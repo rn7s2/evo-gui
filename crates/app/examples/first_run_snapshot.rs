@@ -34,6 +34,10 @@ const WINDOW_SIZE: (f32, f32) = (1600., 1000.);
 /// How long the catalog probe is given before the second picture is taken anyway.
 const CATALOG_WAIT: Duration = Duration::from_secs(60);
 
+/// The swarm binary `app.json` names in the third picture: a path that is not a binary that
+/// runs, which is the case the empty tab says out loud (§9.7).
+const MISSING_SWARM: &str = "/nonexistent/evo-swarm";
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut dir = None;
@@ -152,6 +156,27 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
         started.elapsed()
     );
     shot(&mut cx, window, dir, "first-run-02-loaded.png", true)?;
+
+    // 3. `app.json` naming a swarm binary that is not there (§9.7): the same screen, with
+    //    the app's one line about it under the folder card. The app reads `app.json` once,
+    //    when it starts, so the capture does what such a launch does — the binaries the
+    //    `Shell` holds, then the same `--version` probe.
+    cx.update(|cx| {
+        cx.global_mut::<Shell>().binaries.evo_swarm = PathBuf::from(MISSING_SWARM);
+    });
+    cx.update(start_version_probe);
+    let deadline = Instant::now() + CATALOG_WAIT;
+    loop {
+        let said = cx.update(|cx| cx.global::<Shell>().launcher.swarm_problem.is_some());
+        if said || Instant::now() >= deadline {
+            break;
+        }
+        cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let problem = cx.update(|cx| cx.global::<Shell>().launcher.swarm_problem.clone());
+    println!("[capture] the swarm binary: {problem:?}");
+    shot(&mut cx, window, dir, "first-run-03-swarm-missing.png", true)?;
 
     let _ = std::fs::remove_dir_all(root.path());
     Ok(())

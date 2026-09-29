@@ -67,6 +67,10 @@ pub fn install(cx: &mut App) {
     cx.on_action(|_: &QuitApp, cx: &mut App| quit::begin(cx));
     cx.on_action(|_: &AboutApp, cx: &mut App| open_about(cx));
     cx.on_action(|_: &SettingsApp, cx: &mut App| open_settings(cx));
+    // The workspace's own Settings action: the empty tab's "evo-swarm not found" line
+    // (§9.7) is drawn there and the panel is here, so the tab asks through this action
+    // and the app answers with the same handler the menu item uses.
+    cx.on_action(|_: &workspace::OpenSettings, cx: &mut App| open_settings(cx));
     cx.on_action(|_: &HideApp, cx: &mut App| {
         cx.hide();
         log(cx, "hide");

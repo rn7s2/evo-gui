@@ -18,6 +18,7 @@ pub use chrome::{
     fit_to_work_area, initial_window_bounds, window_options, LauncherData, SelectLastTab,
     SelectNextTab, SelectPreviousTab, SelectTab, WorkspaceView,
 };
+pub use empty_tab::OpenSettings;
 pub use history::{placeholder_history, HistoryRow};
 pub use launch::{stop_in_background, Launch, SwarmConfig, SHUTDOWN_DEADLINE};
 pub use tab::{RegistryHook, TabContent, TabContentEvent, TabId, TabState};

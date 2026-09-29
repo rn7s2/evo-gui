@@ -11,7 +11,7 @@ mod common;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use evo_desktop::{apply_settings, start_version_probe, AppLog, Shell};
+use evo_desktop::{apply_settings, install_menus, start_version_probe, AppLog, Shell};
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
     px, size, AnyWindowHandle, AppContext as _, Bounds, Entity, Point, TestAppContext,
@@ -26,6 +26,10 @@ use workspace::WorkspaceView;
 
 /// The path `app.json` names in the broken case.
 const MISSING: &str = "/nonexistent/evo-swarm";
+
+/// The empty tab's line under the folder card, and the box the Settings dialog draws its
+/// panel in: the two things this test reads off the screen.
+const SWARM_MISSING_ID: &str = "swarm-missing";
 
 /// How long the probe — two `--version` calls — is given.
 const WAIT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -70,6 +74,9 @@ fn open(
                 ..AppState::default()
             };
             Shell::new(root, log, state, ModelCache::default()).install(cx);
+            // What `run` does next: the menu bar's actions and their handlers — the
+            // handler that answers the empty tab's "fix it in Settings" line is one.
+            install_menus(cx);
             let config = std::sync::Arc::new(evo_desktop::swarm_config(cx));
             gpui_kit::open_window(
                 WindowOptions {
@@ -107,7 +114,7 @@ fn a_swarm_binary_that_cannot_be_run_is_said_at_startup_and_fixed_in_settings(
 
     let root = temp_root("missing-swarm");
     let bins = Bins::installed();
-    let (window, _view) = open(
+    let (window, view) = open(
         cx,
         &root,
         Binaries {
@@ -139,6 +146,46 @@ fn a_swarm_binary_that_cannot_be_run_is_said_at_startup_and_fixed_in_settings(
     // The empty tab is drawn with it — the frame the user sees as the app comes up.
     cx.update_window(window, |_, window, cx| window.render_frame(cx))
         .expect("a drawn frame");
+    let (visible, drawn) = cx
+        .update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            let line = window.find(SWARM_MISSING_ID);
+            (line.visible(), line.label().map(str::to_owned))
+        })
+        .expect("a drawn frame");
+    assert!(
+        visible,
+        "the line is under the folder card, on the screen the user is on"
+    );
+    assert_eq!(
+        drawn.as_deref(),
+        Some(line.as_str()),
+        "and it is the app's own sentence, path and all"
+    );
+
+    // Clicking it opens Settings: the workspace dispatches its own action, and the app's
+    // menu handler is what answers it (`menus::install`, which `run` also installs).
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.click(SWARM_MISSING_ID, cx);
+    })
+    .expect("the click");
+    cx.run_until_parked();
+    let opened = cx
+        .update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window
+                .try_find(evo_desktop::DIALOG_CONTENT_ID)
+                .is_some_and(|panel| panel.visible())
+        })
+        .expect("a drawn frame");
+    assert!(opened, "the click opened the Settings panel");
+    // Nothing was launched by it: the line is not the folder card.
+    let state = cx.update(|cx| view.read(cx).selected_tab().read(cx).state().clone());
+    assert!(
+        matches!(state, workspace::TabState::Empty),
+        "the click asked for Settings, not a folder: {state:?}"
+    );
 
     // The path was fixed in Settings and saved: the app re-reads the binaries, so
     // the line goes — and it is what `app.json` now holds.

@@ -161,6 +161,24 @@ fn a_first_run_shows_the_loading_hint_then_the_probed_catalog(cx: &mut TestAppCo
         root.model_cache().display()
     );
 
+    // The session scan of a first run: `~/.evo/sessions` is not there yet, which is an empty
+    // history rather than a directory that could not be read — the tab says "No resumable
+    // swarms yet" instead of a red line (§9.5).
+    wait_for(cx, "the session scan", |cx| {
+        cx.update(|cx| !cx.global::<Shell>().launcher.data().scanning)
+    });
+    let launch = cx.update(|cx| cx.global::<Shell>().launcher.data());
+    assert!(
+        launch.history.is_empty(),
+        "nothing has been run under this home yet: {:?}",
+        launch.history
+    );
+    assert!(
+        launch.history_error.is_none(),
+        "a sessions directory that is not there is a first run, not a failure: {:?}",
+        launch.history_error
+    );
+
     let _ = std::fs::remove_dir_all(root.path());
 }
 

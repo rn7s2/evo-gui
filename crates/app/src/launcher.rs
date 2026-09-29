@@ -83,6 +83,7 @@ impl Launcher {
             now: self.now,
             offset_seconds: self.offset_seconds,
             history_error: self.history_error.clone(),
+            swarm_problem: self.swarm_problem.clone(),
             home: self.home.clone(),
         }
     }

@@ -38,7 +38,7 @@ pub use launcher::{
 };
 pub use logging::{AppLog, Level, LOG_NAME};
 pub use menus::open_about;
-pub use menus::{open_settings, CloseTab, NewTab, QuitApp};
+pub use menus::{install as install_menus, open_settings, CloseTab, NewTab, QuitApp};
 pub use quit::{
     begin as begin_quit, is_quitting, open_tabs, remember_tab_set, take_engines, TabRecord,
     SHUTDOWN_DEADLINE,

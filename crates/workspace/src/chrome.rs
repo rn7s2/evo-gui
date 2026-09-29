@@ -189,6 +189,11 @@ pub struct LauncherData {
     pub offset_seconds: i32,
     /// Why the scan failed, when it did.
     pub history_error: Option<String>,
+    /// Why the swarm cannot be started at all, when it cannot: the `evo_swarm` path
+    /// `app.json` names is not a binary that runs (§9.7). The app learns it from the
+    /// same `--version` probe the About dialog reads; the empty tabs say it under the
+    /// folder card, where a launch would otherwise fail.
+    pub swarm_problem: Option<String>,
     /// `$HOME`, for shortening the paths in the rows.
     pub home: Option<String>,
 }

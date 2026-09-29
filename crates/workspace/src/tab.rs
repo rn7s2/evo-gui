@@ -526,6 +526,7 @@ impl TabContent {
             self.set_model_cache(cache, window, cx);
         }
         self.set_catalog_error(data.catalog_error.clone(), cx);
+        self.set_swarm_problem(data.swarm_problem.clone(), cx);
         self.set_scanning(data.scanning, cx);
         if !data.history.is_empty() {
             self.set_history_entries(
