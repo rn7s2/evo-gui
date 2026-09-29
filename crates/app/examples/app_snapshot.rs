@@ -45,7 +45,7 @@ use store::paths::Root;
 use store::time;
 use workspace::{Launch, SwarmConfig, TabState, WorkspaceView};
 
-use evo_desktop::{AppLog, Shell, history_entries, push_launcher_data};
+use evo_desktop::{history_entries, push_launcher_data, AppLog, Shell};
 
 /// The size the app opens at (§7.1), so the pictures show the real proportions.
 const WINDOW_SIZE: (f32, f32) = (1600., 1000.);
@@ -64,7 +64,11 @@ struct Screens {
 
 impl Screens {
     const fn app(scale: f32) -> Screens {
-        Screens { width: WINDOW_SIZE.0, height: WINDOW_SIZE.1, scale }
+        Screens {
+            width: WINDOW_SIZE.0,
+            height: WINDOW_SIZE.1,
+            scale,
+        }
     }
 
     /// The picture a file should hold, as the renderer's own pixels.
@@ -74,8 +78,12 @@ impl Screens {
 
     /// The pixel size a `--scale` run resamples that to.
     fn saved(&self) -> Option<(u32, u32)> {
-        (self.scale != RENDER_SCALE)
-            .then(|| ((self.width * self.scale) as u32, (self.height * self.scale) as u32))
+        (self.scale != RENDER_SCALE).then(|| {
+            (
+                (self.width * self.scale) as u32,
+                (self.height * self.scale) as u32,
+            )
+        })
     }
 }
 
@@ -408,7 +416,12 @@ const HISTORY: &[(&str, u64, u32, &str)] = &[
     ("~/coding/evo-desktop", 7 * 3600, 2, "gpt-5.6-sol"),
     ("~/coding/dotfiles", 26 * 3600, 1, "claude-sonnet-5"),
     ("~/notes", 2 * 86_400, 8, "ark-glm-5.2"),
-    ("/opt/checkouts/a-very-long-project-directory-name/nested", 6 * 86_400, 3, "seed-evolving"),
+    (
+        "/opt/checkouts/a-very-long-project-directory-name/nested",
+        6 * 86_400,
+        3,
+        "seed-evolving",
+    ),
 ];
 
 fn main() {
@@ -420,7 +433,10 @@ fn main() {
         match arg.as_str() {
             "--capture" => dir = args.next().map(PathBuf::from),
             "--scale" => {
-                scale = args.next().and_then(|value| value.parse().ok()).unwrap_or(RENDER_SCALE)
+                scale = args
+                    .next()
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(RENDER_SCALE)
             }
             "--only" => {
                 only = args
@@ -482,7 +498,11 @@ fn capture(dir: &Path, scale: f32, only: &[String]) -> Result<(), Box<dyn std::e
     let sessions = work.join("sessions");
     write_journals(&sessions)?;
     let scanned = history::scan(&sessions, &ScanBudget::default());
-    println!("[history] {} journal(s) → {} row(s)", scanned.files_read, scanned.entries.len());
+    println!(
+        "[history] {} journal(s) → {} row(s)",
+        scanned.files_read,
+        scanned.entries.len()
+    );
 
     let catalog = catalog();
     let config = Arc::new(SwarmConfig {
@@ -590,7 +610,9 @@ fn capture(dir: &Path, scale: f32, only: &[String]) -> Result<(), Box<dyn std::e
         "CALL delegate {\"lane\":1,\"task\":\"TODOS then SLOW: write up what you changed\"}",
     )?;
     select_main(&mut cx, window, &first)?;
-    wait_until(&mut cx, |cx| delegate_row(cx, &first).is_some() && !working(cx, &first))?;
+    wait_until(&mut cx, |cx| {
+        delegate_row(cx, &first).is_some() && !working(cx, &first)
+    })?;
     println!("[state] the delegate call expanded");
     cx.run_until_parked();
     if shot_here("04-tool-expanded") {
@@ -625,7 +647,10 @@ fn capture(dir: &Path, scale: f32, only: &[String]) -> Result<(), Box<dyn std::e
     let broken_tab = broken_view.read_with(&cx, |view, _| view.selected_tab().clone());
     launch(&mut cx, broken_window, &broken_tab, &fixture.project, 1)?;
     wait_until(&mut cx, |cx| {
-        matches!(broken_tab.read_with(cx, |tab, _| tab.state().clone()), TabState::Failed { .. })
+        matches!(
+            broken_tab.read_with(cx, |tab, _| tab.state().clone()),
+            TabState::Failed { .. }
+        )
     })?;
     println!("[state] boot failure with its log tail");
     if shot_here("05-boot-failure") {
@@ -643,15 +668,21 @@ fn capture(dir: &Path, scale: f32, only: &[String]) -> Result<(), Box<dyn std::e
     // under it.
     select_main(&mut cx, window, &first)?;
     let stopped = stop_swarms_blocking(&config.root);
-    println!("[state] stopped {} swarm process(es); waiting for the badge", stopped.len());
+    println!(
+        "[state] stopped {} swarm process(es); waiting for the badge",
+        stopped.len()
+    );
     if !stopped.is_empty() {
         if wait_until(&mut cx, |cx| reconnecting(cx, &first)).is_ok() {
             println!("[state] the coordinator's stream is reconnecting");
             if shot_here("06-reconnecting") {
-        both_themes(&mut cx, window, dir, "06-reconnecting", screens)?;
-    }
+                both_themes(&mut cx, window, dir, "06-reconnecting", screens)?;
+            }
         } else {
-            println!("[skip] the reconnect badge did not appear within {:?}", WAIT);
+            println!(
+                "[skip] the reconnect badge did not appear within {:?}",
+                WAIT
+            );
         }
         resume_swarms(&stopped);
     }
@@ -676,7 +707,10 @@ fn capture(dir: &Path, scale: f32, only: &[String]) -> Result<(), Box<dyn std::e
     cx.update_window(window, |_, window, cx| {
         view.update(cx, |view, cx| view.select_tab(last_index, window, cx));
     })?;
-    println!("[state] {} tabs, the strip scrolled to the last", last_index + 1);
+    println!(
+        "[state] {} tabs, the strip scrolled to the last",
+        last_index + 1
+    );
     if shot_here("07-tab-strip") {
         both_themes(&mut cx, window, dir, "07-tab-strip", screens)?;
     }
@@ -684,7 +718,11 @@ fn capture(dir: &Path, scale: f32, only: &[String]) -> Result<(), Box<dyn std::e
     // 8. The narrow window (§7.1's minimum): nothing overlaps, and the long
     //    labels — a lane's task, the status readout — ellipsize instead of
     //    pushing the button off its row.
-    let narrow = Screens { width: 1000., height: 700., scale };
+    let narrow = Screens {
+        width: 1000.,
+        height: 700.,
+        scale,
+    };
     let (narrow_window, narrow_view) = open_workspace(&mut cx, config.clone(), narrow)?;
     let narrow_tab = narrow_view.read_with(&cx, |view, _| view.selected_tab().clone());
     let narrow_folder = work.join("evo-desktop-visual-review-narrow");
@@ -730,9 +768,21 @@ fn capture(dir: &Path, scale: f32, only: &[String]) -> Result<(), Box<dyn std::e
     let bad = open_tab(&mut cx, window, &view)?;
     let bad_folder = work.join("evo-desktop-visual-review-deep-context");
     std::fs::create_dir_all(&bad_folder)?;
-    launch_with(&mut cx, window, &bad, &bad_folder, 1, Some((SMALL_MODEL, "stub")))?;
+    launch_with(
+        &mut cx,
+        window,
+        &bad,
+        &bad_folder,
+        1,
+        Some((SMALL_MODEL, "stub")),
+    )?;
     wait_running(&mut cx, &bad, "the deep-context swarm")?;
-    prompt(&mut cx, window, &bad, "BIG SHOW the whole plan again, at length")?;
+    prompt(
+        &mut cx,
+        window,
+        &bad,
+        "BIG SHOW the whole plan again, at length",
+    )?;
     let whole = wait_within(&mut cx, 60, |cx| {
         text_chars(cx, &bad) > MARKDOWN.chars().count() * 3
     });
@@ -747,7 +797,10 @@ fn capture(dir: &Path, scale: f32, only: &[String]) -> Result<(), Box<dyn std::e
     let ended = wait_within(&mut cx, 90, |cx| run_outcome(cx, &bad).is_some());
     println!("[state] compaction row: {compacted}, retry row: {retried}, outcome row: {ended}");
     if let Some(outcome) = run_outcome(&cx, &bad) {
-        println!("[state] the run says: {}", outcome.lines().next().unwrap_or(""));
+        println!(
+            "[state] the run says: {}",
+            outcome.lines().next().unwrap_or("")
+        );
     }
     if shot_here("09-bad-run") {
         both_themes(&mut cx, window, dir, "09-bad-run", screens)?;
@@ -766,7 +819,9 @@ fn capture(dir: &Path, scale: f32, only: &[String]) -> Result<(), Box<dyn std::e
         println!("[cleanup]   {pid} {where_}");
     }
     for (pid, _) in &alive {
-        let _ = std::process::Command::new("kill").args(["-9", &pid.to_string()]).status();
+        let _ = std::process::Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .status();
     }
     drop(fixture);
     if std::env::var_os("EVO_DESKTOP_KEEP_SCREENS_TMP").is_none() {
@@ -820,7 +875,10 @@ fn write_journals(sessions: &Path) -> std::io::Result<()> {
         std::fs::write(&file, journal)?;
         // The scan orders by mtime, and the row's age comes from the header.
         let modified = std::time::UNIX_EPOCH + Duration::from_secs(at);
-        std::fs::File::options().write(true).open(&file)?.set_modified(modified)?;
+        std::fs::File::options()
+            .write(true)
+            .open(&file)?
+            .set_modified(modified)?;
     }
     Ok(())
 }
@@ -888,7 +946,10 @@ fn launch_with(
     let mut plan = session::LaunchPlan::default();
     plan.workers = Some(workers);
     plan.model = model.map(|(id, provider)| (id.to_string(), provider.to_string()));
-    let launch = Launch::New { folder: folder.to_path_buf(), plan };
+    let launch = Launch::New {
+        folder: folder.to_path_buf(),
+        plan,
+    };
     cx.update_window(window, |_, window, cx| {
         tab.update(cx, |tab, cx| tab.launch(launch, window, cx));
     })?;
@@ -971,7 +1032,9 @@ fn expand_tool_row(cx: &mut HeadlessAppContext, tab: &Entity<workspace::TabConte
         });
         (row, tab.transcript().cloned())
     });
-    let (Some(id), Some(view)) = (row, view) else { return };
+    let (Some(id), Some(view)) = (row, view) else {
+        return;
+    };
     cx.update(|cx| {
         view.update(cx, |view, cx| view.set_expanded(id, true, cx));
     });
@@ -1060,7 +1123,11 @@ fn shot(
         px,
         py,
         path.display(),
-        if resample(&path, screens)? { " (resampled)" } else { "" }
+        if resample(&path, screens)? {
+            " (resampled)"
+        } else {
+            ""
+        }
     );
     Ok(())
 }
@@ -1070,10 +1137,16 @@ fn shot(
 /// `sips` (macOS). No `sips` — a non-macOS host — leaves the 2x file in place
 /// and says so.
 fn resample(path: &Path, screens: Screens) -> Result<bool, Box<dyn std::error::Error>> {
-    let Some((w, h)) = screens.saved() else { return Ok(false) };
+    let Some((w, h)) = screens.saved() else {
+        return Ok(false);
+    };
     let widest = w.max(h);
     let status = Command::new("sips")
-        .args(["-Z", &widest.to_string(), &path.to_string_lossy().into_owned()])
+        .args([
+            "-Z",
+            &widest.to_string(),
+            &path.to_string_lossy().into_owned(),
+        ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
@@ -1107,7 +1180,10 @@ fn open_tab_and_stop(
     let Some(tab) = tab else { return Ok(()) };
     launch(cx, window, &tab, folder, 1)?;
     let up = wait_within(cx, 60, |cx| {
-        matches!(tab.read_with(cx, |tab, _| tab.state().clone()), TabState::Running { .. })
+        matches!(
+            tab.read_with(cx, |tab, _| tab.state().clone()),
+            TabState::Running { .. }
+        )
     });
     if !up {
         println!("[skip] a tab for the strip never answered /health — not stopped");
@@ -1168,7 +1244,11 @@ fn row_dump(cx: &HeadlessAppContext, tab: &Entity<workspace::TabContent>) -> Vec
                     .map(|row| {
                         let (kind, text): (&str, String) = match &row.kind {
                             RowKind::User { text } => ("user", text.to_string()),
-                            RowKind::Assistant { markdown, streaming, .. } => (
+                            RowKind::Assistant {
+                                markdown,
+                                streaming,
+                                ..
+                            } => (
                                 "assistant",
                                 format!("{}{markdown}", if *streaming { "*" } else { "" }),
                             ),
@@ -1196,27 +1276,38 @@ fn row_dump(cx: &HeadlessAppContext, tab: &Entity<workspace::TabContent>) -> Vec
 
 /// A dim/status row whose text contains `needle` (case-insensitive): the
 /// compaction rows, which no transcript message carries.
-fn dim_row(cx: &HeadlessAppContext, tab: &Entity<workspace::TabContent>, needle: &str) -> Option<String> {
+fn dim_row(
+    cx: &HeadlessAppContext,
+    tab: &Entity<workspace::TabContent>,
+    needle: &str,
+) -> Option<String> {
     let needle = needle.to_lowercase();
     tab.read_with(cx, |tab, cx| {
         tab.transcript().and_then(|view| {
-            view.read(cx).rows(cx).iter().find_map(|row| match &row.kind {
-                RowKind::Dim { text, .. } if text.to_lowercase().contains(&needle) => Some(text.clone()),
-                _ => None,
-            })
+            view.read(cx)
+                .rows(cx)
+                .iter()
+                .find_map(|row| match &row.kind {
+                    RowKind::Dim { text, .. } if text.to_lowercase().contains(&needle) => {
+                        Some(text.clone())
+                    }
+                    _ => None,
+                })
         })
     })
 }
-
 
 /// The row a bad run leaves: `run-end` with an outcome that is not a clean stop.
 fn run_outcome(cx: &HeadlessAppContext, tab: &Entity<workspace::TabContent>) -> Option<String> {
     tab.read_with(cx, |tab, cx| {
         tab.transcript().and_then(|view| {
-            view.read(cx).rows(cx).iter().find_map(|row| match &row.kind {
-                RowKind::RunOutcome { text, .. } => Some(text.clone()),
-                _ => None,
-            })
+            view.read(cx)
+                .rows(cx)
+                .iter()
+                .find_map(|row| match &row.kind {
+                    RowKind::RunOutcome { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
         })
     })
 }
@@ -1246,7 +1337,10 @@ fn wait_running(
     what: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     wait_until(cx, |cx| {
-        matches!(tab.read_with(cx, |tab, _| tab.state().clone()), TabState::Running { .. })
+        matches!(
+            tab.read_with(cx, |tab, _| tab.state().clone()),
+            TabState::Running { .. }
+        )
     })
     .map_err(|error| format!("{what}: {error}").into())
 }
@@ -1273,16 +1367,23 @@ fn row_chars(row: &session::Row) -> usize {
 }
 
 /// How many checklist items lane `n` currently has.
-fn lane_todos(cx: &HeadlessAppContext, tab: &Entity<workspace::TabContent>, n: u32) -> Option<usize> {
+fn lane_todos(
+    cx: &HeadlessAppContext,
+    tab: &Entity<workspace::TabContent>,
+    n: u32,
+) -> Option<usize> {
     tab.read_with(cx, |tab, _| {
-        tab.model().and_then(|model| model.lane_model(n)).map(|lane| lane.todos().len())
+        tab.model()
+            .and_then(|model| model.lane_model(n))
+            .map(|lane| lane.todos().len())
     })
 }
 
 /// Whether the coordinator is mid-run.
 fn working(cx: &HeadlessAppContext, tab: &Entity<workspace::TabContent>) -> bool {
     tab.read_with(cx, |tab, _| {
-        tab.model().is_some_and(|model| model.activity() != session::Activity::Idle)
+        tab.model()
+            .is_some_and(|model| model.activity() != session::Activity::Idle)
     })
 }
 
@@ -1293,12 +1394,14 @@ fn reconnecting(cx: &HeadlessAppContext, tab: &Entity<workspace::TabContent>) ->
 
 // --- the swarm processes ------------------------------------------------------
 
-
 /// The pids under `root` whose command line names one of its tab tokens, with
 /// the tab directory each one is serving.
 fn swarms_under(root: &Root) -> Vec<(u32, String)> {
     let needle = format!("--token-file {}", root.tabs_dir().display());
-    let output = match std::process::Command::new("ps").args(["-axo", "pid=,command="]).output() {
+    let output = match std::process::Command::new("ps")
+        .args(["-axo", "pid=,command="])
+        .output()
+    {
         Ok(output) => output,
         Err(_) => return Vec::new(),
     };
@@ -1325,14 +1428,18 @@ fn swarms_under(root: &Root) -> Vec<(u32, String)> {
 fn stop_swarms_blocking(root: &Root) -> Vec<(u32, String)> {
     let pids = swarms_under(root);
     for (pid, _) in &pids {
-        let _ = std::process::Command::new("kill").args(["-STOP", &pid.to_string()]).status();
+        let _ = std::process::Command::new("kill")
+            .args(["-STOP", &pid.to_string()])
+            .status();
     }
     pids
 }
 
 fn resume_swarms(pids: &[(u32, String)]) {
     for (pid, _) in pids {
-        let _ = std::process::Command::new("kill").args(["-CONT", &pid.to_string()]).status();
+        let _ = std::process::Command::new("kill")
+            .args(["-CONT", &pid.to_string()])
+            .status();
     }
 }
 
@@ -1343,7 +1450,10 @@ fn temp_dir() -> std::io::Result<PathBuf> {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let path = std::env::temp_dir().join(format!("evo-desktop-screens-{}-{nanos:x}", std::process::id()));
+    let path = std::env::temp_dir().join(format!(
+        "evo-desktop-screens-{}-{nanos:x}",
+        std::process::id()
+    ));
     std::fs::create_dir_all(&path)?;
     Ok(path)
 }
@@ -1391,7 +1501,15 @@ impl Fixture {
 
         let (stub, stdout, port) = start_stub(script)?;
         std::fs::write(home.join(".evo").join("init.lisp"), stub_init_lisp(port))?;
-        Ok(Fixture { home, project, swarm_bin, agent_bin, stub, _stdout: stdout, port })
+        Ok(Fixture {
+            home,
+            project,
+            swarm_bin,
+            agent_bin,
+            stub,
+            _stdout: stdout,
+            port,
+        })
     }
 
     /// What the servers run with: the temp home, the evo home inside it — with
@@ -1400,14 +1518,23 @@ impl Fixture {
     fn env(&self) -> Vec<(String, String)> {
         vec![
             ("HOME".to_string(), self.home.to_string_lossy().into_owned()),
-            ("EVO_HOME".to_string(), format!("{}/.evo/", self.home.display())),
-            ("EVO_BINARY".to_string(), self.agent_bin.to_string_lossy().into_owned()),
+            (
+                "EVO_HOME".to_string(),
+                format!("{}/.evo/", self.home.display()),
+            ),
+            (
+                "EVO_BINARY".to_string(),
+                self.agent_bin.to_string_lossy().into_owned(),
+            ),
             ("TERM".to_string(), "xterm-256color".to_string()),
         ]
     }
 
     fn env_remove(&self) -> Vec<String> {
-        vec!["ANTHROPIC_API_KEY".to_string(), "OPENAI_API_KEY".to_string()]
+        vec![
+            "ANTHROPIC_API_KEY".to_string(),
+            "OPENAI_API_KEY".to_string(),
+        ]
     }
 }
 
@@ -1464,7 +1591,9 @@ fn start_stub(script: &Path) -> Result<(Child, ChildStdout, u16), Box<dyn std::e
 
 /// An installed binary, unless the environment names another.
 fn bin(variable: &str, fallback: &str) -> PathBuf {
-    std::env::var_os(variable).map(PathBuf::from).unwrap_or_else(|| PathBuf::from(fallback))
+    std::env::var_os(variable)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(fallback))
 }
 
 /// A port nothing is listening on: ask the OS for one, then let it go.
