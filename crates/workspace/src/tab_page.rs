@@ -30,6 +30,12 @@ use crate::panes::side_of;
 use crate::tab::{Notice, NoticeTone, TabContent, TabContentEvent, TabState};
 use store::app_state::{CENTER_MIN, LEFT_MAX, LEFT_MIN, RIGHT_MAX, RIGHT_MIN};
 
+/// The middle column's header: its own padding, one line of text and the hairline
+/// under it. The composer column pads by this, so the input begins on the same
+/// line as the transcript's first row rather than over the header (§7.3). The
+/// assertion in `chrome`'s tests is what keeps the two in step.
+pub(crate) const HEADER_HEIGHT: Pixels = px(35.);
+
 /// The status line's element id. It carries the whole line as its tooltip and as
 /// its accessible name (§7.3).
 pub const READOUT_LINE_ID: &str = "status-readout";
@@ -489,12 +495,24 @@ impl TabContent {
             .test_support()
             .w_full()
             .h_full()
-            .p_4()
+            // The header's own height at the top, so what is below it starts on
+            // the line the transcript starts on (§7.3).
+            .px_4()
+            .pt(HEADER_HEIGHT)
+            .pb_4()
             .gap_2()
             .when_some(self.notice(), |this, notice| {
                 this.child(notice_line(notice, cx))
             })
-            .child(self.composer.clone())
+            .child(
+                div()
+                    .id("composer-body")
+                    .test_support()
+                    .w_full()
+                    .flex_1()
+                    .min_h_0()
+                    .child(self.composer.clone()),
+            )
     }
 }
 

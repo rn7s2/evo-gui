@@ -517,7 +517,13 @@ mod tests {
         let mut state = sample();
         state.panes = Panes::new(300.0, 500.0);
         state.save(&root).unwrap();
-        assert_eq!(AppState::load(&root).panes, Panes { left: 300.0, right: 500.0 });
+        assert_eq!(
+            AppState::load(&root).panes,
+            Panes {
+                left: 300.0,
+                right: 500.0
+            }
+        );
 
         // A file from before there were any, and a hand-edited one.
         root.ensure().unwrap();
@@ -550,18 +556,21 @@ mod tests {
     /// fits the smallest window the app opens (§7.1, §7.3). The defaults need not
     /// fit that window: a window too narrow for them takes from both sides, which
     /// is what the view's own fit does.
+    ///
+    /// Assertions over constants, so they are made where a build can make them:
+    /// a range that stopped holding would be a compile error rather than a test
+    /// run nobody was watching.
     #[test]
     fn the_pane_ranges_hold_together() {
-        assert!(LEFT_MIN < LEFT_DEFAULT && LEFT_DEFAULT < LEFT_MAX);
-        assert!(RIGHT_MIN < RIGHT_DEFAULT && RIGHT_DEFAULT < RIGHT_MAX);
-        assert!(
+        const _: () = assert!(LEFT_MIN < LEFT_DEFAULT && LEFT_DEFAULT < LEFT_MAX);
+        const _: () = assert!(RIGHT_MIN < RIGHT_DEFAULT && RIGHT_DEFAULT < RIGHT_MAX);
+        const _: () = assert!(
             LEFT_MAX + CENTER_MIN + RIGHT_MIN <= MIN_SIZE.0 * 2.,
             "room to drag one side out without the window having to be huge"
         );
-        assert!(
+        const _: () = assert!(
             LEFT_MIN + CENTER_MIN + RIGHT_MIN <= MIN_SIZE.0,
-            "the narrowest page fits the smallest window: {LEFT_MIN} + {CENTER_MIN} +              {RIGHT_MIN} > {}",
-            MIN_SIZE.0
+            "the narrowest page fits the smallest window"
         );
     }
 

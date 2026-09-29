@@ -330,6 +330,14 @@ pub struct WorkspaceView {
     /// One state for every page, so a split dragged in one tab is dragged in all
     /// of them — the pages are the same three columns.
     pane_state: Entity<ResizableState>,
+    /// Whether the strip still owes the shown tab a reveal (§7.1). See
+    /// [`WorkspaceView::reveal_selected_tab`].
+    strip_reveal: bool,
+    /// How far the strip can scroll, which is its content against its room: the
+    /// shape of it. A strip that has changed under the tab being shown is
+    /// noticed through this even when nothing said so (§7.1) — a title, a dot, a
+    /// tab added, a window resized.
+    strip_content: Option<gpui_kit::Point<Pixels>>,
     /// The state's own report that a drag (or a programmatic resize) is over.
     /// `Some` for the life of the window: it is made in [`WorkspaceView::with_config`].
     pane_resized: Option<Subscription>,
@@ -366,6 +374,8 @@ impl WorkspaceView {
             close_hook_installed: false,
             stopping: None,
             may_close: false,
+            strip_reveal: false,
+            strip_content: None,
             panes: Panes::default(),
             pane_state: cx.new(|_| ResizableState::default()),
             pane_resized: None,
@@ -600,8 +610,9 @@ impl WorkspaceView {
         self.tabs.push(tab.clone());
         self.selected = self.tabs.len() - 1;
         // The new tab is at the far end, which is exactly where an overflowing
-        // strip has to scroll to (§7.1).
-        self.strip_scroll.scroll_to_item(self.selected);
+        // strip has to scroll to (§7.1) — and adding one changes the width every
+        // tab before it has.
+        self.ask_reveal(cx);
         // A tab opened now has the columns the window is showing (§7.3), and the
         // one drag state every page in the window shares.
         let pane_state = self.pane_state.clone();
@@ -624,6 +635,35 @@ impl WorkspaceView {
         tab
     }
 
+    /// Ask the strip to show the whole of the tab being shown (§7.1).
+    ///
+    /// A reveal is not a one-off. The strip's geometry moves under whoever is
+    /// looking at it — a tab's dot appears when its coordinator starts working,
+    /// a folder arrives with a title, the window changes width — and the offset
+    /// that showed the tab a moment ago can leave it half past the strip's edge,
+    /// where its label is cut mid-word instead of elided.
+    fn ask_reveal(&mut self, cx: &mut Context<Self>) {
+        self.strip_reveal = true;
+        cx.notify();
+    }
+
+    /// Show the shown tab, once (§7.1).
+    ///
+    /// `ScrollHandle` answers a reveal against the layout the frame *before* the
+    /// one it is asked in left behind, so the ask is kept until a frame runs:
+    /// asking at the moment the strip changes shape — a title arriving, a dot
+    /// appearing, a window resize — is answered from the shape that is gone, and
+    /// the tab is left where the change pushed it, half past the strip's edge,
+    /// its label cut mid-word instead of elided. Waited for a frame, the answer
+    /// is computed from the strip as it is.
+    fn reveal_selected_tab(&mut self, _cx: &mut Context<Self>) {
+        if !self.strip_reveal {
+            return;
+        }
+        self.strip_reveal = false;
+        self.strip_scroll.scroll_to_item(self.selected);
+    }
+
     /// Show the tab at `index`, and put the keyboard where that tab's work starts
     /// (§7.1): the composer of a tab driving a swarm, so a tab picked to be typed
     /// into takes the typing.
@@ -634,8 +674,9 @@ impl WorkspaceView {
             return;
         }
         // A strip with more tabs than fit scrolls to the one being shown, so the
-        // highlight is never off-screen (§7.1).
-        self.strip_scroll.scroll_to_item(index);
+        // highlight is never off-screen — and the whole of it: a tab revealed by
+        // half is a label cut mid-word (§7.1).
+        self.ask_reveal(cx);
         if index != self.selected {
             self.selected = index;
             cx.notify();
@@ -763,6 +804,10 @@ impl WorkspaceView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Every event a tab can send is one that may have changed how wide it
+        // is — its title, its dot, whether it has a swarm at all — and the strip
+        // reveals the shown tab against those widths (§7.1).
+        self.ask_reveal(cx);
         let Some(tab) = self
             .tabs
             .iter()
@@ -1119,6 +1164,17 @@ impl Render for WorkspaceView {
         self.install_close_hook(window, cx);
         self.sync_window_title(window, cx);
         self.fit_panes(window, cx);
+        // The strip's shape is what its tabs take — and the window is part of
+        // what they take. When that shape changes, the offset that showed the
+        // tab being shown may no longer show it, and nothing has to have said
+        // so: a dot appearing as a run starts changes it without an event, and
+        // a window resize changes it in the same way (§7.1).
+        let content = self.strip_scroll.max_offset();
+        if self.strip_content != Some(content) {
+            self.strip_content = Some(content);
+            self.ask_reveal(cx);
+        }
+        self.reveal_selected_tab(cx);
         v_flex()
             .id("workspace")
             .test_support()
@@ -1157,6 +1213,31 @@ mod tests {
         VisualTestContext,
     };
 
+    /// A window of a given size, built by `build` — the production entry point,
+    /// at the size this test cares about.
+    fn window_with(
+        cx: &mut TestAppContext,
+        window_size: (f32, f32),
+        build: impl FnOnce(&mut gpui_kit::Window, &mut gpui_kit::Context<WorkspaceView>) -> WorkspaceView
+            + 'static,
+    ) -> (gpui_kit::AnyWindowHandle, Entity<WorkspaceView>) {
+        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            gpui_kit::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds {
+                        origin: point(px(0.), px(0.)),
+                        size: size(px(window_size.0), px(window_size.1)),
+                    })),
+                    ..Default::default()
+                },
+                cx,
+                |window, cx| cx.new(|cx| build(window, cx)),
+            )
+            .expect("the workspace window")
+        })
+    }
+
     /// A window with a page on it: one tab, driving a swarm in a folder that does
     /// not have to exist, over an app root of the test's own (§7.3).
     ///
@@ -1189,6 +1270,35 @@ mod tests {
         });
         cx.update(|window, cx| window.render_frame(cx));
         (view, cx)
+    }
+
+    /// The tab at `index` — its own box and the label inside it — has to lie
+    /// inside the clipped strip, two frames after the reveal was asked for: the
+    /// request is applied against the layout of the frame before it.
+    fn revealed(
+        window: &mut gpui_kit::Window,
+        cx: &mut gpui_kit::App,
+        ids: &[u64],
+        index: usize,
+        what: &str,
+    ) {
+        // A reveal is asked for in one frame and answered in the next: render
+        // as the app would, and then look.
+        window.render_frame(cx);
+        window.render_frame(cx);
+        let strip = window.find("tab-strip-scroll").bounds();
+        let tab = window.find(index).bounds();
+        let label = window
+            .find(ElementId::NamedInteger("tab-label".into(), ids[index]))
+            .bounds();
+        assert!(
+            tab.left() >= strip.left() - px(1.) && tab.right() <= strip.right() + px(1.),
+            "{what}: tab {index} is not fully inside the strip: {tab:?} against {strip:?}"
+        );
+        assert!(
+            label.left() >= strip.left() - px(1.) && label.right() <= strip.right() + px(1.),
+            "{what}: the label of tab {index} runs past the strip: {label:?} against {strip:?}"
+        );
     }
 
     /// The widths the window is showing, from outside it.
@@ -1268,6 +1378,156 @@ mod tests {
     fn right_divider(window: &mut gpui_kit::Window) -> gpui_kit::Point<gpui_kit::Pixels> {
         let column = window.find("composer-column").bounds();
         point(column.left(), page_middle(window))
+    }
+
+    /// §7.1: the tab being shown must be *visible* — all of it, not just its
+    /// first pixel. With more tabs than the window has room for, the strip
+    /// scrolls the shown tab in; the tab's own box (and the label inside it)
+    /// has to end up inside the clipped strip, or the label is cut mid-word by
+    /// the window's edge instead of being elided where it stops.
+    #[gpui_kit::test]
+    fn the_tab_being_shown_is_scrolled_fully_into_the_strip(cx: &mut TestAppContext) {
+        let home =
+            std::env::temp_dir().join(format!("workspace-strip-shown-{}", std::process::id()));
+        std::fs::create_dir_all(&home).expect("a home to work in");
+        let root = home.clone();
+
+        let mut ids: Vec<u64> = Vec::new();
+        let (handle, view) = window_with(cx, (1280., 800.), move |window, cx| {
+            WorkspaceView::with_config(
+                Arc::new(SwarmConfig {
+                    swarm_bin: PathBuf::from("/nonexistent/evo-swarm"),
+                    root: store::paths::Root::at(root),
+                    ..SwarmConfig::default()
+                }),
+                window,
+                cx,
+            )
+        });
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            view.update(cx, |view, cx| {
+                for index in 0..15 {
+                    // Short to start with: 15 short-titled tabs fit the window,
+                    // so nothing has to be scrolled until the names arrive —
+                    // which is the shape the strip is caught in.
+                    let folder = home.join(format!("p{index}"));
+                    std::fs::create_dir_all(&folder).expect("a folder to work in");
+                    let tab = if index == 0 {
+                        view.selected_tab().clone()
+                    } else {
+                        view.add_tab(window, cx)
+                    };
+                    ids.push(tab.read(cx).id().get());
+                    tab.update(cx, |tab, cx| {
+                        tab.launch(
+                            Launch::New {
+                                folder,
+                                plan: LaunchPlan::default(),
+                            },
+                            window,
+                            cx,
+                        )
+                    });
+                }
+            });
+            window.render_frame(cx);
+        })
+        .unwrap();
+
+        // The phases are their own turns: what a tab emits is delivered when the
+        // update it was emitted in returns, and what the strip does about it
+        // needs a frame after that.
+        for index in [0usize, 7, 14] {
+            cx.update_window(handle, |_, window, cx| {
+                view.update(cx, |view, cx| view.select_tab(index, window, cx));
+            })
+            .unwrap();
+            cx.update_window(handle, |_, window, cx| {
+                revealed(window, cx, &ids, index, "after selecting");
+            })
+            .unwrap();
+
+            // Now the strip changes shape *under* the offset that revealed the
+            // tab: every tab before it widens — a title arriving, a dot, anything
+            // that lands after the reveal — and the shown tab is pushed towards
+            // the edge by all of them at once (§7.1). No event says a thing about
+            // it, which is the whole difficulty: a reveal asked for once, at the
+            // moment of the change, leaves the tab half past the edge, its label
+            // cut mid-word rather than elided where it stops.
+            cx.update_window(handle, |_, _window, cx| {
+                view.update(cx, |view, cx| {
+                    for (n, tab) in view.tabs().iter().take(index).enumerate() {
+                        tab.update(cx, |tab, _| {
+                            // A tab is named after the folder it runs in, and the
+                            // name is most of its width: the names arriving is the
+                            // strip growing under the tab being shown.
+                            tab.state = crate::TabState::Running {
+                                folder: home.join(format!(
+                                    "evo-desktop-visual-review-a-longer-context-name-{n}"
+                                )),
+                            };
+                        });
+                    }
+                    // Nobody announces the change: the tab being shown is what
+                    // the window draws, and drawing it again is what the app does
+                    // when a run starts and a dot appears on the strip. What the
+                    // window has to work with is the strip's own shape.
+                    let shown = view.tabs()[index].clone();
+                    shown.update(cx, |_, cx| cx.notify());
+                });
+            })
+            .unwrap();
+            cx.update_window(handle, |_, window, cx| {
+                revealed(window, cx, &ids, index, "after the tabs before it grew");
+            })
+            .unwrap();
+        }
+    }
+
+    /// §7.3: the composer starts where the transcript does. The middle column's
+    /// header sits above the transcript's first row, and the right column's input
+    /// begins on that line — it used to begin over the header, its box a full
+    /// header's height above the transcript's own top.
+    #[gpui_kit::test]
+    fn the_composer_starts_at_the_transcripts_first_row(cx: &mut TestAppContext) {
+        let (_view, cx) = page_window(cx, test_root("align"), (1280., 800.));
+        cx.update(|window, cx| window.render_frame(cx));
+
+        let header = cx.update(|window, _| window.find("transcript-header").bounds());
+        let column = cx.update(|window, _| window.find("composer-column").bounds());
+        let body = cx.update(|window, _| window.find("composer-body").bounds());
+        assert_eq!(
+            body.top(),
+            header.bottom(),
+            "the input begins on the transcript's first row: {body:?} against {header:?}"
+        );
+        assert_eq!(
+            column.top(),
+            header.top(),
+            "the two columns start together: {column:?} against {header:?}"
+        );
+        // The padding is this number, so the two must agree: the header is one
+        // line of text, its padding and its hairline, whatever the theme makes
+        // those.
+        assert_eq!(
+            header.size.height,
+            crate::tab_page::HEADER_HEIGHT,
+            "the header is the height the composer column pads by"
+        );
+
+        // And the action is under the input, on its own row, with the room the
+        // composer keeps there.
+        let button = cx.update(|window, _| window.find(composer::BUTTON_ID).bounds());
+        assert!(
+            button.top() > body.top(),
+            "the action is below the input, not beside it: {button:?}"
+        );
+        assert!(
+            button.size.height <= px(28.),
+            "one control high: {button:?}"
+        );
     }
 
     /// §7.3: the status line belongs to the page, not to the composer. It is the
