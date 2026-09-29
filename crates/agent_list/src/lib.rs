@@ -89,6 +89,11 @@ pub struct AgentList {
     /// Why a lane is down, by lane number — the last error line of its transcript,
     /// which the owner reads from `TabModel::lane_down_reason` (§9.7).
     down_reasons: BTreeMap<u32, String>,
+    /// What **now** is, as the owner stamps it (`now_millis`). A lane's step clock
+    /// counts on from the moment its age was read (`LaneRow::step_clock_at`), and
+    /// this is the moment it counts to: the list reads no clock of its own, so an
+    /// owner that never sets one shows exactly the ages the swarm reported.
+    now_millis: u64,
     /// The column's own focus (§7.3): a click takes it, and the arrows walk the rows while it
     /// is held. The list is the thing being navigated, so it is the thing that is focused.
     focus_handle: FocusHandle,
@@ -107,7 +112,23 @@ impl AgentList {
             coordinator_reconnecting: false,
             selected: AgentKey::Coordinator,
             down_reasons: BTreeMap::new(),
+            now_millis: 0,
             focus_handle: cx.focus_handle(),
+        }
+    }
+
+    /// The moment lane clocks are counted to, stamped by the owner with its own
+    /// wall clock (`now_millis`) — once per update, and again every second while
+    /// anything is working.
+    ///
+    /// `GET /lanes` reports a step *age*, not a start, so without this a busy lane's
+    /// clock would sit where the last read left it (§7.3). The owner is the one who
+    /// knows the time, and it is also the one who decides how often a frame is worth
+    /// paying for, so the clock moves when it says so.
+    pub fn set_now(&mut self, now_millis: u64, cx: &mut Context<Self>) {
+        if self.now_millis != now_millis {
+            self.now_millis = now_millis;
+            cx.notify();
         }
     }
 
@@ -313,9 +334,10 @@ impl AgentList {
             (None, None) => (row.state.clone(), theme.muted_foreground),
         };
         // The clock is what tells a slow step from a wedged lane, so it is only worth a
-        // cell while the lane is actually working.
+        // cell while the lane is actually working — and it is read at the owner's
+        // `now` (`set_now`), which is what keeps it moving between `/lanes` reads.
         let trailing = if row.is_busy() {
-            row.step_clock()
+            row.step_clock_at(self.now_millis)
         } else {
             None
         };
@@ -339,7 +361,7 @@ impl AgentList {
             label_color,
             trailing: trailing.map(SharedString::from),
             badge: None,
-            tooltip: lane_tooltip(row, reason).into(),
+            tooltip: lane_tooltip(row, reason, self.now_millis).into(),
             aria: aria.into(),
         }
     }
@@ -594,9 +616,9 @@ struct RowView {
 ///
 /// One field group per line, each folded at [`TOOLTIP_LINE`]: a tooltip that grew to the
 /// width of a long task would be wider than the window it is drawn in.
-fn lane_tooltip(row: &LaneRow, reason: Option<&String>) -> String {
+fn lane_tooltip(row: &LaneRow, reason: Option<&String>, now_millis: u64) -> String {
     let mut head = format!("lane {} · {}", row.n, row.state);
-    if let Some(clock) = row.step_clock() {
+    if let Some(clock) = row.step_clock_at(now_millis) {
         head.push_str(&format!(" · step {clock}"));
     }
     let mut lines = vec![head];
@@ -1144,6 +1166,42 @@ mod tests {
         });
     }
 
+    /// §7.3: a lane's step clock is an age as of wherever it was read, so the row
+    /// counts on from that moment. The owner stamps the time (`set_now`); the list
+    /// reads no clock of its own, and an owner that never stamps one gets exactly
+    /// the ages the swarm reported.
+    #[gpui_kit::test]
+    fn a_lane_clock_counts_on_from_the_moment_its_age_was_read(cx: &mut TestAppContext) {
+        let mut row = lane(1, LaneStatus::Working, Some("build the readout segments"));
+        row.step_age = Some(30);
+        row.step_age_at_millis = Some(1_000_000);
+        let f = open(cx, lanes(vec![row]));
+        let clock = |window: &mut Window| {
+            window
+                .find(row_id(AgentKey::Lane(1)))
+                .label()
+                .unwrap_or_default()
+                .to_owned()
+        };
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            assert!(
+                clock(window).ends_with("step 30s"),
+                "the age the swarm reported: {}",
+                clock(window)
+            );
+
+            // Three seconds of frames later — the same rows, nothing re-read.
+            f.list.update(cx, |list, cx| list.set_now(1_003_000, cx));
+            window.render_frame(cx);
+            assert!(
+                clock(window).ends_with("step 33s"),
+                "the clock counted on: {}",
+                clock(window)
+            );
+        });
+    }
+
     #[gpui_kit::test]
     fn the_down_reason_replaces_the_task_until_the_lane_comes_back(cx: &mut TestAppContext) {
         let f = open(
@@ -1384,7 +1442,7 @@ mod tests {
         row.branch = Some("evo/lane-2".to_string());
         row.restarts = 2;
         row.goal_status = Some("active".to_string());
-        let tooltip = lane_tooltip(&row, None);
+        let tooltip = lane_tooltip(&row, None, 0);
         // Folded for the tooltip's width, so the checks ignore where the line breaks land.
         let flat = tooltip.replace('\n', " ");
         assert!(flat.starts_with("lane 2 · working · step 1m"), "{tooltip}");
@@ -1400,7 +1458,7 @@ mod tests {
         // The reason gets a line of its own, and a lane with no restarts does not brag
         // about them.
         row.restarts = 0;
-        let tooltip = lane_tooltip(&row, Some(&"crashed on startup".to_string()));
+        let tooltip = lane_tooltip(&row, Some(&"crashed on startup".to_string()), 0);
         assert!(tooltip.ends_with("crashed on startup"), "{tooltip}");
         assert!(!tooltip.contains("restart"), "{tooltip}");
     }

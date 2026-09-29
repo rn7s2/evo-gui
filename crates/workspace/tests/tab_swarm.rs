@@ -11,6 +11,7 @@
 //! rejected as non-determinism, so each test opts into parking — the supported
 //! switch for a test that talks to real I/O.
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -624,6 +625,107 @@ fn a_delegated_lane_shows_its_own_transcript(cx: &mut TestAppContext) {
     );
 }
 
+/// §7.3: a lane's step clock is an *age* — what `/lanes` and a `lane-state` event
+/// report — so the row counts on from the moment it was seen. A clock that only
+/// moved when `/lanes` was read again would freeze for exactly as long as nobody
+/// asked, which is the whole time it is worth reading.
+///
+/// Nothing is asked of the swarm between the two readings: no prompt, no read, no
+/// event driven by the test — the seconds pass on their own and the same row reads
+/// a later number. That those frames are the tab's own ticker is the condition
+/// `tab::tests::a_busy_lane_keeps_the_seconds_coming` pins down.
+#[gpui_kit::test]
+fn a_busy_lanes_clock_advances_with_nothing_asked_of_the_swarm(cx: &mut TestAppContext) {
+    let b = bench(cx, 2);
+    let tab = cx.update(|cx| b.view.read(cx).selected_tab().clone());
+    launch(cx, &b, &tab, b.fixture.project.clone(), two_workers());
+    wait_for_running(cx, &tab);
+
+    // A lane is `starting` until its baseline is evaluated, and the swarm's
+    // delegate takes an idle lane, so wait for that first (§9.3).
+    wait_for(cx, "lane 1 to be idle and ready for work", |cx| {
+        cx.update(|cx| {
+            tab.read(cx).model().is_some_and(|model| {
+                model
+                    .lane_rows()
+                    .iter()
+                    .any(|lane| lane.n == 1 && lane.status == session::LaneStatus::Idle)
+            })
+        })
+    });
+    prompt(
+        cx,
+        &b,
+        &tab,
+        "CALL delegate {\"lane\":1,\"task\":\"SLOW lane work for the test\"}",
+    );
+    // And the coordinator hands the work over and has nothing of its own in
+    // flight: the only clock left on the page is the lane's, which is the clock in
+    // question.
+    wait_for(cx, "lane 1 to take the work", |cx| {
+        lane_working(cx, &tab, 1)
+    });
+    wait_for(cx, "the coordinator to be done with its own turn", |cx| {
+        cx.update(|cx| {
+            tab.read(cx)
+                .model()
+                .is_some_and(|model| model.coordinator_step_started().is_none())
+        }) && lane_working(cx, &tab, 1)
+    });
+
+    // The step began with the event that said the lane was working — no `/lanes`
+    // read is needed for a clock to start.
+    let started = lane_clock(cx, &b, 1).expect("a working lane shows its step clock");
+
+    // A second of the frames the ticker draws (§7.3), with nothing in between but
+    // the passing of time: the same row reads a later number. The tab's ticker is a
+    // one-second timer, and in a test the clock it waits on is ours to move — the
+    // step clock itself is the wall clock, which the sleep above is for.
+    std::thread::sleep(Duration::from_millis(1_200));
+    assert!(
+        cx.update(|cx| {
+            tab.read(cx)
+                .model()
+                .is_some_and(|model| model.coordinator_step_started().is_none())
+        }),
+        "still nothing but the lane: the clock that moved is the lane's own"
+    );
+    wait_within(
+        cx,
+        "the lane's clock to have moved",
+        Duration::from_secs(5),
+        &mut |cx| {
+            cx.executor().advance_clock(Duration::from_secs(1));
+            lane_clock(cx, &b, 1).is_some_and(|clock| clock != started)
+        },
+    );
+    let moved = lane_clock(cx, &b, 1).expect("still working");
+    assert_ne!(
+        moved, started,
+        "the clock counts on from the moment its age was read"
+    );
+    assert!(
+        lane_working(cx, &tab, 1),
+        "and the lane is still the reason it is moving"
+    );
+}
+
+/// The step clock the left column draws on a lane's row (§7.3), read off the row's
+/// own aria label — which is also what a reader who cannot see the cell is told.
+fn lane_clock(cx: &mut TestAppContext, b: &Bench, n: u64) -> Option<String> {
+    cx.update_window(b.window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let row = window.find(agent_list::row_id(AgentKey::Lane(n as u32)));
+        row.label().and_then(|label| {
+            label
+                .rsplit_once(", step ")
+                .map(|(_, clock)| clock.to_owned())
+        })
+    })
+    .ok()
+    .flatten()
+}
+
 /// §11's M0 requirement: two tabs streaming at once, with the UI thread still
 /// answering. The numbers are printed so the run reports them.
 #[gpui_kit::test]
@@ -1034,6 +1136,35 @@ fn a_swarm_that_is_gone_shows_its_log_and_retry_resumes_the_session(cx: &mut Tes
         })
     });
 
+    // §3: what the tab shows of a log is its **last** ~40 lines, and §9.7: the
+    // screen reads the paths in them back as places. Both need a log longer than
+    // the tail it shows, so the tab's own directory gets one: 200 lines, and the
+    // last of them naming a file in that directory, which is the shape of the
+    // paths a server writes.
+    let root = store::paths::Root::at(b.fixture.dir.join("app"));
+    let store_id = cx
+        .update(|cx| tab.read(cx).store_id().cloned())
+        .expect("the tab's own directory, while it still has a swarm");
+    let tab_dir = root.tab_dir(&store_id);
+    {
+        let mut log = std::fs::OpenOptions::new()
+            .append(true)
+            .open(root.tab_log(&store_id))
+            .expect("the swarm's log, open for appending");
+        for line in 1..=200 {
+            writeln!(log, "line {line}").expect("a line of the log");
+        }
+        // The server's own wording for the token's place, which is what a real
+        // log carries (and what the redactor leaves alone: it is the *value* of
+        // a named key that gets masked, not a path named in a sentence).
+        writeln!(
+            log,
+            "listening on http://127.0.0.1:1/ (token in {})",
+            tab_dir.join("token").display()
+        )
+        .expect("a line of the log");
+    }
+
     // The whole swarm goes at once. `evo-swarm serve` is spawned into a process
     // group of its own (§3), so one signal takes the supervisor, the server it
     // supervises and every lane — nothing is left to bring the server back, and
@@ -1070,12 +1201,53 @@ fn a_swarm_that_is_gone_shows_its_log_and_retry_resumes_the_session(cx: &mut Tes
         !log_tail.trim().is_empty(),
         "the log tail is the evidence, and it is what the screen shows"
     );
+    // §3's "last ~40 lines" is the last 40 of *this* log, not all of it: the log
+    // is over 200 lines by now, and what came back is the newest of them.
+    let lines = log_tail.lines().count();
+    assert!(lines <= 40, "the tail is a tail: {lines} lines");
+    assert!(
+        log_tail.contains("line 200"),
+        "the newest lines are the ones shown: {log_tail:?}"
+    );
+    assert!(
+        !log_tail.contains("line 100"),
+        "and the oldest are the ones dropped: {log_tail:?}"
+    );
+    // The state keeps the log's own lines, paths and all: what is shortened is
+    // what the screen shows of them (§9.7).
+    assert!(
+        log_tail.contains(&tab_dir.display().to_string()),
+        "the raw tail still names the tab's directory: {log_tail:?}"
+    );
+    let shown = cx
+        .update_window(b.window.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window
+                .find("boot-log-tail")
+                .label()
+                .map(str::to_owned)
+                .unwrap_or_default()
+        })
+        .unwrap();
+    assert!(
+        !shown.contains(&tab_dir.display().to_string()),
+        "and the screen reads that directory as a place: {shown}"
+    );
+    assert!(
+        shown.contains("<tab>/token"),
+        "the paths into it read as <tab>/…: {shown}"
+    );
     cx.update_window(b.window.into(), |_, window, cx| {
         window.render_frame(cx);
         assert!(window.find("boot-failure").visible());
         assert!(
             window.find("boot-log-tail").visible(),
             "the swarm's own log is on the screen"
+        );
+        assert!(
+            window.find("boot-log-tail").bounds().size.height <= px(320.),
+            "§9.7: a long tail scrolls inside a box of its own — got {:?}",
+            window.find("boot-log-tail").bounds().size.height
         );
         assert!(
             window.find("failure-gone-note").visible(),

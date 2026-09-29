@@ -168,6 +168,10 @@ pub enum TabState {
         /// read (§9.7) — nor the same thing to Retry (see
         /// [`TabContent::retry`]).
         was_up: bool,
+        /// The `tabs/<id>/` directory that log and the swarm's token live in,
+        /// while the tab still knows it. The tail is shortened against it before
+        /// it is shown — the raw log keeps its paths (§9.7).
+        tab_dir: Option<PathBuf>,
     },
     /// The tab is being taken down — its swarm is running §3's ladder somewhere
     /// that is not the UI thread (§9.8).
@@ -256,7 +260,11 @@ struct AgentsSnapshot {
     activity: Activity,
     reconnecting: bool,
     selected: AgentKey,
+    /// The coordinator's own step clock, already formatted.
     clock: Option<String>,
+    /// The moment both clocks are counted to (§7.3): a lane's step clock is an
+    /// age as of the last read, and this is what it is counted on towards.
+    now_millis: u64,
     /// Why a lane is down, by lane number (§9.7).
     down_reasons: Vec<(u32, Option<String>)>,
 }
@@ -612,6 +620,9 @@ impl TabContent {
                         message: Some(format!("could not prepare this tab: {error}")),
                         log_tail: String::new(),
                         was_up: false,
+                        // The prep failed before a directory was made, and there
+                        // is no log to shorten.
+                        tab_dir: None,
                     },
                     cx,
                 );
@@ -730,12 +741,14 @@ impl TabContent {
             }
             Update::BootFailed { message, log_tail } => {
                 if let Some(folder) = self.folder().map(Path::to_path_buf) {
+                    let tab_dir = self.live.as_ref().map(|live| live.tab_dir.clone());
                     self.set_state(
                         TabState::Failed {
                             folder,
                             message: Some(message),
                             log_tail,
                             was_up: false,
+                            tab_dir,
                         },
                         cx,
                     );
@@ -863,6 +876,7 @@ impl TabContent {
             return;
         };
         self.agents.update(cx, |list, cx| {
+            list.set_now(snapshot.now_millis, cx);
             list.set_lanes(&snapshot.lanes, cx);
             list.set_coordinator(snapshot.activity, snapshot.reconnecting, cx);
             list.set_coordinator_clock(snapshot.clock, cx);
@@ -878,6 +892,9 @@ impl TabContent {
     fn agents_snapshot(&self) -> Option<AgentsSnapshot> {
         let model = self.model()?;
         let selected = model.selected();
+        // One reading of the clock for both of them: the coordinator's and the
+        // lanes' are the same moment (§7.3).
+        let now = now_millis();
         Some(AgentsSnapshot {
             lanes: model.lanes().clone(),
             activity: model.activity(),
@@ -885,7 +902,8 @@ impl TabContent {
             selected,
             clock: model
                 .coordinator_step_started()
-                .and_then(|clock| clock.clock_label(now_millis())),
+                .and_then(|clock| clock.clock_label(now)),
+            now_millis: now,
             down_reasons: model
                 .lanes()
                 .lanes
@@ -895,19 +913,22 @@ impl TabContent {
         })
     }
 
-    /// Start the once-a-second re-render while the coordinator has a step in
-    /// flight, and stop it when it does not (§7.3).
+    /// Whether anything on the page is counting seconds (§7.3): the coordinator's
+    /// own step, or a lane that is working or compacting.
+    fn stepping(&self) -> bool {
+        self.model().is_some_and(clocks_running)
+    }
+
+    /// Start the once-a-second re-render while anything has a clock to move, and
+    /// stop it when nothing has (§7.3).
     fn ensure_step_ticker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let running = self
-            .model()
-            .is_some_and(|model| model.coordinator_step_started().is_some());
         // A ticker that has ended is not a ticker: the next step starts a new one.
         let ticker_live = self
             .live
             .as_ref()
             .and_then(|live| live.ticker.as_ref())
             .is_some_and(|ticker| !ticker.is_ready());
-        if !running || ticker_live {
+        if !self.stepping() || ticker_live {
             return;
         }
 
@@ -915,19 +936,17 @@ impl TabContent {
             loop {
                 cx.background_executor().timer(STEP_TICK).await;
                 let stepped = this.update_in(cx, |tab, _window, cx| {
-                    let running = tab
-                        .model()
-                        .is_some_and(|model| model.coordinator_step_started().is_some());
-                    if running {
-                        // The step clock is the only thing that changed (§7.3).
+                    let stepping = tab.stepping();
+                    if stepping {
+                        // The clocks are the only thing that changed (§7.3).
                         tab.sync_agents(cx);
                         cx.notify();
                     }
-                    running
+                    stepping
                 });
                 match stepped {
                     Ok(true) => {}
-                    // The tab is gone, or the step ended: stop ticking.
+                    // The tab is gone, or the last clock stopped: stop ticking.
                     _ => break,
                 }
             }
@@ -1209,6 +1228,7 @@ impl TabContent {
     /// Show a boot-style failure for a swarm that went away after it was up.
     fn fail_with_log(&mut self, log_tail: String, cx: &mut Context<Self>) {
         if let Some(folder) = self.folder().map(Path::to_path_buf) {
+            let tab_dir = self.live.as_ref().map(|live| live.tab_dir.clone());
             // A swarm that died after it was up has no one-line reason: the log
             // is the whole story.
             self.set_state(
@@ -1219,12 +1239,25 @@ impl TabContent {
                     // It answered /health: this is a swarm that went away, not
                     // one that never came up (§9.7).
                     was_up: true,
+                    tab_dir,
                 },
                 cx,
             );
             cx.notify();
         }
     }
+}
+
+/// Whether this model has a clock to move (§7.3).
+///
+/// Both clocks on the page are *ages* — the coordinator's step and a lane's — that
+/// a read or an event only stamped, so between updates they are counted on by the
+/// frame the tab draws. This is the one question that decides whether a frame a
+/// second is worth paying for: a busy lane's clock is as much a reason as the
+/// coordinator's own step, and a page where neither is running has nothing to
+/// redraw.
+fn clocks_running(model: &TabModel) -> bool {
+    model.coordinator_step_started().is_some() || model.lanes().busy() > 0
 }
 
 /// Fold one engine update into the model, answering the [`Changes`] the UI has
@@ -1239,7 +1272,11 @@ fn absorb(model: &mut TabModel, update: Update) -> Option<Changes> {
             revision,
             raw,
         } => model.on_transcript(agent_key(agent), revision, &raw),
-        Update::Lanes { raw } => model.on_lanes(&raw),
+        Update::Lanes { raw } => {
+            // `GET /lanes` reports a step *age*, so a read is also the moment that
+            // age was seen: the row counts on from here (§7.3).
+            model.on_lanes_at(&raw, Some(now_millis()))
+        }
         Update::Event {
             agent,
             id,
@@ -1598,6 +1635,104 @@ mod tests {
             model.readout_text().contains("ctx 100k/936k"),
             "and re-anchors the context figure from the same usage: {}",
             model.readout_text()
+        );
+    }
+
+    /// §7.3: a step clock is an *age*, so the moment it was read is part of what
+    /// a `/lanes` read says. The engine hands the body over; the tab is what knows
+    /// the time, and stamps the rows with it before the model counts on.
+    #[test]
+    fn a_lanes_read_stamps_the_ages_it_reports() {
+        let mut model = TabModel::new();
+        let before = now_millis();
+        absorb(
+            &mut model,
+            Update::Lanes {
+                raw: serde_json::json!({
+                    "swarm": {"id": "s", "workers": 2, "busy": 1},
+                    "lanes": [{
+                        "n": 1,
+                        "state": "working",
+                        "task": "build the readout segments",
+                        "step_age": 45,
+                        "pid": 42,
+                    }],
+                }),
+            },
+        )
+        .expect("/lanes is the model's");
+        let seen = now_millis();
+
+        let row = model
+            .lane_rows()
+            .iter()
+            .find(|row| row.n == 1)
+            .expect("lane 1 is in the list");
+        assert_eq!(row.step_clock().as_deref(), Some("45s"));
+        let stamped = row
+            .step_age_at_millis
+            .expect("the read is also the moment its age was seen");
+        assert!(
+            before <= stamped && stamped <= seen,
+            "stamped with the moment of the read: {stamped} is not in {before}..={seen}"
+        );
+        // Which is the whole point: the clock counts on from there, so a second of
+        // frames moves it without another read (§7.3).
+        assert_eq!(row.step_clock_at(stamped).as_deref(), Some("45s"));
+        assert_eq!(row.step_clock_at(stamped + 1_000).as_deref(), Some("46s"));
+    }
+
+    /// §7.3: the frame a second is worth paying for while a clock is moving, and a
+    /// lane's step is a clock as much as the coordinator's own step is. A page whose
+    /// only work is a lane's would otherwise freeze its clock the moment the
+    /// coordinator's turn ended.
+    #[test]
+    fn a_busy_lane_keeps_the_seconds_coming() {
+        let mut model = TabModel::new();
+        assert!(
+            !clocks_running(&model),
+            "an idle session has no clock to redraw"
+        );
+
+        // A lane-state event that starts a step: the lane works, the coordinator
+        // does not — nothing has run and `create_goal` has not asked for anything.
+        absorb(
+            &mut model,
+            Update::Event {
+                agent: Agent::Coordinator,
+                id: Some(1),
+                kind: "lane-state".into(),
+                data: serde_json::json!({
+                    "lane": 1,
+                    "state": "working",
+                    "task": "build the readout segments",
+                }),
+            },
+        )
+        .expect("a lane-state event is the model's");
+        assert!(
+            model.coordinator_step_started().is_none(),
+            "the coordinator has no step of its own here"
+        );
+        assert!(
+            clocks_running(&model),
+            "the lane's clock is what keeps the frames coming"
+        );
+
+        // The lane stops, and with it the reason to redraw: the ticker ends itself.
+        absorb(
+            &mut model,
+            Update::Event {
+                agent: Agent::Coordinator,
+                id: Some(2),
+                kind: "lane-state".into(),
+                data: serde_json::json!({"lane": 1, "state": "idle", "task": null}),
+            },
+        )
+        .expect("a lane-state event is the model's");
+        assert!(
+            !clocks_running(&model),
+            "an idle lane is not a reason to draw a frame a second"
         );
     }
 

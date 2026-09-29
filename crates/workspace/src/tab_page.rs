@@ -46,7 +46,15 @@ impl TabContent {
                 message,
                 log_tail,
                 was_up,
-            } => self.render_failed(folder, message.clone(), log_tail, *was_up, cx),
+                tab_dir,
+            } => self.render_failed(
+                folder,
+                message.clone(),
+                log_tail,
+                *was_up,
+                tab_dir.as_deref(),
+                cx,
+            ),
             TabState::Stopping { .. } => self.render_stopping(cx),
         }
     }
@@ -91,12 +99,16 @@ impl TabContent {
         message: Option<String>,
         log_tail: &str,
         was_up: bool,
+        tab_dir: Option<&Path>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let folder = folder.to_path_buf();
         let retry = folder.clone();
         let show_log = !log_tail.trim().is_empty()
             && message.as_deref().map(str::trim) != Some(log_tail.trim());
+        // The evidence, as the screen shows it: the same lines, with the long
+        // paths a swarm writes read back as places (see `shorten_log`).
+        let log = shorten_log(log_tail, tab_dir);
         v_flex()
             .id("boot-failure")
             .test_support()
@@ -154,13 +166,18 @@ impl TabContent {
             .when(show_log, |this| {
                 this.child(
                     // The log is the evidence: its own box, monospace, and only as
-                    // tall as it needs to be before it scrolls (§9.7).
+                    // tall as it needs to be before it scrolls (§9.7). Lines are
+                    // not rewrapped — a stack trace and a long command line are
+                    // read as they were written — so the box scrolls sideways
+                    // too, and carries the whole tail for a screen reader.
                     div()
                         .id("boot-log-tail")
                         .test_support()
+                        .aria_label(log.clone())
                         .w_full()
                         .max_w(px(720.))
                         .max_h(px(320.))
+                        .overflow_x_scroll()
                         .overflow_y_scroll()
                         .p_3()
                         .text_xs()
@@ -170,7 +187,7 @@ impl TabContent {
                         .border_color(cx.theme().border)
                         .bg(cx.theme().muted)
                         .text_color(cx.theme().muted_foreground)
-                        .child(SharedString::from(log_tail.to_string())),
+                        .child(div().whitespace_nowrap().child(log)),
                 )
             })
             .child(
@@ -439,6 +456,69 @@ fn elide_middle(text: &str, limit: usize) -> String {
     format!("{start}…{end}")
 }
 
+/// A log tail as the failure screen shows it (§9.7).
+///
+/// A server's log is mostly paths, and all of them are long: the tab's own
+/// directory is in `--token-file`, the home or temporary directory a session or a
+/// probe was made in is on half the lines. Read as `…/T/swarm-client-fixture-71353-…/
+/// app/tabs/1a6c242b-…/token` that is a wall of temporary directories; read as
+/// `<tab>/token` it is a place. The log **file** keeps its own lines — this is
+/// what one screen shows of them.
+fn shorten_log(tail: &str, tab_dir: Option<&Path>) -> String {
+    let mut log = tail.to_string();
+    if let Some(dir) = tab_dir {
+        log = shorten_prefix(&log, &dir.to_string_lossy(), "<tab>");
+    }
+    if let Some(home) = env_path("HOME") {
+        log = shorten_prefix(&log, &home, "~");
+    }
+    if let Some(tmp) = env_path("TMPDIR") {
+        log = shorten_prefix(&log, &tmp, "…");
+    }
+    log
+}
+
+/// A directory from the environment — empty or `/` would shorten the whole
+/// filesystem into a single character.
+fn env_path(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.is_empty() && value != "/")
+}
+
+/// Replace `prefix` with SHORT where it **is** a path: at the start of one, so
+/// `/Users/me` is not read out of `/Users/me2/x`, and with a separator (or the end
+/// of the text) after it, so a directory named `/tmp/evolved` is not the tab's
+/// `/tmp/evo`.
+fn shorten_prefix(text: &str, prefix: &str, short: &str) -> String {
+    if prefix.is_empty() {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(prefix) {
+        let (before, from) = rest.split_at(at);
+        let after = &from[prefix.len()..];
+        let starts_a_path = before.chars().next_back().is_none_or(|c| !in_a_path(c));
+        let ends_a_path = after.chars().next().is_none_or(|c| c == '/');
+        out.push_str(before);
+        out.push_str(if starts_a_path && ends_a_path {
+            short
+        } else {
+            prefix
+        });
+        rest = after;
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Whether a character could be part of the path a prefix was found inside, and
+/// so whether that prefix is really the start of one.
+fn in_a_path(c: char) -> bool {
+    c.is_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | '~' | '+')
+}
+
 /// A transient line above the composer: the server's own words, dim when the
 /// answer was `409 not now` and in the danger colour for a failure (§4, §9.2).
 ///
@@ -550,5 +630,71 @@ mod tests {
             "~/work/proj"
         );
         assert_eq!(shorten_path("/var/tmp/proj", 80), "/var/tmp/proj");
+    }
+
+    /// §9.7: the tail a failure screen shows is the log's lines with the paths a
+    /// swarm writes read back as places — its own directory, the home directory,
+    /// the temporary one — and nothing else about the lines touched.
+    #[test]
+    fn the_log_tail_names_places_not_directories() {
+        // Nothing above this directory can be shortened, so what the assertions
+        // below see is this rule and no other.
+        let tab_dir = Path::new("/evo-fixture/tabs/1a6c242b-ba23-4e6b");
+        let tail = "\
+evo-swarm serve: listening on http://127.0.0.1:52658/ (token in /evo-fixture/tabs/1a6c242b-ba23-4e6b/token)
+evo-swarm: restarting serve --workers 2 --port 52658 --token-file /evo-fixture/tabs/1a6c242b-ba23-4e6b/token --resume (attempt 1)
+evo-swarm: another tab's file /evo-fixture/tabs/1a6c242b-ba23-4e6bff/token is not this one's
+evo-swarm: no directory here: /evo-fixture/tabs/1a6c242b-ba23-4e6bbackup
+still here";
+        let shown = shorten_log(tail, Some(tab_dir));
+
+        assert!(
+            shown.contains("(token in <tab>/token)"),
+            "a path into the tab's own directory reads as the tab: {shown}"
+        );
+        assert!(
+            shown.contains("--token-file <tab>/token --resume"),
+            "the command line the swarm logged keeps its shape: {shown}"
+        );
+        assert!(
+            shown.contains("/evo-fixture/tabs/1a6c242b-ba23-4e6bff/token"),
+            "a *different* directory that merely starts with the same characters is left alone: {shown}"
+        );
+        assert!(
+            shown.contains("/evo-fixture/tabs/1a6c242b-ba23-4e6bbackup"),
+            "and so is one that carries on from it: {shown}"
+        );
+        assert!(shown.ends_with("still here"), "no line is lost: {shown}");
+
+        // Without a directory to shorten against — a failure that never got as
+        // far as one — the lines are shown as they are.
+        assert_eq!(
+            shorten_log(tail, None).lines().count(),
+            tail.lines().count()
+        );
+    }
+
+    /// The home and temporary directories are places too, wherever the log names
+    /// them; a prefix is only shortened where it starts a path.
+    #[test]
+    fn the_home_and_temporary_directories_are_places_in_a_log_too() {
+        let home = env_path("HOME").expect("a home directory");
+        let tail = format!(
+            "evo-swarm: sessions in {home}/.evo/sessions/proj\n\
+             evo-swarm: not a path: x{home}/x\n\
+             evo-swarm: integer /2"
+        );
+        let shown = shorten_log(&tail, None);
+        assert!(
+            shown.contains("sessions in ~/.evo/sessions/proj"),
+            "{shown}"
+        );
+        assert!(shown.contains(&format!("x{home}/x")), "{shown}");
+        assert!(shown.ends_with("integer /2"), "{shown}");
+
+        if let Some(tmp) = env_path("TMPDIR") {
+            let shown = shorten_log(&format!("evo-swarm: probe in {tmp}/evo-probe\n"), None);
+            assert!(shown.contains("probe in …/evo-probe"), "{shown}");
+        }
     }
 }
