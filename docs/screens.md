@@ -85,3 +85,28 @@ A swarm handed to the shutdown ladder while it is still booting is not reaped:
 there is no port to post `/shutdown` to yet, and the processes the server had
 already started outlive the engine and the tab (ten of them, when `07` opened its
 tabs and stopped them at once).
+
+## The real run's pictures
+
+`docs/screens/real/` holds pictures taken against the **installed** evo rather
+than a fixture: the M4 bundle proof's `bundle-launch.png` (docs/proofs.md) and
+four frames of **one real run** — the installed `evo-swarm` and `evo-agent`, the
+real `HOME`, the user's own models, no scripted provider — taken by
+
+```sh
+cargo run -p evo-desktop --example real_gui_run -- --capture docs/screens/real --scale 1
+```
+
+| capture | what it shows |
+|---|---|
+| `real-01-mid-stream.png` | the coordinator's first reply, mid-stream (§2.8) |
+| `real-02-lane-working.png` | the delegation out and lane 1 working — the left column's `●` |
+| `real-03-lane-transcript.png` | lane 1 selected, its own transcript (§7.3) |
+| `real-04-follow-up.png` | the final state: the report relayed back and answered |
+
+They are 1× (1600×1000 pixels each, 0.15 MB together) and quantised the same way
+as the twenty above. The session's injected context shows as one collapsed
+`Context · global memory` line in each of them, which is what makes them safe to
+commit at all — the run that produced the first set drew the user's own memory
+snapshot into every frame. `docs/proofs-real.md` §4 is their proof: the command,
+the UTC timeline, the two journals, the §7.3 readout, and what each frame is of.

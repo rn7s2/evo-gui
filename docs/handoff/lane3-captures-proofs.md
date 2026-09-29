@@ -20,5 +20,17 @@
 3. `docs/proofs-real.md` + `crates/swarm_client/examples/{m0_real,real_readout,real_catalog,real_history}.rs`
    — real-backend proofs and findings R1–R4.
 4. `scripts/stub_home.sh` — stubbed EVO_HOME; exports `EVO_HOME="$home/.evo/"` (trailing slash matters).
+5. `crates/app/examples/real_gui_run.rs` — four frames of **one real run** through
+   the app window (real HOME, installed binaries, no scripted provider), into
+   `docs/screens/real/`, with the proof in `docs/proofs-real.md` §4.
+   Run: `cargo run -p evo-desktop --example real_gui_run -- --capture docs/screens/real --scale 1`
+   (a real coordinator turn and a real lane turn: run it for the proof, not for the
+   pictures). It launches the window's own empty tab by its `Launch` event with
+   `workers 1` and Default models, and quits through `evo_desktop::begin_quit`, then
+   checks nothing it started is alive and `hello.txt` is there. Gotchas: the (a) and
+   (b) frames have to be waited for in one loop (the flash lane finishes before the
+   coordinator's thinking puts its first text on screen), the lane's dot comes from
+   `TabModel::lanes().lane(n).is_busy()` rather than the lane's own model, and a
+   `report` row becomes a user message after a `settled` resync — all in §4's notes.
 Also: store::history::sessions_dir() ignores EVO_SESSIONS_DIR; swarm_client::redact is applied to
 StatusError, Error and BootFailure.log_tail.

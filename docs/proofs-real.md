@@ -34,6 +34,11 @@ library's own dependency graph is unchanged, so nothing in a production build
 compiles them. (Needs the coordinator's ack — it is the one file I touched that
 is not a new example.)
 
+A fifth example drives the same real backend through **the app's own window** —
+`crates/app/examples/real_gui_run.rs`, §4 below: the production `Shell` and
+`WorkspaceView`, one tab launched by the empty tab's `Launch` event, a prompt sent
+through the composer, four headless frames of the run, then the app's own quit.
+
 ```text
 CARGO_TARGET_DIR=target/real cargo run -q -p swarm_client --example m0_real -- /tmp/evo-m0-real-20260929T121155Z
 ```
@@ -351,6 +356,207 @@ lanes, when, coordinator model — `session::history_rows` formatting):
 
 ---
 
+## 4. M0/M1 through the GUI: one real run in the app window
+
+§12's M0 also asks for a screenshot of a real run, and M1 for a run where a lane
+is delegated work and the coordinator's transcript renders it. This is that
+proof with the app's own window in the loop: `crates/app/examples/real_gui_run.rs`
+assembles the production `Shell` global and a real `WorkspaceView` (the app's
+1600×1000 window, its title bar, its tab strip), one tab opened by the empty
+tab's own `TabContentEvent::Launch` in a fresh temp folder with `--workers 1` and
+**no** model override, and a real `tab_engine` driving the installed
+`/usr/local/bin/evo-swarm` + `evo-agent`. The `HOME`, the evo home, the
+credentials and the user's `~/.evo/init.lisp` / `~/.evo/swarm.lisp` are the real
+ones, so the swarm ran the user's own models; the catalog probe and the session
+scan are the only things that did not run (this proof is about the swarm, and on
+this machine the probe is finding R1 anyway).
+
+```sh
+cargo run -p evo-desktop --example real_gui_run -- --capture docs/screens/real --scale 1
+```
+
+The one thing deliberately not the user's is the app's own root: `~/.evo/desktop`
+is a temp directory for the run, because the quit sequence writes `app.json` and
+this proof must not rewrite the tab set of a desktop app the user may have open.
+The run below drove the working tree at 2026-09-29T16:57Z (HEAD `e8ecd5d` plus the
+other lanes' in-flight work).
+
+Two things about these frames are worth saying before they are read, because both
+are visible in them. The session's injected context — the message `/transcript`
+marks with `meta.key` — is **one collapsed line** in every frame (`Context ·
+global memory`, `e8ecd5d`): drawn as a note, never as a user turn, and never open
+here. (Before that change the earlier run's four frames drew the user's own memory
+snapshot instead, which is why these pictures were taken again.) And this run met
+a provider hiccup on its way — `Retrying provider (1/4)` sits in the first two
+frames — which is why the coordinator's first word did not arrive until 76 s after
+the prompt.
+
+### The run, in UTC
+
+```text
+started_utc:        2026-09-29T16:57:22Z  temp project folder + temp app root; real HOME
+window_utc:         2026-09-29T16:57:23Z  theme light (the system appearance); one empty tab
+launch_utc:         2026-09-29T16:57:23Z  the empty tab's Launch event: workers 1, models Default
+ready_utc:          2026-09-29T16:57:24Z  /health answered — swarm pid 41066, no session yet
+prompt_utc:         2026-09-29T16:57:24Z  typed into the composer and Entered (§9.2's send path)
+(b)_utc:            2026-09-29T16:58:37Z  delegate row with its result; lane list 1 busy, lane 1 ● working
+(a)_utc:            2026-09-29T16:58:40Z  the first reply streaming (assistant row, 71 characters)
+(c)_utc:            2026-09-29T16:58:42Z  lane 1 selected; its own transcript, 3371 characters
+(d)_utc:            2026-09-29T16:58:55Z  report seen, follow-up turn over, coordinator idle, transcript still
+quit_utc:           2026-09-29T16:58:57Z  evo_desktop::begin_quit
+shutdown_utc:       2026-09-29T16:58:59Z  app.log: "shutdown: all 1 tab(s) exited"
+process_check_utc:  2026-09-29T16:59:00Z  0 processes alive, by tab dir and by project folder
+```
+
+The coordinator's journal at the real `~/.evo/sessions` (the temp project's cwd)
+carries the turns, and they line up with the frames — including the two `bash`
+calls it made for itself, one before delegating and one to check the file:
+
+```text
+16:57:24Z injected context (the row the tab draws as one collapsed line)
+16:57:24Z user      Delegate to a lane: create hello.txt containing 'hi' in this folder, …
+16:57:33Z assistant (tool-use) bash {"command": "pwd"}
+16:57:33Z tool-result …
+16:58:37Z assistant (tool-use) delegate {"task": "Create a file named hello.txt in the directory …/project/ containing exactly the text 'hi' …"}
+16:58:37Z tool-result Delegated to lane 1. It reports back here when it has something; end your turn to wait.
+16:58:40Z assistant I've handed this to lane 1 and will tell you when hello.txt is created.
+16:58:43Z user      [lane 1 report] done: Created hello.txt containing 'hi' and verified via cat. …
+16:58:46Z assistant (tool-use) bash {"command": "cat hello.txt"}
+16:58:47Z tool-result hi
+16:58:47Z user      [lane 1] run ended (stop) — task: Create a file named hello.txt in the directory …
+16:58:49Z assistant Done: hello.txt is in this folder and contains "hi", which I confirmed by reading it.
+```
+
+and the lane's own journal (`~/.evo/swarm/20260929T165724-f9fb/lane-1/sessions/…`)
+is what it did with the delegation — eight messages, four of them the lane's own,
+on **`ark-deepseek-v4.1-flash`** (provider `aiden`, api `anthropic-messages`),
+three ending in a tool call and one `:stop`:
+
+```text
+16:58:37Z user      Create a file named hello.txt in the directory …/project/ containing exactly the text 'hi' …
+16:58:39Z assistant I'll create the file and verify it.
+                    (tool-call) write {"path": "…/project/hello.txt", "content": "hi"}
+16:58:39Z tool-result Wrote 2 chars to /private/var/folders/…/project/hello.txt
+16:58:41Z assistant (tool-call) bash {"command": "cat hello.txt"}
+16:58:42Z tool-result hi
+16:58:43Z assistant (tool-call) report :done "Created hello.txt containing 'hi' and verified via cat."
+                                        :evidence "write wrote 2 chars to .../project/hello.txt; `cat hello.txt` printed `hi`."
+                                        :goal "complete"
+16:58:43Z tool-result Delivered to the coordinator. You have no goal to complete.
+16:58:45Z assistant Created `hello.txt` with `hi`; `cat` confirms the content.
+```
+
+Note which model is which: the coordinator ran the user's `claude-opus-5-5` on
+`anthropic-oauth`, and the lane ran `ark-deepseek-v4.1-flash` on `aiden` — the
+`evo.swarm:in-lanes` model from `~/.evo/swarm.lisp`. That is the §9.4 rule
+holding in a real run: the `claude-*` provider is an extension API a quarantined
+lane cannot reach, so the lanes chooser marks it unavailable (finding §2 above)
+and the lane uses the model the user gave the lanes.
+
+### The §7.3 readout, from the tab's own model
+
+```text
+readout at boot:    ctx 0k                                        (nothing has answered /state yet)
+readout at the end: claude-opus-5-5 · high · ctx 146k/1000k (15%) · 74% cached
+segments:           ["claude-opus-5-5", "high", "ctx 146k/1000k (15%)", "74% cached"]
+model:              Some("claude-opus-5-5")    provider: Some("anthropic-oauth")
+```
+
+`claude-opus-5-5` with thinking `high` is the user's own `~/.evo/swarm.lisp`
+(`:model`, `:thinking`); nothing in the proof passed a model, and the launch's
+`LaunchPlan` only carried `workers: Some(1)`. The 146k context is the session's
+own injected context plus the run — the same snapshot the collapsed row stands
+for, counted by the provider all the same.
+
+### The four frames
+
+All four are the app's own theme (light — the system appearance), 1600×1000
+**points** rendered at 1× (the window's own size), saved as ≤192-colour PNGs —
+0.15 MB together (the injected context used to be the bulk of the pixels):
+
+```sh
+magick real-0N.png -background white -alpha remove -alpha off -colors 192 PNG8:real-0N.png
+```
+
+| capture | what it shows |
+|---|---|
+| `docs/screens/real/real-02-lane-working.png` | **The delegation is out and a lane is working** (16:58:37Z). The center column shows turn 1 — the prompt — with the coordinator's `bash ● ok` and `delegate ● ok` rows, the `Retrying provider (1/4)` line the run met on the way, and the run still streaming; the left column reads `1 lane · 1 busy`, `main ●` mid-turn and lane 1 `●` with the task it was given; the composer is in its running state (`Stop`). This is M1's picture: the coordinator's transcript renders the delegation while the lane works. |
+| `docs/screens/real/real-01-mid-stream.png` | **The coordinator's first reply, mid-stream** (16:58:40Z). The same rows plus the reply itself: the assistant row was still streaming when the frame was taken (71 characters of it), under the composer's `Stop` and a readout that has moved with the run (`ctx 146k/1000k`) — §2.8's streaming path, on a real provider, in the real transcript view. |
+| `docs/screens/real/real-03-lane-transcript.png` | **Lane 1 selected, its own transcript** (16:58:42Z). The center column is the lane's — its task as the header and as its first turn, its own text ("I'll create the file and verify it."), and its `write ● ok` tool row — while the left column keeps following the swarm (`main ○ idle`, lane 1 `● 1s`) and the composer keeps the coordinator's readout and stays disabled: lanes are watched, never typed to (§14.4). |
+| `docs/screens/real/real-04-follow-up.png` | **The final state** (16:58:55Z): the report has been fed back and answered, and the lane's run-end with it. Turn 1 the prompt with `bash ● ok`, `delegate ● ok` and "I've handed this to lane 1 and will tell you when hello.txt is created."; turn 2 the relayed `[lane 1 report]` with its evidence and the coordinator's own `bash ● ok` (it ran `cat hello.txt` itself); turn 3 `[lane 1] run ended (stop)` and "Done: hello.txt is in this folder and contains \"hi\", which I confirmed by reading it."; both rows `○ idle`, `1 lane · 0 busy`, and the composer back to `Send`. |
+
+### The work, and the way the run ends
+
+```text
+hello.txt in the project folder:  true
+hello.txt content:                "hi"        (2 bytes, no trailing newline)
+app.log:  16:58:57Z quitting: stopping every tab
+          16:58:57Z saved …/app/app.json: 1 tab(s), 1 of them resumable
+          16:58:59Z shutdown: all 1 tab(s) exited
+[cleanup] swarm process(es) still alive after the quit: 0 (quiet: true)
+```
+
+The quit is the app's own: `evo_desktop::begin_quit` takes the tab's engine out of
+the workspace, runs §3's ladder on its own thread and writes `app.json` — the log
+lines above are that thread's. The process check looks for what this run started
+**twice**: by the tab directory (`--token-file <root>/tabs/<id>/…`, which is the
+swarm and everything it forked) and by the project folder, which no unrelated
+process names. Both said zero, ~4 s after the quit began.
+
+### Notes on taking these frames
+
+- **The lane is faster than the coordinator's thinking.** With the flash lane the
+  whole delegation — write, verify, report, run-end — took 8 s (16:58:37 →
+  16:58:45), while the coordinator's first text reached the screen at 16:58:40 and
+  its follow-up turns ran to 16:58:49. So the delegation can be out and the lane
+  working *before* the coordinator has written anything: the (a) and (b) waits have
+  to run **together**, in one loop, or the frame of the lane working arrives after
+  the lane has already stopped. (Taken one at a time and the lane's dot is missed:
+  the first three attempts at this proof, on an earlier tree, did exactly that, and
+  the (b) wait found `0 busy, lane 1 ○ idle` every time.)
+- **The injected context is a row of the window's, and it is private.** What the
+  session's `/transcript` marks with `meta.key` is drawn as one collapsed line and
+  nothing else (`e8ecd5d`), but it is *still in the message list*: it is a
+  user-role message in the journal, and it is what a proof prints if it dumps the
+  rows verbatim. This proof's first set of pictures were taken before that row
+  existed, and every one of them showed the user's memory snapshot on screen; the
+  frames here were taken again after it. (A run's log still carries the row's text
+  — the example prints the rows — so a log is not a file to paste or commit.)
+- **A real run can meet a provider hiccup, and the picture will say so.** This run
+  retried once (`Retrying provider (1/4) in 1.6 s — SSL-ERROR-SYSCALL: …`, a
+  transient TLS failure) and the coordinator's first word took 76 s to arrive
+  instead of the few seconds the earlier run took; the row is in the first two
+  frames, and the transcript loses it on the next resync (it is an `output` line,
+  which `/transcript` does not carry — the same reason a lane's "down" reason is
+  remembered separately).
+- **The lane's dot comes from the lane list, not from the lane's own model.** A
+  lane is only *watched* while it is the one shown (§9.3), so
+  `TabModel::lane_model(1).activity()` reads `Idle` while the lane works; what the
+  left column draws — and what this proof waits on — is
+  `TabModel::lanes().lane(1).is_busy()`, fed by `/lanes` and the coordinator
+  stream's `lane-state` events. The proof records the sequence it saw:
+  `["◌ starting", "○ idle", "● working"]`.
+- **A `report` row does not survive a resync.** The report arrives as a
+  `RowKind::Report` on the event stream, but `settled` rebuilds the coordinator's
+  rows from `/transcript`, where the same news is the user message the swarm fed
+  back (`[lane 1 report] done: …`). A proof that waits only for `RowKind::Report`
+  waits forever once a turn has settled; both shapes are the report.
+- **A real provider does not always stream.** This reply did (the frame caught it
+  at 71 characters, still streaming), but the same prompt on other runs arrived in
+  single deltas, which gives the UI nothing to render mid-word — so "mid-stream" is
+  a frame the provider hands a proof when it streams, not one it can be forced to
+  produce.
+- **M1's "idle" is not "finished".** The coordinator went idle at 16:58:40 with the
+  lane still working, and again at 16:58:47 with the lane's run-end still to come;
+  the final frame waits for the report *and* a still transcript, per R4.
+- **Nothing private in the frames, checked two ways.** `tesseract` over each of the
+  four pictures finds no memory marker (`mem-`, `Asia/Singapore`, `OpenViking`,
+  `192.168`, `dybench`, `guardrails`, `api_key`, `Bearer`, `sk-`, `/Users/`), and
+  the only non-ASCII text any of them shows is the UI's own glyphs, this proof's
+  prompt, the collapsed `Context · global memory` line and the temp folder's path.
+
+---
+
 ## Findings
 
 ### R1 — `GET /registry` is 500 on the real config, and the error body is a secret
@@ -546,7 +752,17 @@ probe and the lanes chooser's availability rule, with real models; the §9.5
 scan and row formatting over 697 real journals; `POST /shutdown` ending the
 whole process group with exit 0 and nothing alive afterwards (§3).
 
-Not proven here: the UI itself (workspace tests), a multi-lane swarm (this ran
-`--workers 1` on purpose), `--resume`/history *launch*, the tab directory's own
-token/lock handling (§6), and anything about a machine whose `init.lisp` does
-not hold the dotted-pair `:headers` that R1 needs to fail.
+Not proven here: a multi-lane swarm (this ran `--workers 1` on purpose),
+`--resume`/history *launch*, the tab directory's own token/lock handling (§6), the
+parts of the UI that need a manual hand (§7.3's tooltips, §9.5's *open at the last
+quit* flow), and anything about a machine whose `init.lisp` does not hold the
+dotted-pair `:headers` that R1 needs to fail.
+
+§4 is the same backend **through the GUI**, so it adds what the examples above
+cannot: the assembled window rendering a real run end to end — the empty tab's own
+`Launch` event starting a real swarm, a prompt typed into the real composer, the
+coordinator's reply streaming into the real transcript view while the left column
+draws the lane's dot from `/lanes`, lane 1's own transcript on selection, and the
+report relayed back and answered in the coordinator's transcript. What it does not
+add: any of the UI the other lanes' work covers, a multi-lane swarm, and the one
+picture a real provider refuses to give on demand — see the notes in §4.
