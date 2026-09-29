@@ -35,7 +35,7 @@ use gpui_kit::{
     HeadlessAppContext, WindowBounds, WindowOptions,
 };
 use session::{AgentKey, RowKind};
-use store::app_state::Binaries;
+use store::app_state::{AppState, Binaries};
 use store::history::{self, ScanBudget};
 use store::model_cache::ModelCache;
 use store::paths::Root;
@@ -46,6 +46,35 @@ use evo_desktop::{AppLog, Shell, history_entries, push_launcher_data};
 
 /// The size the app opens at (§7.1), so the pictures show the real proportions.
 const WINDOW_SIZE: (f32, f32) = (1600., 1000.);
+
+/// The scale the headless renderer draws at (a retina platform window).
+const RENDER_SCALE: f32 = 2.;
+
+/// A window's logical size, and the scale its pictures are saved at: `1` means
+/// 1600x1000 pixels, `2` (the default) means the renderer's own 3200x2000.
+#[derive(Clone, Copy)]
+struct Screens {
+    width: f32,
+    height: f32,
+    scale: f32,
+}
+
+impl Screens {
+    const fn app(scale: f32) -> Screens {
+        Screens { width: WINDOW_SIZE.0, height: WINDOW_SIZE.1, scale }
+    }
+
+    /// The picture a file should hold, as the renderer's own pixels.
+    fn device(&self) -> (f32, f32) {
+        (self.width * RENDER_SCALE, self.height * RENDER_SCALE)
+    }
+
+    /// The pixel size a `--scale` run resamples that to.
+    fn saved(&self) -> Option<(u32, u32)> {
+        (self.scale != RENDER_SCALE)
+            .then(|| ((self.width * self.scale) as u32, (self.height * self.scale) as u32))
+    }
+}
 
 /// A transition samples the app clock; advance it before a capture.
 const SETTLE: Duration = Duration::from_millis(400);
@@ -127,6 +156,30 @@ TODO_ITEMS = [
 
 TAIL_PAUSE = 8.0
 
+# The coordinator delegates once, whatever order the swarm puts its turn in.
+DELEGATED = [False]
+
+
+def call_from(text):
+    """The first `CALL <tool> {json}` in TEXT, as (name, args)."""
+    at = text.find("CALL ")
+    if at < 0:
+        return None
+    rest = text[at + 5:].lstrip()
+    name, _, tail = rest.partition(" ")
+    tail = tail.lstrip()
+    if not tail.startswith("{"):
+        return None
+    depth = 0
+    for i, ch in enumerate(tail):
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return name, json.loads(tail[:i + 1])
+    return None
+
 
 def block_text(block):
     if block.get("type") == "text":
@@ -190,24 +243,45 @@ class Handler(BaseHTTPRequestHandler):
         role = "lane"
         if "## Swarm coordinator" in system:
             role = "coordinator"
+        sys.stderr.write("stub: %s asked %r\n" % (role, newest[:70]))
+        sys.stderr.flush()
         try:
-            self.respond(request.get("model"), all_text, newest, has_result, role)
+            self.respond(request.get("model"), all_text, newest, has_result, role, system)
         except (BrokenPipeError, ConnectionResetError):
             pass
         except (BrokenPipeError, ConnectionResetError):
             pass
 
-    def respond(self, model, text, newest, has_result, role):
+    def respond(self, model, text, newest, has_result, role, system):
+        # Usage is what the kernel anchors its context estimate on (chars/4), so
+        # a reply that reports its own size is what makes the session see a
+        # context worth compacting.
+        inputs = max(1, (len(system) + len(text)) // 4)
+        sent = 0
         self.sse("message_start", {
             "type": "message_start",
             "message": {"id": "msg_stub", "type": "message", "role": "assistant",
                         "model": model, "content": [],
-                        "usage": {"input_tokens": 10, "output_tokens": 0}}})
+                        "usage": {"input_tokens": inputs, "output_tokens": 0}}})
         stripped = newest.strip()
         tool = None
         reply = None
         chunks = 0
-        if has_result and role == "coordinator":
+        if "summarizer" in system:
+            reply = "SUMMARY: the session so far, condensed by the stub."
+        elif "FAIL" in newest:
+            # The provider dies mid-stream: no terminal event, which the kernel
+            # retries (provider-retry rows) and then gives up on (a run that ends
+            # badly).
+            self.sse("content_block_start", {
+                "type": "content_block_start", "index": 0,
+                "content_block": {"type": "text", "text": ""}})
+            self.sse("content_block_delta", {
+                "type": "content_block_delta", "index": 0,
+                "delta": {"type": "text_delta", "text": "half a sentence "}})
+            self.close_connection = True
+            return
+        elif has_result and role == "coordinator":
             # The delegation is acknowledged in one line: the coordinator's
             # transcript stays short, so its delegate row is still on screen
             # when the picture is taken.
@@ -218,11 +292,14 @@ class Handler(BaseHTTPRequestHandler):
             chunks = 40 if "SLOW" in text else 3
         elif has_result:
             reply = "The checklist is in the panel above."
-        elif stripped.startswith("CALL "):
-            name, _, rest = stripped[5:].partition(" ")
-            tool = (name, json.loads(rest) if rest.strip() else {})
-        elif "TODOS" in newest:
+        elif role == "lane" and "TODOS" in newest:
             tool = ("todo", {"items": TODO_ITEMS})
+        elif not DELEGATED[0] and call_from(text):
+            # The coordinator's own turn: the delegation, once.
+            tool = call_from(text)
+            DELEGATED[0] = True
+        elif "BIG" in newest:
+            chunks = 8
         elif "SLOW" in newest:
             chunks = 40
         elif "SHOW" in newest:
@@ -245,11 +322,13 @@ class Handler(BaseHTTPRequestHandler):
                 "type": "content_block_start", "index": 0,
                 "content_block": {"type": "text", "text": ""}})
             if chunks:
-                size = max(1, len(DOC) // chunks)
-                for at in range(0, len(DOC), size):
+                body = DOC * (8 if "BIG" in newest else 1)
+                size = max(1, len(body) // chunks)
+                for at in range(0, len(body), size):
                     self.sse("content_block_delta", {
                         "type": "content_block_delta", "index": 0,
-                        "delta": {"type": "text_delta", "text": DOC[at:at + size]}})
+                        "delta": {"type": "text_delta", "text": body[at:at + size]}})
+                    sent += size
                     time.sleep(0.05)
                 # A capture takes a frame mid-stream: stay streaming for a while.
                 time.sleep(TAIL_PAUSE)
@@ -257,11 +336,12 @@ class Handler(BaseHTTPRequestHandler):
                 self.sse("content_block_delta", {
                     "type": "content_block_delta", "index": 0,
                     "delta": {"type": "text_delta", "text": reply or ""}})
+                sent += len(reply or "")
             stop = "end_turn"
         self.sse("content_block_stop", {"type": "content_block_stop", "index": 0})
         self.sse("message_delta", {"type": "message_delta",
                                    "delta": {"stop_reason": stop},
-                                   "usage": {"output_tokens": 5}})
+                                   "usage": {"output_tokens": max(1, sent // 4)}})
         self.sse("message_stop", {"type": "message_stop"})
 
 
@@ -322,28 +402,45 @@ const HISTORY: &[(&str, u64, u32, &str)] = &[
 ];
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    match args.as_slice() {
-        [flag, dir] if flag == "--capture" => {
-            if let Err(error) = capture(Path::new(dir)) {
-                eprintln!("capture failed: {error}");
-                std::process::exit(1);
+    let mut dir: Option<PathBuf> = None;
+    let mut scale = RENDER_SCALE;
+    let mut only: Vec<String> = Vec::new();
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--capture" => dir = args.next().map(PathBuf::from),
+            "--scale" => {
+                scale = args.next().and_then(|value| value.parse().ok()).unwrap_or(RENDER_SCALE)
+            }
+            "--only" => {
+                only = args
+                    .next()
+                    .map(|list| list.split(',').map(str::to_string).collect())
+                    .unwrap_or_default()
+            }
+            other => {
+                eprintln!("usage: app_snapshot --capture <dir> [--scale <n>] (got {other})");
+                std::process::exit(2);
             }
         }
-        _ => {
-            eprintln!("usage: app_snapshot --capture <dir>");
-            std::process::exit(2);
-        }
+    }
+    let Some(dir) = dir else {
+        eprintln!("usage: app_snapshot --capture <dir> [--scale <n>]");
+        std::process::exit(2);
+    };
+    if let Err(error) = capture(&dir, scale, &only) {
+        eprintln!("capture failed: {error}");
+        std::process::exit(1);
     }
 }
 
 /// The window options the captures use: the production title bar, at the size
 /// the app opens with, without touching the screen.
-fn capture_window_options() -> WindowOptions {
+fn capture_window_options(screens: Screens) -> WindowOptions {
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds {
             origin: point(px(0.), px(0.)),
-            size: size(px(WINDOW_SIZE.0), px(WINDOW_SIZE.1)),
+            size: size(px(screens.width), px(screens.height)),
         })),
         focus: false,
         show: false,
@@ -351,8 +448,12 @@ fn capture_window_options() -> WindowOptions {
     }
 }
 
-fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn capture(dir: &Path, scale: f32, only: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(dir)?;
+    let screens = Screens::app(scale);
+    // `--only 07,09` draws the earlier states without saving them: takes them
+    // again when a change only touches the later ones.
+    let shot_here = |id: &str| only.is_empty() || only.iter().any(|wanted| wanted == id);
     let work = temp_dir()?;
 
     // The scripted model, and the temp `HOME` it is registered in.
@@ -398,19 +499,14 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     cx.update(|cx| {
         let log = AppLog::open(&root);
         log.info("app_snapshot: building the app's shell");
-        Shell::new(
-            root.clone(),
-            log,
-            Binaries {
-                evo_swarm: fixture.swarm_bin.clone(),
-                evo_agent: fixture.agent_bin.clone(),
-            },
-            Vec::new(),
-            catalog.clone(),
-        )
-        .install(cx);
+        let mut state = AppState::default();
+        state.binaries = Binaries {
+            evo_swarm: fixture.swarm_bin.clone(),
+            evo_agent: fixture.agent_bin.clone(),
+        };
+        Shell::new(root.clone(), log, state, catalog.clone()).install(cx);
     });
-    let (window, view) = open_workspace(&mut cx, config.clone())?;
+    let (window, view) = open_workspace(&mut cx, config.clone(), screens)?;
     cx.update(|cx| {
         cx.update_global::<Shell, _>(|shell, _| {
             shell.view = Some(view.downgrade());
@@ -427,7 +523,9 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
 
     // 1. What the app opens with: one empty tab, the choosers filled from the
     //    catalog, and the sessions the scan found (§7.2).
-    both_themes(&mut cx, window, dir, "01-launch")?;
+    if shot_here("01-launch") {
+        both_themes(&mut cx, window, dir, "01-launch", screens)?;
+    }
 
     // 1b. The lanes chooser open: the models the catalog holds, with the one a
     //     quarantined lane cannot reach called out (§9.4).
@@ -436,7 +534,9 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
         window.click("lanes-model", cx);
     })?;
     cx.run_until_parked();
-    both_themes(&mut cx, window, dir, "01b-lanes-chooser")?;
+    if shot_here("01b-lanes-chooser") {
+        both_themes(&mut cx, window, dir, "01b-lanes-chooser", screens)?;
+    }
     cx.update_window(window, |_, window, cx| {
         window.press("escape", cx);
     })?;
@@ -462,7 +562,9 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
         text_chars(cx, &first) * 10 >= MARKDOWN.chars().count() * 9
     })?;
     println!("[state] two swarms running, the first streaming markdown");
-    both_themes(&mut cx, window, dir, "02-three-tabs")?;
+    if shot_here("02-three-tabs") {
+        both_themes(&mut cx, window, dir, "02-three-tabs", screens)?;
+    }
 
     // 3. The delegation, opened onto its arguments and result (§2.8). The
     //    coordinator answers in one line, so the row it made is still on
@@ -476,10 +578,14 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
         "CALL delegate {\"lane\":1,\"task\":\"TODOS then SLOW: write up what you changed\"}",
     )?;
     select_main(&mut cx, window, &first)?;
-    wait_until(&mut cx, |cx| tool_row_with_result(cx, &first).is_some())?;
-    expand_tool_row(&mut cx, window, &first)?;
+    wait_until(&mut cx, |cx| delegate_row(cx, &first).is_some() && !working(cx, &first))?;
     println!("[state] the delegate call expanded");
-    both_themes(&mut cx, window, dir, "03-tool-expanded")?;
+    cx.run_until_parked();
+    if shot_here("04-tool-expanded") {
+        both_themes_prepared(&mut cx, window, dir, "04-tool-expanded", screens, |cx| {
+            expand_tool_row(cx, &first);
+        })?;
+    }
 
     // 4. Lane 1's own transcript and the checklist it set (§7.3, §9.3), once its
     //    run is over so the report it wrote is whole.
@@ -490,7 +596,9 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
             && text_chars(cx, &first) * 10 >= MARKDOWN.chars().count() * 9
     })?;
     println!("[state] lane 1 selected with its checklist");
-    both_themes(&mut cx, window, dir, "04-lane-todos")?;
+    if shot_here("03-lane-todos") {
+        both_themes(&mut cx, window, dir, "03-lane-todos", screens)?;
+    }
 
     // 5. A swarm that cannot start: a binary that exits during boot, so the tab
     //    shows the log tail, Retry and Close (§9.7). A second window, because a
@@ -501,40 +609,141 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
         swarm_bin: broken_bin.clone(),
         ..(*config).clone()
     });
-    let (broken_window, broken_view) = open_workspace(&mut cx, broken)?;
+    let (broken_window, broken_view) = open_workspace(&mut cx, broken, screens)?;
     let broken_tab = broken_view.read_with(&cx, |view, _| view.selected_tab().clone());
     launch(&mut cx, broken_window, &broken_tab, &fixture.project, 1)?;
     wait_until(&mut cx, |cx| {
         matches!(broken_tab.read_with(cx, |tab, _| tab.state().clone()), TabState::Failed { .. })
     })?;
     println!("[state] boot failure with its log tail");
-    both_themes(&mut cx, broken_window, dir, "05-boot-failure")?;
+    if shot_here("05-boot-failure") {
+        both_themes(&mut cx, broken_window, dir, "05-boot-failure", screens)?;
+    }
 
     // 6. The coordinator's stream gone quiet while its process is still there
     //    (§9.7): the lane list's reconnecting badge. The server is stopped, not
     //    killed — a killed one would fail the tab instead — and started again
     //    after the pictures.
     view.update(&mut cx, |view, cx| view.select_tab(0, cx));
+    // The badge belongs to the coordinator's row, so show its own transcript
+    // under it.
+    select_main(&mut cx, window, &first)?;
     let stopped = stop_swarms_blocking(&config.root);
     println!("[state] stopped {} swarm process(es); waiting for the badge", stopped.len());
     if !stopped.is_empty() {
         if wait_until(&mut cx, |cx| reconnecting(cx, &first)).is_ok() {
             println!("[state] the coordinator's stream is reconnecting");
-            both_themes(&mut cx, window, dir, "06-reconnecting")?;
+            if shot_here("06-reconnecting") {
+        both_themes(&mut cx, window, dir, "06-reconnecting", screens)?;
+    }
         } else {
             println!("[skip] the reconnect badge did not appear within {:?}", WAIT);
         }
         resume_swarms(&stopped);
     }
 
-    // Stop the tabs' swarms the way the quit sequence does, and say what is
-    // left: the example's contract is that it leaves no process behind.
-    let handles = view.update(&mut cx, |view, cx| view.take_engines(cx));
+    // 7. The tab strip, overflowing: a dozen tabs, folders with long names, the
+    //    `+` still on screen and the strip scrolled to the selected tab (§7.1).
+    //    Ten of them are opened and their engines stopped at once — the picture
+    //    is of the strip, and ten live swarms are not worth their memory — and
+    //    the last tab is a real swarm, so the page it scrolls to is a healthy
+    //    one.
+    for n in 1..=10 {
+        let folder = work.join(format!("evo-desktop-visual-review-capture-{n:02}"));
+        std::fs::create_dir_all(&folder)?;
+        open_tab_and_stop(&mut cx, window, &view, &folder)?;
+    }
+    let dashboard = work.join("evo-desktop-visual-review-dashboard");
+    std::fs::create_dir_all(&dashboard)?;
+    let last = open_tab(&mut cx, window, &view)?;
+    launch(&mut cx, window, &last, &dashboard, 1)?;
+    wait_running(&mut cx, &last, "the dashboard swarm")?;
+    let last_index = view.read_with(&cx, |view, _| view.tabs().len().saturating_sub(1));
+    view.update(&mut cx, |view, cx| view.select_tab(last_index, cx));
+    println!("[state] {} tabs, the strip scrolled to the last", last_index + 1);
+    if shot_here("07-tab-strip") {
+        both_themes(&mut cx, window, dir, "07-tab-strip", screens)?;
+    }
+
+    // 8. The narrow window (§7.1's minimum): nothing overlaps, and the long
+    //    labels — a lane's task, the status readout — ellipsize instead of
+    //    pushing the button off its row.
+    let narrow = Screens { width: 1000., height: 700., scale };
+    let (narrow_window, narrow_view) = open_workspace(&mut cx, config.clone(), narrow)?;
+    let narrow_tab = narrow_view.read_with(&cx, |view, _| view.selected_tab().clone());
+    let narrow_folder = work.join("evo-desktop-visual-review-narrow");
+    std::fs::create_dir_all(&narrow_folder)?;
+    launch(&mut cx, narrow_window, &narrow_tab, &narrow_folder, 2)?;
+    wait_running(&mut cx, &narrow_tab, "the narrow window's swarm")?;
+    prompt(
+        &mut cx,
+        narrow_window,
+        &narrow_tab,
+        "CALL delegate {\"lane\":1,\"task\":\"SLOW: walk the narrow layout and report everything \
+         that overlaps or clips\"}",
+    )?;
+    select_lane(&mut cx, narrow_window, &narrow_tab, 1)?;
+    wait_within(&mut cx, 60, |cx| text_chars(cx, &narrow_tab) > 40);
+    println!("[state] the narrow window, mid-run");
+    if shot_here("08-narrow-1000x700") {
+        both_themes(&mut cx, narrow_window, dir, "08-narrow-1000x700", narrow)?;
+    }
+
+    // 9. A run that ended badly, with the status rows a stalled run leaves: the
+    //    compaction a full context forces, and the provider retries before the
+    //    kernel gives up (§5). Its own tab, on the registration whose window is
+    //    small enough to cross the compaction line in one turn.
+    let bad = open_tab(&mut cx, window, &view)?;
+    let bad_folder = work.join("evo-desktop-visual-review-deep-context");
+    std::fs::create_dir_all(&bad_folder)?;
+    launch_with(&mut cx, window, &bad, &bad_folder, 1, Some((SMALL_MODEL, "stub")))?;
+    wait_running(&mut cx, &bad, "the deep-context swarm")?;
+    prompt(&mut cx, window, &bad, "BIG SHOW the whole plan again, at length")?;
+    let started = wait_within(&mut cx, 60, |cx| text_chars(cx, &bad) > 400);
+    println!(
+        "[state] big document started: {started} ({} chars, state {:?})",
+        text_chars(&cx, &bad),
+        bad.read_with(&cx, |tab, _| format!("{:?}", tab.state()))
+    );
+    for row in row_dump(&cx, &bad) {
+        println!("[rows] {row}");
+    }
+    for swarm in swarm_details(&config.root) {
+        println!("[procs] {swarm}");
+    }
+    let whole = wait_within(&mut cx, 60, |cx| {
+        text_chars(cx, &bad) > MARKDOWN.chars().count() * 3
+    });
+    println!("[state] big document whole: {whole} ({} chars)", text_chars(&cx, &bad));
+    wait_within(&mut cx, 60, |cx| !working(cx, &bad));
+    // The next turn opens with a compaction: the context no longer fits.
+    prompt(&mut cx, window, &bad, "keep going")?;
+    let compacted = wait_within(&mut cx, 60, |cx| dim_row(cx, &bad, "compacted").is_some());
+    println!("[state] compaction status row: {compacted}");
+    wait_within(&mut cx, 30, |cx| !working(cx, &bad));
+    prompt(&mut cx, window, &bad, "FAIL: the provider is down")?;
+    wait_until(&mut cx, |cx| run_outcome(cx, &bad).is_some())?;
+    println!("[state] a run that ended badly");
+    for row in row_dump(&cx, &bad) {
+        println!("[rows] {row}");
+    }
+    if shot_here("09-bad-run") {
+        both_themes(&mut cx, window, dir, "09-bad-run", screens)?;
+    }
+
+    // Stop the tabs' swarms the way the quit sequence does — every window's,
+    // and say what is left: the example's contract is that it leaves no process
+    // behind.
+    let mut handles = view.update(&mut cx, |view, cx| view.take_engines(cx));
+    handles.extend(narrow_view.update(&mut cx, |view, cx| view.take_engines(cx)));
     let _bridge = workspace::stop_in_background(handles);
-    std::thread::sleep(Duration::from_secs(6));
+    std::thread::sleep(Duration::from_secs(8));
     let alive = swarms_under(&config.root);
     println!("[cleanup] swarm process(es) still alive: {}", alive.len());
-    for pid in &alive {
+    for (pid, where_) in &alive {
+        println!("[cleanup]   {pid} {where_}");
+    }
+    for (pid, _) in &alive {
         let _ = std::process::Command::new("kill").args(["-9", &pid.to_string()]).status();
     }
     drop(fixture);
@@ -624,9 +833,10 @@ fn write_broken_binary(path: &Path) -> std::io::Result<()> {
 fn open_workspace(
     cx: &mut HeadlessAppContext,
     config: Arc<SwarmConfig>,
+    screens: Screens,
 ) -> Result<(AnyWindowHandle, Entity<WorkspaceView>), Box<dyn std::error::Error>> {
     let (window, view) = cx.update(|cx| {
-        gpui_kit::open_window(capture_window_options(), cx, |window, cx| {
+        gpui_kit::open_window(capture_window_options(screens), cx, |window, cx| {
             cx.new(|cx| WorkspaceView::with_config(config, window, cx))
         })
     })?;
@@ -640,8 +850,22 @@ fn launch(
     folder: &Path,
     workers: u16,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    launch_with(cx, window, tab, folder, workers, None)
+}
+
+/// A launch, with the coordinator's model when one is named: the tab's `--model`
+/// (§3, §7.2).
+fn launch_with(
+    cx: &mut HeadlessAppContext,
+    window: AnyWindowHandle,
+    tab: &Entity<workspace::TabContent>,
+    folder: &Path,
+    workers: u16,
+    model: Option<(&str, &str)>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut plan = session::LaunchPlan::default();
     plan.workers = Some(workers);
+    plan.model = model.map(|(id, provider)| (id.to_string(), provider.to_string()));
     let launch = Launch::New { folder: folder.to_path_buf(), plan };
     cx.update_window(window, |_, window, cx| {
         tab.update(cx, |tab, cx| tab.launch(launch, window, cx));
@@ -702,40 +926,40 @@ fn select_main(
     Ok(())
 }
 
-/// Open the first tool row of the shown transcript, the way a click does.
-fn expand_tool_row(
-    cx: &mut HeadlessAppContext,
-    window: AnyWindowHandle,
-    tab: &Entity<workspace::TabContent>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let row = tab.read_with(cx, |tab, cx| {
-        tab.transcript().and_then(|view| {
-            view.read(cx)
-                .rows(cx)
+/// Open the shown transcript's first tool row that has a result, the way a click
+/// does. Re-read each time: a resync replaces the rows, and the expansion with
+/// them.
+fn expand_tool_row(cx: &mut HeadlessAppContext, tab: &Entity<workspace::TabContent>) {
+    let (row, view) = tab.read_with(&*cx, |tab, cx| {
+        let row = tab.transcript().and_then(|view| {
+            let view = view.read(cx);
+            view.rows(cx)
                 .iter()
-                .find(|row| matches!(row.kind, RowKind::Tool { .. }))
+                .find(|row| {
+                    matches!(&row.kind, RowKind::Tool { name, result: Some(_), .. } if name == "delegate")
+                })
                 .map(|row| row.id)
-        })
+        });
+        (row, tab.transcript().cloned())
     });
-    if let Some(id) = row {
-        cx.update_window(window, |_, _window, cx| {
-            if let Some(view) = tab.read(cx).transcript().cloned() {
-                view.update(cx, |view, cx| view.set_expanded(id, true, cx));
-            }
-        })?;
-    }
-    Ok(())
+    let (Some(id), Some(view)) = (row, view) else { return };
+    cx.update(|cx| {
+        view.update(cx, |view, cx| view.set_expanded(id, true, cx));
+    });
 }
 
-/// The id of the first tool row that already has its result, for a wait loop:
-/// the picture is of a call that ran, not one still in flight.
-fn tool_row_with_result(cx: &HeadlessAppContext, tab: &Entity<workspace::TabContent>) -> Option<u64> {
+/// The delegate call's row, once it has its result: what the fourth picture is
+/// of. Not simply the first tool row — the scripted model makes a `todo` call of
+/// its own on the way.
+fn delegate_row(cx: &HeadlessAppContext, tab: &Entity<workspace::TabContent>) -> Option<u64> {
     tab.read_with(cx, |tab, cx| {
         tab.transcript().and_then(|view| {
             view.read(cx)
                 .rows(cx)
                 .iter()
-                .find(|row| matches!(&row.kind, RowKind::Tool { result: Some(_), .. }))
+                .find(|row| {
+                    matches!(&row.kind, RowKind::Tool { name, result: Some(_), .. } if name == "delegate")
+                })
                 .map(|row| row.id)
         })
     })
@@ -750,17 +974,38 @@ fn lane_working(cx: &HeadlessAppContext, tab: &Entity<workspace::TabContent>, n:
     })
 }
 
+/// Render the current state twice, with `prepare` run just before each frame —
+/// for a state a resync would otherwise undo (the transcript clears its
+/// expanded rows when it replaces them, so the row is opened again per theme).
+fn both_themes_prepared(
+    cx: &mut HeadlessAppContext,
+    window: AnyWindowHandle,
+    dir: &Path,
+    name: &str,
+    screens: Screens,
+    prepare: impl Fn(&mut HeadlessAppContext),
+) -> Result<(), Box<dyn std::error::Error>> {
+    cx.update(|cx| Theme::change(ThemeMode::Light, None, cx));
+    prepare(cx);
+    shot(cx, window, dir, &format!("{name}-light.png"), screens)?;
+    cx.update(|cx| Theme::change(ThemeMode::Dark, None, cx));
+    prepare(cx);
+    shot(cx, window, dir, &format!("{name}-dark.png"), screens)?;
+    Ok(())
+}
+
 /// Render the current state in the light theme and then the dark one.
 fn both_themes(
     cx: &mut HeadlessAppContext,
     window: AnyWindowHandle,
     dir: &Path,
     name: &str,
+    screens: Screens,
 ) -> Result<(), Box<dyn std::error::Error>> {
     cx.update(|cx| Theme::change(ThemeMode::Light, None, cx));
-    shot(cx, window, dir, &format!("{name}-light.png"))?;
+    shot(cx, window, dir, &format!("{name}-light.png"), screens)?;
     cx.update(|cx| Theme::change(ThemeMode::Dark, None, cx));
-    shot(cx, window, dir, &format!("{name}-dark.png"))?;
+    shot(cx, window, dir, &format!("{name}-dark.png"), screens)?;
     Ok(())
 }
 
@@ -770,6 +1015,7 @@ fn shot(
     window: AnyWindowHandle,
     dir: &Path,
     name: &str,
+    screens: Screens,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Something that animates (a spinner, a stream fade) settles on the app
     // clock, which the headless context only advances when asked.
@@ -779,8 +1025,154 @@ fn shot(
     let image = cx.capture_screenshot(window)?;
     let path = dir.join(name);
     image.save(&path)?;
-    println!("[capture] {}x{} -> {}", image.width(), image.height(), path.display());
+    let (px, py) = screens.device();
+    println!(
+        "[capture] {:.0}x{:.0} -> {}{}",
+        px,
+        py,
+        path.display(),
+        if resample(&path, screens)? { " (resampled)" } else { "" }
+    );
     Ok(())
+}
+
+/// `--scale 1` once, at the source of the picture: the renderer draws at the
+/// platform's 2x, and a review wants 1600x1000, so the file is scaled down with
+/// `sips` (macOS). No `sips` — a non-macOS host — leaves the 2x file in place
+/// and says so.
+fn resample(path: &Path, screens: Screens) -> Result<bool, Box<dyn std::error::Error>> {
+    let Some((w, h)) = screens.saved() else { return Ok(false) };
+    let widest = w.max(h);
+    let status = Command::new("sips")
+        .args(["-Z", &widest.to_string(), &path.to_string_lossy().into_owned()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    match status {
+        Ok(status) if status.success() => Ok(true),
+        _ => {
+            println!("[note] no sips: {} stays {}x{}", path.display(), w, h);
+            Ok(false)
+        }
+    }
+}
+
+/// Open a tab the way the `+` button and ⌘T do — `WorkspaceView::add_tab` — and
+/// hand its engine to the background stop at once: the strip keeps the folder's
+/// name as the tab's title, and ten more live swarms are not worth what they
+/// cost. Not a click: with the strip overflowing, the button itself scrolls out
+/// of the viewport and a click would fail.
+fn open_tab_and_stop(
+    cx: &mut HeadlessAppContext,
+    window: AnyWindowHandle,
+    view: &Entity<WorkspaceView>,
+    folder: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    open_tab(cx, window, view)?;
+    let tab = view.read_with(&*cx, |view, _| view.tabs().last().cloned());
+    let Some(tab) = tab else { return Ok(()) };
+    launch(cx, window, &tab, folder, 1)?;
+    let mut handle = None;
+    cx.update_window(window, |_, _window, cx| {
+        handle = tab.update(cx, |tab, cx| tab.take_engine(cx));
+    })?;
+    if let Some(handle) = handle {
+        let _ = workspace::stop_in_background(vec![handle]);
+    }
+    Ok(())
+}
+
+/// Add a tab through the window's own action, which is what the `+` button and
+/// ⌘T do.
+fn open_tab(
+    cx: &mut HeadlessAppContext,
+    window: AnyWindowHandle,
+    view: &Entity<WorkspaceView>,
+) -> Result<Entity<workspace::TabContent>, Box<dyn std::error::Error>> {
+    let mut opened = None;
+    cx.update_window(window, |_, window, cx| {
+        opened = Some(view.update(cx, |view, cx| view.add_tab(window, cx)));
+    })?;
+    opened.ok_or_else(|| "the window did not open a tab".into())
+}
+
+/// Spin the UI thread for at most `secs`, saying whether `done` came true: for
+/// the states that may simply not happen (a command with nothing to compact).
+fn wait_within(
+    cx: &mut HeadlessAppContext,
+    secs: u64,
+    done: impl Fn(&HeadlessAppContext) -> bool,
+) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    loop {
+        cx.run_until_parked();
+        if done(cx) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// A dim/status row whose text contains `needle` (case-insensitive): the
+/// compaction rows, which no transcript message carries.
+fn dim_row(cx: &HeadlessAppContext, tab: &Entity<workspace::TabContent>, needle: &str) -> Option<String> {
+    let needle = needle.to_lowercase();
+    tab.read_with(cx, |tab, cx| {
+        tab.transcript().and_then(|view| {
+            view.read(cx).rows(cx).iter().find_map(|row| match &row.kind {
+                RowKind::Dim { text, .. } if text.to_lowercase().contains(&needle) => Some(text.clone()),
+                _ => None,
+            })
+        })
+    })
+}
+
+/// The shown transcript's rows, one line each: for reading a failed run's log.
+fn row_dump(cx: &HeadlessAppContext, tab: &Entity<workspace::TabContent>) -> Vec<String> {
+    tab.read_with(cx, |tab, cx| {
+        tab.transcript()
+            .map(|view| {
+                view.read(cx)
+                    .rows(cx)
+                    .iter()
+                    .map(|row| {
+                        let text = match &row.kind {
+                            RowKind::User { text } => format!("user {}", first(&text)),
+                            RowKind::Assistant { markdown, streaming, .. } => {
+                                format!("assistant{}{}", if *streaming { "*" } else { "" }, first(markdown))
+                            }
+                            RowKind::Tool { name, result, .. } => {
+                                format!("tool {name} result={}", result.is_some())
+                            }
+                            RowKind::Report { done, .. } => format!("report {}", first(done)),
+                            RowKind::Dim { text, .. } => format!("dim {}", first(text)),
+                            RowKind::RunOutcome { text, .. } => format!("outcome {}", first(text)),
+                        };
+                        text
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    })
+}
+
+fn first(text: &str) -> String {
+    text.lines().next().unwrap_or("").chars().take(50).collect()
+}
+
+/// The row a bad run leaves: `run-end` with an outcome that is not a clean stop.
+fn run_outcome(cx: &HeadlessAppContext, tab: &Entity<workspace::TabContent>) -> Option<String> {
+    tab.read_with(cx, |tab, cx| {
+        tab.transcript().and_then(|view| {
+            view.read(cx).rows(cx).iter().find_map(|row| match &row.kind {
+                RowKind::RunOutcome { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+        })
+    })
 }
 
 /// Spin the UI thread until `done` holds or the wait runs out. A capture is a
@@ -855,8 +1247,37 @@ fn reconnecting(cx: &HeadlessAppContext, tab: &Entity<workspace::TabContent>) ->
 
 // --- the swarm processes ------------------------------------------------------
 
-/// The pids under `root` whose command line names one of its tab tokens.
-fn swarms_under(root: &Root) -> Vec<u32> {
+/// Every live swarm under `root`, as pid + folder + model: for reading a run's
+/// process state out of its log.
+fn swarm_details(root: &Root) -> Vec<String> {
+    let needle = root.tabs_dir().display().to_string();
+    let output = std::process::Command::new("ps")
+        .args(["-ww", "-o", "pid=", "-o", "command=", "-ax"])
+        .output()
+        .expect("ps");
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| line.contains(&needle))
+        .map(|line| {
+            let tab = line
+                .split("--token-file ")
+                .nth(1)
+                .and_then(|rest| Path::new(rest).parent())
+                .and_then(Path::file_name)
+                .map(|name| name.to_string_lossy().into_owned());
+            let model = line.split("--model ").nth(1).and_then(|rest| rest.split(' ').next());
+            format!(
+                "tab={} model={}",
+                tab.as_deref().unwrap_or("?"),
+                model.unwrap_or("-")
+            )
+        })
+        .collect()
+}
+
+/// The pids under `root` whose command line names one of its tab tokens, with
+/// the tab directory each one is serving.
+fn swarms_under(root: &Root) -> Vec<(u32, String)> {
     let needle = format!("--token-file {}", root.tabs_dir().display());
     let output = match std::process::Command::new("ps").args(["-axo", "pid=,command="]).output() {
         Ok(output) => output,
@@ -866,7 +1287,15 @@ fn swarms_under(root: &Root) -> Vec<u32> {
         .lines()
         .filter_map(|line| {
             let (pid, command) = line.trim().split_once(' ')?;
-            command.contains(&needle).then(|| pid.parse().ok())?
+            if !command.contains(&needle) {
+                return None;
+            }
+            let tab = Path::new(command.split("--token-file ").nth(1)?)
+                .parent()?
+                .file_name()?
+                .to_string_lossy()
+                .into_owned();
+            Some((pid.parse().ok()?, tab))
         })
         .collect()
 }
@@ -874,16 +1303,16 @@ fn swarms_under(root: &Root) -> Vec<u32> {
 /// Stop the swarms' processes without killing them: a killed server fails its
 /// tab, a stopped one leaves the stream to time out — which is what the
 /// reconnecting badge is (§9.7). `SIGSTOP` goes to the whole group.
-fn stop_swarms_blocking(root: &Root) -> Vec<u32> {
+fn stop_swarms_blocking(root: &Root) -> Vec<(u32, String)> {
     let pids = swarms_under(root);
-    for pid in &pids {
+    for (pid, _) in &pids {
         let _ = std::process::Command::new("kill").args(["-STOP", &pid.to_string()]).status();
     }
     pids
 }
 
-fn resume_swarms(pids: &[u32]) {
-    for pid in pids {
+fn resume_swarms(pids: &[(u32, String)]) {
+    for (pid, _) in pids {
         let _ = std::process::Command::new("kill").args(["-CONT", &pid.to_string()]).status();
     }
 }
@@ -901,7 +1330,12 @@ fn temp_dir() -> std::io::Result<PathBuf> {
 }
 
 /// The model the temp `init.lisp` registers.
-const STUB_MODEL: &str = "stub-a";
+const STUB_MODEL: &str = "stub-a-preview-2026-09";
+/// A second registration the ninth picture uses: a context window small enough
+/// that one streamed document crosses the compaction threshold, so the
+/// "Compacting context…" row can be reached without a real long context.
+const SMALL_MODEL: &str = "stub-small-window";
+const SMALL_WINDOW: u64 = 3000;
 
 /// What a swarm runs against: a temp `HOME` whose evo home registers the
 /// scripted model, a project folder, the installed binaries and the model's own
@@ -967,13 +1401,24 @@ impl Drop for Fixture {
 
 /// Where the scripted model listens, and the `init.lisp` that points evo at it.
 fn stub_init_lisp(port: u16) -> String {
-    format!(
-        "(evo:register-provider :stub :base-url \"http://127.0.0.1:{port}\" \
-         :api-key \"app-snapshot-stub-secret\")\n\
-         (evo:register-model \"{STUB_MODEL}\" :provider :stub :context-window 200000 \
-         :max-output 8000 :effort t)\n\
-         (evo:set-setting :model \"{STUB_MODEL}\")\n"
-    )
+    let lines = [
+        format!(
+            "(evo:register-provider :stub :base-url \"http://127.0.0.1:{port}\" :api-key \"app-snapshot-stub-secret\")"
+        ),
+        format!(
+            "(evo:register-model \"{STUB_MODEL}\" :provider :stub :context-window 200000 :max-output 8000 :effort t)"
+        ),
+        format!(
+            ";; {SMALL_MODEL}: a window small enough that one streamed document crosses the compaction line — the status row the ninth picture shows, without a real context."
+        ),
+        format!(
+            "(evo:register-model \"{SMALL_MODEL}\" :provider :stub :context-window {SMALL_WINDOW} :max-output 2000 :effort t)"
+        ),
+        "(evo:set-setting :compact-reserve 2000)".to_string(),
+        "(evo:set-setting :compact-keep-recent 200)".to_string(),
+        format!("(evo:set-setting :model \"{STUB_MODEL}\")"),
+    ];
+    format!("{}\n", lines.join("\n"))
 }
 
 /// Start the scripted model on a free port and wait for it to say it is up.
