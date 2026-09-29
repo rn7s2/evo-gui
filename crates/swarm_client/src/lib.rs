@@ -14,6 +14,8 @@
 //! - [`stream`] — the resumable SSE reader on its own thread, delivering
 //!   `Connected`/`Disconnected`/`Event`/`Reset`/`Ended` into an `async-channel`.
 //! - [`probe`] — `learn_registry`, the throwaway `evo-agent serve` of §9.4.
+//! - [`redact`] — the credentials a server's own text must not carry into a log
+//!   or onto the screen; applied to every error and log tail below.
 //! - `harness` (feature `test-harness`) — a temp `HOME` with a stub provider and
 //!   a live swarm, for this crate's tests and any other crate's.
 //!
@@ -40,6 +42,7 @@ pub mod api;
 pub mod error;
 pub mod http;
 pub mod probe;
+pub mod redact;
 pub mod server;
 pub mod sse;
 pub mod stream;
@@ -55,6 +58,7 @@ pub use api::{
 pub use error::{BootFailure, Error, RequestError, Result, StatusError};
 pub use http::{HttpClient, HttpResponse, SseConnection, Token, is_loopback};
 pub use probe::{learn_registry, learn_registry_with};
+pub use redact::{MASK, redact, redact_json};
 pub use server::{
     BootCancel, Readiness, Resume, SCRUB_ENV, Server, ServerConfig, Shutdown, ShutdownOutcome,
     log_tail, process_alive,

@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 use crate::api::{Client, Health};
 use crate::error::{BootFailure, Error, Result};
 use crate::http::Token;
+use crate::redact::redact;
 
 /// Environment a spawned server must not inherit.
 ///
@@ -658,6 +659,10 @@ fn port_from_log(text: &str) -> Option<u16> {
 }
 
 /// The last `lines` lines of a file, read from the end so a long log stays cheap.
+///
+/// Redacted on the way out: a server log carries whatever the user's
+/// configuration put in front of that server, and this text is shown as a boot
+/// failure's tail (docs/proofs-real.md R1).
 pub fn log_tail(path: &Path, lines: usize) -> String {
     const WINDOW: u64 = 256 * 1024;
     let Ok(mut file) = File::open(path) else {
@@ -674,7 +679,7 @@ pub fn log_tail(path: &Path, lines: usize) -> String {
     }
     let all: Vec<&str> = text.lines().collect();
     let from = all.len().saturating_sub(lines);
-    all[from..].join("\n")
+    redact(&all[from..].join("\n")).into_owned()
 }
 
 #[cfg(test)]
@@ -696,6 +701,27 @@ mod tests {
         );
         // --allow-remote is never passed (§3).
         assert!(!cfg.argv(8421).iter().any(|arg| arg == "--allow-remote"));
+    }
+
+    #[test]
+    fn a_log_tail_is_redacted() {
+        // A server log is where the user's own configuration can surface, so the
+        // tail a boot failure shows goes through the redactor (R1).
+        let dir = std::env::temp_dir().join(format!("swarm-log-tail-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("swarm.log");
+        std::fs::write(
+            &path,
+            "ready\nerror: {\"error\":\"The value \\\"Bearer Zm9vYmFyQjNyUXc3eExrMnA5VHV2\\\" is not of type LIST\"}\nstill here\n",
+        )
+        .unwrap();
+        let tail = log_tail(&path, 3);
+        assert!(!tail.contains("Zm9vYmFy"), "{tail}");
+        assert!(tail.contains("Bearer <redacted>"), "{tail}");
+        // …and keeps the lines that matter.
+        assert!(tail.starts_with("ready\nerror:"), "{tail}");
+        assert!(tail.ends_with("still here"), "{tail}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -23,6 +23,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 use session::{lanes_chooser, DEFAULT_KEY};
+use swarm_client::redact;
 
 fn main() {
     let mut home: Option<String> = None;
@@ -181,28 +182,5 @@ fn api_names(apis: &Option<Value>) -> String {
             .collect::<Vec<_>>()
             .join(", "),
         None => "(none reported: the no-userspace probe did not answer)".to_string(),
-    }
-}
-
-/// Hide a credential a failing probe put into its message or log.
-fn redact(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    loop {
-        let hit = ["Bearer ", "Basic ", "token="]
-            .iter()
-            .filter_map(|marker| rest.find(marker).map(|at| (at, marker.len())))
-            .min();
-        let Some((at, len)) = hit else {
-            out.push_str(rest);
-            return out;
-        };
-        out.push_str(&rest[..at + len]);
-        let tail = &rest[at + len..];
-        let end = tail
-            .find(|c: char| c == '"' || c == '\\' || c == '\'' || c.is_whitespace() || c == '&')
-            .unwrap_or(tail.len());
-        out.push_str("<redacted>");
-        rest = &tail[end..];
     }
 }

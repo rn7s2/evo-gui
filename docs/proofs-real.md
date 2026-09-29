@@ -13,6 +13,12 @@ configuration — no stub provider, no temp `EVO_HOME`, no fixtures. Lane 3,
   `~/.evo/swarm.lisp`, `~/.evo/extensions/`, real credential files.
 - one worker, no `--model`: the swarm takes the user's own default.
 
+Three of the findings below were fixed on our side after this proof: R1 (a
+`swarm_client::redact` applied where server text enters the crate), R3 (the
+history scan follows the evo home, not a lane's `EVO_SESSIONS_DIR`) and R2's
+trailing-separator care for the one place we build an `EVO_HOME`. R4 stands as
+notes, and the `/registry` 500 itself is evo's to fix.
+
 Four examples drive it, all new files under `crates/swarm_client/examples/`:
 
 | example | what it does |
@@ -337,11 +343,11 @@ lanes, when, coordinator model — `session::history_rows` formatting):
   the coordinator's model (last `:model-change`), the lanes model only the app
   itself remembers from a session it opened. A first-launch app therefore shows
   "coordinator: …" and no lanes model, and fills it in from then on.
-- `store::history::sessions_dir()` honours `EVO_SESSIONS_DIR` (finding R3): the
-  first attempt at this ran inside a swarm lane and scanned
-  `/Users/bytedance/.evo/swarm/20260929T093455-90a1/lane-3/sessions/` — 0 files,
-  0 rows. The proof above is the run with that variable unset, i.e. what a
-  Finder-launched app sees.
+- the first attempt at §3 ran inside a swarm lane, where `EVO_SESSIONS_DIR`
+  points at that lane's own sessions directory: it scanned
+  `/Users/bytedance/.evo/swarm/20260929T093455-90a1/lane-3/sessions/` and found
+  0 files, 0 rows (finding R3 — since fixed: the variable is ignored, and the
+  run above is the same directory with it set in the environment).
 
 ---
 
@@ -396,9 +402,51 @@ the caption under the lanes chooser (danger colour at `:513`, and the same text
 as the tooltip). With
 the real config that caption is the user's MCP bearer token, on screen and in
 the app log. Not a spec violation, but worth fixing on our side: redact
-`Bearer`/`Basic`/`token=` runs in whatever we log or show — the examples here do
-it (`redact`), and the same shape would fit `Error`'s `Display` or the catalog's
-`Failed { message }`.
+`Bearer`/`Basic`/`token=` runs in whatever we log or show.
+
+**Fixed on our side.** `swarm_client::redact` / `redact_json`
+(`crates/swarm_client/src/redact.rs`) masks an auth scheme's value, a named
+key's value (`authorization:`, `x-api-key`, `api_key=`, `token=`, `apikey`, …),
+`sk-…` keys and, as a backstop, a marker-free run of 32+ characters that mixes
+cases and digits over at least 17 distinct bytes — while leaving prose, paths,
+URLs, session ids and hex digests readable. It runs where server text enters the
+crate, so everything that reads it is safe without changes elsewhere:
+
+* `StatusError::from_reply` (`crates/swarm_client/src/error.rs`) — the refusal's
+  `message`, its whole `raw` body, and the `Envelope` parsed out of it. That one
+  constructor is every HTTP error path: `HttpResponse::error`, `open_sse`'s
+  refusal, `Client::read` and `Client::envelope`;
+* `Error`'s `Display`, which is what the app logs
+  (`crates/app/src/startup.rs:145`) and shows as the empty tab's caption
+  (`crates/workspace/src/empty_tab.rs:417`, danger colour at `:513`);
+* `BootFailure.log_tail` and `log_tail()` (`crates/swarm_client/src/server.rs`),
+  i.e. what `tab_engine` puts into `Update::BootFailed`
+  (`crates/tab_engine/src/engine.rs:427-428`) and `crates/workspace/src/tab_page.rs:38`
+  renders.
+
+Verified: `cargo test -p swarm_client --lib` — 23 tests, of which seven are the
+redactor's own (the real 500 body shape with its token replaced by a squib of
+the same shape, a JSON body's strings, prose like "a basic idea" and "token: the
+file", paths, URLs, a hex digest, a session id, two credentials in one line),
+plus one that a refusal is redacted before it is stored (`error.rs`), one that a
+non-JSON body is too, and one that a log tail is redacted on the way out
+(`server.rs`). `cargo test -p swarm_client` (the e2e suite included) passes.
+End-to-end, with `real_catalog` printing the *raw* `CatalogUpdate::Failed.message`
+against the real `HOME`, the output is still
+`http 500: The value "Bearer <redacted>" is not of type LIST` — the masking is in
+the client, not in the example.
+
+**Server text that is still unredacted**, and why: what the *session itself*
+prints is not a refusal quoting configuration but the thing the user asked for,
+and masking it would mangle real output. Named for whoever owns it:
+
+* `crates/session/src/model.rs:212` — an assistant message's `error_message`
+  becomes a row's error, and at `:530-533` the text `Run failed: {error}`;
+* `crates/session/src/model.rs:535` — an unrecognised `run-end` outcome becomes
+  `Run ended: {other}`;
+* `crates/session/src/model.rs:356-363` — `output` events become dim rows (the
+  `error` style included), and tool results (`:328`) become tool rows. All of it
+  is server text rendered by `transcript`.
 
 ### R2 — `EVO_HOME` without a trailing separator breaks the claude-oauth extension
 
@@ -426,6 +474,19 @@ directory, including `catalog::learn_with`'s own `EVO_HOME` switch and our
 is invisible there today). Cheap for us to respect: pass `EVO_HOME` with a
 trailing `/`.
 
+**Resolved for us.** Nothing in the app constructs `EVO_HOME`: neither
+`crates/app` nor `crates/workspace` mentions it, so the app simply inherits
+whatever the environment has. The two places *we* do make one now carry the
+separator — `scripts/stub_home.sh` exports `EVO_HOME="$home/.evo/"` (both the
+`run` environment and `print_exports`, `:178`/`:191`) — and
+`store::history::sessions_dir` joins the value with `Path::join`, which is
+path-aware: `/tmp/x` and `/tmp/x/` both give `/tmp/x/sessions` (tested in
+`crates/store/src/history.rs`). The test harness that still passes it bare
+(`crates/swarm_client/src/harness.rs:275`, `crates/swarm_client/tests/swarm_e2e.rs`)
+points at homes with no extensions directory, so that extension never loads
+there. The evo-side fix is `extensions/020-claude-oauth-provider.lisp:216`; the
+coordinator reports it to the user, and it is not ours to change.
+
 ### R3 — `EVO_SESSIONS_DIR` is the app's history directory too
 
 `store::history::sessions_dir()` prefers `$EVO_SESSIONS_DIR` over
@@ -435,8 +496,18 @@ would scan that variable's directory instead of the user's sessions: the first
 attempt at §3 above got 0 files / 0 rows from
 `~/.evo/swarm/20260929T093455-90a1/lane-3/sessions/`. §9.5 says
 `~/.evo/sessions`. The app already scrubs `EVO_SESSIONS_DIR` for the servers it
-*spawns*; its own scan is the one that inherits it. Either pass the real path at
-startup or drop the variable from the app's own environment.
+*spawns*; its own scan is the one that inherits it.
+
+**Fixed.** `store::history::sessions_dir()` now ignores `EVO_SESSIONS_DIR` and
+returns `<evo home>/sessions` — `$EVO_HOME` when a process sets one, `~/.evo`
+otherwise (`crates/store/src/history.rs`). Two tests cover it: the home rule
+with and without a trailing separator and with the variable empty, and that a
+lane's `EVO_SESSIONS_DIR` does not steer the scan at all. Verified end-to-end:
+run inside a swarm lane with
+`EVO_SESSIONS_DIR=/Users/bytedance/.evo/swarm/20260929T093455-90a1/lane-3/sessions/`
+in the environment, `real_history` reports
+`sessions_dir: /Users/bytedance/.evo/sessions` and the same 16 rows as the unset
+run, so `app/src/startup.rs:68`'s scan follows the swarms rather than the lane.
 
 ### R4 — notes, not defects
 

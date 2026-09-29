@@ -35,7 +35,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde_json::Value;
 use swarm_client::{
     EventStream, Server, ServerConfig, StreamConfig, StreamMsg, StreamTarget, default_agent_bin,
-    default_swarm_bin, process_alive,
+    default_swarm_bin, process_alive, redact,
 };
 
 /// One small delegation, so the proof covers lane 1 without paying for much.
@@ -232,7 +232,9 @@ fn run() -> swarm_client::Result<()> {
                 println!("route {path:<20} 200 ({} bytes) → {file}", body.to_string().len());
             }
             Err(error) => {
-                let text = redact(&error.to_string());
+                // Printed as the client's own error: swarm_client redacts a
+                // refusal where it is built, so this is already safe to show.
+                let text = error.to_string();
                 println!("route {path:<20} FAILED: {text}");
                 failures.push(format!("{path}: {text}"));
             }
@@ -382,32 +384,6 @@ fn descendants(root: u32) -> Vec<u32> {
         }
     }
     found
-}
-
-/// Hide a credential a server put into an error or an event: everything a
-/// `Bearer `, `Basic ` or `token=` prefix introduces, up to the quote or
-/// whitespace that ends it, becomes `<redacted>`. `m0_real` prints server text,
-/// and one real reply is a secret (§7.3's note: no tokens in the record).
-fn redact(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    loop {
-        let hit = ["Bearer ", "Basic ", "token="]
-            .iter()
-            .filter_map(|marker| rest.find(marker).map(|at| (at, marker.len())))
-            .min();
-        let Some((at, len)) = hit else {
-            out.push_str(rest);
-            return out;
-        };
-        out.push_str(&rest[..at + len]);
-        let tail = &rest[at + len..];
-        let end = tail
-            .find(|c: char| c == '"' || c == '\\' || c == '\'' || c.is_whitespace() || c == '&')
-            .unwrap_or(tail.len());
-        out.push_str("<redacted>");
-        rest = &tail[end..];
-    }
 }
 
 fn secs_env(name: &str, default: u64) -> Duration {

@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use serde_json::Value;
 
 use crate::api::Envelope;
+use crate::redact::{redact, redact_json};
 use crate::server::ShutdownOutcome;
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -165,12 +166,24 @@ pub enum StatusError {
 
 impl StatusError {
     /// Type a reply by its status: the mapping of docs/serve.md §Statuses.
+    ///
+    /// The reply is **redacted first**, message and body alike: a refusal quotes
+    /// what caused it, and what caused it can be the user's own configuration —
+    /// the real `/registry` 500 echoes an MCP bearer token (docs/proofs-real.md
+    /// R1). Everything downstream (the app's log, the empty tab's caption, a
+    /// boot failure) reads these two fields, so this is the one place that has
+    /// to get it right.
     pub fn from_reply(status: u16, raw: Value, text: &str) -> StatusError {
+        let mut raw = raw;
+        redact_json(&mut raw);
         let message = raw
             .get("error")
             .and_then(Value::as_str)
             .map(str::to_owned)
-            .unwrap_or_else(|| text.trim().chars().take(400).collect());
+            .unwrap_or_else(|| {
+                let clipped: String = text.trim().chars().take(400).collect();
+                redact(&clipped).into_owned()
+            });
         let envelope = serde_json::from_value::<Envelope>(raw.clone()).ok();
         let reply = Box::new(RequestError { status, message, envelope, raw });
         match status {
@@ -256,5 +269,29 @@ mod tests {
         assert_eq!(error.cancelled(), Some(ShutdownOutcome::Terminated));
         assert_eq!(Error::Closed.cancelled(), None);
         assert!(error.to_string().contains("cancelled"));
+    }
+
+    #[test]
+    fn a_refusal_is_redacted_before_it_is_stored() {
+        // The real /registry 500, its token replaced by a squib of the same
+        // shape. Both things a caller can read — `message()` and the raw body —
+        // must come out masked, because the app logs one and shows the other.
+        let text = "{\"ok\":false,\"error\":\"The value\\n  \\\"Bearer Zm9vYmFyQjNyUXc3eExrMnA5VHV2\\\"\\nis not of type\\n  LIST\"}";
+        let raw: Value = serde_json::from_str(text).unwrap();
+        let error = StatusError::from_reply(500, raw, text);
+        assert_eq!(error.status(), 500);
+        assert!(error.message().contains("<redacted>"), "{}", error.message());
+        assert!(!error.message().contains("Zm9vYmFy"), "{}", error.message());
+        assert!(!error.request().raw.to_string().contains("Zm9vYmFy"));
+        assert!(!error.to_string().contains("Zm9vYmFy"));
+        assert!(error.message().contains("is not of type"));
+    }
+
+    #[test]
+    fn a_body_that_is_not_json_is_redacted_too() {
+        let text = "Internal Server Error: Bearer Zm9vYmFyQjNyUXc3eExrMnA5VHV2 is not of type LIST";
+        let error = StatusError::from_reply(500, Value::String(text.to_string()), text);
+        assert!(error.message().contains("<redacted>"), "{}", error.message());
+        assert!(!error.message().contains("Zm9vYmFy"));
     }
 }

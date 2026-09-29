@@ -171,8 +171,11 @@ run_env() {
     elif [ -x /usr/local/bin/evo-agent ]; then
         extra+=(EVO_BINARY=/usr/local/bin/evo-agent)
     fi
+    # EVO_HOME keeps its trailing separator: evo's own extensions merge this
+    # path textually, and one without the slash loses its last component
+    # (docs/proofs-real.md R2).
     env "${unset[@]}" "${extra[@]}" \
-        HOME="$home" EVO_HOME="$home/.evo" TERM="${TERM:-xterm-256color}" \
+        HOME="$home" EVO_HOME="$home/.evo/" TERM="${TERM:-xterm-256color}" \
         STUB_URL="http://127.0.0.1:${STUB_PORT:-$(stub_port "$home")}" \
         "$@"
 }
@@ -185,7 +188,7 @@ print_exports() {
     local home="$1"
     [ -f "$home/.evo/init.lisp" ] || die "$home does not look like a stub home"
     printf 'export HOME=%q\n' "$home"
-    printf 'export EVO_HOME=%q\n' "$home/.evo"
+    printf 'export EVO_HOME=%q\n' "$home/.evo/"
 }
 
 # The HOME a `run` is using, cleaned up however the script ends.
