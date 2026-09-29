@@ -55,6 +55,19 @@ events, which is why watching a lane needs the replay pass of gap 1 at all.
 **What we do.** `Update::Lanes` (the snapshot) plus `lane-state` events for the
 list, and the bounded `todo-changed` replay for the panel.
 
+The §7.3 status line is the same story one level down: for a lane it is built
+from what the API does carry — the model and provider its transcript's assistant
+messages name, the usage they report, and the window its model runs with in
+`/registry` — because there is no lane `/state` to read a context window, a
+thinking level or a goal from. A lane's goal is the one asymmetry that shows:
+`/lanes` carries it, but as the lane's *cached* goal, refreshed only when the
+lane's own `/state` is read (at bring-up, `swarm/lanes.lisp:212`), and updated
+in place by the status alone afterwards (`note-lane-goal-status`,
+`swarm/api.lisp:22-30`). A lane that acquires a goal after boot therefore
+reports `{"status": …}` with no id and no token count — not enough for the goal
+segment, which needs both — so the line leaves it out rather than write a
+half-empty one.
+
 ## 3. `POST /steer` is the only command that answers `409 Not now`
 
 **Wanted.** A reliable way to tell "the session was busy" from "the command

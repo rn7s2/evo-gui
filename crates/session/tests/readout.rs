@@ -467,3 +467,63 @@ fn folding_the_capture_agrees_with_the_state_the_server_reports() {
         Some("goal g-4cb9 (complete) 0k")
     );
 }
+
+/// A lane has no `/state` of this tab's to be seeded from — the tab talks to the
+/// coordinator (§14.4) — so its transcript is the seed: the model and provider its
+/// assistant messages name, and the usage they report. The capture
+/// (`lane1-transcript.json`) is a real lane's folded messages, so this is what a lane's
+/// line is made of and nothing else is invented for it.
+#[test]
+fn a_lane_transcript_seeds_the_line_a_state_would_have() {
+    let mut readout = Readout::new();
+    readout.apply_registry(&fixture("registry.json"));
+    assert!(!readout.known(), "nothing has been read: no line yet");
+
+    readout.seed_from_transcript(&fixture("lane1-transcript.json"));
+    assert!(readout.known());
+    // `{"role": "assistant", "provider": "stub", "model": "stub-a", "usage": {"input": 10,
+    // "output": 5, "cache_read": 0, "cache_write": 0}}` — the newest message that names a
+    // model and the newest that reports usage.
+    assert_eq!(readout.model_id(), Some("stub-a"));
+    assert_eq!(readout.provider(), Some("stub"));
+    assert_eq!(readout.context_tokens(), 15);
+    // The window is not in the transcript: it is in the catalog, by `(id, provider)`.
+    assert_eq!(readout.context_window(), Some(200000));
+    // 15 tokens is `0k`: the k figure is `round(n/1000)`, TUI and tab alike.
+    assert_eq!(readout.text(), "stub-a · ctx 0k/200k (0%)");
+    // No cache activity in the capture's usage, so the segment stays hidden — the rule
+    // the TUI applies to the same usage.
+    assert_eq!(readout.cache_label(), None);
+
+    // A usage that does carry cache activity shows the share, by the same rule.
+    let mut readout = Readout::new();
+    readout.apply_registry(&fixture("registry.json"));
+    readout.seed_from_transcript(&json!({ "messages": [
+        { "role": "assistant", "model": "stub-b", "provider": "stub",
+          "usage": { "input": 1000, "output": 0, "cache_read": 3880, "cache_write": 0 } },
+    ]}));
+    assert_eq!(readout.context_tokens(), 4880);
+    assert_eq!(readout.text(), "stub-b · ctx 5k/100k (5%) · 80% cached");
+
+    // A model the catalog does not know: no window, so no `/<window>` half. Same rule as
+    // `/state` reporting none.
+    let mut readout = Readout::new();
+    readout.seed_from_transcript(&json!({ "messages": [
+        { "role": "assistant", "model": "not-in-the-catalog", "provider": "stub",
+          "usage": { "input": 1500, "output": 0, "cache_read": 0, "cache_write": 0 } },
+    ]}));
+    assert_eq!(readout.text(), "not-in-the-catalog · ctx 2k");
+
+    // Seeding is idempotent, and it never overwrites the stream: a lane's resync re-reads
+    // the same transcript, and folding it in again would double the cache totals.
+    let mut readout = Readout::new();
+    readout.apply_registry(&fixture("registry.json"));
+    readout.seed_from_transcript(&fixture("lane1-transcript.json"));
+    assert!(readout.fold_message_end(&json!({
+        "usage": { "input": 9000, "output": 0, "cache_read": 4000, "cache_write": 0 }
+    })));
+    let live = readout.text();
+    readout.seed_from_transcript(&fixture("lane1-transcript.json"));
+    assert_eq!(readout.text(), live, "the stream is the fresher source");
+    assert_eq!(readout.text(), "stub-a · ctx 13k/200k (6%) · 31% cached");
+}

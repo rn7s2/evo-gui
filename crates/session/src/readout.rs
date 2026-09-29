@@ -129,6 +129,10 @@ pub struct Readout {
     /// Model id → the providers it is registered under (`/registry.models`). More than
     /// one makes the bare id ambiguous, so the label names the live provider.
     providers_by_model: BTreeMap<String, BTreeSet<String>>,
+    /// Model id → provider → its `context_window` (`/registry.models`), for a readout
+    /// with no `/state` behind it to have read the window from: a lane's
+    /// ([`Readout::context_window`]).
+    windows_by_model: BTreeMap<String, BTreeMap<String, u64>>,
     thinking: Option<String>,
     context_tokens: u64,
     context_window: Option<u64>,
@@ -137,6 +141,11 @@ pub struct Readout {
     /// Usage folded since the last `/state`, the GUI's stand-in for the TUI's
     /// `tui-goal-run-tokens`; reset whenever `/state` seeds the readout again.
     goal_run_tokens: u64,
+    /// Whether a usage has reached this readout at all — a `message-end` on the stream, or
+    /// the transcript seed. The transcript fills the context and cache figures only while
+    /// none has ([`Readout::seed_from_transcript`]), so a rebuild cannot fold the same
+    /// message in a second time.
+    has_usage: bool,
 }
 
 impl Readout {
@@ -163,9 +172,12 @@ impl Readout {
     }
 
     /// Note the model catalog (`GET /registry`), so the model segment can tell an
-    /// unambiguous id from one registered under several providers.
+    /// unambiguous id from one registered under several providers — and so
+    /// [`Readout::context_window`] can name the window of a model whose `/state` this
+    /// readout never saw (a lane's).
     pub fn apply_registry(&mut self, registry: &Value) {
         let mut providers: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        let mut windows: BTreeMap<String, BTreeMap<String, u64>> = BTreeMap::new();
         if let Some(models) = registry.get("models").and_then(Value::as_array) {
             for model in models {
                 let (Some(id), Some(provider)) =
@@ -173,10 +185,66 @@ impl Readout {
                 else {
                     continue;
                 };
-                providers.entry(id).or_default().insert(provider);
+                providers
+                    .entry(id.clone())
+                    .or_default()
+                    .insert(provider.clone());
+                if let Some(window) = optional_u64(model, "context_window") {
+                    windows.entry(id).or_default().insert(provider, window);
+                }
             }
         }
         self.providers_by_model = providers;
+        self.windows_by_model = windows;
+    }
+
+    /// Seed the parts of the line a transcript carries, for an agent whose `/state` this
+    /// tab never reads — a lane. The newest assistant message that names its model
+    /// supplies the model and its provider; the newest message that reports usage
+    /// supplies the context figure and the cache totals, by the same rule a `message-end`
+    /// is folded with.
+    ///
+    /// Fill-only, and only while nothing has been folded yet: the coordinator's readout is
+    /// `/state`'s and the journal's, and a lane's live stream is the fresher of its two
+    /// sources, so neither is overwritten here.
+    pub fn seed_from_transcript(&mut self, transcript: &Value) {
+        let messages = transcript
+            .get("messages")
+            .and_then(Value::as_array)
+            .or_else(|| transcript.as_array());
+        let Some(messages) = messages else {
+            return;
+        };
+        if self.model.is_none() {
+            let names_its_model = messages.iter().rev().find(|message| {
+                string_field(message, "role").as_deref() == Some("assistant")
+                    && string_field(message, "model").is_some()
+            });
+            if let Some(message) = names_its_model {
+                self.model = string_field(message, "model").filter(|id| !id.is_empty());
+                self.provider = string_field(message, "provider").filter(|p| !p.is_empty());
+            }
+        }
+        if !self.has_usage {
+            let usage = messages
+                .iter()
+                .rev()
+                .find_map(|message| message.get("usage").filter(|usage| usage.is_object()));
+            if let Some(usage) = usage {
+                self.fold_usage(usage);
+            }
+        }
+    }
+
+    /// Whether this readout knows anything yet: a model, a thinking level, a context
+    /// figure or a goal. A lane selected before anything about it has been read knows
+    /// none of them, and has no line to show — the UI says "no metrics yet" rather than
+    /// `ctx 0k`.
+    pub fn known(&self) -> bool {
+        self.model.is_some()
+            || self.thinking.is_some()
+            || self.context_tokens > 0
+            || self.goal.is_some()
     }
 
     /// The journal's `cache-stats` totals are the seed for the cache segment; from then
@@ -194,10 +262,15 @@ impl Readout {
     /// `usage-total-tokens` and the cache-stats hook do. A usage of all zeros changes
     /// nothing, exactly as in the TUI.
     pub fn fold_message_end(&mut self, data: &Value) -> bool {
-        let usage = match data.get("usage") {
-            Some(usage) if usage.is_object() => usage,
-            _ => return false,
-        };
+        match data.get("usage") {
+            Some(usage) if usage.is_object() => self.fold_usage(usage),
+            _ => false,
+        }
+    }
+
+    /// The one rule both entry points use (a stream's `message-end` and a transcript's
+    /// message): the context figure is the usage's total, the cache totals fold it.
+    fn fold_usage(&mut self, usage: &Value) -> bool {
         let total = u64_field(usage, "input")
             + u64_field(usage, "output")
             + u64_field(usage, "cache_read")
@@ -208,6 +281,7 @@ impl Readout {
         self.context_tokens = total;
         self.cache.fold(usage);
         self.goal_run_tokens += total;
+        self.has_usage = true;
         true
     }
 
@@ -219,8 +293,16 @@ impl Readout {
         self.context_tokens
     }
 
+    /// The window of the model the line names: what `/state` reported, else the catalog's
+    /// entry for the same `(id, provider)` — a lane has no `/state` to read one from, and
+    /// the registry's catalog is where the window of a model is named. `None` when
+    /// neither knows it, which hides the `/<window>` half ([`Readout::context_label`]).
     pub fn context_window(&self) -> Option<u64> {
-        self.context_window
+        self.context_window.or_else(|| {
+            let id = self.model.as_deref()?;
+            let provider = self.provider.as_deref()?;
+            self.windows_by_model.get(id)?.get(provider).copied()
+        })
     }
 
     /// The model id as `/state` reports it (bare, without the provider), for a tooltip.
@@ -254,7 +336,7 @@ impl Readout {
 
     /// `context-label`: `ctx 48k/936k (5%)`, or `ctx 48k` without a window.
     pub fn context_label(&self) -> String {
-        match self.context_window {
+        match self.context_window() {
             Some(window) => {
                 let percent =
                     round_div_half_even(self.context_tokens * 100, window.max(1)).min(100);

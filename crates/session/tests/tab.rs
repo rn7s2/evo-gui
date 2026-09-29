@@ -999,3 +999,88 @@ the lane — an extension defines it, so load that extension in the lanes with \
         "a lane that is up claims nothing"
     );
 }
+
+/// The status row under the center column reads the **selected** agent's metrics: the
+/// coordinator's on `main`, the lane's own when a lane is selected, and nothing while that
+/// lane has not been read yet — which the UI writes as its own muted "no metrics yet".
+///
+/// A lane's line is built from what the API carries for a lane: the model and provider its
+/// transcript's assistant messages name, the usage they report, and the window its model
+/// has in `/registry`. There is no per-lane `/state`, so the segments that live only there
+/// (the thinking level, the goal) are not invented for it.
+#[test]
+fn the_status_line_follows_the_selection() {
+    let mut tab = TabModel::new();
+    tab.on_registry(&fixture("registry.json"));
+    tab.on_state(&fixture("state.json"));
+    assert_eq!(
+        tab.selected_readout_text().as_deref(),
+        Some("stub-a · medium · ctx 0k/200k (0%)"),
+        "`main` shows the coordinator's line"
+    );
+
+    // The coordinator's rebuild leaves that line alone: `/state` is its seed, and the
+    // transcript's usage (15 tokens a message) is not newer news than the state's.
+    tab.on_transcript(COORDINATOR, 1, &fixture("transcript.json"));
+    assert_eq!(
+        tab.selected_readout_text().as_deref(),
+        Some("stub-a · medium · ctx 0k/200k (0%)")
+    );
+
+    // A lane selected before anything about it has been read: the UI has nothing to show.
+    let changes = tab.select(lane(1));
+    assert!(changes.selection);
+    assert!(
+        changes.readout,
+        "the row under the column is a different one"
+    );
+    assert_eq!(tab.selected_readout_text(), None);
+    assert_eq!(tab.selected(), lane(1));
+
+    // Its transcript is what it has to say: the model, the provider, the usage, and the
+    // window from the catalog.
+    let changes = tab.on_transcript(lane(1), 1, &fixture("lane1-transcript.json"));
+    assert!(changes.readout, "the lane's first line is news");
+    assert_eq!(
+        tab.selected_readout_text().as_deref(),
+        Some("stub-a · ctx 0k/200k (0%)")
+    );
+
+    // Its own stream keeps the line live…
+    let changes = tab.on_event(
+        lane(1),
+        99,
+        "message-end",
+        &json!({ "usage": { "input": 48211, "output": 100, "cache_read": 9700, "cache_write": 200 } }),
+    );
+    assert!(changes.readout, "the selected lane's line moved");
+    assert_eq!(
+        tab.selected_readout_text().as_deref(),
+        Some("stub-a · ctx 58k/200k (29%) · 17% cached")
+    );
+
+    // …and stays quiet while the line on screen belongs to someone else.
+    tab.select(COORDINATOR);
+    let changes = tab.on_event(
+        lane(1),
+        100,
+        "message-end",
+        &json!({ "usage": { "input": 90000, "output": 0, "cache_read": 0, "cache_write": 0 } }),
+    );
+    assert!(!changes.readout, "nothing shown moved");
+    assert_eq!(
+        tab.selected_readout_text().as_deref(),
+        Some("stub-a · medium · ctx 0k/200k (0%)")
+    );
+
+    // The lane kept its own figure all the same, and `main`'s is untouched.
+    assert_eq!(
+        tab.lane_model(1)
+            .map(|model| model.readout().context_tokens()),
+        Some(90000)
+    );
+    assert_eq!(tab.readout().context_tokens(), 0);
+
+    // A lane's own events never move the coordinator's activity, and never its line.
+    assert!(!changes.activity);
+}

@@ -26,10 +26,14 @@
 //! # Which agent is which
 //!
 //! The coordinator's model holds the transcript, the checklist, the activity and the §7.3
-//! readout the composer shows; a lane's model holds what its own stream carries (rows, its
-//! checklist from `todo-changed`, `report` rows). The activity and the readout are the
-//! **coordinator's** only — lanes are watched, never typed to (spec §14.4) — so a lane's
-//! events never raise [`Changes::activity`] or [`Changes::readout`].
+//! readout the center pane's status row shows while `main` is selected; a lane's model
+//! holds what its own stream carries (rows, its checklist from `todo-changed`, `report`
+//! rows) and a readout of its own, built from what the API carries for a lane — its
+//! transcript's model, provider and usage, and the window its model has in `/registry`
+//! ([`TabModel::selected_readout_text`]). The activity is the **coordinator's** only —
+//! lanes are watched, never typed to (spec §14.4) — so a lane's events never raise
+//! [`Changes::activity`]; they raise [`Changes::readout`] only for the lane the center
+//! pane is showing.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
@@ -89,7 +93,9 @@ pub struct Changes {
     pub todos: BTreeSet<AgentKey>,
     /// The lane list changed.
     pub lanes: bool,
-    /// The §7.3 readout text changed.
+    /// The §7.3 readout text the UI shows changed — the selected agent's
+    /// ([`TabModel::selected_readout_text`]), which is the coordinator's while `main` is
+    /// selected.
     pub readout: bool,
     /// The coordinator's activity changed (the Send/Stop button's face).
     pub activity: bool,
@@ -135,6 +141,11 @@ pub struct TabModel {
     lane_announcements: BTreeMap<u32, String>,
     selected: AgentKey,
     streams: BTreeMap<AgentKey, StreamStatus>,
+    /// The newest `GET /registry` body. A lane's model is created by a selection or by the
+    /// lane's first update — after this was read — and its readout needs the catalog to
+    /// name the window its model runs with, so it is kept and applied to each lane model as
+    /// it is born ([`TabModel::model_mut`]).
+    registry: Option<Value>,
     /// The last transcript revision applied per agent — a late answer from an older fetch
     /// is dropped (§9.1). Cleared for an agent when `hello` says the server restarted:
     /// past that point the two numbering schemes are not comparable.
@@ -156,6 +167,7 @@ impl TabModel {
             lane_announcements: BTreeMap::new(),
             selected: AgentKey::Coordinator,
             streams: BTreeMap::new(),
+            registry: None,
             transcript_revisions: BTreeMap::new(),
         }
     }
@@ -199,13 +211,31 @@ impl TabModel {
             .unwrap_or(&[])
     }
 
-    /// The coordinator's readout — the §7.3 status line the composer renders.
+    /// The coordinator's readout — the §7.3 status line.
     pub fn readout(&self) -> &Readout {
         self.coordinator.readout()
     }
 
     pub fn readout_text(&self) -> String {
         self.coordinator.readout().text()
+    }
+
+    /// The line the center pane's status row shows: the **selected** agent's §7.3
+    /// readout — the coordinator's on `main`, the lane's own when a lane is selected —
+    /// or `None` while nothing about that agent is known yet (a lane selected before
+    /// anything about it was read), which the UI writes as its own muted "no metrics
+    /// yet".
+    ///
+    /// A lane's line is made of what the swarm's API carries for it: the model and
+    /// provider its transcript's assistant messages name, the context figure and the
+    /// cache share of the usage they report, and the window its model runs with in
+    /// `/registry` ([`Readout::seed_from_transcript`]). A lane has no `/state` of its own
+    /// (the tab talks to the coordinator, §14.4), so the two segments that live only there
+    /// — the thinking level and the goal — have nothing to read and are left out
+    /// (`docs/api-gaps.md`, "a lane has no state endpoint").
+    pub fn selected_readout_text(&self) -> Option<String> {
+        let readout = self.agent_model(self.selected)?.readout();
+        readout.known().then(|| readout.text())
     }
 
     /// The coordinator's activity, for the Send/Stop button's face.
@@ -280,18 +310,20 @@ impl TabModel {
     // --- selecting -------------------------------------------------------
 
     /// Show AGENT's transcript in the center column. A lane's model is created here (the
-    /// first thing a selection does is give the lane somewhere to land its transcript).
+    /// first thing a selection does is give the lane somewhere to land its transcript, and
+    /// with it the catalog its readout needs).
     pub fn select(&mut self, agent: AgentKey) -> Changes {
         let mut changes = Changes::default();
-        if let AgentKey::Lane(n) = agent {
-            self.lane_models.entry(n).or_default();
-        }
+        self.model_mut(agent);
         if self.selected != agent {
             self.selected = agent;
             changes.selection = true;
             // The center column is a different agent now: whatever row views it held
             // belong to the other one, so the row set is new from the UI's point of view.
             changes.rows.insert(agent, RowChanges::Rebuilt);
+            // ...and so is the status line under it, which shows the selected agent's
+            // readout ([`TabModel::selected_readout_text`]).
+            changes.readout = true;
         }
         changes
     }
@@ -311,7 +343,20 @@ impl TabModel {
             return Changes::default();
         }
         self.transcript_revisions.insert(agent, revision);
-        let effect = self.model_mut(agent).rebuild_from_transcript(transcript);
+        let mut effect = self.model_mut(agent).rebuild_from_transcript(transcript);
+        // A lane's readout has no `/state` behind it (the tab talks to the coordinator,
+        // §14.4), so its transcript is the seed: the model its assistant messages name and
+        // the usage they report. The coordinator's readout is `/state`'s and the journal's
+        // — rebuilding it from a transcript must not move it, and does not (the seed fills
+        // only what is still unknown).
+        if agent != AgentKey::Coordinator {
+            let model = self.model_mut(agent);
+            let before = model.readout().text();
+            model.readout_mut().seed_from_transcript(transcript);
+            if model.readout().text() != before {
+                effect |= crate::Effect::READOUT;
+            }
+        }
         self.absorb(agent, effect)
     }
 
@@ -323,12 +368,18 @@ impl TabModel {
     }
 
     /// `GET /registry` — the model catalog, which the readout needs to tell an unambiguous
-    /// model id from one registered under several providers.
+    /// model id from one registered under several providers, and to name the window of a
+    /// model whose `/state` it never saw. Every agent's readout takes it: the catalog is
+    /// the same for the whole swarm.
     pub fn on_registry(&mut self, registry: &Value) -> Changes {
-        let before = self.coordinator.readout().text();
+        let before = self.selected_readout_text();
+        self.registry = Some(registry.clone());
         self.coordinator.readout_mut().apply_registry(registry);
+        for model in self.lane_models.values_mut() {
+            model.readout_mut().apply_registry(registry);
+        }
         Changes {
-            readout: self.coordinator.readout().text() != before,
+            readout: self.selected_readout_text() != before,
             ..Changes::default()
         }
     }
@@ -475,7 +526,20 @@ impl TabModel {
     fn model_mut(&mut self, agent: AgentKey) -> &mut AgentModel {
         match agent {
             AgentKey::Coordinator => &mut self.coordinator,
-            AgentKey::Lane(n) => self.lane_models.entry(n).or_default(),
+            AgentKey::Lane(n) => {
+                if !self.lane_models.contains_key(&n) {
+                    // A lane's model is born when the lane is first selected or an update
+                    // arrives for it — long after the catalog was read once, and it is not
+                    // re-read for a lane. The newest catalog is applied here so the lane's
+                    // readout can name the window its model runs with.
+                    let registry = self.registry.clone();
+                    let model = self.lane_models.entry(n).or_default();
+                    if let Some(registry) = registry.as_ref() {
+                        model.readout_mut().apply_registry(registry);
+                    }
+                }
+                self.lane_models.get_mut(&n).expect("just created")
+            }
         }
     }
 
@@ -497,10 +561,12 @@ impl TabModel {
         if effect.contains(crate::Effect::RESYNC) {
             changes.needs_resync.insert(agent);
         }
-        // The readout and the activity are the coordinator's: lanes are watched, never
-        // typed to, so nothing about a lane moves the composer (§14.4).
+        // The status line the UI shows is the *selected* agent's readout, so a lane's own
+        // usage moves it — while that lane is the one on screen. The activity stays the
+        // coordinator's: lanes are watched, never typed to (§14.4).
+        changes.readout = effect.contains(crate::Effect::READOUT)
+            && (agent == AgentKey::Coordinator || agent == self.selected);
         if agent == AgentKey::Coordinator {
-            changes.readout = effect.contains(crate::Effect::READOUT);
             changes.activity = effect.contains(crate::Effect::ACTIVITY);
         }
         changes
