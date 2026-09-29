@@ -646,12 +646,12 @@ the client, not in the example.
 prints is not a refusal quoting configuration but the thing the user asked for,
 and masking it would mangle real output. Named for whoever owns it:
 
-* `crates/session/src/model.rs:212` — an assistant message's `error_message`
-  becomes a row's error, and at `:530-533` the text `Run failed: {error}`;
-* `crates/session/src/model.rs:535` — an unrecognised `run-end` outcome becomes
+* `crates/session/src/model.rs:228` — an assistant message's `error_message`
+  becomes a row's error, and at `:606-608` the text `Run failed: {error}`;
+* `crates/session/src/model.rs:611` — an unrecognised `run-end` outcome becomes
   `Run ended: {other}`;
-* `crates/session/src/model.rs:356-363` — `output` events become dim rows (the
-  `error` style included), and tool results (`:328`) become tool rows. All of it
+* `crates/session/src/model.rs:385-397` — `output` events become dim rows (the
+  `error` style included), and tool results (`:339`) become tool rows. All of it
   is server text rendered by `transcript`.
 
 ### R2 — `EVO_HOME` without a trailing separator breaks the claude-oauth extension

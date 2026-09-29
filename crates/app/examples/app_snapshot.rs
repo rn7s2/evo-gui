@@ -483,8 +483,8 @@ fn capture_window_options(screens: Screens) -> WindowOptions {
 fn capture(dir: &Path, scale: f32, only: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(dir)?;
     let screens = Screens::app(scale);
-    // `--only 07,09` draws the earlier states without saving them: takes them
-    // again when a change only touches the later ones.
+    // `--only 07-tab-strip,09-bad-run` saves those states and no others: every
+    // earlier state is still taken, for a change that only touches the last few.
     let shot_here = |id: &str| only.is_empty() || only.iter().any(|wanted| wanted == id);
     let work = temp_dir()?;
 
@@ -588,7 +588,7 @@ fn capture(dir: &Path, scale: f32, only: &[String]) -> Result<(), Box<dyn std::e
     // `/health` answers before a swarm's lanes are up, and the lane list draws
     // `starting` for each one that has not begun: wait for the rows to settle, or
     // the picture is of a swarm still booting rather than of one running.
-    wait_until(&mut cx, |cx| !lanes_starting(cx, &first))?;
+    wait_until(&mut cx, |cx| lanes_settled(cx, &first))?;
 
     click(&mut cx, window, "tab-add")?;
     let second = view.read_with(&cx, |view, _| view.tabs()[1].clone());
@@ -741,6 +741,10 @@ fn capture(dir: &Path, scale: f32, only: &[String]) -> Result<(), Box<dyn std::e
     std::fs::create_dir_all(&narrow_folder)?;
     launch(&mut cx, narrow_window, &narrow_tab, &narrow_folder, 2)?;
     wait_running(&mut cx, &narrow_tab, "the narrow window's swarm")?;
+    // The same wait as `02`'s: a delegation handed to a lane that has not begun is
+    // refused (`lane 1 is starting; delegate to an idle lane, or use steer`), and
+    // the picture is then of the refusal rather than of the work.
+    wait_until(&mut cx, |cx| lanes_settled(cx, &narrow_tab))?;
     prompt(
         &mut cx,
         narrow_window,
@@ -753,9 +757,7 @@ fn capture(dir: &Path, scale: f32, only: &[String]) -> Result<(), Box<dyn std::e
     // was handed out, the coordinator is the one with a transcript, so that is
     // what the window shows.
     let delegated = wait_within(&mut cx, 45, |cx| delegate_row(cx, &narrow_tab).is_some());
-    let busy = wait_within(&mut cx, 20, |cx| {
-        (1..=2).any(|n| lane_working(cx, &narrow_tab, n))
-    });
+    let busy = wait_within(&mut cx, 20, |cx| lane_busy(cx, &narrow_tab, 1));
     if busy {
         select_lane(&mut cx, narrow_window, &narrow_tab, 1)?;
     }
@@ -1080,21 +1082,42 @@ fn lane_working(cx: &HeadlessAppContext, tab: &Entity<workspace::TabContent>, n:
     })
 }
 
-/// Whether the tab's lane list still has a lane booting.
+/// Whether the swarm's own lane list has lane `n` working.
 ///
-/// The list is the swarm's own account (`GET /lanes`, kept current by its
-/// `lane-state` events), and it is what the agent list draws: a lane that has not
-/// begun reads `starting` there while the lane's *own* model says nothing at all.
-/// A row the swarm has not reported yet is not the same as one that is starting,
-/// so an empty list counts as settled.
-fn lanes_starting(cx: &HeadlessAppContext, tab: &Entity<workspace::TabContent>) -> bool {
+/// The list is the swarm's account (`GET /lanes`, plus its `lane-state` events),
+/// and it is what the agent list draws its activity dot and step clock from.  A
+/// lane's *own* model is not a substitute: its stream is only opened once the lane
+/// is being watched, and until then `lane_model(n)` reads nothing — `Idle` — while
+/// the lane works.
+fn lane_busy(cx: &HeadlessAppContext, tab: &Entity<workspace::TabContent>, n: u64) -> bool {
+    tab.read_with(cx, |tab, _| {
+        tab.model()
+            .and_then(|model| model.lanes().lane(n))
+            .is_some_and(|row| row.is_busy())
+    })
+}
+
+/// Whether the swarm's lane list has settled: it reports rows, and every one of
+/// them is past `starting`.
+///
+/// The list is the swarm's account (`GET /lanes`, plus its `lane-state` events),
+/// and it is what the agent list draws — the activity dot, the glyph and the step
+/// clock all come from here.  A lane's *own* model is not a substitute: its stream
+/// is only opened once the lane is being watched, and until then `lane_model(n)`
+/// reads nothing — `Idle` — while the lane works.
+///
+/// A list with no rows is not settled.  The swarm answers `/health`, and reports
+/// itself in `/state`, before its lanes have begun: a delegation handed to a lane
+/// that has not started is refused (`lane 1 is starting; delegate to an idle lane,
+/// or use steer`), and the picture is of the refusal.
+fn lanes_settled(cx: &HeadlessAppContext, tab: &Entity<workspace::TabContent>) -> bool {
     tab.read_with(cx, |tab, _| {
         tab.model().is_some_and(|model| {
-            model
-                .lanes()
-                .lanes
-                .iter()
-                .any(|row| row.status == session::LaneStatus::Starting)
+            let lanes = &model.lanes().lanes;
+            !lanes.is_empty()
+                && lanes
+                    .iter()
+                    .all(|row| row.status != session::LaneStatus::Starting)
         })
     })
 }
