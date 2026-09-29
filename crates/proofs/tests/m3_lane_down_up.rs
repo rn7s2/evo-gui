@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use common::{fixture, one_swarm, row_summary, spec, Drive};
 use session::{AgentKey, LaneStatus};
-use tab_engine::Agent;
+use tab_engine::{Agent, Update};
 
 #[test]
 fn m3_lane_down_up() {
@@ -110,6 +110,17 @@ fn m3_lane_down_up() {
     // docs/proofs.md for why the row itself is back to `idle` by the time the
     // line lands (the swarm announces the crash *after* it has already
     // re-initialized the lane).
+    // Waited for rather than looked up: the swarm publishes it once the lane is
+    // *back* (recover-lane re-initializes it, then tells the coordinator), so the
+    // assertions above can pass a moment before it arrives.
+    drive.wait_for_update(deadline, "the restart announcement", |update| {
+        matches!(update, Update::Event { agent: Agent::Coordinator, kind, data, .. }
+            if kind == "output"
+                && data["style"].as_str() == Some("error")
+                && data["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("[lane 1] crashed and was restarted")))
+    });
     let outputs = drive.events(Agent::Coordinator, "output");
     let announcement = outputs
         .iter()
@@ -119,12 +130,7 @@ fn m3_lane_down_up() {
                     .as_str()
                     .is_some_and(|text| text.contains("[lane 1] crashed and was restarted"))
         })
-        .unwrap_or_else(|| {
-            panic!(
-                "no restart announcement among {} output lines",
-                outputs.len()
-            )
-        });
+        .expect("the announcement, which the wait above saw");
     eprintln!("m3: the swarm said {}", outputs[announcement]["text"]);
     // ...and the restarted lane's own complaint about its fresh state ("no model is
     // configured yet", until the swarm re-runs its baseline) comes *after* it:
