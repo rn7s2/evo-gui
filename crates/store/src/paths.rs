@@ -273,8 +273,13 @@ pub fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
 }
 
 fn temp_sibling(path: &Path) -> PathBuf {
+    // The name is unique per process *and* per call: the app writes from its own
+    // threads (§2 rule 6), and two of them writing one file must not share a
+    // scratch file.
+    static TMP_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = TMP_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    path.with_file_name(format!(".{name}.tmp-{}", std::process::id()))
+    path.with_file_name(format!(".{name}.tmp-{}-{n}", std::process::id()))
 }
 
 /// Serialize `value` as pretty JSON and write it atomically (mode 0600).
@@ -387,6 +392,30 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().contains(".tmp-"))
             .collect();
         assert!(leftovers.is_empty());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn concurrent_writes_never_mix_contents() {
+        // The app writes from its own threads; two of them writing one file must
+        // not share a scratch file, and the file must always be one whole write.
+        let dir = temp("concurrent");
+        let path = dir.join("app.json");
+        let payloads: Vec<String> = (0..8).map(|i| format!("{{\"who\":{i},\"pad\":\"{}\"}}", "x".repeat(4096))).collect();
+        std::thread::scope(|scope| {
+            for payload in &payloads {
+                let path = path.clone();
+                scope.spawn(move || {
+                    for _ in 0..25 {
+                        write_atomic(&path, payload.as_bytes(), FILE_MODE).unwrap();
+                    }
+                });
+            }
+        });
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(payloads.contains(&text), "a torn write: {text:.80}");
+        let leftovers = fs::read_dir(&dir).unwrap().count();
+        assert_eq!(leftovers, 1, "scratch files left behind");
         fs::remove_dir_all(&dir).unwrap();
     }
 

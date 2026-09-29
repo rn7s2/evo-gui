@@ -142,8 +142,8 @@ pub fn scan(dir: &Path, budget: &ScanBudget) -> ScanOutcome {
             break;
         }
         outcome.files_read += 1;
-        // A file we could not read, or one whose byte budget cut it short, is
-        // skipped rather than counted.
+        // A file we could not read, or one the byte budget cut short, yields no
+        // entry; it is the read that counts, not the result.
         if let Ok((entry, truncated)) = read_history(&path, mtime, budget.max_file_bytes) {
             outcome.stopped_early |= truncated;
             if let Some(entry) = entry {
@@ -367,10 +367,9 @@ fn read_history(path: &Path, mtime: u64, max_bytes: u64) -> io::Result<(Option<H
                         }
                     }
                     // A message entry is never buffered: it carries the whole
-                    // conversation turn. Only its header is read, and only for
-                    // the model it names.
-                    // Only ever needed as the fallback, and only the first one:
-                    // a later message cannot be cheaper to read than this one.
+                    // conversation turn. Only its header is read, only for the
+                    // model it names, and only until one is found — this is the
+                    // fallback for journals that recorded no model change.
                     Some("message")
                         if model_change.is_none() && first_message_model.is_none() =>
                     {
