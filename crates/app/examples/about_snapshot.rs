@@ -50,9 +50,16 @@ fn main() {
 
 fn capture(dir: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(dir)?;
-    let root =
-        Root::at(std::env::temp_dir().join(format!("evo-desktop-about-{}", std::process::id())));
-    let _ = std::fs::remove_dir_all(root.path());
+    // A throwaway HOME, and the app's root inside it — `$HOME/.evo/desktop`, the
+    // layout `run` builds. So the dialog shows what a user's own does
+    // (`State ~/.evo/desktop`, `Log ~/.evo/desktop/app.log`, the `~` shortening
+    // included) instead of this machine's temp directory, and the capture cannot
+    // read the real one.
+    let home = std::env::temp_dir().join(format!("evo-desktop-about-home-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home)?;
+    std::env::set_var("HOME", &home);
+    let root = Root::at(home.join(".evo").join("desktop"));
 
     let mut cx = HeadlessAppContext::with_platform(
         gpui_kit::platform::current_platform(true).text_system(),
@@ -107,6 +114,7 @@ fn capture(dir: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
         shot(&mut cx, window, dir, name)?;
     }
     let _ = std::fs::remove_dir_all(root.path());
+    let _ = std::fs::remove_dir_all(&home);
     Ok(())
 }
 

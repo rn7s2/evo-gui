@@ -63,15 +63,21 @@ background process. The name it shows is the bundle's, `Evo Desktop`.
 The menu bar of the running app read ` Evo Desktop | File | Edit | Window` —
 the app menu from the bundle's name, and the four menus this round added.
 
-The Dock: an icon of the app's own is present while it runs and gone after it
-quits. Screen captures taken for the check (`/tmp/evo-app-check/dock.png` before,
-`dock_after.png` after) show the same Dock with one icon fewer: the app's, the
-one between the Docker whale and the Downloads folder. A close-up of the surface
-appears in the window too — the empty tab rendered the **real** history: sixteen
-resumable sessions with folders, lane counts and coordinator models
-(`~/coding/evo-agent/ · 12 lanes · coordinator: claude-opus-5-5`, and so on),
-which is §9.5 against real data. It also showed `GET /registry` failing with the
-500 `docs/proofs-real.md` finding R1 records, as the catalog's own error line.
+The Dock had an icon of the app's own while it ran — the purple one between the
+Docker whale and the Downloads folder — and none after it quit. The Dock is
+macOS's, not the window's, so it cannot be captured headlessly; the committed
+picture of a launch from Finder is `docs/screens/real/bundle-launch.png`, which
+shows that icon in place, dark, and the rest of this launch is in the log lines
+above: LaunchServices reached the app as `type="Foreground"`,
+`bundleID="com.evo.desktop"`, one process — and the section below ends with
+`pgrep … | wc -l` at `0`, which is what takes the icon away.
+
+The window's own surface was §9.5 and §9.4 against real data: the empty tab drew
+the **real** history — sixteen resumable sessions with folders, lane counts and
+coordinator models (`~/coding/evo-agent/ · 12 lanes · coordinator: claude-opus-5-5`,
+and so on), the same list `bundle-launch.png` shows four hours later with eighteen
+rows — and `GET /registry` failing with the 500 `docs/proofs-real.md` finding R1
+records, as the catalog's own error line.
 
 ### A second launch activates instead of duplicating
 
@@ -367,8 +373,8 @@ on the way out.
 ## M4 — appearance, window geometry, and the tab directories
 
 The other three things this milestone owns, each checked in a real launch with a
-throwaway `HOME` (`/tmp/evo-app-check/home`, deleted afterwards) and the log lines
-that say which way it went.
+throwaway `HOME` (a temp directory, deleted afterwards) and the log lines that say
+which way it went.
 
 ### Light or dark (§7.1)
 
@@ -387,10 +393,13 @@ app runs:
 2026-09-29T13:16:21Z info  theme: light (app.json)
 ```
 
-Screen captures of the same window confirm it: dark with `theme: "system"`, light
-with `theme: "light"`. `crates/app/tests/appearance.rs` covers the choice (a
-`Dark` window on the test platform's light one) and the log line; the live switch
-itself is gpui's appearance observer, which the test platform offers no lever for.
+Both themes of the same window are committed: `docs/screens/01-launch-dark.png`
+and `docs/screens/01-launch-light.png`, the assembled window rendered headlessly in
+each (§12's twenty captures, taken by `app_snapshot`). The example sets the theme
+the picture is drawn in; that the app *follows* the Mac is the log lines above.
+`crates/app/tests/appearance.rs` covers the choice (a `Dark` window on the test
+platform's light one) and the log line; the live switch itself is gpui's appearance
+observer, which the test platform offers no lever for.
 
 ### The window's geometry (§2 rule 1)
 
@@ -438,7 +447,7 @@ all in, plus §7.1's ninth piece of polish: the app's own About.
 was put — the build, both binaries it spawns, and where the app's state and log live:
 
 ```
-# /tmp/evo-app-check/r4/r4b-about.png, the dialog over the real window
+# docs/screens/app/about-light.png, the dialog over the window itself
 Evo Desktop          [the app icon]
 Version 0.1.0
 evo-swarm  0.1.0
@@ -461,8 +470,35 @@ What it found is kept on the `Shell`, so opening the dialog is a read:
 `--version` to ask is `no --version` rather than a blank, `$HOME` is shortened to
 `~`, the version line drops the binary's own name (the row already names it), and
 the log line names both binaries. `crates/app/examples/about_snapshot.rs --capture
-<dir>` renders it headless in both themes (`about-light.png`, `about-dark.png`) —
-the picture the polish was judged on, with no screen involved.
+<dir>` renders it headless in both themes — the committed
+`docs/screens/app/about-light.png` and `docs/screens/app/about-dark.png`, the
+picture the polish was judged on, with no screen involved. It renders into a
+throwaway `HOME`, so the two paths read `~/.evo/desktop` and
+`~/.evo/desktop/app.log` exactly as a user's own dialog does.
+
+### The app's own surfaces, as pictures
+
+Three of the app's screens are judged by looking at them rather than by a log
+line, and all three are committed: rendered headlessly by the app's own examples,
+with a temp `HOME` and a temp `EVO_HOME` whose `init.lisp` registers the harness's
+stub provider — no real `$HOME` is read, no model is called, no screen is
+involved.
+
+| capture | taken by | what it shows |
+|---|---|---|
+| `docs/screens/app/about-light.png`, `docs/screens/app/about-dark.png` | `crates/app/examples/about_snapshot.rs` | §7.1's About: the app icon, the build, both binaries' `--version`s, and the state and log paths shortened to `~/.evo/desktop`. |
+| `docs/screens/app/settings-light.png`, `docs/screens/app/settings-dark.png` | `crates/app/examples/settings_snapshot.rs` | §13's panel over the window: the two binary paths with what the prober found at each, and the theme. |
+| `docs/screens/app/first-run-01-loading.png` | `crates/app/examples/first_run_snapshot.rs` | §9.4's first run: an empty `~/.evo/desktop`, the choosers on `Default` and `Loading models…` under them, the probe still running. |
+| `docs/screens/app/first-run-02-loaded.png` | `crates/app/examples/first_run_snapshot.rs` | The same tab once the probe answered: the hint gone, the catalog in the choosers, `No resumable swarms yet` where the scan of a first run's empty `~/.evo/sessions` belongs (§9.5). |
+| `docs/screens/app/first-run-03-swarm-missing.png` | `crates/app/examples/first_run_snapshot.rs` | `app.json` naming an `evo-swarm` that is not there: the amber line under the folder card, which opens Settings when it is clicked (§9.7). |
+
+They are committed at 1× and 192 colours, like `docs/screens/`'s set:
+
+```sh
+cargo run -p evo-desktop --example about_snapshot -- --capture /tmp/app-2x
+magick /tmp/app-2x/about-light.png -resize 50% -background white -alpha remove \
+    -alpha off -colors 192 PNG8:docs/screens/app/about-light.png
+```
 
 ### Real history, R1 redacted, dark, and ⌘Q — in the bundle
 
@@ -496,10 +532,11 @@ $ pgrep -f 'MacOS/evo-desktop' | wc -l
 
 Four things this shows at once, each of them in the *release* build:
 
-* **the real history** — sixteen rows, the same ones the launcher drew
-  (`/tmp/evo-app-check/r4/r4b-app.png`): `work-harness · 6 lanes · 5h ago ·
-  coordinator: ark-glm-5.2`, `clog`, the `evo-agent` and `evo-gui` worktrees, and
-  so on, out of the user's own `~/.evo/sessions`;
+* **the real history** — sixteen rows
+  (`docs/screens/real/bundle-launch.png`, four hours later, with the same folders
+  and eighteen): `work-harness · 6 lanes · 5h ago · coordinator: ark-glm-5.2`,
+  `clog`, the `evo-agent` and `evo-gui` worktrees, and so on, out of the user's own
+  `~/.evo/sessions`;
 * **R1, redacted** — `GET /registry` answering 500 with the token in the message,
   written as `Bearer <redacted>`, in the log *and* on the screen, with no raw
   token anywhere (the screen capture shows the same redaction in the red error
