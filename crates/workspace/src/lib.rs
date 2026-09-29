@@ -10,6 +10,7 @@ mod chrome;
 mod empty_tab;
 mod history;
 mod launch;
+mod panes;
 mod tab;
 mod tab_page;
 
@@ -22,3 +23,4 @@ pub use empty_tab::OpenSettings;
 pub use history::{placeholder_history, HistoryRow};
 pub use launch::{stop_in_background, Launch, SwarmConfig, SHUTDOWN_DEADLINE};
 pub use tab::{RegistryHook, TabContent, TabContentEvent, TabId, TabState};
+pub use tab_page::READOUT_LINE_ID;

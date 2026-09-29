@@ -15,6 +15,7 @@ use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
     h_flex, v_flex, ActiveTheme as _, Icon, IconName, Sizable as _, TitleBar,
 };
+use gpui_kit::component::{ResizablePanelEvent, ResizableState};
 use gpui_kit::prelude::*;
 use gpui_kit::{
     div, linear_color_stop, linear_gradient, point, px, size, AnyElement, App, Background, Bounds,
@@ -27,11 +28,13 @@ use std::rc::Rc;
 
 use serde_json::Value;
 use session::{HistoryEntry, LaunchPlan};
+use store::app_state::Panes;
 use store::model_cache::ModelCache;
 use tab_engine::EngineHandle;
 
 use crate::history::folder_name;
 use crate::launch::{stop_in_background, Launch, SwarmConfig};
+use crate::panes;
 use crate::tab::{RegistryHook, TabContent, TabContentEvent, TabId};
 
 /// The app's own name: what the bundle, the menu bar and the About window call it
@@ -94,6 +97,21 @@ fn title_bar_background(cx: &App) -> Background {
         linear_color_stop(mixed, 0.),
         linear_color_stop(title_bar, 1.),
     )
+}
+
+/// The page's widths, as the panels ended up: the first panel's and the last
+/// panel's, with the middle column left to take what remains (§7.3).
+///
+/// `None` until the panels have laid out once — before that there is no page to
+/// measure, and nothing to remember.
+fn panes_from_sizes(sizes: &[Pixels]) -> Option<Panes> {
+    let [left, _, right] = sizes else {
+        return None;
+    };
+    Some(Panes {
+        left: left.as_f32(),
+        right: right.as_f32(),
+    })
 }
 
 /// The key context the window's own shortcuts are bound in (§7.1).
@@ -305,6 +323,16 @@ pub struct WorkspaceView {
     stopping: Option<Task<()>>,
     /// True once nothing is left to wait for and the window may close.
     may_close: bool,
+    /// The tab page's side columns (§7.3): one pair of widths for the whole
+    /// window, shared by every tab's page and remembered in `app.json`.
+    panes: Panes,
+    /// The drag machinery behind those widths (`gpui_base`'s resizable panels).
+    /// One state for every page, so a split dragged in one tab is dragged in all
+    /// of them — the pages are the same three columns.
+    pane_state: Entity<ResizableState>,
+    /// The state's own report that a drag (or a programmatic resize) is over.
+    /// `Some` for the life of the window: it is made in [`WorkspaceView::with_config`].
+    pane_resized: Option<Subscription>,
 }
 
 impl WorkspaceView {
@@ -338,11 +366,97 @@ impl WorkspaceView {
             close_hook_installed: false,
             stopping: None,
             may_close: false,
+            panes: Panes::default(),
+            pane_state: cx.new(|_| ResizableState::default()),
+            pane_resized: None,
         };
+        // The columns the app was left with (§7.3), before any page is built.
+        view.panes = panes::fit(
+            store::app_state::AppState::load(&view.config.root).panes,
+            window.bounds().size.width.into(),
+        );
+        // Where a resized split ends up: the panels tell the state, the state
+        // tells the window, and the window is what remembers it (§7.3).
+        view.pane_resized = Some(cx.subscribe_in(
+            &view.pane_state,
+            window,
+            |this, state, _: &ResizablePanelEvent, window, cx| {
+                this.panes_resized(state, window, cx);
+            },
+        ));
         // The first tab takes the keyboard as it opens (§7.1): without a focus in
         // the frame, a shortcut pressed on a fresh window would go nowhere at all.
         view.open_empty_tab(window, cx);
         view
+    }
+
+    /// The widths, against the window they are drawn in (§7.3).
+    ///
+    /// A window narrowed under a pair of wide columns would otherwise leave the
+    /// transcript with nothing: the sides come in, and the panels are told, so
+    /// what is on screen is what is remembered. A window wide again leaves them
+    /// where they were — a resize is not a reason to grow a column the reader
+    /// sized by hand.
+    fn fit_panes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let fitted = panes::fit(self.panes, window.bounds().size.width.into());
+        if fitted == self.panes {
+            return;
+        }
+        self.set_panes(fitted, cx);
+        let state = self.pane_state.clone();
+        state.update(cx, |state, cx| {
+            state.resize_panel(0, px(fitted.left), window, cx);
+            state.resize_panel(2, px(fitted.right), window, cx);
+        });
+    }
+
+    /// A split was dragged — or something moved one: take the widths the panels
+    /// ended at, fit them to the window, hand them to every tab's page and write
+    /// them down (§7.3).
+    fn panes_resized(
+        &mut self,
+        state: &Entity<ResizableState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let sizes = state.read(cx).sizes().to_vec();
+        let Some(panes) = panes_from_sizes(&sizes) else {
+            return;
+        };
+        let panes = panes::fit(panes, window.bounds().size.width.into());
+        self.set_panes(panes, cx);
+    }
+
+    /// The widths, everywhere they are needed: the pages, the app file.
+    fn set_panes(&mut self, panes: Panes, cx: &mut Context<Self>) {
+        if self.panes == panes {
+            return;
+        }
+        self.panes = panes;
+        for tab in &self.tabs {
+            tab.update(cx, |tab, cx| tab.set_panes(panes, cx));
+        }
+        self.remember_panes();
+        cx.notify();
+    }
+
+    /// `app.json`'s own pair of widths, in place: the file is read, changed and
+    /// written back whole, the way the app's other remembered facts are (§6).
+    fn remember_panes(&self) {
+        let mut state = store::app_state::AppState::load(&self.config.root);
+        if state.panes == self.panes {
+            return;
+        }
+        state.panes = self.panes;
+        let _ = state.save(&self.config.root);
+    }
+
+    /// The widths the window is showing its tab pages' side columns at (§7.3).
+    ///
+    /// One pair for the window, remembered in `app.json`: the three columns are
+    /// the same three columns in every tab.
+    pub fn panes(&self) -> Panes {
+        self.panes
     }
 
     /// How many tabs the window is showing.
@@ -488,6 +602,14 @@ impl WorkspaceView {
         // The new tab is at the far end, which is exactly where an overflowing
         // strip has to scroll to (§7.1).
         self.strip_scroll.scroll_to_item(self.selected);
+        // A tab opened now has the columns the window is showing (§7.3), and the
+        // one drag state every page in the window shares.
+        let pane_state = self.pane_state.clone();
+        let panes = self.panes;
+        tab.update(cx, |tab, cx| {
+            tab.set_pane_state(pane_state, cx);
+            tab.set_panes(panes, cx);
+        });
         // A tab opened now shows what the app already learned (§9.4, §9.5).
         let launcher = self.launcher.clone();
         tab.update(cx, |tab, cx| tab.set_launcher_data(&launcher, window, cx));
@@ -694,6 +816,23 @@ impl WorkspaceView {
                 if self.tabs[self.selected].read(cx).id() != id && self.finished.insert(id) {
                     cx.notify();
                 }
+            }
+            TabContentEvent::ResetPane(side) => {
+                // A double-clicked split goes back to the width it starts at
+                // (§7.3). The panels are what move; the window hears them and
+                // writes the result down, the way it does for a drag.
+                let width = match side {
+                    panes::PaneSide::Left => store::app_state::LEFT_DEFAULT,
+                    panes::PaneSide::Right => store::app_state::RIGHT_DEFAULT,
+                };
+                let index = match side {
+                    panes::PaneSide::Left => 0,
+                    panes::PaneSide::Right => 2,
+                };
+                let state = self.pane_state.clone();
+                state.update(cx, |state, cx| {
+                    state.resize_panel(index, px(width), window, cx)
+                });
             }
             TabContentEvent::ScreenChanged => {
                 // The screen changed under the keyboard. GPUI resolves a keystroke
@@ -979,6 +1118,7 @@ impl Render for WorkspaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.install_close_hook(window, cx);
         self.sync_window_title(window, cx);
+        self.fit_panes(window, cx);
         v_flex()
             .id("workspace")
             .test_support()
@@ -1012,7 +1152,407 @@ impl Render for WorkspaceView {
 mod tests {
     use super::*;
     use gpui_kit::test::TestWindowExt as _;
-    use gpui_kit::TestAppContext;
+    use gpui_kit::{
+        InputEvent as _, Modifiers, MouseButton, MouseUpEvent, Point, TestAppContext,
+        VisualTestContext,
+    };
+
+    /// A window with a page on it: one tab, driving a swarm in a folder that does
+    /// not have to exist, over an app root of the test's own (§7.3).
+    ///
+    /// The page is where the side columns live, and it only exists for a tab that
+    /// has a swarm — which a unit test can say without starting one.
+    fn page_window(
+        cx: &mut TestAppContext,
+        root: std::path::PathBuf,
+        window_size: (f32, f32),
+    ) -> (Entity<WorkspaceView>, &mut VisualTestContext) {
+        cx.update(gpui_kit::init);
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            WorkspaceView::with_config(
+                Arc::new(SwarmConfig {
+                    root: store::paths::Root::at(root),
+                    ..SwarmConfig::default()
+                }),
+                window,
+                cx,
+            )
+        });
+        cx.simulate_resize(size(px(window_size.0), px(window_size.1)));
+        view.update(cx, |view, cx| {
+            let tab = view.selected_tab().clone();
+            tab.update(cx, |tab, _| {
+                tab.state = crate::TabState::Running {
+                    folder: PathBuf::from("/tmp/proj"),
+                }
+            });
+        });
+        cx.update(|window, cx| window.render_frame(cx));
+        (view, cx)
+    }
+
+    /// The widths the window is showing, from outside it.
+    fn view_panes(cx: &mut VisualTestContext, view: &Entity<WorkspaceView>) -> Panes {
+        let view = view.clone();
+        cx.update(|_, cx| view.read(cx).panes())
+    }
+
+    /// Drag a divider from `from` to `to`: press, move past the threshold the
+    /// drag needs, then to where the split belongs, and let go (§7.3).
+    fn drag_split(cx: &mut VisualTestContext, from: Point<Pixels>, to: Point<Pixels>) {
+        cx.simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(
+            from + point(px(6.), px(0.)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.simulate_mouse_move(to, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+        cx.update(|window, cx| window.render_frame(cx));
+    }
+
+    /// Double-click a divider, the way a pointer does: two clicks, the second of
+    /// which is what the gesture is made of.
+    fn double_click_split(cx: &mut VisualTestContext, at: Point<Pixels>) {
+        cx.update(|window, cx| {
+            for count in 1..=2 {
+                window.dispatch_event(
+                    MouseDownEvent {
+                        position: at,
+                        modifiers: Modifiers::none(),
+                        button: MouseButton::Left,
+                        click_count: count,
+                        first_mouse: false,
+                    }
+                    .to_platform_input(),
+                    cx,
+                );
+                window.dispatch_event(
+                    MouseUpEvent {
+                        position: at,
+                        modifiers: Modifiers::none(),
+                        button: MouseButton::Left,
+                        click_count: count,
+                    }
+                    .to_platform_input(),
+                    cx,
+                );
+            }
+            window.render_frame(cx);
+        });
+    }
+
+    /// An app root of this test's own, empty.
+    fn test_root(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("workspace-panes-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a root to work in");
+        dir
+    }
+
+    /// The middle of the page, which is where the dividers run from top to bottom
+    /// and where a drag has room to move.
+    fn page_middle(window: &mut gpui_kit::Window) -> gpui_kit::Pixels {
+        window.find("tab-page").bounds().center().y
+    }
+
+    /// The page's left divider: the boundary between the agent column and the
+    /// transcript, which is where the agent column ends.
+    fn left_divider(window: &mut gpui_kit::Window) -> gpui_kit::Point<gpui_kit::Pixels> {
+        let column = window.find("agent-column").bounds();
+        point(column.right(), page_middle(window))
+    }
+
+    /// The same, on the other side: the boundary the composer column starts at.
+    fn right_divider(window: &mut gpui_kit::Window) -> gpui_kit::Point<gpui_kit::Pixels> {
+        let column = window.find("composer-column").bounds();
+        point(column.left(), page_middle(window))
+    }
+
+    /// §7.3: the status line belongs to the page, not to the composer. It is the
+    /// foot of the middle column — full width, under whatever the transcript and
+    /// the todos take — and the composer's row is the input and the action alone.
+    #[gpui_kit::test]
+    fn the_status_line_is_the_foot_of_the_middle_column(cx: &mut TestAppContext) {
+        let (_view, cx) = page_window(cx, test_root("status"), (1280., 800.));
+        cx.update(|window, cx| window.render_frame(cx));
+
+        let line = cx.update(|window, _| window.find(crate::READOUT_LINE_ID).bounds());
+        let column = cx.update(|window, _| window.find("transcript-column").bounds());
+        let header = cx.update(|window, _| window.find("transcript-header").bounds());
+        let composer = cx.update(|window, _| window.find("composer-column").bounds());
+        assert!(
+            line.bottom() == column.bottom(),
+            "the line is the column's last row: {line:?} against {column:?}"
+        );
+        assert!(
+            line.top() > header.bottom(),
+            "and it is under the transcript, not over it: {line:?} against {header:?}"
+        );
+        assert!(
+            (line.size.width - column.size.width).abs() <= px(1.),
+            "it spans the column: {line:?} against {column:?}"
+        );
+        let page = cx.update(|window, _| window.find("tab-page").bounds());
+        assert!(
+            line.left() >= page.left() && line.right() <= page.right(),
+            "the middle column's own foot, inside the page: {line:?} against {page:?}"
+        );
+        assert!(
+            line.right() <= composer.left(),
+            "and it stops where the composer's column begins: {line:?} against {composer:?}"
+        );
+
+        // The composer's row: the input above, the action below it. Whatever the
+        // composer can still draw for itself, the page is not showing it.
+        cx.update(|window, _| {
+            assert!(
+                window.try_find(composer::READOUT_ID).is_none(),
+                "the status line is not in the composer any more"
+            );
+            assert!(
+                window.find(composer::BUTTON_ID).visible(),
+                "the action is, where the reader expects it"
+            );
+        });
+    }
+
+    /// §7.3: the split between the agent column and the transcript is draggable,
+    /// and the room comes out of the middle column — the side columns are what
+    /// the reader sized, and dragging one is no reason to move the other.
+    #[gpui_kit::test]
+    fn a_dragged_split_moves_that_column_and_takes_the_room_from_the_middle(
+        cx: &mut TestAppContext,
+    ) {
+        let root = test_root("drag");
+        let (view, cx) = page_window(cx, root.clone(), (1280., 800.));
+
+        let column = cx.update(|window, _| window.find("agent-column").bounds().size.width);
+        let transcript =
+            cx.update(|window, _| window.find("transcript-column").bounds().size.width);
+        let from = cx.update(|window, _| left_divider(window));
+        drag_split(cx, from, from + point(px(60.), px(0.)));
+
+        let column_after = cx.update(|window, _| window.find("agent-column").bounds().size.width);
+        let transcript_after =
+            cx.update(|window, _| window.find("transcript-column").bounds().size.width);
+        assert!(
+            (column_after.as_f32() - column.as_f32() - 60.).abs() <= 2.,
+            "the agent column follows the pointer: {column:?} then {column_after:?}"
+        );
+        assert!(
+            (transcript.as_f32() - transcript_after.as_f32() - 60.).abs() <= 2.,
+            "the transcript gives up what the column took: {transcript:?} then {transcript_after:?}"
+        );
+
+        let panes = view_panes(cx, &view);
+        assert!(
+            (panes.left - 320.).abs() < 2.,
+            "260 points, 60 points more: {panes:?}"
+        );
+        assert_eq!(
+            panes.right,
+            store::app_state::RIGHT_DEFAULT,
+            "the split nobody touched stayed where it was"
+        );
+
+        // The window wrote the widths down (§6): they are the app's own pair, so
+        // they outlive the window that dragged them.
+        let saved = store::app_state::AppState::load(&store::paths::Root::at(root)).panes;
+        assert!(
+            (saved.left - panes.left).abs() < 0.01 && (saved.right - panes.right).abs() < 0.01,
+            "app.json remembers the split: {saved:?} against {panes:?}"
+        );
+    }
+
+    /// §7.3: a split stops where the page says it does. A column has a range, and
+    /// a drag past it is a drag that has already done all it can.
+    #[gpui_kit::test]
+    fn a_split_stops_at_the_widths_the_page_allows(cx: &mut TestAppContext) {
+        let (view, cx) = page_window(cx, test_root("clamp"), (1280., 800.));
+
+        let from = cx.update(|window, _| left_divider(window));
+        drag_split(cx, from, from + point(px(600.), px(0.)));
+        let left = view_panes(cx, &view).left;
+        assert!(
+            (left - store::app_state::LEFT_MAX).abs() < 1.,
+            "the agent column stops at its widest: {left}"
+        );
+
+        let from = cx.update(|window, _| left_divider(window));
+        drag_split(cx, from, from - point(px(600.), px(0.)));
+        let left = view_panes(cx, &view).left;
+        assert!(
+            (left - store::app_state::LEFT_MIN).abs() < 1.,
+            "and at its narrowest: {left}"
+        );
+
+        // The other split is the other side's, and has its own range: dragging it
+        // to the right makes the composer column narrower, not wider.
+        let from = cx.update(|window, _| right_divider(window));
+        drag_split(cx, from, from + point(px(600.), px(0.)));
+        let right = view_panes(cx, &view).right;
+        assert!(
+            (right - store::app_state::RIGHT_MIN).abs() < 1.,
+            "the composer column stops at its narrowest: {right}"
+        );
+
+        let from = cx.update(|window, _| right_divider(window));
+        drag_split(cx, from, from - point(px(600.), px(0.)));
+        let right = view_panes(cx, &view).right;
+        assert!(
+            (right - store::app_state::RIGHT_MAX).abs() < 1.,
+            "and at its widest: {right}"
+        );
+
+        // The middle column is never squeezed out of the page: at the widest the
+        // window allows, it still has its own room (§7.3).
+        let middle = cx.update(|window, _| window.find("transcript-column").bounds().size.width);
+        assert!(
+            middle.as_f32() >= store::app_state::CENTER_MIN - 1.,
+            "the transcript keeps its minimum: {middle:?}"
+        );
+    }
+
+    /// §7.3: a double-click on a split puts that side back to the width it starts
+    /// at — and leaves the other one where the reader left it.
+    #[gpui_kit::test]
+    fn double_clicking_a_split_puts_that_side_back(cx: &mut TestAppContext) {
+        let (view, cx) = page_window(cx, test_root("reset"), (1280., 800.));
+
+        let from = cx.update(|window, _| left_divider(window));
+        drag_split(cx, from, from + point(px(60.), px(0.)));
+        let from = cx.update(|window, _| right_divider(window));
+        drag_split(cx, from, from - point(px(60.), px(0.)));
+        let dragged = view_panes(cx, &view);
+        assert!(
+            dragged.left > 300. && dragged.right > 400.,
+            "both splits were dragged away from their defaults first: {dragged:?}"
+        );
+
+        let at = cx.update(|window, _| left_divider(window));
+        double_click_split(cx, at);
+
+        let panes = view_panes(cx, &view);
+        assert!(
+            (panes.left - store::app_state::LEFT_DEFAULT).abs() < 1.,
+            "the split that was double-clicked is back at its default: {panes:?}"
+        );
+        assert!(
+            (panes.right - dragged.right).abs() < 1.,
+            "the split nobody touched is where it was: {panes:?} against {dragged:?}"
+        );
+
+        // The other side resets too — the gesture belongs to the split it was
+        // made on, wherever that split is.
+        let at = cx.update(|window, _| right_divider(window));
+        double_click_split(cx, at);
+        let panes = view_panes(cx, &view);
+        assert!(
+            (panes.right - store::app_state::RIGHT_DEFAULT).abs() < 1.,
+            "the composer column is back at its default: {panes:?}"
+        );
+        assert!(
+            (panes.left - store::app_state::LEFT_DEFAULT).abs() < 1.,
+            "and the agent column did not move for it: {panes:?}"
+        );
+    }
+
+    /// §7.3: the two columns are the window's, not a tab's. A split dragged while
+    /// one tab is shown is the split the next tab opens with.
+    #[gpui_kit::test]
+    fn every_tab_shows_the_same_two_columns(cx: &mut TestAppContext) {
+        let (view, cx) = page_window(cx, test_root("shared"), (1280., 800.));
+
+        let second = cx.update(|window, cx| {
+            let tab = view.update(cx, |view, cx| view.add_tab(window, cx));
+            tab.update(cx, |tab, _| {
+                tab.state = crate::TabState::Running {
+                    folder: PathBuf::from("/tmp/other"),
+                };
+            });
+            tab
+        });
+        cx.update(|window, cx| window.render_frame(cx));
+        assert_eq!(cx.update(|_, cx| view.read(cx).selected_index()), 1);
+
+        let from = cx.update(|window, _| left_divider(window));
+        drag_split(cx, from, from + point(px(60.), px(0.)));
+        let dragged = view_panes(cx, &view);
+        assert!(dragged.left > 300., "the drag landed: {dragged:?}");
+
+        // Back to the first tab: its page is drawn with the widths the drag left,
+        // whatever it was showing when they changed.
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| view.select_tab(0, window, cx));
+            window.render_frame(cx);
+        });
+        let column = cx.update(|window, _| window.find("agent-column").bounds().size.width);
+        assert!(
+            (column.as_f32() - dragged.left).abs() < 2.,
+            "the tab that was not being looked at has the same column: {column:?} against {dragged:?}"
+        );
+        assert_eq!(cx.update(|_, cx| second.read(cx).panes()), dragged);
+    }
+
+    /// §7.3, §7.1: a window narrowed under columns someone widened still shows a
+    /// page — the side columns come in so the middle one keeps its room, rather
+    /// than the transcript being squeezed to nothing.
+    #[gpui_kit::test]
+    fn a_narrowed_window_brings_the_side_columns_in(cx: &mut TestAppContext) {
+        let root = test_root("small");
+        // Wide enough for both columns at their widest — 480 + 420 + 640 — which
+        // is the pair the smallest window cannot hold.
+        let (view, cx) = page_window(cx, root.clone(), (1600., 900.));
+
+        // Both columns dragged as wide as the page allows — 160 points for the
+        // split on the left, and the composer's 280 — a pair that fits this
+        // window, and not the app's smallest one.
+        let from = cx.update(|window, _| left_divider(window));
+        drag_split(cx, from, from + point(px(600.), px(0.)));
+        let from = cx.update(|window, _| right_divider(window));
+        drag_split(cx, from, from - point(px(280.), px(0.)));
+        let dragged = view_panes(cx, &view);
+        assert!(
+            (dragged.left - store::app_state::LEFT_MAX).abs() < 1.
+                && (dragged.right - store::app_state::RIGHT_MAX).abs() < 1.,
+            "the widest columns the window can hold: {dragged:?}"
+        );
+
+        // The smallest window the app opens (§7.1).
+        cx.simulate_resize(size(px(1000.), px(700.)));
+        cx.update(|window, cx| window.render_frame(cx));
+
+        let panes = view_panes(cx, &view);
+        assert!(
+            panes.left + panes.right + store::app_state::CENTER_MIN <= 1000. + 1.,
+            "the three columns fit the smallest window: {panes:?}"
+        );
+        assert!(
+            panes.left >= store::app_state::LEFT_MIN && panes.right >= store::app_state::RIGHT_MIN,
+            "and neither side went below its own minimum: {panes:?}"
+        );
+        let column = cx.update(|window, _| window.find("agent-column").bounds().size.width);
+        assert!(
+            (column.as_f32() - panes.left).abs() < 2.,
+            "the page is drawn at the fitted widths: {column:?} against {panes:?}"
+        );
+        let transcript =
+            cx.update(|window, _| window.find("transcript-column").bounds().size.width);
+        assert!(
+            transcript.as_f32() >= store::app_state::CENTER_MIN - 1.,
+            "the transcript kept its room: {transcript:?}"
+        );
+
+        // And the window remembered what it had to do (§6): the widths it could
+        // not hold are not what the next window opens with.
+        let saved = store::app_state::AppState::load(&store::paths::Root::at(root)).panes;
+        assert!(
+            saved.left + saved.right + store::app_state::CENTER_MIN <= 1000. + 1.,
+            "app.json kept the fitted widths: {saved:?}"
+        );
+    }
 
     /// §7.1: the keyboard follows the tab. A tab that drives a swarm is one
     /// someone means to type into, so selecting it puts the caret in its

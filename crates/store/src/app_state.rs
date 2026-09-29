@@ -77,6 +77,70 @@ pub struct Binaries {
     pub evo_agent: PathBuf,
 }
 
+/// The tab page's two side columns, in points (§7.3).
+///
+/// One pair of widths for the app, not one per tab: every tab's page is the same
+/// three columns, and a browser's sidebar is not per-tab either. Dragging a split
+/// between a side column and the middle changes this, and this is what `app.json`
+/// remembers — so the numbers, and how far they may be dragged, live with the
+/// schema rather than with the view that draws them.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[serde(default)]
+pub struct Panes {
+    /// The agent list on the left.
+    pub left: f32,
+    /// The composer on the right.
+    pub right: f32,
+}
+
+/// Where the left column opens, and how far it may be dragged (§7.3).
+pub const LEFT_DEFAULT: f32 = 260.0;
+pub const LEFT_MIN: f32 = 180.0;
+pub const LEFT_MAX: f32 = 480.0;
+
+/// The right column: wide enough for the composer's model-and-status row at its
+/// longest, narrow enough to leave the transcript its room (§7.3).
+pub const RIGHT_DEFAULT: f32 = 360.0;
+pub const RIGHT_MIN: f32 = 300.0;
+pub const RIGHT_MAX: f32 = 640.0;
+
+/// The middle column never goes below this: the transcript is what the page is
+/// for, and a page three-quarters chrome is not a page (§7.3).
+pub const CENTER_MIN: f32 = 420.0;
+
+impl Default for Panes {
+    fn default() -> Panes {
+        Panes {
+            left: LEFT_DEFAULT,
+            right: RIGHT_DEFAULT,
+        }
+    }
+}
+
+impl Panes {
+    pub fn new(left: f32, right: f32) -> Panes {
+        Panes { left, right }.sanitized()
+    }
+
+    /// The same widths, dragged back into their ranges — and into something that
+    /// can be drawn: a hand-edited file may say anything.
+    pub fn sanitized(self) -> Panes {
+        Panes {
+            left: ranged(self.left, LEFT_MIN, LEFT_MAX, LEFT_DEFAULT),
+            right: ranged(self.right, RIGHT_MIN, RIGHT_MAX, RIGHT_DEFAULT),
+        }
+    }
+}
+
+/// A number from a file: finite, and inside `min..=max`, or the default.
+fn ranged(value: f32, min: f32, max: f32, default: f32) -> f32 {
+    if value.is_finite() && value >= min && value <= max {
+        value
+    } else {
+        default
+    }
+}
+
 impl Default for Binaries {
     fn default() -> Self {
         Binaries {
@@ -206,6 +270,9 @@ pub struct AppState {
     pub recents: Vec<Recent>,
     #[serde(deserialize_with = "de_theme")]
     pub theme: Theme,
+    /// The tab page's side columns, app-wide (§7.3). Absent in a file written
+    /// before there were any: the defaults are what the page opens with.
+    pub panes: Panes,
 }
 
 impl Default for AppState {
@@ -218,6 +285,7 @@ impl Default for AppState {
             binaries: Binaries::default(),
             recents: Vec::new(),
             theme: Theme::System,
+            panes: Panes::default(),
         }
     }
 }
@@ -251,6 +319,7 @@ impl AppState {
         self.version = SCHEMA_VERSION;
         self.window = self.window.sanitized();
         self.binaries = self.binaries.sanitized();
+        self.panes = self.panes.sanitized();
 
         // A stored id is only kept if it is still safe as a single path segment.
         let mut seen = std::collections::HashSet::new();
@@ -437,6 +506,63 @@ mod tests {
         assert_eq!(state.window.width, DEFAULT_SIZE.0);
         assert_eq!(state.window.height, DEFAULT_SIZE.1);
         fs::remove_dir_all(root.path()).unwrap();
+    }
+
+    /// §7.3: the side columns are one app-wide pair of widths, and the file is
+    /// allowed to be wrong about them: a width outside its range, or one that is
+    /// not a number at all, opens at the default instead.
+    #[test]
+    fn panes_are_remembered_and_dragged_back_into_range() {
+        let root = temp_root("panes");
+        let mut state = sample();
+        state.panes = Panes::new(300.0, 500.0);
+        state.save(&root).unwrap();
+        assert_eq!(AppState::load(&root).panes, Panes { left: 300.0, right: 500.0 });
+
+        // A file from before there were any, and a hand-edited one.
+        root.ensure().unwrap();
+        fs::write(root.app_json(), r#"{"version":1}"#).unwrap();
+        assert_eq!(AppState::load(&root).panes, Panes::default());
+        fs::write(
+            root.app_json(),
+            r#"{"version":1,"panes":{"left":9999,"right":-4}}"#,
+        )
+        .unwrap();
+        assert_eq!(AppState::load(&root).panes, Panes::default());
+        fs::write(
+            root.app_json(),
+            r#"{"version":1,"panes":{"left":200,"right":640.5}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            AppState::load(&root).panes,
+            Panes {
+                left: 200.0,
+                right: RIGHT_DEFAULT
+            },
+            "in range on one side, nonsense on the other"
+        );
+        fs::remove_dir_all(root.path()).unwrap();
+    }
+
+    /// The three columns as geometry: every range is a range, dragging has room
+    /// to move, and the *narrowest* page — both sides at their minimum — still
+    /// fits the smallest window the app opens (§7.1, §7.3). The defaults need not
+    /// fit that window: a window too narrow for them takes from both sides, which
+    /// is what the view's own fit does.
+    #[test]
+    fn the_pane_ranges_hold_together() {
+        assert!(LEFT_MIN < LEFT_DEFAULT && LEFT_DEFAULT < LEFT_MAX);
+        assert!(RIGHT_MIN < RIGHT_DEFAULT && RIGHT_DEFAULT < RIGHT_MAX);
+        assert!(
+            LEFT_MAX + CENTER_MIN + RIGHT_MIN <= MIN_SIZE.0 * 2.,
+            "room to drag one side out without the window having to be huge"
+        );
+        assert!(
+            LEFT_MIN + CENTER_MIN + RIGHT_MIN <= MIN_SIZE.0,
+            "the narrowest page fits the smallest window: {LEFT_MIN} + {CENTER_MIN} +              {RIGHT_MIN} > {}",
+            MIN_SIZE.0
+        );
     }
 
     #[test]

@@ -983,6 +983,12 @@ fn the_coordinators_goal_and_todos_reach_the_tab_page(cx: &mut TestAppContext) {
                 .is_some_and(|model| model.selected_todos().len() == 2)
         })
     });
+    let model_line = cx.read(|cx| {
+        tab.read(cx)
+            .model()
+            .and_then(|model| model.selected_readout_text())
+            .expect("the coordinator's readout, from /state")
+    });
     cx.update_window(b.window.into(), |_, window, cx| {
         window.render_frame(cx);
         assert!(
@@ -998,6 +1004,50 @@ fn the_coordinators_goal_and_todos_reach_the_tab_page(cx: &mut TestAppContext) {
         assert!(
             window.find("todo-header").visible(),
             "and the header that counts them"
+        );
+
+        // §7.3: under the panel, the status line. It is the *page's* now — the
+        // composer's row is the input and the action — and what it says is the
+        // selected agent's readout, whole, as its accessible name.
+        let line = window.find(workspace::READOUT_LINE_ID);
+        let panel = window.find("todo-panel").bounds();
+        let column = window.find("transcript-column").bounds();
+        assert!(line.visible(), "the status line is on the page");
+        assert!(
+            line.bounds().top() >= panel.bottom(),
+            "under the todo panel, at the foot of the column: {:?} against {:?}",
+            line.bounds(),
+            panel
+        );
+        assert!(
+            (line.bounds().size.width - column.size.width).abs() <= px(1.),
+            "and it spans the column: {:?} against {column:?}",
+            line.bounds()
+        );
+        assert_eq!(
+            line.label(),
+            Some(model_line.as_str()),
+            "the line the tab read off the selected agent, whole"
+        );
+        assert!(
+            line.label().is_some_and(|line| line.contains("goal g-")),
+            "which is the readout the swarm reported, goal segment and all: {:?}",
+            line.label()
+        );
+    })
+    .unwrap();
+
+    // And it is not the composer's line any more: that row keeps the input and
+    // the action (§7.3).
+    cx.update_window(b.window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(
+            window.try_find(composer::READOUT_ID).is_none(),
+            "the composer's row no longer carries the readout"
+        );
+        assert!(
+            window.find(composer::BUTTON_ID).visible(),
+            "the action is still there"
         );
     })
     .unwrap();

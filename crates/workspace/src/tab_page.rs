@@ -8,23 +8,39 @@
 //! the list, and the header that names the agent being shown.
 
 use std::path::Path;
+use std::rc::Rc;
 
 use agent_list::{activity_status, status_color};
+use gpui_kit::base::{InteractiveElementExt as _, ResizeHandleRenderer};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
-    h_flex, v_flex, ActiveTheme as _, IconName, Sizable as _, StyledExt as _,
+    h_flex, h_resizable, resizable_panel, resize_handle_appearance, v_flex, ActiveTheme as _,
+    IconName, Sizable as _, StyledExt as _,
 };
 use gpui_kit::prelude::*;
-use gpui_kit::{div, px, AnyElement, App, Context, IntoElement, SharedString, TestSupportExt as _};
-use session::{lane_task_label, AgentKey, LaneStatus};
+use gpui_kit::{
+    div, px, AnyElement, App, Context, IntoElement, Pixels, SharedString, TestSupportExt as _,
+};
+use session::{lane_task_label, AgentKey, LaneStatus, TabModel};
 use transcript::TodoPanel;
 
+use crate::panes::side_of;
 use crate::tab::{Notice, NoticeTone, TabContent, TabContentEvent, TabState};
+use store::app_state::{CENTER_MIN, LEFT_MAX, LEFT_MIN, RIGHT_MAX, RIGHT_MIN};
 
-/// Width of the composer column on the tab page (§7.3).
-pub(crate) const COMPOSER_COLUMN_WIDTH: f32 = 360.;
+/// The status line's element id. It carries the whole line as its tooltip and as
+/// its accessible name (§7.3).
+pub const READOUT_LINE_ID: &str = "status-readout";
+
+/// The status line's size: the TUI's dim status line, small enough to stay one
+/// line however long the line is.
+const READOUT_SIZE: Pixels = px(12.);
+
+/// What the status line's tooltip wraps to: the middle column's own minimum, so
+/// the whole line is read in a card the width of the column it belongs to.
+const READOUT_TOOLTIP_WIDTH: Pixels = px(CENTER_MIN);
 
 /// How many characters the folder line under the agent list may take before it is
 /// elided in the middle: about what fits under a 260 px column at 11 px text.
@@ -214,16 +230,106 @@ impl TabContent {
     }
 
     /// The tab page: agents, transcript and todos, composer (§7.3).
+    ///
+    /// Three columns with a draggable split between them (§7.3), drawn by the
+    /// kit's resizable panels: the two side columns take the widths the window
+    /// remembers, the middle one takes what is left. Every tab's page shares one
+    /// [`panes::Panes`](crate::panes) state — the three columns are the same three
+    /// columns in every tab, so a split dragged in one tab is dragged in all of
+    /// them — and the window hears where the drag ended so it can write it down.
     fn render_page(&self, folder: &Path, cx: &mut Context<Self>) -> AnyElement {
-        h_flex()
+        let panes = self.panes();
+        div()
             .id("tab-page")
             .test_support()
-            .items_stretch()
             .size_full()
-            .child(self.render_agent_column(folder, cx))
-            .child(self.render_center_column(cx))
-            .child(self.render_composer_column(cx))
+            .child(self.render_columns(folder, panes, cx))
             .into_any_element()
+    }
+
+    /// The three columns themselves, in the group that lets the splits between
+    /// them be dragged (§7.3).
+    fn render_columns(
+        &self,
+        folder: &Path,
+        panes: store::app_state::Panes,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        h_resizable("tab-columns")
+            .when_some(self.pane_state.clone(), |group, state| {
+                group.with_state(&state)
+            })
+            .with_handle_appearance(self.pane_hands(cx))
+            .child(
+                resizable_panel()
+                    .size(px(panes.left))
+                    .size_range(px(LEFT_MIN)..px(LEFT_MAX))
+                    .flex_none()
+                    .child(self.render_agent_column(folder, cx)),
+            )
+            .child(
+                resizable_panel()
+                    .size_range(px(CENTER_MIN)..Pixels::MAX)
+                    .child(self.render_center_column(cx)),
+            )
+            .child(
+                resizable_panel()
+                    .size(px(panes.right))
+                    .size_range(px(RIGHT_MIN)..px(RIGHT_MAX))
+                    .flex_none()
+                    .child(self.render_composer_column(cx)),
+            )
+    }
+
+    /// The dividers between the three columns (§7.3): the kit's own hairline and
+    /// the pill it grows on hover, wrapped in the one gesture it has no room for —
+    /// a double-click that puts that side back to the width it starts at.
+    fn pane_hands(&self, cx: &Context<Self>) -> ResizeHandleRenderer {
+        let kit = resize_handle_appearance();
+        let tab = cx.entity().downgrade();
+        let state = self.pane_state.clone();
+        Rc::new(move |handle, window, cx| {
+            let side_state = state.clone();
+            let side_tab = tab.clone();
+            // What the kit draws: the hairline between the columns, and the pill
+            // it grows when the pointer is over it (§7.3).
+            let painted = kit(handle, window, cx);
+            Some(
+                div()
+                    // Only what a double-click needs: the divider itself is the
+                    // kit's, and a keystroke must not land on this.
+                    .id("pane-handle")
+                    .h_full()
+                    .w(px(1.))
+                    // The kit sets the cursor on the band it drags; this is the
+                    // one pixel of it that is drawn, and the pointer reads it.
+                    .cursor_col_resize()
+                    .on_double_click(move |event, _, cx| {
+                        // Which split this is: the kit draws both with the same
+                        // element and tells neither of them its own name, so the
+                        // pointer's place against the two splits' own places is
+                        // what says it (§7.3).
+                        let sizes = side_state
+                            .as_ref()
+                            .map(|state| state.read(cx).sizes().to_vec())
+                            .unwrap_or_default();
+                        let side = side_of(event.position().x.as_f32(), &sizes);
+                        if let Some(tab) = side_tab.upgrade() {
+                            // The window owns the widths (§7.3); a tab only says
+                            // what was asked of it.
+                            tab.update(cx, |_, cx| cx.emit(TabContentEvent::ResetPane(side)));
+                        }
+                    })
+                    .child(painted.unwrap_or_else(|| {
+                        div()
+                            .h_full()
+                            .w(px(1.))
+                            .bg(cx.theme().border)
+                            .into_any_element()
+                    }))
+                    .into_any_element(),
+            )
+        })
     }
 
     /// The agent column: `agent_list`'s own rows, with the folder the swarm runs
@@ -235,11 +341,11 @@ impl TabContent {
         v_flex()
             .id("agent-column")
             .test_support()
-            .w(agent_list::COLUMN_WIDTH)
+            // The panel the column sits in decides how wide it is (§7.3); the
+            // column fills whatever it is given, and the divider between them is
+            // the panel's own handle, not a border here.
+            .w_full()
             .h_full()
-            .flex_shrink_0()
-            .border_r_1()
-            .border_color(cx.theme().border)
             .child(div().flex_1().min_h_0().child(self.agents.clone()))
             .child(folder_line(folder, cx))
     }
@@ -367,6 +473,9 @@ impl TabContent {
             // The panel renders nothing while the agent has no todos, so this
             // row disappears rather than leaving a gap (§7.3).
             .child(TodoPanel::new(&todos))
+            // Under everything else, the one line that says what the agent being
+            // shown is working with (§7.3).
+            .child(status_line(status_text(self.model()), cx))
     }
 
     /// The coordinator's composer: the input, and the readout and the single
@@ -378,11 +487,8 @@ impl TabContent {
         v_flex()
             .id("composer-column")
             .test_support()
-            .w(px(COMPOSER_COLUMN_WIDTH))
+            .w_full()
             .h_full()
-            .flex_shrink_0()
-            .border_l_1()
-            .border_color(cx.theme().border)
             .p_4()
             .gap_2()
             .when_some(self.notice(), |this, notice| {
@@ -390,6 +496,50 @@ impl TabContent {
             })
             .child(self.composer.clone())
     }
+}
+
+/// What the status line under the transcript says: the readout of the agent
+/// being shown, or the UI's own words while nothing about it is known (§7.3).
+///
+/// The coordinator's line is made of `/state` and `/registry`; a lane's of its
+/// own transcript and usage. A lane selected before anything about it has been
+/// read has no line at all — which is a fact about that agent, not an empty
+/// space, and is said in the same muted voice.
+fn status_text(model: Option<&TabModel>) -> SharedString {
+    model
+        .and_then(|model| model.selected_readout_text())
+        .map(SharedString::from)
+        .unwrap_or_else(|| SharedString::from("no metrics yet"))
+}
+
+/// The status line itself: one muted line at the foot of the middle column, with
+/// a hairline above it (§7.3).
+///
+/// The line is as long as the readout is; the column decides how much of it is
+/// drawn. What is not drawn is still *said*: the whole line is the element's
+/// accessible name, and its tooltip, wrapped rather than run off the screen.
+fn status_line(text: SharedString, cx: &App) -> impl IntoElement {
+    let tooltip = text.clone();
+    div()
+        .id(READOUT_LINE_ID)
+        .test_support()
+        .w_full()
+        .min_w_0()
+        .flex_shrink_0()
+        .truncate()
+        .px_4()
+        .pt_2()
+        .border_t_1()
+        .border_color(cx.theme().border)
+        .text_size(READOUT_SIZE)
+        .text_color(cx.theme().muted_foreground)
+        .aria_label(text.clone())
+        .tooltip(move |window, cx| {
+            let line = tooltip.clone();
+            Tooltip::element(move |_, _| div().w(READOUT_TOOLTIP_WIDTH).child(line.clone()))
+                .build(window, cx)
+        })
+        .child(text)
 }
 
 /// The folder the swarm runs in: one line under the agent list, `~`-shortened
@@ -604,6 +754,7 @@ fn centered_region(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui_kit::test::TestWindowExt as _;
 
     /// A path is elided in the middle: both ends survive, and the tail — the part
     /// that names the folder — gets the longer half.
@@ -672,6 +823,82 @@ still here";
             shorten_log(tail, None).lines().count(),
             tail.lines().count()
         );
+    }
+
+    /// `status_line`'s own view: a column of a fixed width with the line in it.
+    struct LineView(SharedString, Pixels);
+
+    impl gpui_kit::Render for LineView {
+        fn render(&mut self, _: &mut gpui_kit::Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div().w(self.1).child(status_line(self.0.clone(), cx))
+        }
+    }
+
+    /// §7.3: the line is one line in a column that may be narrower than it is —
+    /// and what is not drawn is still read. The whole line is the element's
+    /// accessible name, which is what a reader who cannot see the ellipsis (and a
+    /// test) is meant to read.
+    #[gpui_kit::test]
+    fn a_status_line_wider_than_its_column_keeps_all_of_itself_as_its_name(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        let line: SharedString =
+            "ark-deepseek-v4.1-flash \u{b7} max \u{b7} ctx 48k/936k (5%) \u{b7} 97% cached \u{b7} \
+             goal a1b2c3d4 (active) 12k/50k \u{b7} 0123456789 0123456789 0123456789 0123456789"
+                .into();
+        cx.update(gpui_kit::init);
+        let (_view, cx) = cx.add_window_view(|_, _| LineView(line.clone(), px(200.)));
+        cx.update(|window, cx| window.render_frame(cx));
+
+        let element = cx.update(|window, _| window.find(READOUT_LINE_ID));
+        assert!(element.visible(), "the line is drawn");
+        assert_eq!(
+            element.label(),
+            Some(line.as_ref()),
+            "the whole line, drawn or not, is what the element is called"
+        );
+        assert!(
+            element.bounds().size.width <= px(200.),
+            "and it stays inside the column it was given: {:?}",
+            element.bounds()
+        );
+        // One line of 12 px text, its padding and the hairline — not two.
+        assert!(
+            element.bounds().size.height <= px(36.),
+            "one line high, however long the line is: {:?}",
+            element.bounds()
+        );
+    }
+
+    /// §7.3: what the line says is the readout of the agent being *shown*, and a
+    /// selected agent nothing is known about is a fact the line states rather
+    /// than an empty row.
+    #[test]
+    fn the_status_line_says_what_is_known_and_says_when_nothing_is() {
+        assert_eq!(
+            status_text(None),
+            "no metrics yet",
+            "no swarm to ask, nothing to say"
+        );
+
+        let mut model = TabModel::new();
+        model.on_state(&serde_json::json!({
+            "status": "idle",
+            "model": "ark-deepseek-v4.1-flash",
+            "thinking": "max",
+            "context_tokens": 48_000,
+            "context_window": 936_000,
+        }));
+        let line = status_text(Some(&model));
+        assert!(
+            line.contains("ark-deepseek-v4.1-flash") && line.contains("ctx 48k/936k"),
+            "the coordinator's own line: {line}"
+        );
+
+        // A lane selected before anything about it has been read: the same words
+        // as a page with no model at all (§7.3).
+        model.select(AgentKey::Lane(1));
+        assert_eq!(status_text(Some(&model)), "no metrics yet");
     }
 
     /// The home and temporary directories are places too, wherever the log names

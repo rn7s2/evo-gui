@@ -150,6 +150,11 @@ impl Global for KeysBound {}
 pub struct Composer {
     input: Entity<TextareaState>,
     readout: SharedString,
+    /// Whether this composer draws the status readout on its own row. The app
+    /// turns it off: the line belongs to the tab page now, under the transcript,
+    /// where it can speak for the agent being shown rather than for the
+    /// coordinator alone (§7.3). A composer on its own — the demo — keeps it.
+    show_readout: bool,
     activity: Activity,
     /// True while this composer's own request is in flight — the only reason
     /// the button is disabled.
@@ -225,6 +230,7 @@ impl Composer {
         Self {
             input,
             readout: SharedString::default(),
+            show_readout: true,
             activity: Activity::Idle,
             in_flight: false,
             history: Vec::new(),
@@ -257,6 +263,15 @@ impl Composer {
         let readout = readout.into();
         if self.readout != readout {
             self.readout = readout;
+            cx.notify();
+        }
+    }
+
+    /// Whether the readout shares the action row. Off, the row is the button
+    /// alone, at its right-hand end (§7.3).
+    pub fn set_show_readout(&mut self, show: bool, cx: &mut Context<Self>) {
+        if self.show_readout != show {
+            self.show_readout = show;
             cx.notify();
         }
     }
@@ -514,7 +529,7 @@ impl Composer {
 impl Render for Composer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let readout = self.readout_element(cx);
+        let readout = self.show_readout.then(|| self.readout_element(cx));
         let button = self.action_button(cx);
         // The caret is what "focused" means here: the ring belongs to the card,
         // which the input does not own. Focus is the theme's focus colour, and
@@ -573,7 +588,10 @@ impl Render for Composer {
                     .min_w_0()
                     .items_center()
                     .gap_2()
-                    .child(readout)
+                    // The readout is the flexible cell of this row; without it the
+                    // button is the row, and stays where it was (§7.3).
+                    .when_some(readout, |row, readout| row.child(readout))
+                    .when(!self.show_readout, |row| row.justify_end())
                     .child(button),
             )
     }
@@ -1171,6 +1189,36 @@ mod tests {
                 readout.bounds().right() <= button.bounds().left(),
                 "the readout overlaps the button: {:?} vs {:?}",
                 readout.bounds(),
+                button.bounds()
+            );
+        });
+    }
+
+    /// §7.3: the app takes the readout off this row — the tab page draws it under
+    /// the transcript — and the row is then the action alone, at its right-hand
+    /// end: the button does not move to the left, and nothing of the readout is
+    /// left behind.
+    #[gpui_kit::test]
+    fn without_the_readout_the_row_is_the_button_at_its_right(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.act(cx, |window, cx| {
+            f.composer
+                .update(cx, |composer, cx| composer.set_readout("ctx 48k/936k", cx));
+            f.composer
+                .update(cx, |composer, cx| composer.set_show_readout(false, cx));
+            window.render_frame(cx);
+
+            let button = window.find(BUTTON_ID);
+            assert!(button.visible(), "the button is the row");
+            assert!(
+                window.try_find(READOUT_ID).is_none(),
+                "the readout is not drawn here any more"
+            );
+            // Right-aligned in the column — which here is the whole window, so
+            // the row's right-hand end is its width.
+            assert!(
+                (button.bounds().right() - COLUMN.width).abs() <= px(1.),
+                "the button is at the row's right-hand end: {:?}",
                 button.bounds()
             );
         });

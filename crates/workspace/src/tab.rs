@@ -211,6 +211,10 @@ pub enum TabContentEvent {
     /// failure. The screen the keyboard was on is gone with the old one, so the
     /// window moves it to whatever the new screen starts with (§7.1).
     ScreenChanged,
+    /// Someone double-clicked the split between the middle column and one of the
+    /// sides (§7.3): that side goes back to the width it starts at. The window
+    /// owns the widths, so the gesture is reported rather than acted on.
+    ResetPane(crate::panes::PaneSide),
 }
 
 /// The retained view behind one tab.
@@ -232,6 +236,13 @@ pub struct TabContent {
     pub(crate) composer: Entity<Composer>,
     /// What every tab of this window starts its swarms with.
     config: Arc<SwarmConfig>,
+    /// The side columns' widths (§7.3), as the window has them: the same in
+    /// every tab, so the page of a tab opened now looks like the one next to it.
+    pub(crate) panes: store::app_state::Panes,
+    /// The drag machinery behind those widths, shared by every page in the
+    /// window (§7.3). A tab the window built gets one; a bare tab — the ones the
+    /// unit tests open — has none, and its page keeps the widths it was given.
+    pub(crate) pane_state: Option<Entity<gpui_kit::component::ResizableState>>,
     /// The swarm this tab is driving, once one has started.
     live: Option<Live>,
     /// The last launch, so a failed boot's Retry can ask for the same thing again
@@ -349,6 +360,10 @@ impl TabContent {
         );
 
         let composer = cx.new(|cx| Composer::new(window, cx));
+        // The status line is the tab page's, under the transcript, where it can
+        // name the agent being shown rather than the coordinator alone (§7.3):
+        // the composer keeps the input and the button.
+        composer.update(cx, |composer, cx| composer.set_show_readout(false, cx));
         let composer_subscription = cx.subscribe_in(
             &composer,
             window,
@@ -374,6 +389,8 @@ impl TabContent {
             transcripts: BTreeMap::new(),
             composer,
             config,
+            panes: store::app_state::Panes::default(),
+            pane_state: None,
             live: None,
             last_launch: None,
             gone: None,
@@ -453,6 +470,32 @@ impl TabContent {
     /// answered (§3). Diagnostics, and how §9.7's failure modes are exercised.
     pub fn swarm_pid(&self) -> Option<u32> {
         self.live.as_ref().and_then(|live| live.pid)
+    }
+
+    /// Give this tab's page the window's drag machinery for its side columns
+    /// (§7.3): every tab's page is the same three columns, so they share one
+    /// state and a split dragged in one tab moves in all of them.
+    pub(crate) fn set_pane_state(
+        &mut self,
+        state: Entity<gpui_kit::component::ResizableState>,
+        cx: &mut Context<Self>,
+    ) {
+        self.pane_state = Some(state);
+        cx.notify();
+    }
+
+    /// The widths the window is showing its side columns at (§7.3).
+    pub fn panes(&self) -> store::app_state::Panes {
+        self.panes
+    }
+
+    /// The same widths, as the window changed them. The panels carry the resize
+    /// themselves; this is what the page opens a tab with.
+    pub(crate) fn set_panes(&mut self, panes: store::app_state::Panes, cx: &mut Context<Self>) {
+        if self.panes != panes {
+            self.panes = panes;
+            cx.notify();
+        }
     }
 
     /// The `tabs/<id>/` directory this tab's swarm writes to, while it has one.
@@ -837,7 +880,6 @@ impl TabContent {
             .todos
             .contains(&selected)
             .then(|| live.model.selected_todos().to_vec());
-        let readout = changes.readout.then(|| live.model.readout_text());
         let activity = changes.activity.then(|| live.model.activity());
 
         let Some(view) = self.transcripts.get(&selected).cloned() else {
@@ -855,10 +897,6 @@ impl TabContent {
         }
         if let Some(todos) = todos {
             view.update(cx, |view, cx| view.set_todos(todos, cx));
-        }
-        if let Some(readout) = readout {
-            self.composer
-                .update(cx, |composer, cx| composer.set_readout(readout, cx));
         }
         if let Some(activity) = activity {
             self.composer

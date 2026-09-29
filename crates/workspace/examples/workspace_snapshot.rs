@@ -20,7 +20,8 @@ use gpui_kit::component::TitleBar;
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
     point, px, size, AnyWindowHandle, AppContext as _, Bounds, Entity, HeadlessAppContext,
-    WindowBounds, WindowOptions,
+    InputEvent as _, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
+    Point, WindowBounds, WindowOptions,
 };
 use session::LaunchPlan;
 use swarm_client::harness::{Fixture, HarnessConfig, STUB_MODEL};
@@ -384,6 +385,150 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     wait_until(&mut cx, "the resumed transcript", |cx| rows(cx, &tab) > 2)?;
     shot(&mut cx, window, dir, "16-retry-resumed.png")?;
 
+    // 17, 18, 19. §7.3: the splits between the three columns are draggable, and a
+    //     double-click on one puts that side back to the width it starts at. These
+    //     are the pixel-level gestures, not calls into the layout.
+    let left = divider(&mut cx, window, "agent-column", Side::Trailing)?;
+    drag_split(&mut cx, window, left, left + point(px(-80.), px(0.)))?;
+    shot(&mut cx, window, dir, "17-narrow-agent-column.png")?;
+
+    let right = divider(&mut cx, window, "composer-column", Side::Leading)?;
+    drag_split(&mut cx, window, right, right + point(px(-120.), px(0.)))?;
+    shot(&mut cx, window, dir, "18-wider-composer.png")?;
+
+    let left = divider(&mut cx, window, "agent-column", Side::Trailing)?;
+    double_click_split(&mut cx, window, left)?;
+    let right = divider(&mut cx, window, "composer-column", Side::Leading)?;
+    double_click_split(&mut cx, window, right)?;
+    shot(&mut cx, window, dir, "19-columns-reset.png")?;
+
+    Ok(())
+}
+
+/// Which edge of a column a divider runs along.
+enum Side {
+    Leading,
+    Trailing,
+}
+
+/// A divider's own point: the edge of the panel it splits, at the middle of the
+/// page, which is where the pointer has to be to take hold of it.
+fn divider(
+    cx: &mut HeadlessAppContext,
+    window: AnyWindowHandle,
+    column: &'static str,
+    side: Side,
+) -> Result<Point<Pixels>, Box<dyn std::error::Error>> {
+    Ok(cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        let bounds = window.find(column).bounds();
+        let page = window.find("tab-page").bounds();
+        let x = match side {
+            Side::Leading => bounds.left(),
+            Side::Trailing => bounds.right(),
+        };
+        point(x, page.center().y)
+    })?)
+}
+
+/// A drag on a divider: press, move past the threshold a drag needs, then to
+/// where the split belongs, and let go.
+///
+/// One event per turn of the event loop, each followed by a frame — a drag is not
+/// a batch of events, and a capture that sent them all at once would leave the
+/// pointer's own task with nothing to run on.
+fn drag_split(
+    cx: &mut HeadlessAppContext,
+    window: AnyWindowHandle,
+    from: Point<Pixels>,
+    to: Point<Pixels>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    press(cx, window, from, 1)?;
+    for at in [from + point(px(6.), px(0.)), to] {
+        move_pointer(cx, window, at)?;
+    }
+    release(cx, window, to, 1)
+}
+
+/// The same gesture the other way: two clicks, the second of which is what a
+/// double-click is.
+fn double_click_split(
+    cx: &mut HeadlessAppContext,
+    window: AnyWindowHandle,
+    at: Point<Pixels>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for count in 1..=2 {
+        press(cx, window, at, count)?;
+        release(cx, window, at, count)?;
+    }
+    Ok(())
+}
+
+fn press(
+    cx: &mut HeadlessAppContext,
+    window: AnyWindowHandle,
+    at: Point<Pixels>,
+    count: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    cx.update_window(window, |_, window, cx| {
+        window.dispatch_event(
+            MouseDownEvent {
+                position: at,
+                modifiers: Modifiers::none(),
+                button: MouseButton::Left,
+                click_count: count,
+                first_mouse: false,
+            }
+            .to_platform_input(),
+            cx,
+        );
+        window.render_frame(cx);
+    })?;
+    cx.run_until_parked();
+    Ok(())
+}
+
+fn release(
+    cx: &mut HeadlessAppContext,
+    window: AnyWindowHandle,
+    at: Point<Pixels>,
+    count: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    cx.update_window(window, |_, window, cx| {
+        window.dispatch_event(
+            MouseUpEvent {
+                position: at,
+                modifiers: Modifiers::none(),
+                button: MouseButton::Left,
+                click_count: count,
+            }
+            .to_platform_input(),
+            cx,
+        );
+        window.render_frame(cx);
+    })?;
+    cx.run_until_parked();
+    Ok(())
+}
+
+fn move_pointer(
+    cx: &mut HeadlessAppContext,
+    window: AnyWindowHandle,
+    at: Point<Pixels>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    cx.update_window(window, |_, window, cx| {
+        window.dispatch_event(
+            MouseMoveEvent {
+                position: at,
+                modifiers: Modifiers::none(),
+                pressed_button: Some(MouseButton::Left),
+            }
+            .to_platform_input(),
+            cx,
+        );
+        window.render_frame(cx);
+    })?;
+    cx.run_until_parked();
     Ok(())
 }
 
