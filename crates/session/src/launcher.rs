@@ -399,18 +399,40 @@ fn window_size(window: u64) -> String {
     if window < 1_000_000 {
         return k_tokens(window);
     }
-    if window.is_multiple_of(1_000_000) {
+    // The picker divides by a million in double precision and prints that double, so this
+    // does the same — and rounds it the way `~,1f` does: the *exact* value of the double to
+    // one decimal, ties away from zero. (Formatting the f64 with Rust's `{:.1}` would round
+    // exact ties to even instead, which reads `1.2M` where evo prints `1.3M`.)
+    let millions = window as f64 / 1_000_000.0;
+    if millions.floor() == millions {
         return format!("{}M", window / 1_000_000);
     }
-    // The tenth, half up from the exact ratio: an integer computation, because the picker
-    // rounds a double and only differs where the ratio lands exactly on a tenth boundary.
-    let whole = window / 1_000_000;
-    let tenths = (window % 1_000_000 + 50_000) / 100_000;
-    match tenths {
-        // Rounded up into the next whole million: the picker still prints the decimal.
-        10 => format!("{}.0M", whole + 1),
-        tenths => format!("{}.{}M", whole, tenths),
+    let tenths = round_tenths(millions);
+    format!("{}.{}M", tenths / 10, tenths % 10)
+}
+
+/// `m` (≥ 1) times ten, rounded to the nearest integer with ties away from zero — the
+/// number of tenths `~,1f` prints. The arithmetic is exact (`m` is decomposed into its
+/// mantissa and exponent), because multiplying the double by ten first would lose the very
+/// bits the rounding turns on: `(format nil "~,1f" 1.65d0)` is `1.6`, and `1.65 * 10` in
+/// double precision is `16.5`, which would round to `17`.
+fn round_tenths(m: f64) -> u64 {
+    let bits = m.to_bits();
+    // A finite double is `mantissa * 2^exponent` with a 53-bit mantissa.
+    let mantissa = (bits & ((1u64 << 52) - 1)) | (1u64 << 52);
+    let exponent = ((bits >> 52) & 0x7ff) as i64 - 1075;
+    // `m * 10 = mantissa * 5 * 2^(exponent + 1)`, as a fraction numerator/denominator.
+    let power = exponent + 1;
+    let mut numerator = mantissa as i128 * 5;
+    let mut denominator = 1i128;
+    if power >= 0 {
+        numerator <<= power;
+    } else {
+        denominator <<= -power;
     }
+    // Nearest with ties away from zero is `floor(m * 10 + 1/2)`, and neither value is
+    // negative here, so integer division truncating is that floor.
+    ((2 * numerator + denominator) / (2 * denominator)) as u64
 }
 
 /// The first option of every chooser.
@@ -465,8 +487,19 @@ pub fn home_short(path: &str, home: Option<&str>) -> String {
 // --- history (§9.5) -----------------------------------------------------------------
 
 /// The history rows: merged by session path, newest first, with unknown parts of the meta
-/// line left out. `now` is the clock the relative times are read against (epoch seconds).
-pub fn history_rows(entries: &[HistoryEntry], now: i64, home: Option<&str>) -> Vec<HistoryRow> {
+/// line left out.
+///
+/// `now` is the clock the relative times are read against (epoch seconds) and
+/// `offset_seconds` the caller's local UTC offset, which the relative words use for their
+/// day boundaries and the tooltip prints the instant in — a desktop shows a session's time
+/// where the person is, not on the machine that wrote the journal. Instants stay epoch
+/// internally, so nothing here depends on the offset being the same between two calls.
+pub fn history_rows(
+    entries: &[HistoryEntry],
+    now: i64,
+    offset_seconds: i32,
+    home: Option<&str>,
+) -> Vec<HistoryRow> {
     // Newest first; a session whose time is unknown sorts last, and entries with the same
     // time keep the order they came in.
     let mut ordered: Vec<&HistoryEntry> = entries.iter().collect();
@@ -490,15 +523,24 @@ pub fn history_rows(entries: &[HistoryEntry], now: i64, home: Option<&str>) -> V
             None => merged.push(entry.clone()),
         }
     }
-    merged.iter().map(|entry| history_row(entry, now, home)).collect()
+    merged
+        .iter()
+        .map(|entry| history_row(entry, now, offset_seconds, home))
+        .collect()
 }
 
-fn history_row(entry: &HistoryEntry, now: i64, home: Option<&str>) -> HistoryRow {
+fn history_row(entry: &HistoryEntry, now: i64, offset_seconds: i32, home: Option<&str>) -> HistoryRow {
     HistoryRow {
         title: base_name(&entry.folder),
         subtitle: home_short(&entry.folder, home),
-        meta: meta_line(&entry.lanes, entry.coordinator_model.as_deref(), entry.when.epoch_seconds(), now),
-        tooltip: tooltip_line(entry),
+        meta: meta_line(
+            &entry.lanes,
+            entry.coordinator_model.as_deref(),
+            entry.when.epoch_seconds(),
+            now,
+            offset_seconds,
+        ),
+        tooltip: tooltip_line(entry, offset_seconds),
         session_path: entry.session_path.clone(),
         folder: entry.folder.clone(),
         coordinator_model: entry.coordinator_model.clone(),
@@ -507,8 +549,9 @@ fn history_row(entry: &HistoryEntry, now: i64, home: Option<&str>) -> HistoryRow
     }
 }
 
-/// The row's tooltip: everything known about the session, in one line.
-fn tooltip_line(entry: &HistoryEntry) -> String {
+/// The row's tooltip: everything known about the session, in one line, with the instant in
+/// the caller's own offset.
+fn tooltip_line(entry: &HistoryEntry, offset_seconds: i32) -> String {
     let mut parts: Vec<String> = Vec::new();
     if !entry.folder.is_empty() {
         // The full path, not the `~`-shortened one the row shows: the tooltip is where the
@@ -520,7 +563,7 @@ fn tooltip_line(entry: &HistoryEntry) -> String {
         parts.push(session);
     }
     if let Some(when) = entry.when.epoch_seconds() {
-        parts.push(absolute_time(when));
+        parts.push(absolute_time(when, offset_seconds));
     }
     if let Some(model) = entry.coordinator_model.as_deref().filter(|model| !model.is_empty()) {
         parts.push(format!("coordinator: {}", model));
@@ -534,32 +577,48 @@ fn tooltip_line(entry: &HistoryEntry) -> String {
     parts.join(" · ")
 }
 
-/// An instant in full, with the zone spelled out: `2026-09-29 09:25:44 UTC (+00:00)`.
+/// An instant in full, in a caller-given offset, with that offset spelled out:
+/// `2026-09-29 17:25:44 +08:00`.
 ///
-/// Every entry is normalized to UTC — a journal header may carry another offset, and the
-/// tooltip says which zone the printed time is in instead of leaving it to be guessed.
-fn absolute_time(when: i64) -> String {
-    let (year, month, day) = civil_from_epoch(when);
-    let seconds_of_day = when.rem_euclid(86_400);
+/// The offset is always printed, even when it is `+00:00`: the instant is epoch seconds and
+/// a reader has to be told which zone the clock face is in, never left to assume one.
+fn absolute_time(when: i64, offset_seconds: i32) -> String {
+    let local = when + offset_seconds as i64;
+    let (year, month, day) = civil_from_epoch(local);
+    let seconds_of_day = local.rem_euclid(86_400);
     format!(
-        "{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC (+00:00)",
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02} {}",
         year,
         month,
         day,
         seconds_of_day / 3600,
         (seconds_of_day % 3600) / 60,
-        seconds_of_day % 60
+        seconds_of_day % 60,
+        offset_label(offset_seconds)
     )
 }
 
+/// A UTC offset as `+08:00`, `-05:00`, `+05:30`.
+fn offset_label(offset_seconds: i32) -> String {
+    let sign = if offset_seconds < 0 { '-' } else { '+' };
+    let magnitude = offset_seconds.unsigned_abs();
+    format!("{}{:02}:{:02}", sign, magnitude / 3600, (magnitude % 3600) / 60)
+}
+
 /// The meta line: what is known about the session, unknown parts left out.
-fn meta_line(lanes: &Option<u32>, coordinator_model: Option<&str>, when: Option<i64>, now: i64) -> String {
+fn meta_line(
+    lanes: &Option<u32>,
+    coordinator_model: Option<&str>,
+    when: Option<i64>,
+    now: i64,
+    offset_seconds: i32,
+) -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Some(lanes) = lanes {
         parts.push(format!("{} lane{}", lanes, if *lanes == 1 { "" } else { "s" }));
     }
     if let Some(when) = when {
-        parts.push(relative_time(when, now));
+        parts.push(relative_time(when, now, offset_seconds));
     }
     if let Some(model) = coordinator_model.filter(|model| !model.is_empty()) {
         parts.push(format!("coordinator: {}", model));
@@ -580,9 +639,14 @@ fn base_name(path: &str) -> String {
 /// How long ago, in the history list's words: `just now`, `5m ago`, `2h ago`, `yesterday`,
 /// `3d ago`, then the date — `12 Sep`, or `12 Sep 2025` when it is another year.
 ///
+/// `offset_seconds` is the local UTC offset: `yesterday` means the calendar day before the
+/// caller's today (so an evening session is still yesterday the next morning, and one from
+/// two evenings ago is not), and the dates are the caller's calendar dates. The elapsed-hour
+/// words are plain elapsed time and need no zone.
+///
 /// A time in the future reads as `just now`: the clock the app compares against is the
 /// same machine's.
-pub fn relative_time(when: i64, now: i64) -> String {
+pub fn relative_time(when: i64, now: i64, offset_seconds: i32) -> String {
     let elapsed = now - when;
     if elapsed < 60 {
         return "just now".to_string();
@@ -593,15 +657,18 @@ pub fn relative_time(when: i64, now: i64) -> String {
     if elapsed < 86_400 {
         return format!("{}h ago", elapsed / 3600);
     }
-    if elapsed < 2 * 86_400 {
+    // Elapsed time is at least a day, so the local day is at least yesterday's: with a fixed
+    // offset, `days` here is ≥ 1 by construction.
+    let offset = offset_seconds as i64;
+    let days = (now + offset).div_euclid(86_400) - (when + offset).div_euclid(86_400);
+    if days == 1 {
         return "yesterday".to_string();
     }
-    let days = elapsed / 86_400;
     if days < 7 {
         return format!("{}d ago", days);
     }
-    let (year, month, day) = civil_from_epoch(when);
-    let (this_year, ..) = civil_from_epoch(now);
+    let (year, month, day) = civil_from_epoch(when + offset);
+    let (this_year, ..) = civil_from_epoch(now + offset);
     if year == this_year {
         format!("{} {}", day, MONTHS[(month - 1) as usize])
     } else {
@@ -814,10 +881,17 @@ impl Launcher {
     }
 
     /// The resumable sessions, from the disk scan and the app's own recents (§9.5). `now`
-    /// is the clock the relative times read against, `home` the directory to shorten paths
-    /// around — the tab passes the same home it shows elsewhere.
-    pub fn set_history(&mut self, entries: &[HistoryEntry], now: i64, home: Option<&str>) -> bool {
-        let rows = history_rows(entries, now, home);
+    /// is the clock the relative times read against, `offset_seconds` the local UTC offset
+    /// the rows are shown in, `home` the directory to shorten paths around — the tab passes
+    /// the same home it shows elsewhere.
+    pub fn set_history(
+        &mut self,
+        entries: &[HistoryEntry],
+        now: i64,
+        offset_seconds: i32,
+        home: Option<&str>,
+    ) -> bool {
+        let rows = history_rows(entries, now, offset_seconds, home);
         if self.history == rows {
             return false;
         }
