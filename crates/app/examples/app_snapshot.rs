@@ -309,11 +309,19 @@ class Handler(BaseHTTPRequestHandler):
             reply = "The checklist is in the panel above."
         elif role == "lane" and "TODOS" in newest:
             tool = ("todo", {"items": TODO_ITEMS})
-        elif not has_result and call_from(text):
-            # The coordinator's opening turn: the delegation.  Keyed on there
-            # being no tool result yet rather than on a global, so every swarm
-            # in the run delegates on its own first turn.
-            tool = call_from(text)
+        elif newest.startswith("[lane "):
+            # A lane notice — `[lane 1] run ended (stop) — task: …` — is the swarm
+            # telling the coordinator news (`session::RowKind::LaneNotice`), not a
+            # prompt from the reader.  Answer it and hold the turn: the `CALL`
+            # further up the history belongs to an earlier prompt, and replaying it
+            # delegates the same task again every time a lane's run ends.
+            reply = "Noted."
+        elif not has_result and call_from(newest):
+            # The coordinator's opening turn: the delegation.  Keyed on the newest
+            # block — the prompt itself, so a notice in the history cannot replay
+            # it — and on there being no tool result yet rather than on a global,
+            # so every swarm in the run delegates on its own first turn.
+            tool = call_from(newest)
         elif "BIG" in newest:
             chunks = 8
         elif "SLOW" in newest:
@@ -577,6 +585,10 @@ fn capture(dir: &Path, scale: f32, only: &[String]) -> Result<(), Box<dyn std::e
     let first = view.read_with(&cx, |view, _| view.tabs()[0].clone());
     launch(&mut cx, window, &first, &fixture.project, 2)?;
     wait_running(&mut cx, &first, "the first swarm")?;
+    // `/health` answers before a swarm's lanes are up, and the lane list draws
+    // `starting` for each one that has not begun: wait for the rows to settle, or
+    // the picture is of a swarm still booting rather than of one running.
+    wait_until(&mut cx, |cx| !lanes_starting(cx, &first))?;
 
     click(&mut cx, window, "tab-add")?;
     let second = view.read_with(&cx, |view, _| view.tabs()[1].clone());
@@ -1065,6 +1077,25 @@ fn lane_working(cx: &HeadlessAppContext, tab: &Entity<workspace::TabContent>, n:
         tab.model()
             .and_then(|model| model.lane_model(n))
             .is_some_and(|lane| lane.activity() != session::Activity::Idle)
+    })
+}
+
+/// Whether the tab's lane list still has a lane booting.
+///
+/// The list is the swarm's own account (`GET /lanes`, kept current by its
+/// `lane-state` events), and it is what the agent list draws: a lane that has not
+/// begun reads `starting` there while the lane's *own* model says nothing at all.
+/// A row the swarm has not reported yet is not the same as one that is starting,
+/// so an empty list counts as settled.
+fn lanes_starting(cx: &HeadlessAppContext, tab: &Entity<workspace::TabContent>) -> bool {
+    tab.read_with(cx, |tab, _| {
+        tab.model().is_some_and(|model| {
+            model
+                .lanes()
+                .lanes
+                .iter()
+                .any(|row| row.status == session::LaneStatus::Starting)
+        })
     })
 }
 
