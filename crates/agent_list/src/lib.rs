@@ -11,6 +11,7 @@
 //! AgentList::new(cx)                                  the entity
 //! set_lanes(&LaneList, cx)                            GET /lanes + lane-state events
 //! set_coordinator(activity, reconnecting, cx)         /state.status + the stream badge
+//! set_coordinator_clock(Option<String>, cx)           TabModel::coordinator_step_started()
 //! set_selected(AgentKey, cx)                          TabModel::selected
 //! set_down_reason(lane, Option<String>, cx)           §9.7: why a lane is down
 //! → AgentListEvent::Select(AgentKey)                  the owner calls TabModel::select
@@ -70,6 +71,10 @@ pub enum AgentListEvent {
 pub struct AgentList {
     lanes: LaneList,
     activity: Activity,
+    /// The coordinator's step clock, already formatted by the owner
+    /// (`session::StepClock::clock_label`). Shown in the trailing cell while the
+    /// coordinator runs or compacts, where an idle row shows its activity word.
+    coordinator_clock: Option<String>,
     /// The coordinator's stream is down and retrying (§9.7): the `reconnecting` badge.
     coordinator_reconnecting: bool,
     selected: AgentKey,
@@ -87,6 +92,7 @@ impl AgentList {
         Self {
             lanes: LaneList::new(),
             activity: Activity::Idle,
+            coordinator_clock: None,
             coordinator_reconnecting: false,
             selected: AgentKey::Coordinator,
             down_reasons: BTreeMap::new(),
@@ -113,6 +119,21 @@ impl AgentList {
         if self.activity != activity || self.coordinator_reconnecting != reconnecting {
             self.activity = activity;
             self.coordinator_reconnecting = reconnecting;
+            cx.notify();
+        }
+    }
+
+    /// The coordinator's step clock, formatted the way the owner wants it shown
+    /// (`session::StepClock::clock_label(now_millis)`, which counts in the same words a
+    /// lane's `step_age` does). It takes the trailing cell while the coordinator is running
+    /// or compacting — the activity word is what shows the rest of the time, and while the
+    /// clock is unknown — so an idle row never claims a step.
+    ///
+    /// `None` (or a blank string) clears it: the run ended, or its start was never stamped.
+    pub fn set_coordinator_clock(&mut self, clock: Option<String>, cx: &mut Context<Self>) {
+        let clock = clock.filter(|clock| !clock.trim().is_empty());
+        if self.coordinator_clock != clock {
+            self.coordinator_clock = clock;
             cx.notify();
         }
     }
@@ -191,26 +212,38 @@ impl AgentList {
     fn coordinator_view(&self, theme: &Theme) -> RowView {
         let status = activity_status(self.activity);
         let word = activity_word(self.activity);
+        // The step clock takes the trailing cell a lane's own clock sits in, but only while
+        // the coordinator is actually doing something: an idle `main` says "idle", not the
+        // seconds since a run that already ended.
+        let busy = matches!(self.activity, Activity::Running | Activity::Compacting);
+        let clock = busy.then(|| self.coordinator_clock.clone()).flatten();
         let badge = self
             .coordinator_reconnecting
             .then(|| SharedString::from("reconnecting"));
         let mut tooltip = format!("main — the coordinator · {word}");
+        if let Some(clock) = &clock {
+            tooltip.push_str(&format!(" · step {clock}"));
+        }
         if self.coordinator_reconnecting {
             tooltip.push_str("\nstream reconnecting");
         }
+        let aria_step = match &clock {
+            Some(clock) => format!(", step {clock}"),
+            None => String::new(),
+        };
         RowView {
             key: AgentKey::Coordinator,
             glyph: status.glyph(),
             glyph_color: status_color(status, theme),
             // No lane number: `main` sits in the label column, so it lines up with the
-            // tasks below it, and the activity takes the trailing cell a clock would.
+            // tasks below it, and the clock (or the activity word) takes the trailing cell.
             lead: SharedString::default(),
             label: "main".into(),
             label_color: theme.foreground,
-            trailing: Some(word.into()),
+            trailing: Some(clock.unwrap_or_else(|| word.to_string()).into()),
             badge,
             tooltip: tooltip.into(),
-            aria: format!("{} main, {word}", status.glyph()).into(),
+            aria: format!("{} main, {word}{aria_step}", status.glyph()).into(),
         }
     }
 
@@ -436,7 +469,8 @@ pub fn status_color(status: LaneStatus, theme: &Theme) -> Hsla {
         LaneStatus::Working => theme.success,
         LaneStatus::Compacting => theme.warning,
         LaneStatus::Idle => theme.muted_foreground,
-        LaneStatus::Starting => theme.muted_foreground.opacity(0.55),
+        // The dashed glyph is what says "not up yet"; the color stays legible (§7.3).
+        LaneStatus::Starting => theme.muted_foreground.opacity(0.85),
         LaneStatus::Down => theme.danger,
     }
 }
@@ -959,6 +993,77 @@ mod tests {
             assert!(window.find(badge_id(AgentKey::Coordinator)).visible());
             // The activity keeps its cell: the badge is added after it, not instead.
             assert!(window.try_find(clock_id(AgentKey::Coordinator)).is_some());
+        });
+    }
+
+    /// The coordinator's row as the view model has it, written out.
+    fn coordinator_trailing(f: &Fixture, cx: &App) -> Option<String> {
+        f.list
+            .read(cx)
+            .coordinator_view(cx.theme())
+            .trailing
+            .map(|trailing| trailing.to_string())
+    }
+
+    /// The coordinator's step clock shares the trailing cell with the activity word: it is
+    /// shown while the coordinator runs or compacts, and the word is what shows otherwise —
+    /// so an idle `main` never claims a step. Lanes keep their own clock in that cell, and
+    /// the owner formats both with the same words.
+    #[gpui_kit::test]
+    fn the_coordinator_clock_takes_the_trailing_cell_only_while_it_works(cx: &mut TestAppContext) {
+        let f = open(cx, lanes(vec![lane(1, LaneStatus::Idle, None)]));
+        f.act(cx, |window, cx| {
+            // Idle: the word, even with a clock in hand.
+            f.list.update(cx, |list, cx| {
+                list.set_coordinator(Activity::Idle, false, cx);
+                list.set_coordinator_clock(Some("41s".to_string()), cx);
+            });
+            assert_eq!(coordinator_trailing(&f, cx).as_deref(), Some("idle"));
+
+            // Running with a clock: the clock, in the cell the lanes use, and the row's aria
+            // says the step as a lane row's does.
+            f.list.update(cx, |list, cx| {
+                list.set_coordinator(Activity::Running, false, cx);
+            });
+            assert_eq!(coordinator_trailing(&f, cx).as_deref(), Some("41s"));
+            window.render_frame(cx);
+            assert!(window.find(clock_id(AgentKey::Coordinator)).visible());
+            let main = window
+                .find(row_id(AgentKey::Coordinator))
+                .label()
+                .unwrap_or_default()
+                .to_string();
+            assert_eq!(main, "● main, running, step 41s");
+
+            // A compaction is work too.
+            f.list.update(cx, |list, cx| {
+                list.set_coordinator(Activity::Compacting, false, cx);
+                list.set_coordinator_clock(Some("3m".to_string()), cx);
+            });
+            assert_eq!(coordinator_trailing(&f, cx).as_deref(), Some("3m"));
+
+            // No clock (the step was never stamped, or the run just ended): the word is what
+            // shows, and a blank string is no clock either.
+            f.list.update(cx, |list, cx| list.set_coordinator_clock(None, cx));
+            assert_eq!(coordinator_trailing(&f, cx).as_deref(), Some("compacting"));
+            f.list.update(cx, |list, cx| {
+                list.set_coordinator_clock(Some("   ".to_string()), cx)
+            });
+            assert_eq!(coordinator_trailing(&f, cx).as_deref(), Some("compacting"));
+
+            // A step that just began is a real clock, not an empty cell.
+            f.list.update(cx, |list, cx| {
+                list.set_coordinator(Activity::Running, false, cx);
+                list.set_coordinator_clock(Some("0s".to_string()), cx);
+            });
+            assert_eq!(coordinator_trailing(&f, cx).as_deref(), Some("0s"));
+            window.render_frame(cx);
+            let main = window
+                .find(row_id(AgentKey::Coordinator))
+                .label()
+                .unwrap_or_default()
+                .to_string();
+            assert_eq!(main, "● main, running, step 0s");
         });
     }
 

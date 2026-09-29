@@ -21,7 +21,7 @@ use gpui_kit::{
     HeadlessAppContext, InputEvent as _, IntoElement, MouseMoveEvent, ParentElement as _, Render,
     Styled as _, Subscription, Task, WeakEntity, Window, WindowBounds, WindowOptions,
 };
-use session::{Activity, AgentKey, LaneList, LaneRow, LaneStatus, SwarmInfo};
+use session::{short_duration, Activity, AgentKey, LaneList, LaneRow, LaneStatus, SwarmInfo};
 
 /// The live window: the column, and room for the middle and right columns beside it.
 const WINDOW_SIZE: (f32, f32) = (900., 420.);
@@ -135,6 +135,10 @@ fn lane_row(step: usize, lane: u32, status: LaneStatus) -> LaneRow {
 struct Script {
     lanes: LaneList,
     activity: Activity,
+    /// The coordinator's step clock, as the owner formats it from
+    /// `TabModel::coordinator_step_started()` — the same `short_duration` a lane's
+    /// `step_age` goes through, so the two kinds of row count in one voice.
+    coordinator_clock: Option<String>,
     reconnecting: bool,
     selected: AgentKey,
     down_reason: Option<String>,
@@ -154,13 +158,15 @@ impl Script {
                 lanes,
             },
             // The coordinator's own row: idle before the first run, then a run, then a
-            // compaction, like the TUI's status line.
+            // compaction, like the TUI's status line. The clock runs with the step, and the
+            // list keeps it out of the idle frames.
             activity: [
                 Activity::Idle,
                 Activity::Running,
                 Activity::Running,
                 Activity::Compacting,
             ][step % 4],
+            coordinator_clock: Some(short_duration(12 + (step as u64) * 7)),
             // The stream drops for a while, so the badge and its effect on the row are
             // both on screen.
             reconnecting: matches!(step % 8, 3 | 4),
@@ -227,6 +233,7 @@ impl Demo {
         self.list.update(cx, |list, cx| {
             list.set_lanes(&script.lanes, cx);
             list.set_coordinator(script.activity, script.reconnecting, cx);
+            list.set_coordinator_clock(script.coordinator_clock.clone(), cx);
             list.set_selected(script.selected, cx);
             for lane in 1..=LANE_COUNT {
                 // The reason is the failing lane's, and only while it is down.
@@ -323,6 +330,14 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
         demo.apply(cx);
     });
     shot(&mut cx, window, dir, "03-coordinator-reconnecting.png")?;
+
+    // The coordinator's own step clock: `main` selected, running, its trailing cell counting
+    // in the same words the lane rows below it use.
+    demo.update(&mut cx, |demo, cx| {
+        demo.step = 2;
+        demo.apply(cx);
+    });
+    shot(&mut cx, window, dir, "07-coordinator-step-clock.png")?;
 
     // A hovered row, so the hover fill is on screen too.
     hover(&mut cx, window, AgentKey::Lane(5))?;
