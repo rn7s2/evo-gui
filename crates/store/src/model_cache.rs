@@ -117,7 +117,10 @@ impl ModelCache {
                     id,
                     provider: m.get("provider").and_then(Value::as_str).map(str::to_owned),
                     api: m.get("api").and_then(Value::as_str).map(str::to_owned),
-                    context_window: m.get("context-window").and_then(Value::as_u64),
+                    // On the wire evo writes `context_window`: the server's JSON
+                    // encoder turns keyword dashes into underscores (verified
+                    // against a live `--no-userspace` server's `/registry`).
+                    context_window: m.get("context_window").and_then(Value::as_u64),
                     effort: string_array(m.get("effort")),
                 })
             })
@@ -218,22 +221,24 @@ mod tests {
         Root::at(dir)
     }
 
-    /// A registry body shaped like the server's JSON encoder produces it:
-    /// plists become objects, keywords become lower-cased strings.
+    /// A registry body shaped the way the server really sends it: plist keys
+    /// become snake_case JSON keys (`:context-window` → `context_window`), and
+    /// `:apis` is the registered api set. Key names and types verified against
+    /// a live `evo-agent serve --no-userspace` server, 2026-09-29.
     fn registry() -> Value {
         serde_json::json!({
             "models": [
                 {"id": "claude-opus-5", "provider": "anthropic", "api": "anthropic-messages",
-                 "context-window": 200000, "max-output": 64000, "vision": true,
-                 "thinking-mode": "adaptive", "effort": ["low", "medium", "high", "xhigh", "max"]},
+                 "context_window": 200000, "max_output": 64000, "vision": true,
+                 "thinking_mode": "adaptive", "effort": ["low", "medium", "high", "xhigh", "max"]},
                 {"id": "ark-deepseek-v4.1-flash", "provider": "aiden", "api": "ark-chat",
-                 "context-window": 936000, "max-output": 32000, "vision": false,
-                 "thinking-mode": "effort-only", "effort": null},
+                 "context_window": 936000, "max_output": 32000, "vision": false,
+                 "thinking_mode": "effort-only", "effort": null},
                 {"id": "claude-sonnet-5", "provider": "proxy", "api": "anthropic-oauth-messages",
-                 "context-window": 200000, "max-output": 64000, "vision": true,
-                 "thinking-mode": "adaptive", "effort": ["low", "max"]}
+                 "context_window": 1000000, "max_output": 128000, "vision": true,
+                 "thinking_mode": "adaptive", "effort": ["low", "max"]}
             ],
-            "providers": [{"key": "anthropic", "has-api-key": true}],
+            "providers": [{"key": "anthropic", "has_api_key": true}],
             "apis": ["anthropic-messages", "ark-chat"],
             "tools": []
         })

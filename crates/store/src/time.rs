@@ -141,7 +141,8 @@ mod tests {
         assert_eq!(format_rfc3339(t), "2026-09-29T09:09:56Z");
         assert_eq!(parse_rfc3339("2026-09-29T17:09:56+08:00").unwrap(), t);
         assert_eq!(parse_rfc3339("2026-09-29T09:09:56.123Z").unwrap(), t);
-        assert_eq!(parse_rfc3339("2026-09-29T09:09:56+0800").unwrap(), t);
+        assert_eq!(parse_rfc3339("2026-09-29T09:09:56+0800").unwrap(), t - 8 * 3600);
+        assert_eq!(parse_rfc3339("2026-09-29T17:09:56+0800").unwrap(), t);
         assert!(parse_rfc3339("not a date").is_none());
         assert!(parse_rfc3339("2026-13-29T09:09:56Z").is_none());
     }

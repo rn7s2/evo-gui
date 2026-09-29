@@ -142,10 +142,13 @@ pub fn scan(dir: &Path, budget: &ScanBudget) -> ScanOutcome {
             break;
         }
         outcome.files_read += 1;
-        match read_history(&path, mtime, budget.max_file_bytes) {
-            Ok(Some(entry)) => outcome.entries.push(entry),
-            Ok(None) => {}
-            Err(_) => {} // unreadable or no longer there: skip it
+        // A file we could not read, or one whose byte budget cut it short, is
+        // skipped rather than counted.
+        if let Ok((entry, truncated)) = read_history(&path, mtime, budget.max_file_bytes) {
+            outcome.stopped_early |= truncated;
+            if let Some(entry) = entry {
+                outcome.entries.push(entry);
+            }
         }
     }
     // Newest first, then by path so equal mtimes still order deterministically.
@@ -289,16 +292,29 @@ fn candidates(dir: &Path) -> Vec<(PathBuf, u64)> {
     out
 }
 
-/// Read one journal far enough to describe it, or `None` when it is not a
-/// resumable swarm.
-fn read_history(path: &Path, mtime: u64, max_bytes: u64) -> io::Result<Option<HistoryEntry>> {
+/// Read one journal far enough to describe it.
+///
+/// `Ok((Some(entry), …))` when the file is a resumable swarm; `Ok((None, …))`
+/// when it is not. The flag says whether the byte budget stopped the read
+/// before the end of the file, so the caller can report a truncated scan.
+///
+/// The read is line-oriented and only looks at lines that begin an entry
+/// (`(:type …` in column 0); entries we care about are buffered until they
+/// balance, everything else is skipped. A journal entry whose *text* happens to
+/// contain a column-0 line that looks like one of those headers would be read as
+/// one — the price of not walking every byte of every journal.
+fn read_history(path: &Path, mtime: u64, max_bytes: u64) -> io::Result<(Option<HistoryEntry>, bool)> {
     let file = fs::File::open(path)?;
     let mut reader = BufReader::new(file);
 
     let mut read: u64 = 0;
     let mut header: Option<Sexp> = None;
     let mut swarm: Option<Sexp> = None;
-    let mut coordinator_model: Option<(Option<String>, Option<String>)> = None;
+    // A recorded model change is authoritative and later than the messages
+    // around it, so the *last* one wins; a journal that never recorded one
+    // falls back to the model of its first assistant message.
+    let mut model_change: Option<String> = None;
+    let mut first_message_model: Option<String> = None;
     let mut pending: Option<String> = None;
     let mut truncated = false;
 
@@ -328,7 +344,7 @@ fn read_history(path: &Path, mtime: u64, max_bytes: u64) -> io::Result<Option<Hi
                 };
                 if complete {
                     let text = pending.take().unwrap();
-                    record(&text, &mut swarm, &mut coordinator_model);
+                    record(&text, &mut swarm, &mut model_change);
                 }
             }
             None => {
@@ -345,10 +361,20 @@ fn read_history(path: &Path, mtime: u64, max_bytes: u64) -> io::Result<Option<Hi
                 match entry_type_of(trimmed) {
                     Some("custom") | Some("model-change") => {
                         if balanced(trimmed) {
-                            record(trimmed, &mut swarm, &mut coordinator_model);
+                            record(trimmed, &mut swarm, &mut model_change);
                         } else {
                             pending = Some(trimmed.to_owned());
                         }
+                    }
+                    // A message entry is never buffered: it carries the whole
+                    // conversation turn. Only its header is read, and only for
+                    // the model it names.
+                    // Only ever needed as the fallback, and only the first one:
+                    // a later message cannot be cheaper to read than this one.
+                    Some("message")
+                        if model_change.is_none() && first_message_model.is_none() =>
+                    {
+                        first_message_model = message_model(trimmed);
                     }
                     _ => {}
                 }
@@ -362,22 +388,22 @@ fn read_history(path: &Path, mtime: u64, max_bytes: u64) -> io::Result<Option<Hi
             if header.is_none() && buffer.trim_start().starts_with("(:type :session") {
                 header = Sexp::parse(&buffer).ok();
             } else if header.is_some() {
-                record(&buffer, &mut swarm, &mut coordinator_model);
+                record(&buffer, &mut swarm, &mut model_change);
             }
         }
     }
 
     if truncated && swarm.is_none() {
-        return Ok(None);
+        return Ok((None, truncated));
     }
     let Some(header) = header else {
-        return Ok(None);
+        return Ok((None, truncated));
     };
     if header.entry_type() != Some("session") {
-        return Ok(None);
+        return Ok((None, truncated));
     }
     let Some(swarm) = swarm else {
-        return Ok(None); // not a swarm session: not resumable
+        return Ok((None, truncated)); // not a swarm session: not resumable
     };
 
     let lane_cwds: Vec<PathBuf> = swarm
@@ -400,30 +426,28 @@ fn read_history(path: &Path, mtime: u64, max_bytes: u64) -> io::Result<Option<Hi
         .or_else(|| swarm.get_str("dir").map(PathBuf::from))
         .unwrap_or_default();
     let when = header.get_str("timestamp").unwrap_or_default().to_string();
-    let (model, _provider) = coordinator_model.unwrap_or((None, None));
 
-    Ok(Some(HistoryEntry {
-        session: path.to_path_buf(),
-        folder,
-        when_epoch: time::parse_rfc3339(&when),
-        when: if when.is_empty() { time::format_rfc3339(mtime) } else { when },
-        mtime,
-        session_id: header.get_str("id").unwrap_or_default().to_string(),
-        swarm_id: swarm.get_str("id").unwrap_or_default().to_string(),
-        workers,
-        lanes,
-        lane_cwds,
-        models: TabModels { coordinator: model, lanes: None },
-        source: HistorySource::Scanned,
-    }))
+    Ok((
+        Some(HistoryEntry {
+            session: path.to_path_buf(),
+            folder,
+            when_epoch: time::parse_rfc3339(&when),
+            when: if when.is_empty() { time::format_rfc3339(mtime) } else { when },
+            mtime,
+            session_id: header.get_str("id").unwrap_or_default().to_string(),
+            swarm_id: swarm.get_str("id").unwrap_or_default().to_string(),
+            workers,
+            lanes,
+            lane_cwds,
+            models: TabModels { coordinator: model_change.or(first_message_model), lanes: None },
+            source: HistorySource::Scanned,
+        }),
+        truncated,
+    ))
 }
 
 /// Remember the interesting parts of one parsed form.
-fn record(
-    text: &str,
-    swarm: &mut Option<Sexp>,
-    coordinator_model: &mut Option<(Option<String>, Option<String>)>,
-) {
+fn record(text: &str, swarm: &mut Option<Sexp>, model_change: &mut Option<String>) {
     let Ok(form) = Sexp::parse(text) else { return };
     match form.entry_type() {
         // Only the newest record counts: a swarm that grew or shrank journals
@@ -434,20 +458,67 @@ fn record(
             }
         }
         Some("model-change") => {
-            *coordinator_model = Some((
-                form.get_str("model").map(str::to_owned),
-                form.get_str("provider").map(str::to_owned),
-            ));
+            if let Some(model) = form.get_str("model") {
+                *model_change = Some(model.to_owned());
+            }
         }
         _ => {}
     }
 }
 
+/// The model an assistant message names, read out of its header.
+///
+/// evo journals the model on every assistant message
+/// (`:message (:role :assistant :api … :provider … :model "…" :stop-reason …)`),
+/// which is the only place a real session states it — most journals contain no
+/// `:model-change` at all. A message entry spans lines (its text has newlines),
+/// so only the header is read: everything before the message's own `:content`,
+/// walked as key/value pairs with the shared reader. A header cut short by the
+/// line end simply ends the walk.
+fn message_model(line: &str) -> Option<String> {
+    /// The header is a few hundred bytes; never look past this much of a line.
+    const HEADER_CAP: usize = 4096;
+
+    let rest = line.strip_prefix("(:type :message ")?;
+    // The cap is in bytes and journals are UTF-8: step back to a character
+    // boundary rather than panicking on a multi-byte character at the edge.
+    let mut cap = rest.len().min(HEADER_CAP);
+    while !rest.is_char_boundary(cap) {
+        cap -= 1;
+    }
+    let window = &rest[..cap];
+    let after_body = &window[window.find(":message (")? + ":message (".len()..];
+    let header = match after_body.find(" :content ") {
+        Some(content) => &after_body[..content],
+        None => after_body,
+    };
+
+    let mut role = None;
+    let mut model = None;
+    let mut pos = 0;
+    while let Ok((key, read)) = Sexp::parse_prefix(&header[pos..]) {
+        pos += read;
+        let Some(key) = key.as_symbol() else { break };
+        let Ok((value, read)) = Sexp::parse_prefix(&header[pos..]) else { break };
+        pos += read;
+        match key {
+            "role" => role = value.as_symbol().map(str::to_owned),
+            "model" => model = value.as_str().map(str::to_owned),
+            _ => {}
+        }
+    }
+    match role.as_deref() {
+        Some("assistant") => model,
+        _ => None,
+    }
+}
+
 /// The `:type` of a line that starts an entry, cheaply — without parsing.
+/// The leading colon is dropped, the same way [`Sexp::entry_type`] reports it.
 fn entry_type_of(line: &str) -> Option<&str> {
     let rest = line.strip_prefix("(:type ")?;
     let end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
-    Some(&rest[..end])
+    Some(rest[..end].trim_start_matches(':'))
 }
 
 /// True when the text holds a whole form: every paren closed, no open string.
@@ -519,6 +590,18 @@ mod tests {
         )
     }
 
+    /// An assistant message in the shape evo writes it: the header carries the
+    /// model, and the text — which may span lines — follows `:content`.
+    fn assistant_message(model: &str, text: &str) -> String {
+        format!(
+            "(:type :message :id \"ma\" :parent-id nil :timestamp \"2026-09-29T01:00:03Z\" \
+             :message (:role :assistant :api :anthropic-messages :provider :aiden \
+             :model \"{model}\" :stop-reason :end-turn \
+             :usage (:input 4 :output 118 :cache-read 0 :cache-write 168541) \
+             :content ((:type :text :text \"{text}\"))))"
+        )
+    }
+
     /// A sessions tree with one journal per case; returns (root, sessions dir).
     fn fixture(name: &str) -> (Root, PathBuf) {
         let root = temp_root(name);
@@ -526,7 +609,9 @@ mod tests {
         fs::create_dir_all(dir.join("-Users-x-foo")).unwrap();
         fs::create_dir_all(dir.join("-Users-x-bar")).unwrap();
 
-        // A live swarm: header, chatter, a swarm record, more chatter.
+        // A live swarm: header, chatter, a swarm record, then an assistant
+        // message that names the model. Most real journals have no
+        // `:model-change` at all, so this is where the model comes from.
         write_journal(
             &dir.join("-Users-x-foo").join("20260929T010000Z_aaaa1111.sexp"),
             &format!(
@@ -534,7 +619,8 @@ mod tests {
                 header("/Users/x/foo/", "aaaa1111", "2026-09-29T01:00:00Z"),
                 "(:type :message :id \"m1\" :parent-id nil :timestamp \"2026-09-29T01:00:01Z\" :message (:role :user :content ((:type :text :text \"hi\"))))",
                 swarm_line("20260929T010000-aaaa", 3, &["/Users/x/foo/", "/Users/x/foo/", "/Users/x/foo/"]),
-                "(:type :model-change :id \"mc\" :parent-id nil :timestamp \"2026-09-29T01:00:02Z\" :model \"ark-deepseek-v4.1-flash\" :provider :aiden)",
+                // The entry spans lines: only its header is read.
+                assistant_message("ark-deepseek-v4.1-flash", "first line\nthe model is :model \\\"not this\\\""),
             ),
             "2026-09-29T01:00:00Z",
         );
@@ -544,12 +630,15 @@ mod tests {
         write_journal(
             &dir.join("-Users-x-foo").join("20260929T020000Z_bbbb2222.sexp"),
             &format!(
-                "{}\n{}\n{}\n{}\n{}\n",
+                "{}\n{}\n{}\n{}\n{}\n{}\n",
                 header("/Users/x/foo/", "bbbb2222", "2026-09-29T02:00:00Z"),
-                "(:type :model-change :id \"mc1\" :parent-id nil :timestamp \"2026-09-29T02:00:01Z\" :model \"claude-sonnet-5\" :provider :anthropic)",
+                assistant_message("claude-opus-5", "a first turn on the old model"),
                 swarm_line("20260929T020000-bbbb", 2, &["/Users/x/foo/", "/Users/x/foo/"]),
                 "(:type :custom :id \"cs\" :parent-id nil :timestamp \"2026-09-29T02:00:05Z\" :key \"cache-stats\" :data (:input 1 :cache-read 0 :cache-write 0))",
                 swarm_line("20260929T020000-bbbb", 1, &["/Users/x/foo/", "/Users/x/.evo/swarm/bbbb/lane-2/"]),
+                // A recorded change is authoritative: it wins over the message
+                // above, whatever order they sit in.
+                "(:type :model-change :id \"mc1\" :parent-id nil :timestamp \"2026-09-29T02:00:09Z\" :model \"claude-sonnet-5\" :provider :anthropic)",
             ),
             "2026-09-29T02:00:00Z",
         );
@@ -584,6 +673,9 @@ mod tests {
         assert_eq!(newest.folder_name(), "foo");
         assert_eq!(newest.when, "2026-09-29T02:00:00Z");
         assert_eq!(newest.when_epoch, time::parse_rfc3339("2026-09-29T02:00:00Z"));
+        // A recorded `:model-change` is authoritative and wins over the
+        // assistant message in the same file; the message is only the fallback
+        // for journals that never recorded a change (see the older entry).
         assert_eq!(newest.models.coordinator.as_deref(), Some("claude-sonnet-5"));
         assert_eq!(newest.models.lanes, None);
         assert_eq!(newest.source, HistorySource::Scanned);
@@ -596,9 +688,37 @@ mod tests {
         assert_eq!(older.session_id, "aaaa1111");
         assert_eq!(older.lanes, 3);
         assert_eq!(older.workers, 3);
+        // No `:model-change` in this file at all: the model comes from the
+        // assistant message's header, and the message's own text (which spans
+        // lines and even quotes a `:model`) never leaks into it.
         assert_eq!(older.models.coordinator.as_deref(), Some("ark-deepseek-v4.1-flash"));
         assert_eq!(older.age_secs(older.mtime + 90), Some(90));
         fs::remove_dir_all(root.path()).unwrap();
+    }
+
+    #[test]
+    fn the_model_comes_from_an_assistant_messages_header() {
+        // The shape a real journal writes (verified against
+        // ~/.evo/sessions/*/*.sexp): the header before `:content` is all we read.
+        let line = assistant_message("claude-opus-5-5", "hello");
+        assert_eq!(message_model(&line).as_deref(), Some("claude-opus-5-5"));
+        // Any order of the header's keys works.
+        let shuffled = "(:type :message :id \"m\" :message (:provider :aiden :role :assistant :model \"m-2\" \
+                        :usage (:input 1) :content ((:type :text :text \"x\"))))";
+        assert_eq!(message_model(shuffled).as_deref(), Some("m-2"));
+        // The message's text is not searched: only the header is.
+        let quoted = assistant_message("honest", "the header of a message is (:role :assistant :model \"liar\")");
+        assert_eq!(message_model(&quoted).as_deref(), Some("honest"));
+
+        // Not a message, not an assistant, or a header that never says :model.
+        assert_eq!(message_model("(:type :custom :role :assistant :model \"no\")"), None);
+        assert_eq!(message_model("(:type :message :id \"u\" :message (:role :user :content ()))"), None);
+        assert_eq!(message_model("(:type :message :id \"a\" :message (:role :assistant :content ()))"), None);
+        // A header cut off mid-value still yields what came before the cut.
+        let cut = "(:type :message :id \"a\" :message (:role :assistant :model \"cut\" :content ((:type :text :text \"oops";
+        assert_eq!(message_model(cut).as_deref(), Some("cut"));
+        let cut_early = "(:type :message :id \"a\" :message (:role :assistant :model \"cu";
+        assert_eq!(message_model(cut_early), None);
     }
 
     #[test]
@@ -664,7 +784,9 @@ mod tests {
         let mut recent_same = Recent::new(&older, "/Users/x/foo", 3);
         recent_same.when = "2026-09-29T09:00:00Z".into(); // app used it later than the journal
         recent_same.models.lanes = Some("lanes-model".into());
-        let recent_orphan = Recent::new("/Users/x/gone/9.sexp", "/Users/x/gone", 2);
+        let mut recent_orphan = Recent::new("/Users/x/gone/9.sexp", "/Users/x/gone", 2);
+        // Pinned so the row order does not depend on when the test runs.
+        recent_orphan.when = "2026-09-29T00:30:00Z".into();
 
         let merged = merge(scanned.clone(), &[recent_same.clone(), recent_orphan.clone()]);
         assert_eq!(merged.len(), 3);
@@ -697,7 +819,7 @@ mod tests {
         app.save(&root).unwrap();
         let history = load_history(&root, &dir, &ScanBudget::default());
         assert_eq!(history.len(), 3);
-        assert!(history.iter().any(|e| e.folder == PathBuf::from("/Users/x/elsewhere")));
+        assert!(history.iter().any(|e| e.folder == *"/Users/x/elsewhere"));
         fs::remove_dir_all(root.path()).unwrap();
     }
 
@@ -714,8 +836,8 @@ mod tests {
 
     #[test]
     fn entry_type_is_read_cheaply() {
-        assert_eq!(entry_type_of("(:type :custom :id \"x\")"), Some(":custom"));
-        assert_eq!(entry_type_of("(:type :swarm-state :x 1)"), Some(":swarm-state"));
+        assert_eq!(entry_type_of("(:type :custom :id \"x\")"), Some("custom"));
+        assert_eq!(entry_type_of("(:type :swarm-state :x 1)"), Some("swarm-state"));
         assert_eq!(entry_type_of("  (:type :custom)"), None);
         assert_eq!(entry_type_of("(:type)"), None);
     }

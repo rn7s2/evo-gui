@@ -41,6 +41,18 @@ impl Sexp {
         parser.form(0)
     }
 
+    /// Read the first form in `s` and report how many bytes it consumed.
+    ///
+    /// For reading a form that was deliberately cut short: the pairs before the
+    /// cut are still readable, one at a time, and the walk stops cleanly at the
+    /// truncation instead of failing the whole thing.
+    pub fn parse_prefix(s: &str) -> Result<(Sexp, usize), Error> {
+        let mut parser = Parser { bytes: s.as_bytes(), src: s, pos: 0 };
+        parser.skip_trivia();
+        let form = parser.form(0)?;
+        Ok((form, parser.pos))
+    }
+
     /// Read every form in `s`.
     pub fn parse_all(s: &str) -> Result<Vec<Sexp>, Error> {
         let mut parser = Parser { bytes: s.as_bytes(), src: s, pos: 0 };
@@ -136,8 +148,11 @@ impl Sexp {
     }
 
     /// The `:type` of a journal entry, as a string (`"custom"`, `"model-change"`…).
+    ///
+    /// evo writes the value as a keyword (`:type :custom`), so a keyword is the
+    /// case that matters; a string is accepted too rather than tripping over it.
     pub fn entry_type(&self) -> Option<&str> {
-        self.get_str("type")
+        self.get("type").and_then(|v| v.as_str().or_else(|| v.as_symbol()))
     }
 }
 
@@ -375,8 +390,11 @@ mod tests {
         assert_eq!(lanes[0].get_str("cwd"), Some("/Users/bytedance/"));
         assert_eq!(lanes[1].get_str("cwd"), Some("/work/"));
         assert!(lanes[0].get("worktree").unwrap().is_nil());
-        // The vector's task is absent, and asking for it is not an error.
-        assert_eq!(lanes[0].get("task"), None);
+        // A field the record carries as `nil` reads as nil, not as absent.
+        assert!(lanes[0].get("task").unwrap().is_nil());
+        // …and a field that is genuinely absent is `None`, not an error.
+        assert_eq!(lanes[1].get("branch").unwrap(), &Sexp::Nil);
+        assert_eq!(Sexp::parse("(:a 1)").unwrap().get("nope"), None);
     }
 
     #[test]
@@ -384,16 +402,22 @@ mod tests {
         let form = Sexp::parse(r#"(:text "one\ntwo" :q "a\"b" :bs "a\\b" :raw "x
 y")"#)
         .unwrap();
-        // Common Lisp escaping: `\n` is the single character `n`.
-        assert_eq!(form.get_str("text"), Some("onetwo"));
+        // Common Lisp escaping: `\n` quotes the `n`, so the text keeps it —
+        // and the two characters are not a newline.
+        assert_eq!(form.get_str("text"), Some("onentwo"));
         assert_eq!(form.get_str("q"), Some("a\"b"));
         assert_eq!(form.get_str("bs"), Some("a\\b"));
+        // A literal newline inside a string is data, and survives.
         assert_eq!(form.get_str("raw"), Some("x\ny"));
     }
 
     #[test]
     fn a_backslash_before_a_newline_continues_the_string() {
+        // The backslash-newline pair is removed; the indentation on the next
+        // line is text and stays.
         let form = Sexp::parse("(:text \"one\\\n     two\")").unwrap();
+        assert_eq!(form.get_str("text"), Some("one     two"));
+        let form = Sexp::parse("(:text \"one\\\ntwo\")").unwrap();
         assert_eq!(form.get_str("text"), Some("onetwo"));
     }
 

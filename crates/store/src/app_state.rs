@@ -332,7 +332,7 @@ mod tests {
         assert_eq!(AppState::default().window.width, 1600.0);
         assert_eq!(AppState::default().binaries.evo_swarm, PathBuf::from("/usr/local/bin/evo-swarm"));
         assert_eq!(AppState::default().binaries.evo_agent, PathBuf::from("/usr/local/bin/evo-agent"));
-        fs::remove_dir_all(root.path()).unwrap();
+        let _ = fs::remove_dir_all(root.path());
     }
 
     #[test]

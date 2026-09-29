@@ -262,7 +262,8 @@ mod tests {
     fn creates_the_directory_and_the_file() {
         let folder = temp_dir("create");
         assert!(!folder.join(".evo").exists());
-        let outcome = set_lanes_model(&folder, Some(&LanesModel::new("m1", "aiden"))).unwrap();
+        let outcome = set_lanes_model(&folder, Some(&LanesModel::new("ark-deepseek-v4.1-flash", "aiden")))
+            .unwrap();
         assert_eq!(outcome, WriteOutcome::Written);
         assert!(folder.join(".evo").exists());
         assert_eq!(read(&folder), BLOCK);
@@ -281,7 +282,7 @@ mod tests {
             WriteOutcome::Written
         );
         let once = read(&folder);
-        assert_eq!(once, format!("{BLOCK}\n{user}"));
+        assert_eq!(once, format!("{}\n{user}", render_block(&LanesModel::new("m1", "ark")).unwrap()));
         // Twice changes nothing at all — not even the mtime.
         let before = fs::metadata(swarm_lisp_path(&folder)).unwrap().modified().unwrap();
         assert_eq!(
@@ -337,12 +338,10 @@ mod tests {
     #[test]
     fn a_deleted_file_reappears_when_a_model_is_chosen_again() {
         let folder = temp_dir("recreate");
-        set_lanes_model(&folder, Some(&LanesModel::new("m1", "aiden"))).unwrap();
+        let model = LanesModel::new("ark-deepseek-v4.1-flash", "aiden");
+        set_lanes_model(&folder, Some(&model)).unwrap();
         set_lanes_model(&folder, None).unwrap();
-        assert_eq!(
-            set_lanes_model(&folder, Some(&LanesModel::new("m1", "aiden"))).unwrap(),
-            WriteOutcome::Written
-        );
+        assert_eq!(set_lanes_model(&folder, Some(&model)).unwrap(), WriteOutcome::Written);
         assert_eq!(read(&folder), BLOCK);
         fs::remove_dir_all(&folder).unwrap();
     }

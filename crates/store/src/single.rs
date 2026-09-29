@@ -26,7 +26,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -39,6 +39,18 @@ pub const ACTIVATE: &str = "activate";
 /// How long a secondary keeps trying to reach the primary's socket. The primary
 /// creates it moments after taking the lock, so this only covers that gap.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// How long the accept loop waits between non-blocking `accept` calls.
+///
+/// The loop cannot block in `accept`: shutdown must not depend on a wake-up
+/// connection, because the socket file can be gone (a killed predecessor, a
+/// removed directory, a test that cleans up first) and `accept` on a dead path
+/// would then never return. One syscall every 25 ms is the price of a `Drop`
+/// that always terminates.
+const ACCEPT_POLL: Duration = Duration::from_millis(25);
+
+/// How long the primary waits for a knocked connection to say something.
+const READ_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Outcome of [`SingleInstance::acquire`].
 #[derive(Debug)]
@@ -135,6 +147,10 @@ pub struct Primary {
     #[allow(dead_code)]
     lock: File,
     lock_path: PathBuf,
+    /// Held for the lifetime of the primary: it is what keeps the socket
+    /// bound. The accept thread works on a clone; dropping this with the
+    /// primary is what finally takes the socket away.
+    #[allow(dead_code)]
     listener: UnixListener,
     rx: Receiver<Activation>,
     sock_path: PathBuf,
@@ -155,6 +171,9 @@ impl Primary {
 
         let sock_path = root.activate_sock();
         let listener = bind_activation_socket(&sock_path)?;
+        // The accept loop polls rather than blocking, so that dropping the
+        // primary always terminates (see `ACCEPT_POLL`).
+        listener.set_nonblocking(true)?;
         let (tx, rx) = mpsc::channel();
         let running = Arc::new(AtomicBool::new(true));
         let accept = {
@@ -190,10 +209,9 @@ impl Primary {
 
     /// A knock, if one is waiting. Call this from the UI's event loop.
     pub fn try_activation(&self) -> Option<Activation> {
-        match self.rx.try_recv() {
-            Ok(a) => Some(a),
-            Err(TryRecvError::Empty | TryRecvError::Disconnected) => None,
-        }
+        // `Empty` (no knock yet) and `Disconnected` (the accept thread is gone)
+        // both mean the same thing to the caller.
+        self.rx.try_recv().ok()
     }
 
     /// Wait up to `timeout` for a knock.
@@ -204,8 +222,9 @@ impl Primary {
 
 impl Drop for Primary {
     fn drop(&mut self) {
-        // Wake the accept thread out of accept() so it can notice the flag and
-        // exit; then take the socket file with us.
+        // The accept loop polls, so this flag alone stops it; the connection is
+        // just a nudge so it stops on the next instant rather than the next
+        // tick. It may fail — the socket file is not ours to rely on.
         self.running.store(false, Ordering::SeqCst);
         let _ = UnixStream::connect(&self.sock_path);
         if let Some(handle) = self.accept.take() {
@@ -252,9 +271,13 @@ fn accept_loop(listener: UnixListener, tx: mpsc::Sender<Activation>, running: Ar
                 }
                 handle_connection(stream, &tx);
             }
+            // Nothing waiting: sleep a tick and look again.
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                std::thread::sleep(ACCEPT_POLL);
+            }
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-            // A dropped listener is how Drop stops this thread if the connect
-            // wake-up ever fails.
+            // A closed listener is how the loop ends if the socket ever dies
+            // under it.
             Err(_) => break,
         }
     }
@@ -263,7 +286,10 @@ fn accept_loop(listener: UnixListener, tx: mpsc::Sender<Activation>, running: Ar
 /// One short line in, one ack out. A peer that connects and says nothing is
 /// dropped after the read timeout, so the loop always comes back.
 fn handle_connection(stream: UnixStream, tx: &mpsc::Sender<Activation>) {
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+    // An accepted socket may inherit the listener's non-blocking flag; put it
+    // back, so a read means "wait for the line", not "try once".
+    let _ = stream.set_nonblocking(false);
+    let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
     let mut line = String::new();
     if let Ok(reader) = stream.try_clone() {
         let mut reader = BufReader::new(reader).take(4096);

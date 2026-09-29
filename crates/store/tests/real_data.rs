@@ -7,26 +7,32 @@
 //! Skipped, loudly, when this machine has no evo data yet.
 
 use std::fs;
-use std::path::Path;
 use std::time::{Duration, Instant};
 
-use store::history::{scan, sessions_dir, ScanBudget};
+use store::history::{scan, ScanBudget};
+use store::paths::evo_dir;
 use store::swarm_config::{self, LanesModel, WriteOutcome};
 
 fn skip(reason: &str) {
     eprintln!("skipping: {reason}");
 }
 
+/// `~/.evo/sessions`, the real one — never the process's `EVO_SESSIONS_DIR`
+/// override, which points at a single agent's own directory.
+fn real_sessions_dir() -> std::path::PathBuf {
+    evo_dir().join("sessions")
+}
+
 #[test]
 fn real_journals_parse_into_resumable_swarms() {
-    let dir = sessions_dir();
+    let dir = real_sessions_dir();
     if !dir.is_dir() {
         skip(&format!("{} does not exist", dir.display()));
         return;
     }
     // A bounded scan of the real tree: the same budget the app uses, but
     // smaller, so this stays a test and not a chore.
-    let budget = ScanBudget { max_files: 100, max_duration: Duration::from_secs(20), ..ScanBudget::default() };
+    let budget = ScanBudget { max_files: 500, max_duration: Duration::from_secs(20), ..ScanBudget::default() };
     let started = Instant::now();
     let outcome = scan(&dir, &budget);
     let elapsed = started.elapsed();
@@ -64,14 +70,51 @@ fn real_journals_parse_into_resumable_swarms() {
     for entry in outcome.entries.iter().take(10) {
         let text = fs::read_to_string(&entry.session).expect("read journal");
         let first_line = text.lines().next().unwrap_or_default();
-        assert!(first_line.starts_with("(:type :session"), "{}", entry.session.display());
-        assert!(first_line.contains(&format!("\"{}\"", entry.session_id)), "header id ≠ scan id");
-        assert!(first_line.contains("\"cwd\""), "header has no cwd");
+        assert!(
+            first_line.starts_with("(:type :session"),
+            "{} does not start with a session header: {first_line}",
+            entry.session.display()
+        );
+        assert!(
+            first_line.contains(&format!("\"{}\"", entry.session_id)),
+            "header id ≠ scan id in {}: {first_line}",
+            entry.session.display()
+        );
+        assert!(
+            first_line.contains(":cwd"),
+            "no :cwd in the header of {}: {first_line}",
+            entry.session.display()
+        );
         assert!(
             text.lines().any(|l| l.starts_with("(:type :custom ") && l.contains(":key \"swarm\"")),
             "a resumable swarm must have a swarm record: {}",
             entry.session.display()
         );
+        // Anything that ran a turn names its model in an assistant message, so
+        // a journal with an assistant message must give us a model.
+        if text.lines().any(|l| l.contains(":role :assistant")) {
+            assert!(
+                entry.models.coordinator.is_some(),
+                "no model read from {} despite assistant messages",
+                entry.session.display()
+            );
+        }
+    }
+
+    // The whole set: at least one row carries a model, and none invents one.
+    let with_model = outcome.entries.iter().filter(|e| e.models.coordinator.is_some()).count();
+    eprintln!("{} of {} rows know their coordinator model", with_model, outcome.entries.len());
+    assert!(with_model > 0, "no row learned its model from the journals");
+    for entry in &outcome.entries {
+        // The only models we can report are ids the journal actually wrote.
+        if let Some(model) = &entry.models.coordinator {
+            let text = fs::read_to_string(&entry.session).unwrap();
+            assert!(
+                text.contains(&format!(":model \"{model}\"")),
+                "{} reports a model it does not contain: {model}",
+                entry.session.display()
+            );
+        }
     }
 
     // Newest first, and no duplicates.
@@ -131,12 +174,12 @@ fn the_real_swarm_lisp_is_only_ever_touched_by_copy() {
 /// history list.
 #[test]
 fn the_swarm_record_fields_the_scan_depends_on() {
-    let dir = sessions_dir();
+    let dir = real_sessions_dir();
     if !dir.is_dir() {
         skip(&format!("{} does not exist", dir.display()));
         return;
     }
-    let budget = ScanBudget { max_files: 100, max_duration: Duration::from_secs(20), ..ScanBudget::default() };
+    let budget = ScanBudget { max_files: 500, max_duration: Duration::from_secs(20), ..ScanBudget::default() };
     let outcome = scan(&dir, &budget);
     let Some(entry) = outcome.entries.first() else {
         skip("no resumable swarm on this machine");
@@ -145,8 +188,7 @@ fn the_swarm_record_fields_the_scan_depends_on() {
     let text = fs::read_to_string(&entry.session).unwrap();
     let line = text
         .lines()
-        .filter(|l| l.starts_with("(:type :custom ") && l.contains(":key \"swarm\""))
-        .next_back()
+        .rfind(|l| l.starts_with("(:type :custom ") && l.contains(":key \"swarm\""))
         .expect("a swarm record");
     for field in [":id", ":workers", ":lanes", ":cwd"] {
         assert!(line.contains(field), "the swarm record no longer has {field}: {line}");
