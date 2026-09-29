@@ -1007,3 +1007,158 @@ fn a_lanes_model_is_written_to_the_folders_swarm_lisp_and_default_takes_it_away(
     );
     assert!(!swarm_config::swarm_lisp_path(&bare).exists());
 }
+
+/// The dot the strip draws on a tab, if it is drawing one (§7.1). `name` is which
+/// of the two dots: a run in flight, or a run that finished out of sight.
+fn tab_dot(cx: &mut TestAppContext, b: &Bench, name: &str, id: u64) -> bool {
+    cx.update_window(b.window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window
+            .try_find(ElementId::NamedInteger(name.into(), id))
+            .is_some()
+    })
+    .unwrap()
+}
+
+/// §7.1: the strip says what a tab is doing. A run in flight gets a dot; a run that
+/// finished while the user was looking at another tab leaves a quieter one, which
+/// stays until that tab is the one being shown.
+///
+/// The whole point is that the user did not watch it happen, so this is about a tab
+/// in the background: the run is started while its tab is shown, the user moves to
+/// another tab, and the finish lands out of sight.
+#[gpui_kit::test]
+fn the_strip_dots_a_run_and_the_finish_a_background_tab_kept(cx: &mut TestAppContext) {
+    let b = bench(cx, 2);
+    let tab = cx.update(|cx| b.view.read(cx).selected_tab().clone());
+    let id = cx.update(|cx| tab.read(cx).id().get());
+    let label = ElementId::NamedInteger("tab-label".into(), id);
+    launch(cx, &b, &tab, b.fixture.project.clone(), two_workers());
+    wait_for_running(cx, &tab);
+
+    // A tab that is doing nothing has no dot — the strip is quiet by default — and
+    // the label has the room the tab gives it.
+    assert!(!tab_dot(cx, &b, "tab-running", id), "no run, no dot");
+    assert!(!tab_dot(cx, &b, "tab-finished", id));
+    let quiet_label = cx
+        .update_window(b.window.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.find(label.clone()).bounds().size.width
+        })
+        .unwrap();
+
+    prompt(cx, &b, &tab, "SLOW say something long");
+    wait_for(cx, "the run to be in flight", |cx| {
+        cx.update(|cx| tab.read(cx).is_running())
+    });
+    assert!(
+        tab_dot(cx, &b, "tab-running", id),
+        "the coordinator working is dotted"
+    );
+    assert!(
+        !tab_dot(cx, &b, "tab-finished", id),
+        "and it is the running dot, not the other one"
+    );
+
+    // It is a dot, not a layout: a fixed few pixels beside the label, which keeps
+    // every pixel it had. (`size_1_5` is 20% of the parent, which once made the dot
+    // a fifth of the tab wide and squeezed the label into an ellipsis.)
+    let (dot, label_width) = cx
+        .update_window(b.window.into(), |_, window, cx| {
+            window.render_frame(cx);
+            (
+                window
+                    .find(ElementId::NamedInteger("tab-running".into(), id))
+                    .bounds()
+                    .size,
+                window.find(label.clone()).bounds().size.width,
+            )
+        })
+        .unwrap();
+    assert!(
+        dot.width <= px(8.) && dot.height <= px(8.),
+        "the dot is tiny: {dot:?}"
+    );
+    assert_eq!(
+        label_width, quiet_label,
+        "and the label keeps its room: no ellipsis from a dot"
+    );
+
+    // Another tab is opened and shown — while the run is still going, so what
+    // happens next happens where nobody is looking.
+    let other = open_tab(cx, &b);
+    let other_id = cx.update(|cx| other.read(cx).id().get());
+    assert!(
+        !tab_dot(cx, &b, "tab-running", other_id),
+        "the new tab has no swarm to be running"
+    );
+
+    wait_for(cx, "the run to finish out of sight", |cx| {
+        cx.update(|cx| !tab.read(cx).is_running())
+    });
+    assert!(
+        !tab_dot(cx, &b, "tab-running", id),
+        "the run is over, so the running dot is gone"
+    );
+    assert!(
+        tab_dot(cx, &b, "tab-finished", id),
+        "and the strip keeps the finish for the tab nobody was watching"
+    );
+
+    // Looking at the tab is what clears it: the dot has done its job.
+    show_tab(cx, &b, 0);
+    assert!(
+        !tab_dot(cx, &b, "tab-finished", id),
+        "showing the tab clears its dot"
+    );
+    show_tab(cx, &b, 1);
+    assert!(
+        !tab_dot(cx, &b, "tab-finished", id),
+        "and it does not come back when the tab is left again"
+    );
+}
+
+/// §7.1: the window's own shortcuts reach the strip with the caret in a composer,
+/// which is where selecting a running tab puts it. The composer's key context sits
+/// *inside* the workspace's context rather than instead of it, and the composer
+/// intercepts only the keys it has a use for — so ⌘1…⌘9 and ⌃⇥ still mean the tab
+/// strip.
+#[gpui_kit::test]
+fn the_tab_keys_reach_the_strip_with_the_caret_in_the_composer(cx: &mut TestAppContext) {
+    let b = bench(cx, 2);
+    let first = cx.update(|cx| b.view.read(cx).selected_tab().clone());
+    launch(cx, &b, &first, b.fixture.project.clone(), two_workers());
+    wait_for_running(cx, &first);
+
+    // A second tab, then back to the running one: selecting a running tab is what
+    // hands the caret to its composer (§7.1).
+    open_tab(cx, &b);
+    show_tab(cx, &b, 0);
+    cx.update_window(b.window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        // The keyboard really is in the composer: GPUI resolves a keystroke against
+        // the focused element's context, and `Input` is what an editable field
+        // carries.
+        let contexts: Vec<String> = window
+            .context_stack()
+            .iter()
+            .filter_map(|context| context.primary().map(|entry| entry.key.to_string()))
+            .collect();
+        assert!(
+            contexts.iter().any(|context| context == "Input"),
+            "the caret is in the composer: {contexts:?}"
+        );
+
+        window.press("cmd-2", cx);
+        assert_eq!(
+            b.view.read(cx).selected_index(),
+            1,
+            "⌘2 reached the strip with the caret in the composer"
+        );
+        window.press("cmd-1", cx);
+        assert_eq!(b.view.read(cx).selected_index(), 0);
+        window.press("ctrl-tab", cx);
+        assert_eq!(b.view.read(cx).selected_index(), 1, "and so did ⌃⇥");
+    })
+    .unwrap();
+}

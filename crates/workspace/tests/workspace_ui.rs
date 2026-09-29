@@ -4,16 +4,30 @@
 //! ([`workspace::window_options`] plus [`workspace::WorkspaceView`]) in a headless
 //! GPUI test window and drives it the way a user would.
 
+use std::path::PathBuf;
+use std::sync::Arc;
+
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
     base::Root, px, size, App, AppContext, Bounds, ElementId, Entity, InputEvent as _, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Point, TestAppContext, WindowBounds,
     WindowHandle, WindowOptions,
 };
-use workspace::{TabState, WorkspaceView};
+use session::LaunchPlan;
+use workspace::{Launch, SwarmConfig, TabState, WorkspaceView};
 
 /// Opens the app's window with one empty tab, at a deterministic size.
 fn open_workspace(cx: &mut TestAppContext) -> (WindowHandle<Root>, Entity<WorkspaceView>) {
+    open_window_with(cx, WorkspaceView::new)
+}
+
+/// The same window, built by `build` — for the one test that needs a window whose
+/// tabs cannot start a process.
+fn open_window_with(
+    cx: &mut TestAppContext,
+    build: impl FnOnce(&mut gpui_kit::Window, &mut gpui_kit::Context<WorkspaceView>) -> WorkspaceView
+        + 'static,
+) -> (WindowHandle<Root>, Entity<WorkspaceView>) {
     cx.update(gpui_kit::init);
     cx.update(|cx| {
         let bounds = Bounds {
@@ -26,7 +40,7 @@ fn open_workspace(cx: &mut TestAppContext) -> (WindowHandle<Root>, Entity<Worksp
                 ..Default::default()
             },
             cx,
-            |window, cx| cx.new(|cx| WorkspaceView::new(window, cx)),
+            |window, cx| cx.new(|cx| build(window, cx)),
         )
         .expect("open the workspace window");
         (window.downcast::<Root>().expect("base Root"), view)
@@ -481,6 +495,73 @@ fn an_overflowing_strip_keeps_the_add_button_and_shows_the_selected_tab(cx: &mut
             "the first tab came back into view: {:?}",
             first.bounds()
         );
+    })
+    .unwrap();
+}
+
+/// §7.1: the window is named after what it is working on — Mission Control, ⌘`
+/// and the window menu show this — and after nothing but the app while the tab
+/// being shown has no folder.
+///
+/// The window here is given a swarm binary that is not there: a tab reaches its
+/// folder without a process behind it (§9.7's failure screen, covered elsewhere).
+#[gpui_kit::test]
+fn the_window_is_named_after_the_folder_of_the_tab_being_shown(cx: &mut TestAppContext) {
+    let home = std::env::temp_dir().join(format!("workspace-ui-title-{}", std::process::id()));
+    let folder = home.join("a-folder-of-its-own");
+    std::fs::create_dir_all(&folder).expect("a folder to work in");
+
+    let (handle, view) = open_window_with(cx, move |window, cx| {
+        WorkspaceView::with_config(
+            Arc::new(SwarmConfig {
+                swarm_bin: PathBuf::from("/nonexistent/evo-swarm"),
+                root: store::paths::Root::at(home),
+                ..SwarmConfig::default()
+            }),
+            window,
+            cx,
+        )
+    });
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(
+            view.read(cx).window_title(),
+            "Evo Desktop",
+            "an empty tab leaves the window the app's own name"
+        );
+
+        view.update(cx, |view, cx| {
+            let tab = view.selected_tab().clone();
+            tab.update(cx, |tab, cx| {
+                tab.launch(
+                    Launch::New {
+                        folder: folder.clone(),
+                        plan: LaunchPlan::default(),
+                    },
+                    window,
+                    cx,
+                )
+            });
+        });
+        window.render_frame(cx);
+        let named = "a-folder-of-its-own — Evo Desktop";
+        assert_eq!(
+            view.read(cx).window_title(),
+            named,
+            "the folder's name, then the app's"
+        );
+
+        // A new empty tab is what is being shown now, so the window is the app's
+        // again — and the other tab still names its folder when it comes back.
+        view.update(cx, |view, cx| {
+            view.add_tab(window, cx);
+        });
+        window.render_frame(cx);
+        assert_eq!(view.read(cx).window_title(), "Evo Desktop");
+        view.update(cx, |view, cx| view.select_tab(0, window, cx));
+        window.render_frame(cx);
+        assert_eq!(view.read(cx).window_title(), named);
     })
     .unwrap();
 }

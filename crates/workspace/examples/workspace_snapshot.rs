@@ -264,7 +264,7 @@ fn open_workspace(
             cx.new(|cx| WorkspaceView::with_config(config, window, cx))
         })
     })?;
-    Ok((window.into(), view))
+    Ok((window, view))
 }
 
 /// Send a signal to one process this capture started (§9.7).
@@ -413,7 +413,7 @@ fn wait_until(
         if done(cx) {
             return Ok(());
         }
-        if std::env::var_os("SNAPSHOT_TRACE").is_some() && ticks % 20 == 0 {
+        if std::env::var_os("SNAPSHOT_TRACE").is_some() && ticks.is_multiple_of(20) {
             eprintln!("[wait] tick {ticks}");
         }
         ticks += 1;

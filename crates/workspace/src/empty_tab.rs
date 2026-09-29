@@ -215,10 +215,8 @@ impl Choosers {
     /// at all (a capture, a window on its way out) answers `false` and is left
     /// alone.
     ///
-    /// The seam is what the window calls, and only the window can: until
-    /// `TabContent::focus_primary` is wired to it, nothing in this crate calls it,
-    /// hence the allow.
-    #[allow(dead_code)]
+    /// The seam is what the window calls: `TabContent::focus_primary` routes an
+    /// empty tab's keyboard here (§7.1's polish).
     pub fn focus_primary(&self, window: &mut Window, cx: &mut App) -> bool {
         // Read out of the state first: focusing borrows the window and the app, and
         // the state is borrowed through both.

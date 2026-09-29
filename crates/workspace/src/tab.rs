@@ -192,6 +192,14 @@ pub enum TabContentEvent {
     /// The user asked this tab to go, from a screen that owns no close button —
     /// a boot that failed (§9.7).
     CloseRequested,
+    /// The run this tab's coordinator had in flight is over. The strip is what
+    /// decides whether anyone was watching: a tab in the background keeps a dot
+    /// until it is looked at (§7.1).
+    RunFinished,
+    /// This tab is drawing something else now — the choosers, a boot, the page, a
+    /// failure. The screen the keyboard was on is gone with the old one, so the
+    /// window moves it to whatever the new screen starts with (§7.1).
+    ScreenChanged,
 }
 
 /// The retained view behind one tab.
@@ -389,12 +397,31 @@ impl TabContent {
     /// nothing to type into: its first thing to choose belongs to the empty tab
     /// (§7.2), and its focus handles are its own.
     pub fn focus_primary(&self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if matches!(self.state, TabState::Empty) {
-            return false;
+        match &self.state {
+            // The empty tab knows where its own keyboard goes (§7.2): the
+            // coordinator chooser, or the folder card beside it.
+            TabState::Empty => self.choosers.focus_primary(window, cx),
+            // The composer is the only thing on the tab page to type into, and the
+            // page is what a running tab shows.
+            TabState::Running { .. } => {
+                self.composer
+                    .update(cx, |composer, cx| composer.focus_input(window, cx));
+                true
+            }
+            // Starting, stopping, failed: nothing on the screen takes a keystroke,
+            // and the window is better with the keyboard than a caret that is not
+            // drawn.
+            _ => false,
         }
-        self.composer
-            .update(cx, |composer, cx| composer.focus_input(window, cx));
-        true
+    }
+
+    /// The tab's own state, told to the window: a screen change is a keyboard
+    /// change (§7.1).
+    fn set_state(&mut self, state: TabState, cx: &mut Context<Self>) {
+        if self.state != state {
+            self.state = state;
+            cx.emit(TabContentEvent::ScreenChanged);
+        }
     }
 
     /// The process behind the tab: the swarm's own pid, once `/health` has
@@ -428,6 +455,14 @@ impl TabContent {
     pub fn is_reconnecting(&self) -> bool {
         self.model()
             .is_some_and(|model| model.is_reconnecting(model.selected()))
+    }
+
+    /// Whether the coordinator has a run in flight — the tab strip's activity dot
+    /// (§7.1). A compaction counts: the swarm is busy either way, and the readout
+    /// says which.
+    pub fn is_running(&self) -> bool {
+        self.model()
+            .is_some_and(|model| model.activity() != Activity::Idle)
     }
 
     /// The label on the tab: the folder's name, or "New tab" while empty.
@@ -546,17 +581,20 @@ impl TabContent {
                 self.gone = None;
                 // A new swarm writes a new session; `/state` names it when it does.
                 self.session = None;
-                self.state = TabState::Booting { folder };
+                self.set_state(TabState::Booting { folder }, cx);
                 self.attach(started, window, cx);
             }
             Err(error) => {
                 // Nothing is running: show why, with what little there is to show.
                 self.last_launch = Some(launch);
-                self.state = TabState::Failed {
-                    folder,
-                    message: Some(format!("could not prepare this tab: {error}")),
-                    log_tail: String::new(),
-                };
+                self.set_state(
+                    TabState::Failed {
+                        folder,
+                        message: Some(format!("could not prepare this tab: {error}")),
+                        log_tail: String::new(),
+                    },
+                    cx,
+                );
                 cx.notify();
             }
         }
@@ -575,7 +613,7 @@ impl TabContent {
     pub fn take_engine(&mut self, cx: &mut Context<Self>) -> Option<EngineHandle> {
         let live = self.live.take()?;
         if let Some(folder) = self.folder().map(Path::to_path_buf) {
-            self.state = TabState::Stopping { folder };
+            self.set_state(TabState::Stopping { folder }, cx);
             cx.notify();
         }
         Some(live.engine)
@@ -643,6 +681,8 @@ impl TabContent {
 
     /// One update from the engine, applied to the model and to the views (§9.1).
     fn apply(&mut self, update: Update, window: &mut Window, cx: &mut Context<Self>) {
+        // What the strip's dot is about: a run that was in flight and is over (§7.1).
+        let was_running = self.is_running();
         match update {
             Update::Booting => {}
             Update::Ready { pid, .. } => {
@@ -650,17 +690,20 @@ impl TabContent {
                     live.pid = Some(pid);
                 }
                 if let Some(folder) = self.folder().map(Path::to_path_buf) {
-                    self.state = TabState::Running { folder };
+                    self.set_state(TabState::Running { folder }, cx);
                     cx.notify();
                 }
             }
             Update::BootFailed { message, log_tail } => {
                 if let Some(folder) = self.folder().map(Path::to_path_buf) {
-                    self.state = TabState::Failed {
-                        folder,
-                        message: Some(message),
-                        log_tail,
-                    };
+                    self.set_state(
+                        TabState::Failed {
+                            folder,
+                            message: Some(message),
+                            log_tail,
+                        },
+                        cx,
+                    );
                     cx.notify();
                 }
             }
@@ -708,6 +751,12 @@ impl TabContent {
                     self.push(changes, cx);
                 }
             }
+        }
+        // The run ended with this update. The tab does not know whether anyone was
+        // watching it go — that is the window's business — so it says so and the
+        // strip decides (§7.1).
+        if was_running && !self.is_running() {
+            cx.emit(TabContentEvent::RunFinished);
         }
     }
 
@@ -1119,11 +1168,14 @@ impl TabContent {
         if let Some(folder) = self.folder().map(Path::to_path_buf) {
             // A swarm that died after it was up has no one-line reason: the log
             // is the whole story.
-            self.state = TabState::Failed {
-                folder,
-                message: None,
-                log_tail,
-            };
+            self.set_state(
+                TabState::Failed {
+                    folder,
+                    message: None,
+                    log_tail,
+                },
+                cx,
+            );
             cx.notify();
         }
     }
@@ -1291,7 +1343,7 @@ mod tests {
                 "a refusal is not a modal: the page stays"
             );
             assert_eq!(
-                window.find("composer-notice-dim").label().as_deref(),
+                window.find("composer-notice-dim").label(),
                 Some("no goal to pause"),
                 "the notice carries the server's own words"
             );
@@ -1324,7 +1376,7 @@ mod tests {
         cx.update_window(window, |_, window, cx| {
             window.render_frame(cx);
             assert_eq!(
-                window.find("composer-notice-error").label().as_deref(),
+                window.find("composer-notice-error").label(),
                 Some("Can't reach the swarm — it may be restarting."),
                 "an unanswered POST says what happened, not what the socket said"
             );
@@ -1403,14 +1455,14 @@ mod tests {
         cx.update_window(window, |_, window, cx| {
             window.render_frame(cx);
             assert_eq!(
-                window.find("transcript-thinking").label().as_deref(),
+                window.find("transcript-thinking").label(),
                 Some("Show thinking"),
                 "thinking is hidden until it is asked for"
             );
             window.click("transcript-thinking", cx);
             window.render_frame(cx);
             assert_eq!(
-                window.find("transcript-thinking").label().as_deref(),
+                window.find("transcript-thinking").label(),
                 Some("Hide thinking"),
                 "and the button says what it will do next"
             );

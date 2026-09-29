@@ -5,7 +5,7 @@
 //! the selection; everything below the strip belongs to a
 //! [`TabContent`](crate::TabContent).
 
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -29,8 +29,13 @@ use session::{HistoryEntry, LaunchPlan};
 use store::model_cache::ModelCache;
 use tab_engine::EngineHandle;
 
+use crate::history::folder_name;
 use crate::launch::{stop_in_background, Launch, SwarmConfig};
 use crate::tab::{RegistryHook, TabContent, TabContentEvent, TabId};
+
+/// The app's own name: what the bundle, the menu bar and the About window call it
+/// (`scripts/bundle.sh`, `crates/app`). The window title ends with it (§7.1).
+const APP_NAME: &str = "Evo Desktop";
 
 /// The size the window opens at when the display has room for it (§7.1).
 pub const DEFAULT_WINDOW_SIZE: Size<Pixels> = size(px(1600.), px(1000.));
@@ -233,6 +238,12 @@ pub struct WorkspaceView {
     /// Called with every live tab's `/registry`, so the app can refresh its cache
     /// from a real server (§9.4).
     registry_hook: Option<RegistryHook>,
+    /// Tabs whose run ended while another tab was being shown: the strip keeps a
+    /// dot on them until they are looked at (§7.1).
+    finished: BTreeSet<TabId>,
+    /// The title the window has been given, so a redraw does not rename it every
+    /// frame (§7.1).
+    window_title: Option<SharedString>,
     /// Set once the close hook is registered, so it happens once per window.
     close_hook_installed: bool,
     /// The task waiting for every tab's swarm to stop; `Some` while the window is
@@ -268,21 +279,31 @@ impl WorkspaceView {
             quit_hook: None,
             launcher: LauncherData::default(),
             registry_hook: None,
+            finished: BTreeSet::new(),
+            window_title: None,
             close_hook_installed: false,
             stopping: None,
             may_close: false,
         };
+        // The first tab takes the keyboard as it opens (§7.1): without a focus in
+        // the frame, a shortcut pressed on a fresh window would go nowhere at all.
         view.open_empty_tab(window, cx);
-        // An empty tab has nothing to type into yet, and the window is what has the
-        // keyboard until it does: without this, a shortcut pressed on a fresh
-        // window would go nowhere at all.
-        view.focus_selected(window, cx);
         view
     }
 
     /// How many tabs the window is showing.
     pub fn open_tab_count(&self) -> usize {
         self.tabs.len()
+    }
+
+    /// The title the window was last given (§7.1): the app's name, or the folder of
+    /// the tab being shown.
+    ///
+    /// Readable here because the platform's own title is not readable back — a
+    /// headless test window answers `""` to `Window::window_title` even right after
+    /// it was set, which would leave the naming untested.
+    pub fn window_title(&self) -> &str {
+        self.window_title.as_deref().unwrap_or(APP_NAME)
     }
 
     /// Take every tab's engine, so the caller can stop them all (§9.8).
@@ -418,6 +439,11 @@ impl WorkspaceView {
         tab.update(cx, |tab, cx| tab.set_launcher_data(&launcher, window, cx));
         let registry_hook = self.registry_hook.clone();
         tab.update(cx, |tab, _cx| tab.set_registry_hook(registry_hook));
+        // The tab being shown is where the keyboard goes (§7.1). It matters beyond
+        // typing: GPUI resolves a keystroke against the *focused* element's place in
+        // the frame, so a keyboard left on a tab that is no longer drawn is a
+        // keyboard that answers no shortcut at all.
+        self.focus_selected(window, cx);
         cx.notify();
         tab
     }
@@ -448,11 +474,32 @@ impl WorkspaceView {
     /// chooser is the seam for that — hands the keyboard back to the window rather
     /// than leaving it in a composer nobody can see: a keystroke nobody hears is
     /// worse than one the window handles.
-    fn focus_selected(&self, window: &mut Window, cx: &mut Context<Self>) {
+    fn focus_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let tab = self.tabs[self.selected].clone();
+        // Looking at a tab is what clears the dot a finish left on it (§7.1).
+        if self.finished.remove(&tab.read(cx).id()) {
+            cx.notify();
+        }
         let taken = tab.update(cx, |tab, cx| tab.focus_primary(window, cx));
         if !taken {
             window.focus(&self.root_focus, cx);
+        }
+    }
+
+    /// The window's own title, for Mission Control and ⌘` (§7.1): the folder of the
+    /// tab being shown, or the app's name alone on an empty tab.
+    ///
+    /// Kept current from `render` — the selection, a chosen folder and a closed tab
+    /// all end in a redraw — and compared against what the window was last given,
+    /// so a redraw is not a rename.
+    fn sync_window_title(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let title = match self.tabs[self.selected].read(cx).folder() {
+            Some(folder) => SharedString::from(format!("{} — {}", folder_name(folder), APP_NAME)),
+            None => SharedString::from(APP_NAME),
+        };
+        if self.window_title.as_ref() != Some(&title) {
+            window.set_window_title(&title);
+            self.window_title = Some(title);
         }
     }
 
@@ -586,6 +633,26 @@ impl WorkspaceView {
             TabContentEvent::CloseRequested => {
                 self.close_tab(id, window, cx);
             }
+            TabContentEvent::RunFinished => {
+                // The run ended on a tab nobody was looking at — the strip keeps
+                // that fact, with a dot, until the tab is shown. One that ends on
+                // the tab being shown is watched, and leaves nothing (§7.1).
+                if self.tabs[self.selected].read(cx).id() != id && self.finished.insert(id) {
+                    cx.notify();
+                }
+            }
+            TabContentEvent::ScreenChanged => {
+                // The screen changed under the keyboard. GPUI resolves a keystroke
+                // against the focused element's place in the frame, so a keyboard
+                // left on the screen that just went away answers nothing at all —
+                // not even ⌘1. It goes where the new screen starts: the composer of
+                // a page, the window for a boot, a failure or an empty tab's own
+                // first chooser (§7.1). A background tab's screen is not this
+                // window's keyboard, so only the shown one is moved.
+                if self.tabs[self.selected].read(cx).id() == id {
+                    self.focus_selected(window, cx);
+                }
+            }
         }
     }
 
@@ -619,11 +686,49 @@ impl WorkspaceView {
     ///
     /// A middle click closes it, the way a browser's tab does — the same thing the
     /// `×` does, without having to aim at it.
+    /// The strip's dot before a tab's name (§7.1): a tiny `success` dot while the
+    /// tab's coordinator has a run in flight, and a muted one when a background
+    /// tab's run ended since the user last looked at it — a browser's "something
+    /// happened here".
+    ///
+    /// Two element ids rather than one, because *which* dot it is is the whole
+    /// question — and the only part of it a picture cannot answer.
+    fn render_tab_activity(&self, running: bool, id: TabId, cx: &App) -> Option<AnyElement> {
+        let (element, color) = if running {
+            (
+                ElementId::NamedInteger("tab-running".into(), id.get()),
+                cx.theme().success,
+            )
+        } else if self.finished.contains(&id) {
+            (
+                ElementId::NamedInteger("tab-finished".into(), id.get()),
+                cx.theme().muted_foreground,
+            )
+        } else {
+            return None;
+        };
+        Some(
+            div()
+                .id(element)
+                .test_support()
+                .flex_shrink_0()
+                // A fixed 6px: `size_1_5` is a *fraction* of the parent (20%), which
+                // made the dot as wide as a fifth of the tab and squeezed the label
+                // into an ellipsis.
+                .w(px(6.))
+                .h(px(6.))
+                .rounded_full()
+                .bg(color)
+                .into_any_element(),
+        )
+    }
+
     fn render_tab(&self, tab: &Entity<TabContent>, cx: &mut Context<Self>) -> Tab {
         let content = tab.read(cx);
         let id = content.id();
         let title = content.title();
         let tooltip = content.tooltip();
+        let activity = self.render_tab_activity(content.is_running(), id, cx);
         let selected = self
             .tabs
             .get(self.selected)
@@ -646,6 +751,7 @@ impl WorkspaceView {
                     .gap_1()
                     .min_w_0()
                     .items_center()
+                    .when_some(activity, |this, dot| this.child(dot))
                     .child(
                         div()
                             .id(ElementId::NamedInteger("tab-label".into(), id.get()))
@@ -765,6 +871,7 @@ impl WorkspaceView {
 impl Render for WorkspaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.install_close_hook(window, cx);
+        self.sync_window_title(window, cx);
         v_flex()
             .id("workspace")
             .test_support()
@@ -825,7 +932,7 @@ mod tests {
             })
             .expect("the workspace window");
 
-        cx.update_window(window.into(), |_, window, cx| {
+        cx.update_window(window, |_, window, cx| {
             window.render_frame(cx);
             // A second tab, driving a swarm: the state §7.1's rule is about.
             let running = view.update(cx, |view, cx| view.add_tab(window, cx));
