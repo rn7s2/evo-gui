@@ -568,6 +568,7 @@ fn first_reply_shape(cx: &HeadlessAppContext, tab: &Entity<workspace::TabContent
                 RowKind::User { .. } => users += 1,
                 RowKind::Context { key, .. } => parts.push(format!("context {key}")),
                 RowKind::LaneNotice { lane, .. } => parts.push(format!("lane {lane} notice")),
+                RowKind::GoalNudge { kind, .. } => parts.push(format!("goal {kind:?}")),
                 RowKind::Assistant {
                     markdown,
                     streaming,
@@ -723,6 +724,7 @@ fn row_chars(row: &session::Row) -> usize {
         RowKind::User { text } => text.chars().count(),
         RowKind::Context { text, .. } => text.chars().count(),
         RowKind::LaneNotice { text, .. } => text.chars().count(),
+        RowKind::GoalNudge { text, .. } => text.chars().count(),
         RowKind::Assistant { markdown, .. } => markdown.chars().count(),
         RowKind::Tool { name, .. } => name.chars().count(),
         RowKind::Report { done, .. } => done.chars().count(),
@@ -790,6 +792,9 @@ fn row_lines(cx: &HeadlessAppContext, tab: &Entity<workspace::TabContent>) -> Ve
                             RowKind::Context { key, text } => ("context", format!("{key} {text}")),
                             RowKind::LaneNotice { lane, text, .. } => {
                                 ("lane notice", format!("{lane} {text}"))
+                            }
+                            RowKind::GoalNudge { kind, text, .. } => {
+                                ("goal", format!("{kind:?} {text}"))
                             }
                             RowKind::Assistant {
                                 markdown,

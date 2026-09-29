@@ -27,7 +27,8 @@ use serde_json::Value;
 
 use crate::readout::{string_field, u64_field, CacheTotals, Readout};
 use crate::{
-    todos_from_json, Activity, DimStyle, Effect, Row, RowChanges, RowId, RowKind, Todo, ToolResult,
+    todos_from_json, Activity, DimStyle, Effect, GoalNudgeKind, Row, RowChanges, RowId, RowKind,
+    Todo, ToolResult,
 };
 
 /// When the agent's current step began: one turn of its loop, or one compaction, which the
@@ -208,14 +209,16 @@ impl AgentModel {
                     let text = join_blocks(message.get("content"), "text", "text");
                     if !text.is_empty() {
                         // A user-role message the reader did not write: the swarm's own
-                        // words about a lane (`[lane N] …`), or content an extension
-                        // injected with a `meta.key`. Only what is left is their turn.
-                        if let Some(row) = lane_row(&text) {
-                            self.push_row(row);
-                        } else if let Some(key) = context_key(message) {
-                            self.push_row(RowKind::Context { key, text });
-                        } else {
-                            self.push_row(RowKind::User { text });
+                        // words about a lane, a goal nudge evo steered itself, or
+                        // content an extension injected with a `meta.key`. Only what is
+                        // left over is a turn of theirs.
+                        match steered_row(Some(message), &text) {
+                            Some(row) => {
+                                self.push_row(row);
+                            }
+                            None => {
+                                self.push_row(RowKind::User { text });
+                            }
                         }
                     }
                 }
@@ -353,9 +356,10 @@ impl AgentModel {
                 if text.is_empty() {
                     return Effect::NONE;
                 }
-                // A steering entry is not always the reader typing: the swarm steers the
-                // coordinator with its own words too (`tell-coordinator`).
-                match lane_row(&text) {
+                // A steering entry is not always the reader typing: the swarm steers
+                // the coordinator with its own words, and evo steers its own agent
+                // when a goal outlives a run.
+                match steered_row(None, &text) {
                     Some(row) => {
                         self.push_row(row);
                     }
@@ -915,6 +919,91 @@ fn join_blocks(content: Option<&Value>, block_type: &str, key: &str) -> String {
     parts.join("\n")
 }
 
+/// The row for a user-role message the reader did not write — something evo or the
+/// swarm steered in — or `None` when the reader did write it.
+///
+/// One place, because the message arrives by two routes (`/transcript` rebuilds it
+/// from the journal, the live stream sends it as a `steering` or `user-input` event)
+/// and both must read it the same way. `message` is the wire message when there is one:
+/// an extension's injected content is the only thing marked by a field (`meta.key`),
+/// and everything else is marked by the words evo itself writes.
+fn steered_row(message: Option<&Value>, text: &str) -> Option<RowKind> {
+    lane_row(text)
+        .or_else(|| goal_nudge_row(text))
+        .or_else(|| {
+            message.and_then(context_key).map(|key| RowKind::Context {
+                key,
+                text: text.to_string(),
+            })
+        })
+}
+
+/// The row for a goal nudge evo steered into its own agent, or `None` when the text is
+/// something else.
+///
+/// Both nudges are evo's own: `goal-continuation-message` (`src/kernel/goal.lisp:69`)
+/// opens "You are idle but your goal is still active. Continue working toward it now."
+/// and `goal-wrapup-message` (:106) opens "Your goal's token budget is exhausted (",
+/// and `queue-steering` (:149, :153) queues them as ordinary input — no `meta` key, no
+/// event of their own. The opening sentence is the contract, and a reader never types
+/// it.
+fn goal_nudge_row(text: &str) -> Option<RowKind> {
+    let kind = if text.starts_with(CONTINUE_OPENING) {
+        GoalNudgeKind::Continue
+    } else if text.starts_with(WRAPUP_OPENING) {
+        GoalNudgeKind::Wrapup
+    } else {
+        return None;
+    };
+    Some(RowKind::GoalNudge {
+        kind,
+        objective: goal_nudge_objective(kind, text).unwrap_or_default(),
+        budget: goal_nudge_budget(kind, text).unwrap_or_default(),
+        text: text.to_string(),
+    })
+}
+
+/// A continuation's first sentence (`goal.lisp:71`).
+const CONTINUE_OPENING: &str =
+    "You are idle but your goal is still active. Continue working toward it now.";
+/// A wrap-up's first words (`goal.lisp:108`); the budget reads on from there.
+const WRAPUP_OPENING: &str = "Your goal's token budget is exhausted (";
+
+/// The objective a nudge carries: the body of the continuation's `<goal objective=…>`
+/// block (`goal.lisp:73`), or what follows the wrap-up's "Goal objective: " (:111).
+fn goal_nudge_objective(kind: GoalNudgeKind, text: &str) -> Option<String> {
+    let objective = match kind {
+        GoalNudgeKind::Continue => {
+            // The block opens on its own line and closes on one: everything between
+            // the two, trimmed, is the objective (it may be several lines).
+            let opening = text.find("<goal")?;
+            let body = opening + text[opening..].find('>')? + 1;
+            let rest = &text[body..];
+            rest[..rest.find("</goal>")?].trim()
+        }
+        GoalNudgeKind::Wrapup => text.split_once("Goal objective: ")?.1.trim(),
+    };
+    (!objective.is_empty()).then(|| objective.to_string())
+}
+
+/// The budget a nudge states, without the punctuation that puts it in a sentence: the
+/// `Budget: ` line of a continuation (`goal.lisp:76`, whose own words come from
+/// `goal-budget-line` :62), or the parenthetical of a wrap-up (:108).
+fn goal_nudge_budget(kind: GoalNudgeKind, text: &str) -> Option<String> {
+    let budget = match kind {
+        GoalNudgeKind::Continue => text
+            .lines()
+            .find_map(|line| line.strip_prefix("Budget: "))?
+            .trim_end_matches('.'),
+        GoalNudgeKind::Wrapup => {
+            let opening = text.find('(')? + 1;
+            &text[opening..opening + text[opening..].find(')')?]
+        }
+    };
+    let budget = budget.trim();
+    (!budget.is_empty()).then(|| budget.to_string())
+}
+
 /// The row for a message the swarm wrote about one of its lanes, or `None` when the
 /// text is not one.
 ///
@@ -940,6 +1029,9 @@ fn lane_row(text: &str) -> Option<RowKind> {
 /// `[lane N] body` or `[lane N report] body`: which lane, whether it is a report, and
 /// the body. `None` for anything else — a sentence that opens with `[lane ` is the
 /// reader's own, since it carries no number evo could have written.
+///
+/// [`TabModel`](crate::TabModel) reads the lane a line is about off it too, for the
+/// swarm's own account of a lane going down.
 pub(crate) fn lane_prefix(text: &str) -> Option<(u32, bool, &str)> {
     let rest = text.strip_prefix("[lane ")?;
     let (head, rest) = rest.split_once(']')?;

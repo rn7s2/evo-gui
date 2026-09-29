@@ -115,6 +115,12 @@ pub enum RowView {
         text: String,
         tone: session::DimStyle,
     },
+    GoalNudge {
+        kind: session::GoalNudgeKind,
+        objective: String,
+        budget: String,
+        text: String,
+    },
     Dim(String),
     RunOutcome {
         outcome: String,
@@ -171,6 +177,17 @@ impl RowView {
                 lane: *lane,
                 text: text.clone(),
                 tone: *tone,
+            },
+            session::RowKind::GoalNudge {
+                kind,
+                objective,
+                budget,
+                text,
+            } => RowView::GoalNudge {
+                kind: *kind,
+                objective: objective.clone(),
+                budget: budget.clone(),
+                text: text.clone(),
             },
             session::RowKind::Dim { text, .. } => RowView::Dim(text.clone()),
             session::RowKind::RunOutcome { outcome, text } => RowView::RunOutcome {

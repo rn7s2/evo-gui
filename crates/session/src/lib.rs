@@ -79,6 +79,27 @@ pub enum RowKind {
         /// lane the tab showing it already knows.
         lane: Option<u32>,
     },
+    /// A nudge evo steered into its own agent because a goal outlived the run:
+    /// `goal-continuation-message` — "You are idle but your goal is still active.
+    /// Continue working toward it now." — when a run settles with the goal unfinished
+    /// (`src/kernel/goal.lisp:69`), and `goal-wrapup-message` — "Your goal's token
+    /// budget is exhausted (…). Do not start new work." — when the budget is spent
+    /// (:106). `queue-steering` (:149, :153) queues them like any other input, with no
+    /// `meta` key and no event of their own, so the fixed opening sentence is what
+    /// marks them: a reader never types it, and it is evo talking, not a turn of
+    /// theirs.
+    GoalNudge {
+        kind: GoalNudgeKind,
+        /// The goal's objective: the body of the continuation's `<goal objective=…>`
+        /// block (`goal.lisp:73`), or the tail of the wrap-up's last line.
+        objective: String,
+        /// The budget as the message states it — `12,345 tokens used of 50,000 (37,655
+        /// remaining)`, `0 tokens used (no limit)`, `(45,001 used of 45,000)` — without
+        /// the punctuation that puts it in the sentence.
+        budget: String,
+        /// The whole message, which is what an opened row shows.
+        text: String,
+    },
     /// A line the swarm wrote to the coordinator about one of its lanes: `[lane 1] run
     /// ended (stop) — task: …`, `[lane 1] failed to start — see …/lane.log`,
     /// `[lane 1] initialization failed: …`, `[lane 1] error: …`, `[lane 1] is down: …`,
@@ -111,6 +132,15 @@ pub struct ToolResult {
     pub is_error: bool,
     pub content: String,
     pub content_chars: Option<u64>,
+}
+
+/// Which of evo's two goal nudges a row is (`src/kernel/goal.lisp`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GoalNudgeKind {
+    /// The goal is still active and the run settled: keep going (:69).
+    Continue,
+    /// The goal's token budget is spent: wrap up and summarize (:106).
+    Wrapup,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

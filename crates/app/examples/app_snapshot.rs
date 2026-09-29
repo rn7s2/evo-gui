@@ -1248,6 +1248,9 @@ fn row_dump(cx: &HeadlessAppContext, tab: &Entity<workspace::TabContent>) -> Vec
                             RowKind::LaneNotice { lane, text, .. } => {
                                 ("lane notice", format!("{lane} {text}"))
                             }
+                            RowKind::GoalNudge { kind, text, .. } => {
+                                ("goal", format!("{kind:?} {text}"))
+                            }
                             RowKind::Assistant {
                                 markdown,
                                 streaming,
@@ -1364,6 +1367,7 @@ fn row_chars(row: &session::Row) -> usize {
         RowKind::User { text } => text.chars().count(),
         RowKind::Context { text, .. } => text.chars().count(),
         RowKind::LaneNotice { text, .. } => text.chars().count(),
+        RowKind::GoalNudge { text, .. } => text.chars().count(),
         RowKind::Assistant { markdown, .. } => markdown.chars().count(),
         RowKind::Tool { name, .. } => name.chars().count(),
         RowKind::Report { done, .. } => done.chars().count(),

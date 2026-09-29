@@ -54,10 +54,22 @@ Invariants
   `DimStyle::Error` when the body says `failed to start` / `initialization failed:` / `error:` / `is down:` /
   `crashed and was restarted` (case-insensitively, so a lane's own `Error:` output counts), `DimStyle::Notice` otherwise —
   the swarm's `:style :error` is the TUI's and does not cross the wire, so the wording is all there is.
-  Cross-lane consequences: `crates/proofs/tests/m1_delegation.rs:182` waits for a *user* row containing `[lane 1 report]`
-  and now has to wait for `RowKind::Report { lane: Some(1), done, .. }`; and `session/src/tab.rs`'s own `lane_of_line`
+  Cross-lane consequences: `crates/proofs/tests/m1_delegation.rs` now waits for `RowKind::Report { lane: Some(1), .. }`
+  (the relay, not a user row); and `session/src/tab.rs`'s own `lane_of_line`
   reads the same prefix off the coordinator's `Dim` (`output`) rows for a lane's down reason — untouched by these rows,
   but it is a second parser of the same format and the two could become one.
+- A goal nudge is evo talking, not the reader. When a run settles with the goal unfinished, `goal-settled-hook` steers a
+  continuation into the agent (`goal-continuation-message`, `src/kernel/goal.lisp:69`, queued at :153): "You are idle but
+  your goal is still active. Continue working toward it now." followed by the `<goal objective=…>` block (:73), a
+  `Budget: …` line (`goal-budget-line`, :62), the agent's checklist (:77) and the rules. A spent budget steers the
+  wrap-up instead (`goal-wrapup-message`, :106, queued at :149): "Your goal's token budget is exhausted (…). Do not start
+  new work.". `queue-steering` marks neither, so the opening sentence is the contract, and session's `goal_nudge_row`
+  reads it on both paths — the rows are the additive `RowKind::GoalNudge { kind: Continue|Wrapup, objective, budget, text }`
+  (`text` is the whole message) and they open no turn. The transcript draws one quiet line: `Goal · continue — <objective>
+  · <budget>` (the objective gives way first, the budget stays readable at the measure's right edge) and `Goal · budget
+  exhausted — wrap up`, opened onto the same capped mono block a context row uses (`quiet_block`). `budget` is evo's own
+  words without the sentence's punctuation: `15 tokens used of 50,000 (49,985 remaining)`, `0 tokens used (no limit)`,
+  `45,001 used of 45,000`.
 - Tool payloads: one `key  value` row per field; a container the top level holds directly flattens (`env.RUST_LOG`,
   `args.0`), anything deeper is drawn as rows indented `NEST_INDENT` (12px) per level under their own key, up to
   `MAX_DEPTH` (4) — past that, or for an array longer than `MAX_ARRAY` (20), the container is one muted `{…3 keys}` /
@@ -73,7 +85,7 @@ Invariants
   found (`c1b901c`, `dfdb3d3`).
 
 ## Commands
-- `cargo test -p transcript` (48) and `cargo test -p composer` (21), plus `cargo test -p session` (the context row is
+- `cargo test -p transcript` (51) and `cargo test -p composer` (21), plus `cargo test -p session` (the context row is
   fixture-driven: `crates/session/tests/fixtures/context-transcript.json`, recorded by
   `crates/session/tests/capture_context_fixture.py`); `cargo fmt -p transcript -p composer`;
   `cargo clippy -p transcript --all-targets` is clean. Note `cargo fmt -p session` reaches `lanes.rs`/`tab.rs` through
@@ -81,7 +93,8 @@ Invariants
 - Captures: `cargo run -q -p transcript --example transcript_demo -- --capture crates/transcript/screenshots`, and the
   same for `-p composer`'s `composer_demo` (both dirs git-ignored). `34-lane-report-and-run-end.png` /
   `35-dark-lane-report-and-run-end.png` are the turn the swarm talks in (delegation, lane report, run end, the
-  coordinator's answer). Cost harness: `cargo run -q -p transcript --example
+  coordinator's answer), and `36-goal-nudges.png` / `37-dark-goal-nudges.png` the goal evo keeps going by itself (a
+  continuation opened onto its message, and the wrap-up). Cost harness: `cargo run -q -p transcript --example
   transcript_stress [-- rows stream delta message_chars]`.
 
 ## Kit facts worth not re-deriving (gpui-kit 0.7.0 / gpui-base 0.7.0)

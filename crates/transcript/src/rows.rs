@@ -26,7 +26,7 @@ use gpui_kit::{
     Stateful, StatefulInteractiveElement as _, Styled as _, WeakEntity,
 };
 use serde_json::Value;
-use session::{DimStyle, Row, RowId, RowKind, ToolResult};
+use session::{DimStyle, GoalNudgeKind, Row, RowId, RowKind, ToolResult};
 
 use crate::style::{text_style, Palette, BLOCK_GAP, GROUP_GAP, MEASURE, TIGHT_GAP, TURN_GAP};
 use crate::{link, markdown, TranscriptData, TranscriptView};
@@ -45,7 +45,7 @@ pub(crate) const BLOCK_LINES: usize = 8;
 /// hover away.
 pub(crate) const VALUE_LIMIT: usize = 96;
 /// Height of a collapsed tool row, so a long run of them stays a list.
-const TOOL_ROW_HEIGHT: Pixels = px(24.);
+pub(crate) const TOOL_ROW_HEIGHT: Pixels = px(24.);
 /// Width of the disclosure and status columns of a tool row.
 const DISCLOSURE_WIDTH: Pixels = px(14.);
 const STATUS_DOT: Pixels = px(6.);
@@ -264,11 +264,13 @@ impl Group {
             RowKind::Assistant { .. } => Self::Assistant,
             RowKind::Tool { .. } => Self::Tool,
             RowKind::Report { .. } => Self::Report,
-            // A lane notice is a quiet status line like a dim row, and the swarm's
-            // own chatter reads as one block when several land together.
-            RowKind::Dim { .. } | RowKind::RunOutcome { .. } | RowKind::LaneNotice { .. } => {
-                Self::Dim
-            }
+            // A lane notice and a goal nudge are quiet lines like dim rows: what evo
+            // and the swarm say to the agent, not what the conversation is made of,
+            // and they read as one block when several land together.
+            RowKind::Dim { .. }
+            | RowKind::RunOutcome { .. }
+            | RowKind::LaneNotice { .. }
+            | RowKind::GoalNudge { .. } => Self::Dim,
             RowKind::Context { .. } => Self::Context,
         }
     }
@@ -370,6 +372,9 @@ pub(crate) fn render_row(
         RowKind::Report { .. } => report_row(row, &palette),
         RowKind::LaneNotice { lane, text, tone } => {
             lane_notice_row(row.id, *lane, text, *tone, &palette)
+        }
+        RowKind::GoalNudge { .. } => {
+            goal_nudge_row(row, data.expanded.contains(&row.id), view, &palette)
         }
         RowKind::Dim { style, text } => dim_row(row.id, *style, text, &palette),
         RowKind::RunOutcome { outcome, text } => run_outcome_row(row.id, outcome, text, &palette),
@@ -515,12 +520,112 @@ pub(crate) fn context_label(key: &str) -> String {
     }
 }
 
-/// An opened context's text: the payload face, selectable, capped at
-/// [`CONTEXT_BLOCK_LINES`] with a scroll of its own — a memory snapshot is far
-/// longer than a row of a transcript.
+/// A goal nudge evo steered into its own agent: one quiet line saying which nudge it
+/// is, which goal it is about and what the budget stands at, which opens onto the whole
+/// message.
+///
+/// It arrives as a user-role message because `queue-steering` puts it in the input
+/// queue (`src/kernel/goal.lisp:149`, :153), but the reader did not write it and it is
+/// not part of the conversation: it is evo keeping its own goal going, so it is drawn
+/// as a note — closed, one line — rather than as a turn. The whole of it is a click
+/// away; the rules it carries are for the agent, not for the reader.
+fn goal_nudge_row(
+    row: &Row,
+    expanded: bool,
+    view: &WeakEntity<TranscriptView>,
+    palette: &Palette,
+) -> AnyElement {
+    let RowKind::GoalNudge {
+        kind,
+        objective,
+        budget,
+        text,
+    } = &row.kind
+    else {
+        unreachable!("goal_nudge_row draws a goal nudge")
+    };
+    let id = row.id;
+    let view = view.clone();
+
+    // Which nudge, and for a continuation which goal — the objective is the part that
+    // gives way when the line is longer than the measure, so the budget stays readable.
+    let head = match kind {
+        GoalNudgeKind::Continue if !objective.is_empty() => {
+            format!("Goal · continue — {objective}")
+        }
+        GoalNudgeKind::Continue => "Goal · continue".to_string(),
+        GoalNudgeKind::Wrapup => "Goal · budget exhausted — wrap up".to_string(),
+    };
+    // The budget is named on the line for a continuation only: a wrap-up says in its
+    // own words that the budget is what ran out.
+    let spent = match kind {
+        GoalNudgeKind::Continue => (!budget.is_empty()).then(|| format!("· {budget}")),
+        GoalNudgeKind::Wrapup => None,
+    };
+
+    let header = div()
+        .id(("transcript-goal", id))
+        .flex()
+        .items_center()
+        .gap_2()
+        .h(TOOL_ROW_HEIGHT)
+        .cursor_pointer()
+        // The whole line, cut or not, for a reader who cannot see it.
+        .aria_label(match &spent {
+            Some(spent) => format!("{head} {spent}"),
+            None => head.clone(),
+        })
+        .aria_expanded(expanded)
+        .on_click(move |_, _, cx| {
+            let _ = view.update(cx, |view, cx| view.toggle_expanded(id, cx));
+        })
+        .child(caret(expanded, palette))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_size(NAME_SIZE)
+                .text_color(palette.muted_foreground)
+                .child(head),
+        )
+        .children(spent.map(|spent| {
+            div()
+                .flex_none()
+                .text_size(NAME_SIZE)
+                .text_color(palette.muted_foreground)
+                .child(spent)
+        }))
+        .test_support();
+
+    let mut nudge = div()
+        .id(("transcript-goal-row", id))
+        .w_full()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .child(header);
+    if expanded {
+        nudge = nudge.child(quiet_block("transcript-goal-text", id, text, palette));
+    }
+    nudge.test_support().into_any_element()
+}
+
+/// An opened context's text.
 fn context_text(id: RowId, text: &str, palette: &Palette) -> AnyElement {
+    quiet_block("transcript-context-text", id, text, palette)
+}
+
+/// The text of an opened quiet row: the payload face, selectable, capped at
+/// [`CONTEXT_BLOCK_LINES`] with a scroll of its own — what evo steered in is far
+/// longer than a row of a transcript.
+///
+/// `name` is the row's own element name; the block, the text inside it and the run a
+/// reader selects are `name`, `name-content` and `name-run`, which is how a test
+/// reaches the text of one.
+fn quiet_block(name: &'static str, id: RowId, text: &str, palette: &Palette) -> AnyElement {
     div()
-        .id(("transcript-context-text", id))
+        .id((name, id))
         .w_full()
         .min_w_0()
         .max_h(palette.payload_size * (PAYLOAD_LINE_HEIGHT * CONTEXT_BLOCK_LINES as f32))
@@ -539,14 +644,14 @@ fn context_text(id: RowId, text: &str, palette: &Palette) -> AnyElement {
         .text_color(palette.foreground)
         .child(
             div()
-                .id(("transcript-context-text-content", id))
+                .id((SharedString::from(format!("{name}-content")), id as usize))
                 .w_full()
                 .min_w_0()
                 .test_support()
-                // A run of the block's own: selectable, and selected on its own,
-                // so a reader can copy the memory snapshot without the line above it.
+                // A run of the block's own: selectable, and selected on its own, so a
+                // reader can copy it without the line above it.
                 .child(SelectableText::new(
-                    ("transcript-context-text-run", id),
+                    (SharedString::from(format!("{name}-run")), id as usize),
                     text.to_string(),
                 )),
         )

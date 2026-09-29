@@ -9,14 +9,14 @@ use gpui_kit::{
     ParentElement as _, Render, ScrollDelta, Styled as _, TestAppContext, TestSupportExt as _,
     VisualTestContext, Window,
 };
-use session::{DimStyle, Row, RowId, RowKind, Todo, TodoStatus, ToolResult};
+use session::{DimStyle, GoalNudgeKind, Row, RowId, RowKind, Todo, TodoStatus, ToolResult};
 
 use gpui_kit::px;
 
 use crate::rows::{
     block_text, json_fields, looks_like_code, run_outcome_style, Field, FieldValue, BLOCK_LINES,
     COLUMN_GAP, CONTEXT_BLOCK_LINES, KEY_WIDTH, MAX_ARRAY, MAX_DEPTH, NEST_INDENT,
-    PAYLOAD_LINE_HEIGHT, TOOL_TEXT_LIMIT, VALUE_LIMIT,
+    PAYLOAD_LINE_HEIGHT, TOOL_ROW_HEIGHT, TOOL_TEXT_LIMIT, VALUE_LIMIT,
 };
 use crate::style::Palette;
 use crate::style::MEASURE;
@@ -107,6 +107,171 @@ fn context(id: RowId, key: &str, text: &str) -> Row {
     }
 }
 
+/// A goal nudge is one quiet line naming the goal and its budget, closed until it is
+/// asked for — not the walls of text evo sent.
+#[gpui_kit::test]
+fn a_goal_nudge_is_one_quiet_line(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (host, cx) = cx.add_window_view(|_window, cx| TranscriptHost::new(cx));
+
+    let objective = "read the tab page against §7.3, then check the goal segment and the \
+                     page below it, requirement by requirement, to the end of the section";
+    host.update(cx, |host, cx| {
+        host.transcript.update(cx, |view, cx| {
+            view.replace(
+                1,
+                vec![
+                    goal_nudge(
+                        1,
+                        GoalNudgeKind::Continue,
+                        objective,
+                        "12,345 tokens used of 50,000 (37,655 remaining)",
+                        "You are idle but your goal is still active. Continue working toward it now.",
+                    ),
+                    goal_nudge(
+                        2,
+                        GoalNudgeKind::Wrapup,
+                        "read the tab page against §7.3",
+                        "45,001 used of 45,000",
+                        "Your goal's token budget is exhausted (45,001 used of 45,000). Do not start new work.",
+                    ),
+                ],
+                cx,
+            );
+        });
+    });
+
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+
+        let nudge = window.find(("transcript-goal", 1u64));
+        // The whole of what it is about, and what the budget stands at, as the row's
+        // own words — the line itself is cut to the measure.
+        assert_eq!(
+            nudge.label(),
+            Some(format!("Goal · continue — {objective} · 12,345 tokens used of 50,000 (37,655 remaining)").as_str())
+        );
+        assert_eq!(nudge.expanded(), Some(false));
+        assert!(
+            window.try_find(("transcript-goal-text", 1u64)).is_none(),
+            "a nudge is one line until it is opened"
+        );
+        // The wrap-up says which nudge it is in its own words.
+        assert_eq!(
+            window.find(("transcript-goal", 2u64)).label(),
+            Some("Goal · budget exhausted — wrap up")
+        );
+
+        // One line, never wider than the reading measure — however long the objective
+        // evo wrote is. The line's own height is the hit target every quiet row shares.
+        assert_eq!(
+            nudge.bounds().size.height,
+            TOOL_ROW_HEIGHT,
+            "the nudge wrapped: {:?}",
+            nudge.bounds()
+        );
+        for id in [1u64, 2] {
+            let measure = window.find(("transcript-measure", id)).bounds();
+            assert_eq!(measure.size.width, px(MEASURE), "row {id} keeps the measure");
+        }
+    });
+}
+
+/// Its whole message is a click away: the same capped mono block a context row opens
+/// onto, which is where evo's rules are read from.
+#[gpui_kit::test]
+fn an_opened_goal_nudge_shows_the_message_evo_sent(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (host, cx) = cx.add_window_view(|_window, cx| TranscriptHost::new(cx));
+
+    let text: String = (1..=40)
+        .map(|line| format!("rule {line}: keep going\n"))
+        .collect();
+    host.update(cx, |host, cx| {
+        host.transcript.update(cx, |view, cx| {
+            view.replace(
+                1,
+                vec![goal_nudge(
+                    1,
+                    GoalNudgeKind::Continue,
+                    "ship the transcript",
+                    "10 tokens used (no limit)",
+                    &text,
+                )],
+                cx,
+            );
+            view.set_expanded(1, true, cx);
+        });
+    });
+
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        assert_eq!(
+            window.find(("transcript-goal", 1u64)).expanded(),
+            Some(true)
+        );
+        let block = window.find(("transcript-goal-text", 1u64)).bounds();
+        let content = window.find(("transcript-goal-text-content", 1u64)).bounds();
+        assert!(
+            content.size.height > block.size.height,
+            "forty rules run past the block: {} in {}",
+            content.size.height,
+            block.size.height
+        );
+        // Twelve lines of it, no more: the block is the same cap a context row uses.
+        let cap = Palette::from_app(cx).payload_size
+            * (PAYLOAD_LINE_HEIGHT * CONTEXT_BLOCK_LINES as f32)
+            + px(20.);
+        assert!(
+            block.size.height <= cap,
+            "the block grew to {}",
+            block.size.height
+        );
+    });
+}
+
+/// A nudge is not a turn either: evo keeping its goal going is not the reader speaking.
+#[gpui_kit::test]
+fn a_goal_nudge_opens_no_turn(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (host, cx) = cx.add_window_view(|_window, cx| TranscriptHost::new(cx));
+
+    host.update(cx, |host, cx| {
+        host.transcript.update(cx, |view, cx| {
+            view.replace(
+                1,
+                vec![
+                    goal_nudge(
+                        1,
+                        GoalNudgeKind::Continue,
+                        "ship the transcript",
+                        "10 tokens used (no limit)",
+                        "You are idle but your goal is still active. Continue working toward it now.",
+                    ),
+                    user(2, 1, "Ship it."),
+                    assistant(3, 1, "Working on it."),
+                ],
+                cx,
+            );
+        });
+    });
+
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        let first = window
+            .try_find(("transcript-turn", 1usize))
+            .expect("the reader's turn is turn 1");
+        assert!(
+            first.bounds().origin.y > window.find(("transcript-goal", 1u64)).bounds().origin.y,
+            "the nudge is above the first turn and opens none of its own"
+        );
+        assert!(
+            window.try_find(("transcript-turn", 2usize)).is_none(),
+            "a continuation is not a second turn"
+        );
+    });
+}
+
 /// A line the swarm wrote to the coordinator about one of its lanes, as the session
 /// reads it out of the coordinator's own input (`[lane N] …`, `swarm/lanes.lisp`).
 fn lane_notice(id: RowId, lane: u32, text: &str, tone: DimStyle) -> Row {
@@ -135,6 +300,22 @@ fn lane_report(id: RowId, lane: u32, done: &str) -> Row {
             requests: "none".into(),
             goal: None,
             lane: Some(lane),
+        },
+    }
+}
+
+/// A goal nudge: what evo steers into its own agent when a goal outlives the run, as
+/// the session reads it out of that message (`goal-continuation-message`,
+/// `src/kernel/goal.lisp:69`).
+fn goal_nudge(id: RowId, kind: GoalNudgeKind, objective: &str, budget: &str, text: &str) -> Row {
+    Row {
+        id,
+        version: 1,
+        kind: RowKind::GoalNudge {
+            kind,
+            objective: objective.into(),
+            budget: budget.into(),
+            text: text.into(),
         },
     }
 }

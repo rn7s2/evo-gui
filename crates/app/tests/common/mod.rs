@@ -156,6 +156,11 @@ pub fn transcript(cx: &mut TestAppContext, tab: &Entity<TabContent>) -> String {
                 RowKind::User { text } => text.clone(),
                 RowKind::Context { key, text } => format!("context:{key} {text}"),
                 RowKind::LaneNotice { lane, text, .. } => format!("lane {lane}: {text}"),
+                RowKind::GoalNudge {
+                    kind, objective, ..
+                } => {
+                    format!("goal {kind:?}: {objective}")
+                }
                 RowKind::Assistant { markdown, .. } => markdown.clone(),
                 RowKind::Report {
                     done,
