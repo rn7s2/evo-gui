@@ -43,9 +43,16 @@ fn main() {
     println!("files_seen:         {}", outcome.files_seen);
     println!("files_read:         {}", outcome.files_read);
     println!("stopped_early:      {}", outcome.stopped_early);
-    println!("resumable swarms:   {} in {:?}", outcome.entries.len(), took);
+    println!(
+        "resumable swarms:   {} in {:?}",
+        outcome.entries.len(),
+        took
+    );
 
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
     let offset = utc_offset_seconds();
     let home = std::env::var("HOME").ok();
     let entries: Vec<HistoryEntry> = outcome.entries.iter().map(to_session_entry).collect();
@@ -59,7 +66,9 @@ fn main() {
     // `history_rows` orders by the journal's own time and dedups by session path;
     // the scan ordered by file mtime. Pair each row with the entry it came from.
     for (n, row) in rows.iter().take(limit).enumerate() {
-        let entry = entries.iter().find(|entry| entry.session_path == row.session_path);
+        let entry = entries
+            .iter()
+            .find(|entry| entry.session_path == row.session_path);
         println!("--- row {} (newest first) ---", n + 1);
         match entry {
             Some(entry) => println!(

@@ -34,12 +34,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 use swarm_client::{
-    EventStream, Server, ServerConfig, StreamConfig, StreamMsg, StreamTarget, default_agent_bin,
-    default_swarm_bin, process_alive, redact,
+    default_agent_bin, default_swarm_bin, process_alive, redact, EventStream, Server, ServerConfig,
+    StreamConfig, StreamMsg, StreamTarget,
 };
 
 /// One small delegation, so the proof covers lane 1 without paying for much.
-const DEFAULT_PROMPT: &str = "Delegate to a lane: create hello.txt containing 'hi' in this folder, \
+const DEFAULT_PROMPT: &str =
+    "Delegate to a lane: create hello.txt containing 'hi' in this folder, \
      then tell me when it's done. Keep it brief.";
 
 /// Lane states that mean the lane still has the task.
@@ -79,21 +80,30 @@ impl Tally {
                 }
                 println!(
                     "\n— message-end stop_reason={} usage={}",
-                    data.get("stop_reason").and_then(Value::as_str).unwrap_or("?"),
-                    data.get("usage").map(Value::to_string).unwrap_or_else(|| "none".into())
+                    data.get("stop_reason")
+                        .and_then(Value::as_str)
+                        .unwrap_or("?"),
+                    data.get("usage")
+                        .map(Value::to_string)
+                        .unwrap_or_else(|| "none".into())
                 );
             }
             "tool-call-start" => println!(
                 "\n◆ tool {} {}",
                 data.get("name").and_then(Value::as_str).unwrap_or("?"),
-                data.get("arguments").map(Value::to_string).unwrap_or_default()
+                data.get("arguments")
+                    .map(Value::to_string)
+                    .unwrap_or_default()
             ),
             "report" => {
                 let line = format!("report: {}", redact(&data.to_string()));
                 println!("\n{line}");
                 self.reports.push(line);
             }
-            "output" => println!("\n{}", data.get("text").and_then(Value::as_str).unwrap_or("")),
+            "output" => println!(
+                "\n{}",
+                data.get("text").and_then(Value::as_str).unwrap_or("")
+            ),
             "settled" => {
                 let outcome = data.get("outcome").and_then(Value::as_str).unwrap_or("?");
                 println!("\nsettled:            {} at {}", outcome, utc_now());
@@ -116,9 +126,15 @@ fn main() {
 
 fn run() -> swarm_client::Result<()> {
     let mut args = std::env::args().skip(1);
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
     let results = PathBuf::from(args.next().unwrap_or_else(|| {
-        std::env::temp_dir().join(format!("evo-desktop-m0-real-{nanos}")).display().to_string()
+        std::env::temp_dir()
+            .join(format!("evo-desktop-m0-real-{nanos}"))
+            .display()
+            .to_string()
     }));
     let folder = results.join("project");
     fs::create_dir_all(&folder)?;
@@ -166,10 +182,18 @@ fn run() -> swarm_client::Result<()> {
         seeded.typed.context_window
     );
 
-    let stream = EventStream::start(StreamTarget::coordinator(&client, Some(0)), StreamConfig::default());
+    let stream = EventStream::start(
+        StreamTarget::coordinator(&client, Some(0)),
+        StreamConfig::default(),
+    );
     let deadline = Instant::now() + timeout;
     let reply = client.prompt(&prompt)?;
-    println!("prompt_utc:         {}\nprompt_reply:       ok={} queued={:?}", utc_now(), reply.ok, reply.data);
+    println!(
+        "prompt_utc:         {}\nprompt_reply:       ok={} queued={:?}",
+        utc_now(),
+        reply.ok,
+        reply.data
+    );
 
     let mut tally = Tally::default();
     while tally.settled.is_none() && Instant::now() < deadline {
@@ -229,7 +253,10 @@ fn run() -> swarm_client::Result<()> {
         match client.get_raw(path) {
             Ok(body) => {
                 fs::write(results.join(file), serde_json::to_string_pretty(&body)?)?;
-                println!("route {path:<20} 200 ({} bytes) → {file}", body.to_string().len());
+                println!(
+                    "route {path:<20} 200 ({} bytes) → {file}",
+                    body.to_string().len()
+                );
             }
             Err(error) => {
                 // Printed as the client's own error: swarm_client redacts a
@@ -265,14 +292,25 @@ fn run() -> swarm_client::Result<()> {
         ("lanes.json", "lanes", "lanes"),
     ] {
         if let Some(body) = read(file) {
-            println!("{:<19} {} {} item(s)", file, body.get(key).and_then(Value::as_array).map(Vec::len).unwrap_or(0), what);
+            println!(
+                "{:<19} {} {} item(s)",
+                file,
+                body.get(key)
+                    .and_then(Value::as_array)
+                    .map(Vec::len)
+                    .unwrap_or(0),
+                what
+            );
         }
     }
     println!("event_kinds ({} total):", tally.kinds.values().sum::<u64>());
     for (kind, count) in &tally.kinds {
         println!("  {kind} {count}");
     }
-    println!("settled_outcome:    {}", tally.settled.as_deref().unwrap_or("(none)"));
+    println!(
+        "settled_outcome:    {}",
+        tally.settled.as_deref().unwrap_or("(none)")
+    );
     println!("assistant_messages: {}", tally.assistant.len());
     if let Some(last) = tally.assistant.last() {
         println!("--- final coordinator text ---\n{last}\n--- end ---");
@@ -289,7 +327,11 @@ fn run() -> swarm_client::Result<()> {
 
     // Every process the swarm started, so a shutdown can be checked for leaks.
     let before = descendants(server.pid());
-    println!("processes_before:   coordinator {} descendants {:?}", server.pid(), before);
+    println!(
+        "processes_before:   coordinator {} descendants {:?}",
+        server.pid(),
+        before
+    );
     let report = server.shutdown()?;
     println!(
         "shutdown_utc:       {}\nshutdown:           {:?} exit {:?} waited {:?}",
@@ -388,7 +430,10 @@ fn descendants(root: u32) -> Vec<u32> {
 
 fn secs_env(name: &str, default: u64) -> Duration {
     Duration::from_secs(
-        std::env::var(name).ok().and_then(|s| s.parse().ok()).unwrap_or(default),
+        std::env::var(name)
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(default),
     )
 }
 

@@ -647,7 +647,19 @@ impl Engine {
                     }
                     booting = false;
                     match *result {
-                        Ok(started) => {
+                        Ok(mut started) => {
+                            // A stop that arrived *while* this was booting, and lost
+                            // the race to the boot itself: the command was taken, the
+                            // boot thread had already finished and sent its server, so
+                            // the flag is all that is left of it. The server is stopped
+                            // again, the ladder way, instead of being assembled and left
+                            // running for a caller that is gone — which is a tab whose
+                            // swarm nobody will ever ask to stop (its lanes included,
+                            // since they are the supervisor's to take down).
+                            if self.want_shutdown {
+                                let outcome = self.ladder(&mut started);
+                                return self.exit(outcome);
+                            }
                             self.send(Update::Ready {
                                 health: started.health().clone(),
                                 pid: started.pid(),

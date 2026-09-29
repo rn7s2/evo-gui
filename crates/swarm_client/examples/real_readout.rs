@@ -53,9 +53,14 @@ fn main() {
     let mut folded = 0;
     if let Ok(text) = fs::read_to_string(dir.join("usage.jsonl")) {
         for line in text.lines().filter(|line| !line.trim().is_empty()) {
-            let Ok(usage) = serde_json::from_str::<Value>(line) else { continue };
+            let Ok(usage) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
             if readout.fold_message_end(&serde_json::json!({ "usage": usage })) {
-                println!("folded message-end #{folded}: ctx now {}", readout.context_label());
+                println!(
+                    "folded message-end #{folded}: ctx now {}",
+                    readout.context_label()
+                );
                 folded += 1;
             }
         }

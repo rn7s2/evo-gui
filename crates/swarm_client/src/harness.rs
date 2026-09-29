@@ -46,7 +46,10 @@ impl Bins {
     /// `/usr/local/bin/evo-swarm` and `evo-agent`, unless `EVO_SWARM_BIN` /
     /// `EVO_AGENT_BIN` say otherwise.
     pub fn installed() -> Bins {
-        Bins { swarm: crate::default_swarm_bin(), agent: crate::default_agent_bin() }
+        Bins {
+            swarm: crate::default_swarm_bin(),
+            agent: crate::default_agent_bin(),
+        }
     }
 
     /// Whether both are there — a test that needs them can skip otherwise.
@@ -110,9 +113,15 @@ impl StubProvider {
         reader.read_line(&mut line)?;
         if !line.starts_with("stub listening") {
             let _ = child.kill();
-            return Err(Error::Config(format!("the stub model did not start: {line:?}")));
+            return Err(Error::Config(format!(
+                "the stub model did not start: {line:?}"
+            )));
         }
-        Ok(StubProvider { port, child, _stdout: reader.into_inner() })
+        Ok(StubProvider {
+            port,
+            child,
+            _stdout: reader.into_inner(),
+        })
     }
 
     pub fn port(&self) -> u16 {
@@ -220,7 +229,12 @@ pub struct HarnessConfig {
 
 impl Default for HarnessConfig {
     fn default() -> HarnessConfig {
-        HarnessConfig { workers: 2, model: STUB_MODEL.to_owned(), init_extra: String::new(), no_userspace: false }
+        HarnessConfig {
+            workers: 2,
+            model: STUB_MODEL.to_owned(),
+            init_extra: String::new(),
+            no_userspace: false,
+        }
     }
 }
 
@@ -260,7 +274,14 @@ impl Fixture {
         let mut init = stub_init_lisp(stub.port(), &config.model);
         init.push_str(&config.init_extra);
         fs::write(home.join("init.lisp"), init)?;
-        Ok(Fixture { bins, stub, home, project, model: config.model, dir })
+        Ok(Fixture {
+            bins,
+            stub,
+            home,
+            project,
+            model: config.model,
+            dir,
+        })
     }
 
     /// The tab directory the server is told to keep its token and log in.
@@ -272,8 +293,14 @@ impl Fixture {
     /// agent binary for the lanes, and no real provider key.
     pub fn env(&self) -> Vec<(String, String)> {
         vec![
-            ("EVO_HOME".to_owned(), self.home.to_string_lossy().into_owned()),
-            ("EVO_BINARY".to_owned(), self.bins.agent.to_string_lossy().into_owned()),
+            (
+                "EVO_HOME".to_owned(),
+                self.home.to_string_lossy().into_owned(),
+            ),
+            (
+                "EVO_BINARY".to_owned(),
+                self.bins.agent.to_string_lossy().into_owned(),
+            ),
             ("TERM".to_owned(), "xterm-256color".to_owned()),
         ]
     }
@@ -325,7 +352,14 @@ impl Harness {
         let token_file = server_config.token_file.clone();
         let log_path = server_config.log_path.clone();
         let server = Server::start(&server_config)?;
-        let Fixture { bins, stub, home, project, dir, .. } = fixture;
+        let Fixture {
+            bins,
+            stub,
+            home,
+            project,
+            dir,
+            ..
+        } = fixture;
         Ok(Harness {
             token_file,
             log_path,
@@ -394,7 +428,9 @@ impl Harness {
                 }
             }
             if Instant::now() >= deadline {
-                return Err(Error::Timeout(format!("lane {n} never reached {want:?} in {timeout:?}")));
+                return Err(Error::Timeout(format!(
+                    "lane {n} never reached {want:?} in {timeout:?}"
+                )));
             }
             std::thread::sleep(Duration::from_millis(100));
         }
@@ -425,7 +461,9 @@ impl Harness {
         let mut found = Vec::new();
         let mut stack = vec![self.home.clone()];
         while let Some(dir) = stack.pop() {
-            let Ok(entries) = fs::read_dir(&dir) else { continue };
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue;
+            };
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_dir() {

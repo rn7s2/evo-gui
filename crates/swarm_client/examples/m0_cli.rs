@@ -15,8 +15,8 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use swarm_client::{
-    EventStream, Server, ServerConfig, StreamConfig, StreamMsg, StreamTarget, default_agent_bin,
-    default_swarm_bin,
+    default_agent_bin, default_swarm_bin, EventStream, Server, ServerConfig, StreamConfig,
+    StreamMsg, StreamTarget,
 };
 
 fn main() {
@@ -42,9 +42,12 @@ fn run() -> swarm_client::Result<()> {
     let dir = std::env::temp_dir().join(format!("evo-desktop-m0-{}-{nanos}", std::process::id()));
     std::fs::create_dir_all(&dir)?;
 
-    let mut config = ServerConfig::swarm(default_swarm_bin(), &folder, &dir)
-        .with_evo(default_agent_bin());
-    if let Some(workers) = std::env::var("EVO_WORKERS").ok().and_then(|w| w.parse().ok()) {
+    let mut config =
+        ServerConfig::swarm(default_swarm_bin(), &folder, &dir).with_evo(default_agent_bin());
+    if let Some(workers) = std::env::var("EVO_WORKERS")
+        .ok()
+        .and_then(|w| w.parse().ok())
+    {
         config.workers = Some(workers);
     }
     println!(
@@ -70,13 +73,18 @@ fn run() -> swarm_client::Result<()> {
     println!("state: {:?}", client.state()?.status);
 
     // One stream, on its own thread, from the beginning of the log.
-    let stream =
-        EventStream::start(StreamTarget::coordinator(&client, Some(0)), StreamConfig::default());
+    let stream = EventStream::start(
+        StreamTarget::coordinator(&client, Some(0)),
+        StreamConfig::default(),
+    );
     let deadline = Instant::now() + Duration::from_secs(300);
 
     if let Some(prompt) = prompt {
         let reply = client.prompt(&prompt)?;
-        println!("prompt \"{prompt}\": ok={} queued={:?}", reply.ok, reply.data);
+        println!(
+            "prompt \"{prompt}\": ok={} queued={:?}",
+            reply.ok, reply.data
+        );
         let mut settled = false;
         while !settled {
             if Instant::now() >= deadline {
@@ -86,17 +94,34 @@ fn run() -> swarm_client::Result<()> {
             match next(&stream, deadline) {
                 Some(StreamMsg::Event { kind, data, .. }) => match kind.as_str() {
                     // The point of §2.8: text, as it streams.
-                    "text-delta" => print!("{}", data.get("text").and_then(|t| t.as_str()).unwrap_or("")),
+                    "text-delta" => print!(
+                        "{}",
+                        data.get("text").and_then(|t| t.as_str()).unwrap_or("")
+                    ),
                     "message-end" => {
-                        println!("\n— end of message ({} )", data.get("stop_reason").and_then(|s| s.as_str()).unwrap_or("?"));
+                        println!(
+                            "\n— end of message ({} )",
+                            data.get("stop_reason")
+                                .and_then(|s| s.as_str())
+                                .unwrap_or("?")
+                        );
                         if let Some(usage) = data.get("usage") {
                             println!("  usage {usage}");
                         }
                     }
-                    "tool-call-start" => println!("◆ tool {}", data.get("name").and_then(|n| n.as_str()).unwrap_or("?")),
-                    "output" => println!("{}", data.get("text").and_then(|t| t.as_str()).unwrap_or("")),
+                    "tool-call-start" => println!(
+                        "◆ tool {}",
+                        data.get("name").and_then(|n| n.as_str()).unwrap_or("?")
+                    ),
+                    "output" => println!(
+                        "{}",
+                        data.get("text").and_then(|t| t.as_str()).unwrap_or("")
+                    ),
                     "settled" => {
-                        println!("settled: {}", data.get("outcome").and_then(|o| o.as_str()).unwrap_or("?"));
+                        println!(
+                            "settled: {}",
+                            data.get("outcome").and_then(|o| o.as_str()).unwrap_or("?")
+                        );
                         settled = true;
                     }
                     "gap" | "hello" => println!("[{kind}] {data}"),

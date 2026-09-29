@@ -9,7 +9,7 @@ mod common;
 use common::{fixture, sse_events};
 use serde_json::json;
 use session::{
-    Activity, AgentKey, Changes, LaneStatus, RowChanges, RowKind, StreamStatus, TabModel,
+    Activity, AgentKey, Changes, DimStyle, LaneStatus, RowChanges, RowKind, StreamStatus, TabModel,
     TodoStatus,
 };
 use std::time::Duration;
@@ -893,4 +893,69 @@ fn the_two_assembly_paths_agree_through_the_tab() {
             .collect()
     };
     assert_eq!(rows(&from_events), rows(&from_transcript));
+}
+
+/// §9.7 — a lane that cannot register its model says so.
+///
+/// The wording is the swarm's own, from the model check it runs in a lane's init
+/// (`swarm/init.lisp`): the lane keeps running, so nothing about it is *down* — but
+/// what it says arrives on the coordinator's stream, error-styled, and the tab shows
+/// it verbatim. The lane row stays what it is (a lane that is up); the failure is the
+/// line, and this pins both halves: the wording is not ours to paraphrase, and it is
+/// not swallowed into a row that says nothing.
+#[test]
+fn a_lane_that_cannot_register_its_model_says_so() {
+    let mut model = TabModel::new();
+    model.on_lanes(&json!({
+        "swarm": { "id": "s", "dir": "/sw", "cwd": "/p", "workers": 1, "busy": 0, "stopping": false },
+        "lanes": [ { "n": 1, "state": "idle", "restarts": 0, "reports": 0 } ],
+    }));
+
+    // The line the swarm sends: `swarm/init.lisp`'s check, wrapped by the lane's own
+    // init failure report (`swarm/lanes.lisp`), as it goes over the wire.
+    let line = "lane 1 cannot use its model stub-a: its API \"anthropic-messages\" is not in \
+the lane — an extension defines it, so load that extension in the lanes with \
+(evo.swarm:in-lanes ...) in swarm.lisp";
+    model.on_event_at(
+        AgentKey::Coordinator,
+        1,
+        "output",
+        &json!({ "style": "error", "text": format!("[lane 1] initialization failed: {line}") }),
+        1_000,
+    );
+
+    let said: Vec<&RowKind> = model
+        .coordinator()
+        .rows()
+        .iter()
+        .map(|row| &row.kind)
+        .filter(|kind| matches!(kind, RowKind::Dim { text, .. } if text.contains("cannot use its model")))
+        .collect();
+    assert_eq!(
+        said.len(),
+        1,
+        "the lane's own words, once: {:?}",
+        model.coordinator().rows()
+    );
+    match said[0] {
+        RowKind::Dim { style, text } => {
+            assert_eq!(*style, DimStyle::Error, "it is a failure: {text}");
+            assert!(text
+                .starts_with("[lane 1] initialization failed: lane 1 cannot use its model stub-a"));
+            assert!(text.contains("in-lanes"), "the remedy survives too: {text}");
+        }
+        other => panic!("expected the error line, got {other:?}"),
+    }
+
+    // The lane itself is up — a model it cannot use is not a crash — so nothing about
+    // it claims a reason, and what it said is where a reader can see it: the line above.
+    assert_eq!(
+        model.lanes().lane(1).map(|row| row.status),
+        Some(LaneStatus::Idle)
+    );
+    assert_eq!(
+        model.lane_down_reason(1),
+        None,
+        "a lane that is up claims nothing"
+    );
 }

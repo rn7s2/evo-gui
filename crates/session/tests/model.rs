@@ -953,3 +953,106 @@ fn a_todo_change_replaces_the_whole_list() {
     );
     assert!(model.todos().is_empty());
 }
+
+/// A failed run is published twice — the kernel's own error line, then the run's
+/// outcome — and the tab says it once.
+///
+/// `docs/screens/09-bad-run-light.png`: the error-styled `output` row
+/// "error: Provider request failed after 4 attempts: …" and, immediately under it,
+/// the outcome row "Run failed: Provider request failed after 4 attempts: …". The row
+/// that goes is the output one; the outcome stays, because it says the same thing and
+/// says what it was (a run that ended badly).
+#[test]
+fn a_failed_run_says_it_once() {
+    const FAILURE: &str =
+        "Provider request failed after 4 attempts: Stream ended without a terminal event";
+
+    let mut model = AgentModel::new();
+    model.apply_event(
+        1,
+        "message-end",
+        &json!({ "stop_reason": "error", "usage": null, "error": FAILURE }),
+    );
+    model.apply_event(
+        2,
+        "output",
+        &json!({ "style": "error", "text": format!("error: {FAILURE}") }),
+    );
+    let effect = model.apply_event(3, "run-end", &json!({ "outcome": "error" }));
+    assert!(effect.contains(Effect::ROWS), "the row is news: {effect:?}");
+
+    let says: Vec<&RowKind> = kinds(&model)
+        .into_iter()
+        .filter(|kind| match kind {
+            RowKind::Dim { text, .. } => text.contains(FAILURE),
+            RowKind::RunOutcome { text, .. } => text.contains(FAILURE),
+            _ => false,
+        })
+        .collect();
+    assert_eq!(says.len(), 1, "one row, not two: {:?}", model.rows());
+    assert!(
+        matches!(says[0], RowKind::RunOutcome { outcome, text }
+            if outcome == "error" && text == &format!("Run failed: {FAILURE}")),
+        "the outcome row is the one left: {:?}",
+        says[0]
+    );
+
+    // A different failure is a different sentence: both rows stay where they are.
+    let mut model = AgentModel::new();
+    model.apply_event(
+        1,
+        "message-end",
+        &json!({ "stop_reason": "error", "usage": null, "error": "the second failure" }),
+    );
+    model.apply_event(
+        2,
+        "output",
+        &json!({ "style": "error", "text": "error: the first failure" }),
+    );
+    model.apply_event(3, "run-end", &json!({ "outcome": "error" }));
+    assert_eq!(
+        mentions(&model, "the first failure"),
+        1,
+        "{:?}",
+        model.rows()
+    );
+    assert_eq!(
+        mentions(&model, "the second failure"),
+        1,
+        "{:?}",
+        model.rows()
+    );
+
+    // And a line that is not the *error* kind of output is not the same publication.
+    let mut model = AgentModel::new();
+    model.apply_event(
+        1,
+        "message-end",
+        &json!({ "stop_reason": "error", "usage": null, "error": "M" }),
+    );
+    model.apply_event(
+        2,
+        "output",
+        &json!({ "style": "notice", "text": "error: M" }),
+    );
+    model.apply_event(3, "run-end", &json!({ "outcome": "error" }));
+    assert_eq!(
+        mentions(&model, "M"),
+        2,
+        "a notice is not the run's own error line: {:?}",
+        model.rows()
+    );
+}
+
+/// How many rows say NEEDLE, counting only the two kinds that can: an output line
+/// and a run's outcome.
+fn mentions(model: &AgentModel, needle: &str) -> usize {
+    model
+        .rows()
+        .iter()
+        .filter(|row| match &row.kind {
+            RowKind::Dim { text, .. } | RowKind::RunOutcome { text, .. } => text.contains(needle),
+            _ => false,
+        })
+        .count()
+}

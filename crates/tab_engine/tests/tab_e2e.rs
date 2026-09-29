@@ -1132,6 +1132,138 @@ fn a_silent_swarm_is_noticed_while_a_post_waits() {
     handle.join();
 }
 
+/// #15 — a swarm stopped while it is still booting leaves nothing behind.
+///
+/// Not #9's case: this is a real swarm, so what has to die is a tree of processes —
+/// the supervisor, and the coordinator and lanes it starts, each of which the swarm
+/// puts in a process group of its own (so one signal to the supervisor's group does
+/// **not** reach them). The tab is stopped while the boot is still in flight: the
+/// swarm binary is wrapped in a script that waits before it execs the real one, which
+/// is why the boot cannot have finished, and the tab says so itself (no `Ready`).
+#[test]
+fn a_swarm_stopped_while_booting_leaves_nothing() {
+    let _guard = one_swarm();
+    let fixture = fixture(2);
+    let dir = TempDir::new("tab-engine-cancel-boot").expect("temp dir");
+    let project = dir.join("proj");
+    std::fs::create_dir_all(&project).expect("temp project");
+    let script = dir.join("slow-swarm.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nsleep 1\nexec {} \"$@\"\n",
+            fixture.bins.swarm.display()
+        ),
+    )
+    .expect("write the wrapper");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+    let mut spec = TabSpec::new(&script, &project, fixture.tab_dir())
+        .with_agent_bin(&fixture.bins.agent)
+        .with_workers(2);
+    for (key, value) in fixture.env() {
+        spec = spec.with_env(key, value);
+    }
+    for key in fixture.env_remove() {
+        spec = spec.with_env_removed(key);
+    }
+    let (mut handle, rx) = TabEngine::start(spec);
+    let updates = Updates::new(rx);
+
+    // The swarm process, named by the token file the tab told it to write. Its own
+    // children live under the fixture's swarm directory, which is what the check
+    // below scans for — lanes do not name the tab's token.
+    let token = format!("--token-file {}/token", fixture.tab_dir().display());
+    let swarm_dir = fixture.home.join("swarm");
+    let supervisor = wait_for_process(&token, Duration::from_secs(10)).expect("the swarm started");
+    eprintln!("the booting swarm is pid {supervisor}");
+
+    // Give it the moment a real boot has — the lanes come up while readiness is
+    // still being waited for — and take everything's measure.
+    let children_before = wait_for_children(&swarm_dir, Duration::from_secs(15));
+    let booting = !updates
+        .all
+        .iter()
+        .any(|u| matches!(u, Update::Ready { .. }));
+    eprintln!(
+        "stopping with {} process(es) besides the supervisor; the tab never became Ready: {booting}",
+        children_before.len()
+    );
+    assert!(
+        booting,
+        "the point of the test is a boot that is still in flight"
+    );
+
+    let started = Instant::now();
+    assert!(handle.shutdown());
+    handle.join();
+    eprintln!("the aborted boot took {:?}", started.elapsed());
+
+    // Nothing of that swarm survives — supervisor, coordinator, lanes, watchers.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let mut left = processes_naming(&token);
+        left.extend(processes_naming(&swarm_dir.to_string_lossy()));
+        if left.is_empty() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "processes of the stopped swarm are still alive: {left:#?}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// `(pid, command)` for every process whose command line names NEEDLE.
+fn processes_naming(needle: &str) -> Vec<(u32, String)> {
+    let Ok(output) = std::process::Command::new("ps")
+        .args(["-axo", "pid=,command="])
+        .output()
+    else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            if !line.contains(needle) {
+                return None;
+            }
+            let mut fields = line.split_whitespace();
+            let pid: u32 = fields.next()?.parse().ok()?;
+            Some((pid, fields.collect::<Vec<_>>().join(" ")))
+        })
+        .collect()
+}
+
+/// Wait until some process names NEEDLE; the first pid that does.
+fn wait_for_process(needle: &str, timeout: Duration) -> Option<u32> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some((pid, _)) = processes_naming(needle).first() {
+            return Some(*pid);
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+/// Wait until some process other than the swarm itself names the swarm's directory
+/// (the coordinator and the lanes), and give back what is there.
+fn wait_for_children(swarm_dir: &Path, timeout: Duration) -> Vec<(u32, String)> {
+    let needle = swarm_dir.to_string_lossy().into_owned();
+    let deadline = Instant::now() + timeout;
+    loop {
+        let found = processes_naming(&needle);
+        if !found.is_empty() || Instant::now() >= deadline {
+            return found;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
 fn ready_pid(updates: &mut Updates, deadline: Instant) -> u32 {
     match updates.next(deadline, |u| matches!(u, Update::Ready { .. })) {
         Update::Ready { pid, .. } => pid,

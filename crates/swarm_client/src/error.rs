@@ -65,7 +65,10 @@ impl Error {
     /// Whether the connection (rather than the request) failed: the case a
     /// stream reconnects on.
     pub fn is_transport(&self) -> bool {
-        matches!(self, Error::Io(_) | Error::Protocol(_) | Error::Timeout(_) | Error::Closed)
+        matches!(
+            self,
+            Error::Io(_) | Error::Protocol(_) | Error::Timeout(_) | Error::Closed
+        )
     }
 
     /// The log tail a boot failure carries.
@@ -185,7 +188,12 @@ impl StatusError {
                 redact(&clipped).into_owned()
             });
         let envelope = serde_json::from_value::<Envelope>(raw.clone()).ok();
-        let reply = Box::new(RequestError { status, message, envelope, raw });
+        let reply = Box::new(RequestError {
+            status,
+            message,
+            envelope,
+            raw,
+        });
         match status {
             400 => StatusError::BadRequest(reply),
             401 => StatusError::Unauthorized(reply),
@@ -246,7 +254,11 @@ mod tests {
             "Error is {} bytes",
             std::mem::size_of::<Error>()
         );
-        assert!(std::mem::size_of::<StatusError>() <= 64, "{}", std::mem::size_of::<StatusError>());
+        assert!(
+            std::mem::size_of::<StatusError>() <= 64,
+            "{}",
+            std::mem::size_of::<StatusError>()
+        );
     }
 
     #[test]
@@ -280,7 +292,11 @@ mod tests {
         let raw: Value = serde_json::from_str(text).unwrap();
         let error = StatusError::from_reply(500, raw, text);
         assert_eq!(error.status(), 500);
-        assert!(error.message().contains("<redacted>"), "{}", error.message());
+        assert!(
+            error.message().contains("<redacted>"),
+            "{}",
+            error.message()
+        );
         assert!(!error.message().contains("Zm9vYmFy"), "{}", error.message());
         assert!(!error.request().raw.to_string().contains("Zm9vYmFy"));
         assert!(!error.to_string().contains("Zm9vYmFy"));
@@ -291,7 +307,11 @@ mod tests {
     fn a_body_that_is_not_json_is_redacted_too() {
         let text = "Internal Server Error: Bearer Zm9vYmFyQjNyUXc3eExrMnA5VHV2 is not of type LIST";
         let error = StatusError::from_reply(500, Value::String(text.to_string()), text);
-        assert!(error.message().contains("<redacted>"), "{}", error.message());
+        assert!(
+            error.message().contains("<redacted>"),
+            "{}",
+            error.message()
+        );
         assert!(!error.message().contains("Zm9vYmFy"));
     }
 }

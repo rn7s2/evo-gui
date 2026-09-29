@@ -39,10 +39,12 @@ fn main() {
             }
         }
     }
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
-    let probe_dir = probe_dir.unwrap_or_else(|| {
-        std::env::temp_dir().join(format!("evo-desktop-real-catalog-{nanos}"))
-    });
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let probe_dir = probe_dir
+        .unwrap_or_else(|| std::env::temp_dir().join(format!("evo-desktop-real-catalog-{nanos}")));
     let bin = swarm_client::default_agent_bin();
     let env: Vec<(String, String)> = home
         .iter()
@@ -52,10 +54,15 @@ fn main() {
     println!("=== real_catalog ===");
     println!("agent_bin:          {}", bin.display());
     println!("probe_dir:          {}", probe_dir.display());
-    println!("home:               {}", home.as_deref().unwrap_or("(the real one)"));
+    println!(
+        "home:               {}",
+        home.as_deref().unwrap_or("(the real one)")
+    );
     println!(
         "patience:           {}s (EVO_CATALOG_TIMEOUT_SECS)",
-        std::env::var("EVO_CATALOG_TIMEOUT_SECS").ok().unwrap_or_else(|| "120".to_string())
+        std::env::var("EVO_CATALOG_TIMEOUT_SECS")
+            .ok()
+            .unwrap_or_else(|| "120".to_string())
     );
 
     let started = std::time::Instant::now();
@@ -68,20 +75,40 @@ fn main() {
         }
     };
     let (registry, kernel_apis) = match update {
-        tab_engine::catalog::CatalogUpdate::Done { registry, kernel_apis } => {
-            (registry, kernel_apis)
-        }
+        tab_engine::catalog::CatalogUpdate::Done {
+            registry,
+            kernel_apis,
+        } => (registry, kernel_apis),
         tab_engine::catalog::CatalogUpdate::Failed { message, log_tail } => {
-            println!("catalog:            FAILED after {:?}: {}", started.elapsed(), redact(&message));
-            for line in log_tail.lines().rev().take(10).collect::<Vec<_>>().into_iter().rev() {
+            println!(
+                "catalog:            FAILED after {:?}: {}",
+                started.elapsed(),
+                redact(&message)
+            );
+            for line in log_tail
+                .lines()
+                .rev()
+                .take(10)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+            {
                 println!("  log: {}", redact(line));
             }
             std::process::exit(1);
         }
     };
 
-    let models = registry.get("models").and_then(Value::as_array).cloned().unwrap_or_default();
-    let providers = registry.get("providers").and_then(Value::as_array).cloned().unwrap_or_default();
+    let models = registry
+        .get("models")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let providers = registry
+        .get("providers")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
     // The chooser and the report both read the probe's own array; `None` (the
     // no-userspace probe did not answer) falls back to the registry's own list.
     let apis = kernel_apis
@@ -126,7 +153,10 @@ fn main() {
         lanes.options.len(),
         lanes.models().count()
     );
-    println!("lanes default:      {}", describe(lanes.option(DEFAULT_KEY)));
+    println!(
+        "lanes default:      {}",
+        describe(lanes.option(DEFAULT_KEY))
+    );
     let unavailable: Vec<String> = lanes
         .models()
         .filter(|option| !option.available)
@@ -135,7 +165,10 @@ fn main() {
                 "{} ({}) — {}",
                 option.label,
                 option.provider.as_deref().unwrap_or("-"),
-                option.unavailable_reason.as_deref().unwrap_or("no reason given")
+                option
+                    .unavailable_reason
+                    .as_deref()
+                    .unwrap_or("no reason given")
             )
         })
         .collect();
@@ -150,7 +183,10 @@ fn main() {
     println!(
         "coordinator chooser: {} option(s), {} unavailable",
         coordinator.options.len(),
-        coordinator.models().filter(|option| !option.available).count()
+        coordinator
+            .models()
+            .filter(|option| !option.available)
+            .count()
     );
     println!("--- lanes chooser options ---");
     for option in &lanes.options {

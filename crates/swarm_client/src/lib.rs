@@ -56,17 +56,15 @@ pub use api::{
     SwarmSummary, TaskInfo, Todo, TodoKind, Tool, Transcript,
 };
 pub use error::{BootFailure, Error, RequestError, Result, StatusError};
-pub use http::{HttpClient, HttpResponse, SseConnection, Token, is_loopback};
+pub use http::{is_loopback, HttpClient, HttpResponse, SseConnection, Token};
 pub use probe::{learn_registry, learn_registry_with};
-pub use redact::{MASK, redact, redact_json};
+pub use redact::{redact, redact_json, MASK};
 pub use server::{
-    BootCancel, Readiness, Resume, SCRUB_ENV, Server, ServerConfig, Shutdown, ShutdownOutcome,
-    log_tail, process_alive,
+    log_tail, process_alive, BootCancel, Readiness, Resume, Server, ServerConfig, Shutdown,
+    ShutdownOutcome, SCRUB_ENV,
 };
 pub use sse::{SseEvent, SseParser};
-pub use stream::{
-    CursorProbe, EventStream, ResetReason, StreamConfig, StreamMsg, StreamTarget,
-};
+pub use stream::{CursorProbe, EventStream, ResetReason, StreamConfig, StreamMsg, StreamTarget};
 
 /// The installed swarm binary, unless `EVO_SWARM_BIN` says otherwise.
 pub fn default_swarm_bin() -> std::path::PathBuf {
