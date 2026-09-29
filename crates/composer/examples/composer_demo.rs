@@ -267,7 +267,7 @@ fn open_capture_window(
             cx.new(|cx| Demo::staged(window, cx))
         })
     })?;
-    Ok((handle.into(), demo))
+    Ok((handle, demo))
 }
 
 /// Put the caret in the input and type the draft, as a reader would.

@@ -119,6 +119,12 @@ fn end_position(text: &str) -> Position {
     Position::new(line as u32, character as u32)
 }
 
+/// Whether a keystroke is the plain `Enter` that submits a draft — the chord the
+/// input's own `Enter` is bound to, with no modifier on it.
+fn is_submit(keystroke: &Keystroke) -> bool {
+    keystroke.key == "enter" && !keystroke.modifiers.modified()
+}
+
 /// Whether a keystroke is this platform's copy shortcut — the chord the input's
 /// own `Copy` is bound to, and the one the window's `Copy` answers.
 fn is_copy_shortcut(keystroke: &Keystroke) -> bool {
@@ -157,6 +163,13 @@ pub struct Composer {
     /// over a recalled prompt — is visible before the input's own `Change` event
     /// has had a chance to arrive.
     recalled: String,
+    /// The draft as `Enter` found it.
+    ///
+    /// The input's own `PressEnter` reaches this composer at the end of the
+    /// update the key arrived in, and the text would be read off the input then:
+    /// anything that rewrites the input in between — a prefill, a mention the
+    /// reader picked — must not change the prompt that goes out.
+    pending_send: Option<String>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -177,7 +190,13 @@ impl Composer {
             match event {
                 // `Shift+Enter` already inserted its newline in the state.
                 InputEvent::PressEnter { shift: false, .. } => {
-                    let draft = input.read(cx).value().to_string();
+                    // The draft as the keypress found it, not as the input holds
+                    // it when this event lands at the end of the update.
+                    let draft = match this.pending_send.take() {
+                        Some(draft) => draft,
+                        // An event nobody pressed for is still the input's text.
+                        None => input.read(cx).value().to_string(),
+                    };
                     this.send(draft, cx);
                 }
                 InputEvent::Change => {
@@ -211,6 +230,7 @@ impl Composer {
             history: Vec::new(),
             walking: None,
             recalled: String::new(),
+            pending_send: None,
             _subscriptions: vec![subscription, interceptor],
         }
     }
@@ -377,6 +397,14 @@ impl Composer {
         }
 
         let keystroke = &event.keystroke;
+
+        // A plain `Enter` submits, but the input submits at the end of this
+        // update: the reader's words are taken now, at the key, so that whatever
+        // rewrites the input in between is not what goes out.
+        if is_submit(keystroke) {
+            self.pending_send = Some(input.read(cx).value().to_string());
+        }
+
         let empty = input.read(cx).value().is_empty();
         match keystroke.key.as_str() {
             "up" if self.walking.is_some() || empty => {
@@ -551,8 +579,8 @@ impl Render for Composer {
 mod tests {
     use super::*;
     use gpui_kit::base::{TextView, TextViewState};
-    use gpui_kit::FocusHandle;
     use gpui_kit::test::TestWindowExt as _;
+    use gpui_kit::FocusHandle;
     use gpui_kit::{
         point, px, AnyWindowHandle, Bounds, EntityId, TestAppContext, WindowBounds, WindowOptions,
     };
@@ -670,6 +698,7 @@ mod tests {
         fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             div()
                 .id("probe")
+                .test_support()
                 .key_context("Probe")
                 .track_focus(&self.focus)
                 .on_action(cx.listener(|this, _: &ProbeUp, _, cx| {
@@ -717,8 +746,9 @@ mod tests {
             })
             .expect("a window with a composer and a probe")
         });
-        let (probe, composer) =
-            beside.read_with(cx, |beside, _| (beside.probe.clone(), beside.composer.clone()));
+        let (probe, composer) = beside.read_with(cx, |beside, _| {
+            (beside.probe.clone(), beside.composer.clone())
+        });
 
         // A prompt of this tab's, so a leaked ↑ would show up in the draft.
         cx.update_window(window, |_, window, cx| {
@@ -736,7 +766,7 @@ mod tests {
         })
         .expect("the composer's window");
         assert_eq!(
-            composer.read_with(cx, |composer, cx| composer.history().len()),
+            composer.read_with(cx, |composer, _| composer.history().len()),
             1,
             "the tab has one prompt to recall"
         );
@@ -754,14 +784,22 @@ mod tests {
         })
         .expect("the probe's window");
 
-        assert_eq!(probe.read_with(cx, |probe, _| probe.ups), 1, "the probe's ↑");
+        assert_eq!(
+            probe.read_with(cx, |probe, _| probe.ups),
+            1,
+            "the probe's ↑"
+        );
         assert_eq!(
             probe.read_with(cx, |probe, _| probe.copies),
             1,
             "the probe's copy"
         );
         assert_eq!(
-            composer.read_with(cx, |composer, cx| composer.input.read(cx).value().to_string()),
+            composer.read_with(cx, |composer, cx| composer
+                .input
+                .read(cx)
+                .value()
+                .to_string()),
             "",
             "and the composer recalled nothing over its own draft"
         );
@@ -774,7 +812,11 @@ mod tests {
         })
         .expect("the composer's window");
         assert_eq!(
-            composer.read_with(cx, |composer, cx| composer.input.read(cx).value().to_string()),
+            composer.read_with(cx, |composer, cx| composer
+                .input
+                .read(cx)
+                .value()
+                .to_string()),
             "an earlier prompt",
             "the composer's ↑ recalls this tab's prompt"
         );
@@ -1125,6 +1167,34 @@ mod tests {
             );
         });
     }
+
+    /// §9.2: the prompt that goes out is the one the reader had in front of them
+    /// when they pressed `Enter`. The input's own event lands at the end of that
+    /// update, so a prefill — a mention they picked, a program that rewrites the
+    /// input — must not be what is sent.
+    #[gpui_kit::test]
+    fn enter_sends_the_draft_as_the_keypress_found_it(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            f.type_draft("the prompt as it was typed", window, cx);
+            window.press("enter", cx);
+            // The rest of the same update touches the input.
+            f.set_draft("something else entirely", window, cx);
+        });
+
+        assert_eq!(
+            f.events(),
+            vec![ComposerEvent::Send("the prompt as it was typed".into())],
+            "the prompt is what was in the input at the keypress"
+        );
+        assert_eq!(
+            f.draft_now(cx),
+            "something else entirely",
+            "and the input is left as the update left it"
+        );
+    }
+
     #[gpui_kit::test]
     fn the_up_arrow_walks_the_prompts_this_tab_sent(cx: &mut TestAppContext) {
         let f = open(cx);

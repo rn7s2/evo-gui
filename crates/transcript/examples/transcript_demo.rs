@@ -524,7 +524,7 @@ impl Demo {
     /// looks before its first turn.
     fn blank(cx: &mut Context<Self>) -> Self {
         Self {
-            transcript: cx.new(|cx| TranscriptView::new(cx)),
+            transcript: cx.new(TranscriptView::new),
             stream: None,
         }
     }
@@ -686,7 +686,7 @@ fn run_window() {
         .run(|cx| {
             gpui_kit::init(cx);
             gpui_kit::open_window(window_options(WINDOW_SIZE, true), cx, |_window, cx| {
-                cx.new(|cx| Demo::new(cx))
+                cx.new(Demo::new)
             })
             .expect("open the demo window");
         });
@@ -986,10 +986,10 @@ fn open_blank_window(
 ) -> Result<(AnyWindowHandle, Entity<Demo>), Box<dyn std::error::Error>> {
     let (handle, demo) = cx.update(|cx| {
         gpui_kit::open_window(window_options(size, false), cx, |_window, cx| {
-            cx.new(|cx| Demo::blank(cx))
+            cx.new(Demo::blank)
         })
     })?;
-    Ok((handle.into(), demo))
+    Ok((handle, demo))
 }
 
 fn open_capture_window(
@@ -998,10 +998,10 @@ fn open_capture_window(
 ) -> Result<(AnyWindowHandle, Entity<Demo>), Box<dyn std::error::Error>> {
     let (handle, demo) = cx.update(|cx| {
         gpui_kit::open_window(window_options(size, false), cx, |_window, cx| {
-            cx.new(|cx| Demo::staged(cx))
+            cx.new(Demo::staged)
         })
     })?;
-    Ok((handle.into(), demo))
+    Ok((handle, demo))
 }
 
 /// Replay the finished first turn into a window as one rebuild, the way

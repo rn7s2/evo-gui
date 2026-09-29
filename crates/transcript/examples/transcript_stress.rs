@@ -99,10 +99,10 @@ fn run(
 
     let (window, host) = cx.update(|cx| {
         gpui_kit::open_window(window_options(WINDOW_SIZE), cx, |_window, cx| {
-            cx.new(|cx| Host::new(cx))
+            cx.new(Host::new)
         })
     })?;
-    let window: AnyWindowHandle = window.into();
+    let window: AnyWindowHandle = window;
 
     let rss_start = rss_kb();
     println!(
@@ -291,16 +291,15 @@ fn run(
 
     // A view nobody is looking at: a delta arrives, no frame follows. This is
     // the per-update cost of the view itself, with the draw taken out of it.
-    let unmounted = cx.new(|cx| TranscriptView::new(cx));
+    let unmounted = cx.new(TranscriptView::new);
     let mut unmounted_costs = Timings::default();
     let mut source = String::new();
-    let mut version = 1;
     unmounted.update(&mut cx, |view, cx| {
         view.upsert(
             1,
             Row {
                 id: STREAM_ROW_UNMOUNTED,
-                version,
+                version: 1,
                 kind: RowKind::Assistant {
                     markdown: String::new(),
                     thinking: String::new(),
@@ -311,9 +310,10 @@ fn run(
             cx,
         );
     });
-    for delta in &deltas {
+    // The deltas carry the versions after the row above: one upsert per delta,
+    // each a new version of the same row.
+    for (version, delta) in (2..).zip(deltas.iter()) {
         source.push_str(delta);
-        version += 1;
         let markdown = source.clone();
         let started = Instant::now();
         unmounted.update(&mut cx, |view, cx| {
@@ -649,7 +649,7 @@ struct Host {
 
 impl Host {
     fn new(cx: &mut Context<Self>) -> Self {
-        let transcript = cx.new(|cx| TranscriptView::new(cx));
+        let transcript = cx.new(TranscriptView::new);
         transcript.update(cx, |view, cx| {
             view.set_todos(
                 vec![
