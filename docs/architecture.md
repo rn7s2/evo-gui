@@ -12,6 +12,7 @@ Spec: docs/PROMPT.md (copy of the build prompt). Section refs like §7.3 point t
 | `agent_list` | gpui | the tab page's left column (§7.3): `main` + one row per lane, status glyph, task, step clock, selection, reconnecting badge. |
 | `composer` | gpui | Textarea input (2→8 rows, Enter/Shift+Enter/Esc), status readout row + single Send/Stop button. |
 | `workspace` | gpui | window root, TitleBar+TabBar, empty tab (choosers, folder button, history), tab page layout (lane list / center / right), tab lifecycle wiring swarm_client↔session. |
+| `proofs` | tests only | milestone proofs (M1–M4) that drive real `evo-swarm` through tab_engine + session + store without the UI; UI-level proofs live in workspace tests. |
 | `evo-desktop` (crates/app) | bin | main: single-instance, window options/bounds, quit handling. |
 
 Rules: pure crates must not depend on gpui. UI thread never blocks: I/O on own threads, results delivered via channels → weak entity updates with revision checks.
