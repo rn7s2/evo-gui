@@ -3,7 +3,7 @@
 
 use gpui_kit::component::text::TextViewStyle;
 use gpui_kit::component::ActiveTheme as _;
-use gpui_kit::{px, rems, App, Hsla, Overflow, Pixels, SharedString, StyleRefinement};
+use gpui_kit::{px, rems, App, Hsla, Overflow, Pixels, SharedString, StyleRefinement, Styled as _};
 
 /// The widest a row's content gets.
 ///
@@ -36,6 +36,8 @@ pub(crate) struct Palette {
     pub(crate) warning: Hsla,
     pub(crate) info: Hsla,
     pub(crate) mono: SharedString,
+    /// The theme's body size: what a row measures itself against.
+    pub(crate) font_size: Pixels,
     pub(crate) radius: Pixels,
     pub(crate) radius_lg: Pixels,
 }
@@ -55,6 +57,7 @@ impl Palette {
             warning: theme.warning,
             info: theme.info,
             mono: theme.mono_font_family.clone(),
+            font_size: theme.font_size,
             radius: theme.radius,
             radius_lg: theme.radius_lg,
         }
@@ -72,6 +75,21 @@ pub(crate) fn text_style(cx: &App) -> TextViewStyle {
     let mut table = StyleRefinement::default();
     table.overflow.x = Some(Overflow::Scroll);
 
+    // A cell draws no padding of its own, deliberately.
+    //
+    // gpui-base measures a scroll-layout column as `text + CELL_PAD_PX (16) +
+    // border` and uses that as the column's flex floor, while the cell it
+    // renders carries whatever padding the `table_cell` refinement asks for.
+    // Asking for the 8px a side that measurement assumes leaves the text box
+    // exactly as wide as the text, and the flex pass then hands the column a
+    // fraction less than its floor — so a word that fits at all gets broken
+    // mid-word ("call|s", "cach|e"). Leaving the padding to the measurement
+    // keeps those 16px as slack, so no column ever shrinks below its longest
+    // word: short cells stay on one line and the table scrolls sideways. The
+    // one cell that may still break is the one whose word is longer than its
+    // floor, which is what a token with no word boundary is.
+    let table_cell = StyleRefinement::default().px(px(0.));
+
     let mut style = TextViewStyle::default();
     style.paragraph_gap = rems(0.5);
     style.heading_base_font_size = base;
@@ -85,5 +103,6 @@ pub(crate) fn text_style(cx: &App) -> TextViewStyle {
         px(f32::from(base) * scale)
     }));
     style.table = table;
+    style.table_cell = table_cell;
     style
 }

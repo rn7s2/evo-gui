@@ -17,10 +17,9 @@
 //! and are dropped when it is older than the last accepted one, so late results
 //! from a previous revision cannot reach the UI.
 //!
-//! Rows are normalised on the way in: a run marker that only says "a run began"
-//! is dropped (the turn separator between two user turns says the same thing in
-//! place), and a run that **ended** is kept only when the outcome was not `ok`,
-//! where it is a notice rather than a line of bookkeeping.
+//! Rows are rendered as the session hands them over: a turn boundary is drawn
+//! between two user turns, and a run that ended badly arrives as
+//! [`RowKind::RunOutcome`] with the line to show.
 //!
 //! ```ignore
 //! let transcript = cx.new(TranscriptView::new);
@@ -48,7 +47,7 @@ use gpui_kit::{
     App, AppContext as _, Context, Entity, IntoElement, Render, StyleRefinement, Styled as _,
     Window,
 };
-use session::{DimStyle, Row, RowId, RowKind, Todo};
+use session::{Row, RowId, RowKind, Todo};
 
 /// The data the row renderer reads.
 ///
@@ -217,10 +216,6 @@ impl TranscriptView {
             return false;
         }
 
-        let rows = rows
-            .into_iter()
-            .filter_map(display_row)
-            .collect::<Vec<Row>>();
         let change = self.data.update(cx, |data, cx| {
             data.sync_documents(&rows, cx);
             let change = ListChange::between(&data.rows, &rows);
@@ -236,16 +231,11 @@ impl TranscriptView {
     ///
     /// A row that is already there is replaced only when its `version` is
     /// newer — the version is the contract for "this row's content changed".
-    /// A row the view drops as bookkeeping ([`display_row`]) is not added and
-    /// does not count as a change. Returns `true` when the view changed.
+    /// Returns `true` when the view changed.
     pub fn upsert(&mut self, revision: u64, row: Row, cx: &mut Context<Self>) -> bool {
         if !self.accept_revision(revision) {
             return false;
         }
-        let Some(row) = display_row(row) else {
-            return false;
-        };
-
         // `(index, appended)`: a row that was already there keeps its place and
         // only needs remeasuring; a new one extends the list.
         let change = self.data.update(cx, |data, cx| {
@@ -380,44 +370,4 @@ impl Render for TranscriptView {
         .size_full()
         .min_h_0()
     }
-}
-
-/// The row as it should appear, or `None` when it is bookkeeping.
-///
-/// A run that started is only interesting as the turn boundary the transcript
-/// already draws, and a run that ended `ok` says nothing a reader needs; one
-/// that ended any other way is worth a line, as a notice. Everything else
-/// passes through untouched.
-fn display_row(row: Row) -> Option<Row> {
-    let RowKind::Dim { style, text } = &row.kind else {
-        return Some(row);
-    };
-    if !matches!(style, DimStyle::Status) {
-        return Some(row);
-    }
-
-    if text.trim_start().starts_with("run-start") {
-        return None;
-    }
-    if text.trim_start().starts_with("run-end") {
-        let outcome = text.rsplit("outcome").next().unwrap_or("").trim();
-        return match outcome {
-            "" | "ok" => None,
-            "error" | "failed" | "failure" => Some(Row {
-                kind: RowKind::Dim {
-                    style: DimStyle::Error,
-                    text: text.clone(),
-                },
-                ..row
-            }),
-            _ => Some(Row {
-                kind: RowKind::Dim {
-                    style: DimStyle::Notice,
-                    text: text.clone(),
-                },
-                ..row
-            }),
-        };
-    }
-    Some(row)
 }

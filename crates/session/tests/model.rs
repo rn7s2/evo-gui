@@ -136,6 +136,12 @@ fn output_lines_take_the_style_the_server_sent() {
         dims.iter().any(|(_, text)| text.starts_with("[lane 1]")),
         "the lane's run ending is reported in the coordinator's transcript"
     );
+    // ...and an output line is the server's text, whole: no prefix names the event it came
+    // from, because the reader is reading what evo said, not which event carried it.
+    assert!(
+        dims.contains(&(DimStyle::Notice, "◆ goal created: fixture goal: show the goal segment FINISH".to_string())),
+        "dims: {dims:#?}"
+    );
 }
 
 #[test]
@@ -357,6 +363,23 @@ fn the_step_clock_follows_the_step_boundaries() {
         Some(StepClock { turn: 7, event_id: 1, started_at_millis: None })
     );
 
+    // The clock is formatted the way the swarm formats a lane's step age, from the same
+    // `short_duration`, so the two columns of the left list count alike.
+    let clock = StepClock { turn: 0, event_id: 1, started_at_millis: Some(1_000) };
+    assert_eq!(clock.elapsed(1_000), Some(std::time::Duration::ZERO));
+    assert_eq!(clock.elapsed(3_500).unwrap().as_millis(), 2_500);
+    assert_eq!(clock.clock_label(1_000).as_deref(), Some("0s"));
+    assert_eq!(clock.clock_label(46_000).as_deref(), Some("45s"));
+    assert_eq!(clock.clock_label(91_000).as_deref(), Some("1m"));
+    assert_eq!(clock.clock_label(3_601_000).as_deref(), Some("1h0m"));
+    // A clock behind the stamp (two clocks disagreeing) reads as zero, not as a panic.
+    assert_eq!(clock.elapsed(0), Some(std::time::Duration::ZERO));
+    assert_eq!(clock.clock_label(0).as_deref(), Some("0s"));
+    // No stamp, no elapsed time — and no label either.
+    let unstamped = StepClock { turn: 0, event_id: 2, started_at_millis: None };
+    assert_eq!(unstamped.elapsed(9_999), None);
+    assert_eq!(unstamped.clock_label(9_999), None);
+
     // A restarted server has no step running, and neither does a switched session.
     let mut model = AgentModel::new();
     model.apply_event_at(1, "turn-start", &json!({"turn": 0}), 10);
@@ -366,11 +389,19 @@ fn the_step_clock_follows_the_step_boundaries() {
     model.apply_event_at(1, "turn-start", &json!({"turn": 0}), 10);
     model.apply_event(2, "session-switched", &json!({"session": "/x.sexp"}));
     assert_eq!(model.step_started(), None);
-    // ...but a `gap` is this session's own missed events: the step stands.
+    // ...but a `gap` is this session's own missed events: the step stands, and the reader
+    // is told what the missing events mean instead of being shown the event name.
     let mut model = AgentModel::new();
     model.apply_event_at(1, "turn-start", &json!({"turn": 0}), 10);
     model.apply_event(2, "gap", &json!({}));
     assert!(model.step_started().is_some());
+    match &model.rows().last().unwrap().kind {
+        RowKind::Dim { style, text } => {
+            assert_eq!(*style, DimStyle::Notice);
+            assert_eq!(text, "Reconnected — some events may be missing");
+        }
+        other => panic!("unexpected row: {other:?}"),
+    }
 }
 
 #[test]
@@ -397,8 +428,8 @@ fn a_manual_compaction_drives_activity_and_dim_rows() {
     assert_eq!(model.activity(), Activity::Idle);
 
     let dims = dim_texts(&model);
-    assert!(dims.contains(&"compacting...".to_string()), "dims: {dims:#?}");
-    assert!(dims.contains(&"compaction finished".to_string()), "dims: {dims:#?}");
+    assert!(dims.contains(&"Compacting context…".to_string()), "dims: {dims:#?}");
+    assert!(dims.contains(&"Context compacted".to_string()), "dims: {dims:#?}");
     let failure = model.rows().iter().find_map(|row| match &row.kind {
         RowKind::Dim { style: DimStyle::Error, text } => Some(text.clone()),
         _ => None,
@@ -436,7 +467,9 @@ fn a_coordinator_run_start_stops_compacting() {
 
 #[test]
 fn provider_retry_is_a_dim_notice() {
-    // Shape from `src/provider/core.lisp`'s retry emit: attempt, max, delay, reason.
+    // Shape from `src/provider/core.lisp`'s retry emit: attempt, max, delay (seconds,
+    // serialized as a double: `retry-delay` is `2^attempt` plus a random fraction, or a
+    // whole `Retry-After`) and the reason the attempt died.
     let mut model = AgentModel::new();
     assert_eq!(
         model.apply_event(1, "provider-retry", &json!({"attempt": 2, "max": 4, "delay": 1.5, "reason": "overloaded_error: Overloaded\n(second line)"})),
@@ -445,9 +478,109 @@ fn provider_retry_is_a_dim_notice() {
     match &model.rows()[0].kind {
         RowKind::Dim { style, text } => {
             assert_eq!(*style, DimStyle::Notice);
-            assert_eq!(text, "⟲ retry 2/4 · overloaded_error: Overloaded");
+            // The reader's words: no event name, no field name, and the reason is one line.
+            assert_eq!(text, "Retrying provider (2/4) in 1.5 s — overloaded_error: Overloaded");
         }
         other => panic!("unexpected row: {other:?}"),
+    }
+
+    // The delay is spoken in the unit that reads best: sub-second in milliseconds, a whole
+    // second in seconds. A retry with no delay (an older server) or no reason still reads.
+    let texts: Vec<String> = [
+        json!({"attempt": 1, "max": 3, "delay": 0.5, "reason": "HTTP 503"}),
+        json!({"attempt": 3, "max": 4, "delay": 3.0, "reason": "HTTP 529"}),
+        json!({"attempt": 1, "max": 4, "delay": 30, "reason": "HTTP 429"}),
+        json!({"attempt": 1, "max": 4, "reason": "boom"}),
+        json!({"attempt": 1, "max": 4, "delay": 2.0}),
+    ]
+    .iter()
+    .map(|data| {
+        let mut model = AgentModel::new();
+        model.apply_event(1, "provider-retry", data);
+        match &model.rows()[0].kind {
+            RowKind::Dim { text, .. } => text.clone(),
+            other => panic!("unexpected row: {other:?}"),
+        }
+    })
+    .collect();
+    assert_eq!(
+        texts,
+        vec![
+            "Retrying provider (1/3) in 500 ms — HTTP 503",
+            "Retrying provider (3/4) in 3 s — HTTP 529",
+            "Retrying provider (1/4) in 30 s — HTTP 429",
+            "Retrying provider (1/4) — boom",
+            "Retrying provider (1/4) in 2 s",
+        ]
+    );
+}
+
+/// Task 4: a run that ended badly is the one thing `run-end` says. `run-start` never
+/// emits a row, a clean stop emits none either, and the ones that do carry the outcome
+/// itself as a typed field rather than a word to be sniffed back out of a string.
+#[test]
+fn a_run_that_ended_badly_gets_an_outcome_row() {
+    // `stop` is a run finishing as asked — the turn boundary already says so.
+    let mut model = AgentModel::new();
+    assert_eq!(model.apply_event(1, "run-start", &json!({"run_id": "r", "turn": 1})), Effect::STEP | Effect::ACTIVITY);
+    assert!(model.rows().is_empty(), "a run starting is not a row");
+    assert_eq!(
+        model.apply_event(2, "run-end", &json!({"outcome": "stop", "run_id": "r", "turn": 1})),
+        Effect::STEP | Effect::ACTIVITY
+    );
+    assert!(model.rows().is_empty(), "a clean run end is not a row either");
+
+    // An outcome the event does not carry at all reads as a clean one; `ok` is the older
+    // spelling of the same thing.
+    for outcome in [json!({}), json!({"outcome": "ok"})] {
+        let mut model = AgentModel::new();
+        assert_eq!(model.apply_event(1, "run-end", &outcome), Effect::STEP);
+        assert!(model.rows().is_empty(), "{outcome}");
+    }
+
+    // Aborted: the row says so, and the outcome rides along for the UI to style with.
+    let mut model = AgentModel::new();
+    let effect = model.apply_event(1, "run-end", &json!({"outcome": "aborted"}));
+    assert!(effect.contains(Effect::ROWS), "the row is news: {effect:?}");
+    match &model.rows()[0].kind {
+        RowKind::RunOutcome { outcome, text } => {
+            assert_eq!(outcome, "aborted");
+            assert_eq!(text, "Run aborted");
+        }
+        other => panic!("unexpected row: {other:?}"),
+    }
+
+    // A failed run names what it failed with: the failing assistant message's error, which
+    // is the message whose stop reason *is* the outcome.
+    let mut model = AgentModel::new();
+    model.apply_event(1, "message-end", &json!({"stop_reason": "error", "usage": null, "error": "HTTP 529: overloaded"}));
+    model.apply_event(2, "run-end", &json!({"outcome": "error"}));
+    assert!(model.rows().iter().any(|row| matches!(
+        &row.kind,
+        RowKind::RunOutcome { outcome, text }
+            if outcome == "error" && text == "Run failed: HTTP 529: overloaded"
+    )), "rows: {:?}", model.rows());
+
+    // ..., and a run that failed with nothing to quote still says it failed.
+    let mut model = AgentModel::new();
+    model.apply_event(1, "run-end", &json!({"outcome": "error"}));
+    assert!(model.rows().iter().any(|row| matches!(
+        &row.kind,
+        RowKind::RunOutcome { text, .. } if text == "Run failed"
+    )));
+
+    // The other two outcomes evo has words for, and one it does not.
+    let cases = [("length", "Run stopped at the length limit"), ("?", "Run ended: ?")];
+    for (outcome, expected) in cases {
+        let mut model = AgentModel::new();
+        model.apply_event(1, "run-end", &json!({ "outcome": outcome }));
+        match &model.rows()[0].kind {
+            RowKind::RunOutcome { outcome: got, text } => {
+                assert_eq!(got, outcome);
+                assert_eq!(text, expected);
+            }
+            other => panic!("unexpected row: {other:?}"),
+        }
     }
 }
 

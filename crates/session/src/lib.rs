@@ -39,8 +39,13 @@ pub enum RowKind {
     Tool { call_id: String, name: String, arguments: String, result: Option<ToolResult> },
     /// A lane's `report` event.
     Report { done: String, evidence: String, next: String, blocked: String, requests: String },
-    /// `output` lines and status events (compaction, provider-retry, run outcome...).
+    /// `output` lines and status events (compaction, provider-retry, a reconnect...).
     Dim { style: DimStyle, text: String },
+    /// A run that ended badly: `run-end` with an outcome that is not a clean stop
+    /// (`error`, `aborted`, `length`). `text` is the line to show. A run that stopped as
+    /// asked emits no row — the turn boundary already says it finished — and `run-start`
+    /// never emits one at all.
+    RunOutcome { outcome: String, text: String },
 }
 
 #[derive(Clone, Debug, PartialEq)]

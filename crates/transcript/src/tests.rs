@@ -11,6 +11,7 @@ use session::{DimStyle, Row, RowId, RowKind, Todo, TodoStatus};
 
 use gpui_kit::px;
 
+use crate::rows::run_outcome_style;
 use crate::style::MEASURE;
 use crate::{TodoPanel, TranscriptView};
 
@@ -378,53 +379,53 @@ fn a_tool_row_opens_on_click(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn run_markers_are_not_rows_and_a_failed_run_is_a_notice(cx: &mut TestAppContext) {
+fn a_run_that_ended_badly_renders_as_its_own_notice_row(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
-    let view = cx.new(|cx| TranscriptView::new(cx));
+    let (host, cx) = cx.add_window_view(|_window, cx| TranscriptHost::new(cx));
 
-    view.update(cx, |view, cx| {
-        view.replace(
-            1,
-            vec![
-                dim(1, DimStyle::Status, "run-start · turn 1"),
-                user(2, 1, "hello"),
-                dim(3, DimStyle::Status, "run-end · outcome ok"),
-                dim(4, DimStyle::Status, "run-end · outcome aborted"),
-                dim(5, DimStyle::Status, "compacting..."),
-            ],
-            cx,
-        );
+    let outcome = |id: RowId, outcome: &str, text: &str| Row {
+        id,
+        version: 1,
+        kind: RowKind::RunOutcome {
+            outcome: outcome.into(),
+            text: text.into(),
+        },
+    };
+
+    host.update(cx, |host, cx| {
+        host.transcript.update(cx, |view, cx| {
+            view.replace(
+                1,
+                vec![
+                    user(1, 1, "hello"),
+                    outcome(2, "aborted", "Run aborted"),
+                    outcome(3, "length", "Run stopped at the length limit"),
+                    outcome(4, "error", "Run failed: model not registered"),
+                ],
+                cx,
+            );
+        });
     });
 
-    cx.read(|cx| {
-        let rows = view.read(cx).rows(cx);
-        assert_eq!(
-            rows.len(),
-            3,
-            "only the turn and the lines worth reading stay"
-        );
-        assert_eq!(
-            rows.iter().map(|row| row.id).collect::<Vec<_>>(),
-            vec![2, 4, 5]
-        );
-
-        let RowKind::Dim { style, text } = &rows[1].kind else {
-            panic!("the failed run stays a dim row");
-        };
-        assert_eq!(
-            *style,
-            DimStyle::Notice,
-            "a run that did not end ok reads as a notice, not as bookkeeping"
-        );
-        assert!(text.contains("aborted"));
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        for id in [2u64, 3, 4] {
+            assert!(
+                window.try_find(("transcript-run-outcome", id)).is_some(),
+                "the run's own line is a row of its own: {id}"
+            );
+        }
     });
 
-    // A run marker that arrives on its own (a live `run-start`) is not a row.
-    view.update(cx, |view, cx| {
-        assert!(!view.upsert(1, dim(6, DimStyle::Status, "run-start · turn 2"), cx));
-        assert!(!view.upsert(1, dim(7, DimStyle::Status, "run-end · outcome ok"), cx));
-    });
-    cx.read(|cx| assert_eq!(view.read(cx).rows(cx).len(), 3));
+    // The colour follows the outcome: a run that failed is an error, one that
+    // was stopped or ran out of room is a notice, and anything the swarm adds
+    // later reads as a notice rather than falling off the screen.
+    {
+        assert_eq!(run_outcome_style("error"), DimStyle::Error);
+        assert_eq!(run_outcome_style("aborted"), DimStyle::Notice);
+        assert_eq!(run_outcome_style("length"), DimStyle::Notice);
+        assert_eq!(run_outcome_style("something-new"), DimStyle::Notice);
+    }
 }
 
 #[gpui_kit::test]
@@ -505,8 +506,10 @@ fn the_todo_panel_counts_its_items_caps_its_height_and_aligns_its_glyphs(cx: &mu
         .collect();
 
     host.update(cx, |host, cx| {
-        host.transcript
-            .update(cx, |view, cx| view.set_todos(todos.clone(), cx));
+        host.transcript.update(cx, |view, cx| {
+            view.replace(1, vec![user(1, 1, "what is left?")], cx);
+            view.set_todos(todos.clone(), cx);
+        });
     });
 
     cx.update(|window, cx| {
@@ -537,6 +540,15 @@ fn the_todo_panel_counts_its_items_caps_its_height_and_aligns_its_glyphs(cx: &mu
             let item = window.find(("todo-item", index)).bounds();
             assert_eq!(item.origin.x, first_item.origin.x);
         }
+
+        // The panel sits in the same measure as the rows above it.
+        let row = window.find(("transcript-measure", 1u64)).bounds();
+        let header = window.find("todo-header").bounds();
+        assert_eq!(
+            header.origin.x, row.origin.x,
+            "the panel starts on the transcript's left edge"
+        );
+        assert_eq!(header.size.width, row.size.width, "and shares its measure");
     });
 }
 
@@ -577,6 +589,37 @@ fn a_long_todo_list_scrolls_inside_the_panel(cx: &mut TestAppContext) {
             window.find("todo-panel").bounds().size.height,
             panel.size.height,
             "scrolling the list does not resize the panel"
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn markdown_tables_use_the_sideways_scrolling_layout(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+
+    cx.update(|cx| {
+        let style = crate::style::text_style(cx);
+        // Columns keep the width their content needs and the table moves
+        // sideways once it is wider than the measure, instead of squeezing
+        // cells (and breaking words inside them) to fit.
+        assert_eq!(
+            style.table.overflow.x,
+            Some(gpui_kit::Overflow::Scroll),
+            "the table scrolls rather than squeezing its columns"
+        );
+        // The cell's own padding stays zero on purpose: gpui-base has already
+        // counted its `CELL_PAD_PX` into every column's floor, so asking for
+        // that padding again would leave each text box exactly as wide as its
+        // text, which is where a word gets broken in half.
+        let padding = style.table_cell.padding;
+        assert!(
+            padding
+                .left
+                .is_none_or(|left| left == gpui_kit::px(0.).into())
+                && padding
+                    .right
+                    .is_none_or(|right| right == gpui_kit::px(0.).into()),
+            "no cell padding of our own, so the measured floor keeps its slack: {padding:?}"
         );
     });
 }

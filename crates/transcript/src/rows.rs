@@ -63,7 +63,7 @@ impl Group {
             RowKind::Assistant { .. } => Self::Assistant,
             RowKind::Tool { .. } => Self::Tool,
             RowKind::Report { .. } => Self::Report,
-            RowKind::Dim { .. } => Self::Dim,
+            RowKind::Dim { .. } | RowKind::RunOutcome { .. } => Self::Dim,
         }
     }
 }
@@ -153,6 +153,7 @@ pub(crate) fn render_row(
             requests,
         } => report_row(row.id, done, evidence, next, blocked, requests, &palette),
         RowKind::Dim { style, text } => dim_row(row.id, *style, text, &palette),
+        RowKind::RunOutcome { outcome, text } => run_outcome_row(row.id, outcome, text, &palette),
     });
 
     div()
@@ -306,10 +307,13 @@ fn tool_row(
     };
 
     let view = view.clone();
+    // Baseline-aligned: the monospace name sits a point smaller than body text
+    // (mono faces read larger at the same size), and the dot and the status
+    // word share its baseline instead of its box.
     let header = div()
         .id(("transcript-tool", id))
         .flex()
-        .items_center()
+        .items_baseline()
         .gap_2()
         .h(TOOL_ROW_HEIGHT)
         .cursor_pointer()
@@ -320,6 +324,7 @@ fn tool_row(
             div()
                 .w(DISCLOSURE_WIDTH)
                 .flex_shrink_0()
+                .text_xs()
                 .text_color(palette.muted_foreground)
                 .child(if expanded { "▾" } else { "▸" }),
         )
@@ -327,6 +332,7 @@ fn tool_row(
             div()
                 .min_w_0()
                 .font_family(palette.mono.clone())
+                .text_size(palette.font_size - px(1.))
                 .text_color(palette.foreground)
                 .child(name.to_string()),
         )
@@ -335,7 +341,8 @@ fn tool_row(
                 .flex_shrink_0()
                 .size(STATUS_DOT)
                 .rounded_full()
-                .bg(status_color),
+                .bg(status_color)
+                .self_center(),
         )
         .child(
             div()
@@ -462,6 +469,38 @@ fn report_row(
 
 /// An `output` line or status event: one dim line, readable but out of the way.
 fn dim_row(id: RowId, style: DimStyle, text: &str, palette: &Palette) -> AnyElement {
+    dim_line(("transcript-dim", id), style, text, palette)
+}
+
+/// A run that ended badly, as the session wrote it: `text` is the line to show
+/// and `outcome` decides the colour — a run that failed is an error, one that
+/// was stopped or ran out of room is a notice.
+fn run_outcome_row(id: RowId, outcome: &str, text: &str, palette: &Palette) -> AnyElement {
+    dim_line(
+        ("transcript-run-outcome", id),
+        run_outcome_style(outcome),
+        text,
+        palette,
+    )
+}
+
+/// The style of a run's outcome line: `error` is an error, and every other
+/// outcome (`aborted`, `length`, whatever the swarm adds next) is a notice.
+pub(crate) fn run_outcome_style(outcome: &str) -> DimStyle {
+    if outcome == "error" {
+        DimStyle::Error
+    } else {
+        DimStyle::Notice
+    }
+}
+
+/// One dim line of the transcript.
+fn dim_line(
+    id: impl Into<gpui_kit::ElementId>,
+    style: DimStyle,
+    text: &str,
+    palette: &Palette,
+) -> AnyElement {
     let color = match style {
         DimStyle::Dim | DimStyle::Status => palette.muted_foreground,
         DimStyle::Notice => palette.info,
@@ -469,7 +508,7 @@ fn dim_row(id: RowId, style: DimStyle, text: &str, palette: &Palette) -> AnyElem
     };
 
     div()
-        .id(("transcript-dim", id))
+        .id(id)
         .w_full()
         .min_w_0()
         .text_sm()

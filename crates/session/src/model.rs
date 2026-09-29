@@ -21,6 +21,7 @@
 //! `content_chars`, `:arguments-json` as `arguments_json`.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use serde_json::Value;
 
@@ -47,6 +48,23 @@ pub struct StepClock {
     /// The epoch milliseconds the tab's I/O layer saw that event at, when it passed them;
     /// `None` when the step was applied without a stamp.
     pub started_at_millis: Option<u64>,
+}
+
+impl StepClock {
+    /// How long the step has been running as of `now_millis`, or `None` when the caller
+    /// never stamped its arrival ([`AgentModel::apply_event`]). A clock that ran backwards
+    /// (`now_millis` before the stamp — two clocks disagreeing) reads as zero rather than
+    /// panicking: a frontend showing `0s` is better than a crash.
+    pub fn elapsed(&self, now_millis: u64) -> Option<Duration> {
+        Some(Duration::from_millis(now_millis.saturating_sub(self.started_at_millis?)))
+    }
+
+    /// The clock as the swarm writes one — `45s`, `3m`, `1h2m`, the same
+    /// [`short_duration`](crate::short_duration) a lane row's `step_age` is formatted with,
+    /// so both columns of the left list count in the same words. `None` without a stamp.
+    pub fn clock_label(&self, now_millis: u64) -> Option<String> {
+        Some(crate::short_duration(self.elapsed(now_millis)?.as_secs()))
+    }
 }
 
 /// One agent's view model: its transcript rows, its checklist, its activity and the
@@ -350,29 +368,41 @@ impl AgentModel {
             }
             // Compaction and provider retries are the TUI's activity line; here they are
             // dim status rows (§5), so a run that stalls or re-sends says so in place. Both
-            // ends of a compaction are step boundaries, as the TUI has them.
+            // ends of a compaction are step boundaries, as the TUI has them. The words are
+            // the reader's: no event name, no field name, no count the event does not carry.
             "compaction-start" => {
                 self.begin_step(id, data, arrival);
-                self.push_row(RowKind::Dim { style: DimStyle::Status, text: "compacting...".into() });
+                self.push_row(RowKind::Dim {
+                    style: DimStyle::Status,
+                    text: "Compacting context…".into(),
+                });
                 Effect::ROWS | Effect::STEP
             }
             "compaction-end" => {
                 self.begin_step(id, data, arrival);
                 self.push_row(RowKind::Dim {
                     style: DimStyle::Status,
-                    text: "compaction finished".into(),
+                    text: "Context compacted".into(),
                 });
                 Effect::ROWS | Effect::STEP
             }
+            // `src/provider/core.lisp`'s retry emit: attempt, max, delay (seconds — a whole
+            // `Retry-After`, or `2^attempt` plus a fraction) and the reason the attempt died.
             "provider-retry" => {
                 let attempt = u64_field(data, "attempt");
                 let max = u64_field(data, "max");
                 let reason = string_field(data, "reason").unwrap_or_default();
                 let reason: String = reason.lines().next().unwrap_or("").chars().take(100).collect();
-                self.push_row(RowKind::Dim {
-                    style: DimStyle::Notice,
-                    text: format!("⟲ retry {}/{} · {}", attempt, max, reason),
-                });
+                let mut text = format!("Retrying provider ({attempt}/{max})");
+                if let Some(delay) = data.get("delay").and_then(Value::as_f64) {
+                    text.push_str(" in ");
+                    text.push_str(&retry_delay_words(delay));
+                }
+                if !reason.is_empty() {
+                    text.push_str(" — ");
+                    text.push_str(&reason);
+                }
+                self.push_row(RowKind::Dim { style: DimStyle::Notice, text });
                 Effect::ROWS
             }
             "todo-changed" => self.set_todos(todos_from_json(&data["todos"])),
@@ -386,9 +416,23 @@ impl AgentModel {
                     Activity::Running
                 })
             }
-            "task-end" | "run-end" => {
+            "task-end" => {
                 self.step = None;
                 self.set_activity(Activity::Idle) | Effect::STEP
+            }
+            // A run that ended as asked says nothing the turn boundary has not already
+            // drawn; one that ended any other way is worth a line, in the run's own
+            // vocabulary (`run-end`'s `outcome`: `stop`, `length`, `error`, `aborted` —
+            // `src/kernel/loop.lisp`). `run-start` never emits a row.
+            "run-end" => {
+                self.step = None;
+                let mut effect = self.set_activity(Activity::Idle) | Effect::STEP;
+                let outcome = string_field(data, "outcome").unwrap_or_default();
+                if let Some(text) = self.run_outcome_text(&outcome) {
+                    self.push_row(RowKind::RunOutcome { outcome, text });
+                    effect |= Effect::ROWS;
+                }
+                effect
             }
             "run-start" | "turn-start" => {
                 self.begin_step(id, data, arrival);
@@ -413,7 +457,13 @@ impl AgentModel {
                 self.step = None;
                 Effect::RESYNC | Effect::STEP
             }
-            "gap" => Effect::RESYNC,
+            "gap" => {
+                self.push_row(RowKind::Dim {
+                    style: DimStyle::Notice,
+                    text: "Reconnected — some events may be missing".into(),
+                });
+                Effect::ROWS | Effect::RESYNC
+            }
             // A `lane-state` event is the left column's, not this agent's; the tab feeds
             // it to its LaneList.
             "lane-state" => Effect::LANES,
@@ -466,6 +516,34 @@ impl AgentModel {
             event_id,
             started_at_millis: arrival,
         });
+    }
+
+    /// The words a run that ended badly gets, or `None` for the ones that need no line.
+    /// `stop` finishes a run as asked — and a `run-end` that carries no outcome at all, or
+    /// the older `ok` spelling, is the same thing — so the turn boundary already says it.
+    /// An `error` is told with the error itself, which is the failing assistant message's
+    /// ([`AgentModel::last_error`]).
+    fn run_outcome_text(&self, outcome: &str) -> Option<String> {
+        match outcome {
+            "" | "ok" | "stop" => None,
+            "aborted" => Some("Run aborted".to_string()),
+            "error" => Some(match self.last_error() {
+                Some(error) => format!("Run failed: {error}"),
+                None => "Run failed".to_string(),
+            }),
+            "length" => Some("Run stopped at the length limit".to_string()),
+            other => Some(format!("Run ended: {other}")),
+        }
+    }
+
+    /// The error the most recent assistant message carries — what a run that ended `:error`
+    /// failed with (`src/kernel/loop.lisp`: the message's `stop-reason` *is* the run's
+    /// outcome, and its `error-message` rides along).
+    fn last_error(&self) -> Option<&str> {
+        self.rows.iter().rev().find_map(|row| match &row.kind {
+            RowKind::Assistant { error: Some(error), .. } if !error.is_empty() => Some(error.as_str()),
+            _ => None,
+        })
     }
 
     /// The rows touched since the last call, drained: the UI re-sets only those, and a
@@ -739,5 +817,23 @@ fn render_arguments(arguments: &Value) -> String {
         Value::Null => String::new(),
         Value::String(text) => text.clone(),
         other => serde_json::to_string(other).unwrap_or_default(),
+    }
+}
+
+/// `provider-retry`'s `delay` in seconds (`src/provider/core.lisp`'s `retry-delay`) as the
+/// words a reader wants: `500 ms` under a second, `3 s` on the whole second, `1.5 s`
+/// otherwise. The wire's number is fractional even when nobody asked for fractions — the
+/// backoff is `2^attempt` plus a random one, and a `Retry-After` is whole seconds — so the
+/// row rounds to the millisecond and then drops what says nothing.
+fn retry_delay_words(delay: f64) -> String {
+    let millis = (delay * 1000.0).round().max(0.0);
+    if millis < 1000.0 {
+        return format!("{} ms", millis as u64);
+    }
+    let seconds = millis / 1000.0;
+    if seconds.fract() == 0.0 {
+        format!("{} s", seconds as u64)
+    } else {
+        format!("{seconds:.1} s")
     }
 }

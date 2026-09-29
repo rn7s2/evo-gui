@@ -166,6 +166,19 @@ fn user_row(id: RowId, text: &str) -> Row {
     }
 }
 
+/// A run that ended badly, as the session's own row kind spells it: the raw
+/// outcome, plus the line to show.
+fn run_outcome_row(id: RowId, outcome: &str, text: &str) -> Row {
+    Row {
+        id,
+        version: 1,
+        kind: RowKind::RunOutcome {
+            outcome: outcome.into(),
+            text: text.into(),
+        },
+    }
+}
+
 fn dim_row(id: RowId, style: DimStyle, text: &str) -> Row {
     Row {
         id,
@@ -197,9 +210,8 @@ fn tool_row(
 }
 
 /// The rows of the turn that follow the message: three tool calls (one still
-/// running, one ok, one failed), the lane's report, and the dim lines.
-///
-/// The `run-end · outcome ok` line is here on purpose: the view drops it.
+/// running, one ok, one failed), the lane's report, and the status lines — all
+/// in the words a reader wants, none of them protocol.
 fn turn_rows() -> Vec<Row> {
     vec![
         tool_row(
@@ -243,10 +255,10 @@ fn turn_rows() -> Vec<Row> {
                 requests: "".into(),
             },
         },
-        dim_row(8, DimStyle::Notice, "compaction finished · 12 messages → 9"),
-        dim_row(9, DimStyle::Dim, "provider-retry 1/3 in 500ms"),
-        dim_row(10, DimStyle::Error, "lane 3 exited: model not registered"),
-        dim_row(11, DimStyle::Status, "run-end · outcome ok"),
+        dim_row(8, DimStyle::Notice, "Compacted 12 messages into 9"),
+        dim_row(9, DimStyle::Dim, "Retrying the provider (1/3) in 500 ms"),
+        dim_row(10, DimStyle::Error, "Lane 3 exited: model not registered"),
+        run_outcome_row(11, "aborted", "Run aborted"),
     ]
 }
 
@@ -306,8 +318,8 @@ One 280-character token, which has nothing to wrap on:
                 content_chars: Some(66),
             }),
         ),
-        dim_row(23, DimStyle::Dim, &format!("output · {}", long_path())),
-        dim_row(24, DimStyle::Status, "run-end · outcome aborted"),
+        dim_row(23, DimStyle::Dim, &long_path()),
+        run_outcome_row(24, "error", "Run failed: the provider returned 429"),
     ]);
     rows
 }
@@ -396,10 +408,10 @@ impl Demo {
         transcript.update(cx, |view, cx| {
             view.replace(
                 1,
-                vec![
-                    user_row(1, "Render my transcript: markdown live while it streams."),
-                    dim_row(3, DimStyle::Status, "run-start · turn 1"),
-                ],
+                vec![user_row(
+                    1,
+                    "Render my transcript: markdown live while it streams.",
+                )],
                 cx,
             );
             view.set_todos(todos(), cx);

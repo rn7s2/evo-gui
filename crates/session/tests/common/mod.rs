@@ -83,6 +83,7 @@ pub enum RowView {
     Tool { name: String, arguments: String, result: Option<(bool, String)> },
     Report { done: String, evidence: String, next: String, blocked: String, requests: String },
     Dim(String),
+    RunOutcome { outcome: String, text: String },
 }
 
 impl RowView {
@@ -107,18 +108,22 @@ impl RowView {
                 requests: requests.clone(),
             },
             session::RowKind::Dim { text, .. } => RowView::Dim(text.clone()),
+            session::RowKind::RunOutcome { outcome, text } => RowView::RunOutcome {
+                outcome: outcome.clone(),
+                text: text.clone(),
+            },
         }
     }
 }
 
 /// The transcript rows of a model: everything the transcript fold carries, i.e. the
-/// user turns, assistant messages and tool calls — `output` lines and status rows are
-/// events only and never reach `/transcript`.
+/// user turns, assistant messages and tool calls — `output` lines, status rows and a
+/// run's outcome are events only and never reach `/transcript`.
 pub fn transcript_rows(model: &AgentModel) -> Vec<RowView> {
     model
         .rows()
         .iter()
         .map(RowView::of)
-        .filter(|row| !matches!(row, RowView::Dim(_)))
+        .filter(|row| !matches!(row, RowView::Dim(_) | RowView::RunOutcome { .. }))
         .collect()
 }
