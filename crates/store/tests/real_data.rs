@@ -154,7 +154,7 @@ fn the_real_swarm_lisp_is_only_ever_touched_by_copy() {
     let written = fs::read_to_string(&copy).unwrap();
     // The block is at the very top, and the user's own file is intact below it.
     assert!(written.starts_with(";;; evo-desktop:begin"), "{written}");
-    assert!(written.contains("(evo.swarm:in-lanes ())"));
+    assert!(written.contains("(evo.swarm:in-lanes ()\n"));
     assert!(written.contains("(evo:set-setting :model \"ark-deepseek-v4.1-flash\")"));
     assert!(written.contains("(evo:set-setting :model-provider :aiden)"));
     assert!(written.ends_with(&expected), "the file below our block must not move");

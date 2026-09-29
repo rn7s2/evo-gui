@@ -136,8 +136,13 @@ pub fn render_block(model: &LanesModel) -> io::Result<String> {
             format!("{:?} is not usable as a model id", model.model),
         ));
     }
+    // The two settings are the *body* of the `in-lanes` form: closing the form on
+    // its own line would make them top-level forms of the project's `swarm.lisp`
+    // — evaluated in the coordinator, which is the one thing §9.6 must not do —
+    // and leave a stray `)` behind, which stops the reader at whatever the user
+    // wrote next.
     Ok(format!(
-        "{BLOCK_TITLE}\n(evo.swarm:in-lanes ())\n  (evo:set-setting :model {})\n  (evo:set-setting :model-provider :{provider}))\n{BLOCK_END}\n",
+        "{BLOCK_TITLE}\n(evo.swarm:in-lanes ()\n  (evo:set-setting :model {})\n  (evo:set-setting :model-provider :{provider}))\n{BLOCK_END}\n",
         lisp_string(&model.model)
     ))
 }
@@ -243,7 +248,7 @@ mod tests {
     }
 
     const BLOCK: &str = ";;; evo-desktop:begin — the lanes' default model (managed; edit outside the markers)\n\
-                         (evo.swarm:in-lanes ())\n  \
+                         (evo.swarm:in-lanes ()\n  \
                          (evo:set-setting :model \"ark-deepseek-v4.1-flash\")\n  \
                          (evo:set-setting :model-provider :aiden))\n\
                          ;;; evo-desktop:end\n";
@@ -256,6 +261,15 @@ mod tests {
         assert!(rendered.contains("(evo.swarm:in-lanes ()"));
         assert!(rendered.contains("(evo:set-setting :model \"ark-deepseek-v4.1-flash\")"));
         assert!(rendered.contains("(evo:set-setting :model-provider :aiden)"));
+        // They have to be *inside* it: a form closed on the `in-lanes` line leaves
+        // them as the coordinator's own top-level settings (§9.6 is about the lanes)
+        // and a stray `)` that stops evo's reader at whatever the user wrote below.
+        let body = rendered
+            .split_once("(evo.swarm:in-lanes ()")
+            .expect("the form")
+            .1;
+        assert_eq!(body.matches('(').count(), 2, "the two settings are its body");
+        assert_eq!(body.matches(')').count(), 3, "and the form closes after them");
     }
 
     #[test]
