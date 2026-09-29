@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 gpui-kit = { workspace = true }
+serde_json = { workspace = true }
 session = { path = "../session" }
 
 [dev-dependencies]

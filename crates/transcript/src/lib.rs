@@ -306,14 +306,26 @@ impl TranscriptView {
             .update(cx, |scroller, cx| scroller.scroll_to_end(cx));
     }
 
-    /// Show or hide the arguments and result of one tool row.
-    pub(crate) fn toggle_expanded(&mut self, id: RowId, cx: &mut Context<Self>) {
-        self.data.update(cx, |data, _| {
-            if !data.expanded.remove(&id) {
-                data.expanded.insert(id);
+    /// Show or hide the arguments and result of one tool row, for a caller that
+    /// names the row itself; a reader's click goes through the row's own header.
+    pub fn set_expanded(&mut self, id: RowId, expanded: bool, cx: &mut Context<Self>) {
+        let changed = self.data.update(cx, |data, _| {
+            if expanded {
+                data.expanded.insert(id)
+            } else {
+                data.expanded.remove(&id)
             }
         });
-        cx.notify();
+        if changed {
+            cx.notify();
+        }
+    }
+
+    /// A tool row the reader clicked: the one they opened, or the one they
+    /// closed again.
+    pub(crate) fn toggle_expanded(&mut self, id: RowId, cx: &mut Context<Self>) {
+        let expanded = !self.data.read(cx).expanded.contains(&id);
+        self.set_expanded(id, expanded, cx);
     }
 
     fn accept_revision(&mut self, revision: u64) -> bool {

@@ -8,6 +8,12 @@
 //! half-typed constructs (`**bo`, an open ``` fence, a bisected table row) are
 //! on screen while the message grows.
 //!
+//! Later stages show what the rest of a transcript looks like: a turn of tool,
+//! report and status rows; a long todo list, scrolled, with the panel's own
+//! thumb; and two calls — a `bash` one and a `write_file` carrying a whole file
+//! — opened so their arguments and results read as a key/value list rather than
+//! as the JSON they arrived in.
+//!
 //! ```sh
 //! cargo run --example transcript_demo                    # live window
 //! cargo run --example transcript_demo -- --capture <dir> # render the stream to PNGs
@@ -71,9 +77,18 @@ const LONG_TODOS_SHOT: &str = "12-long-todo-list.png";
 /// The dark theme, mid-stream and whole.
 const DARK_STREAM_SHOT: &str = "13-dark-mid-stream.png";
 const DARK_TURN_SHOT: &str = "14-dark-turn.png";
+/// A `bash` call and a `write_file` call, opened: what an expanded row shows
+/// instead of the JSON the call carried.
+const TOOL_ARGUMENTS_SHOT: &str = "15-tool-arguments-expanded.png";
+const DARK_TOOL_ARGUMENTS_SHOT: &str = "16-dark-tool-arguments-expanded.png";
+/// The todo panel while its list scrolls, with the thumb the panel draws.
+const TODO_SCROLLBAR_SHOT: &str = "17-todo-panel-scrollbar.png";
 
 const ASSISTANT_ID: RowId = 2;
 const SECOND_ASSISTANT_ID: RowId = 21;
+/// The two calls of the tool-arguments stage.
+const BASH_CALL: RowId = 30;
+const WRITE_CALL: RowId = 31;
 
 /// The message the demo streams. Headings, bold, a list, a table and a fenced
 /// code block — all of them half-typed at some point mid-stream.
@@ -324,8 +339,88 @@ One 280-character token, which has nothing to wrap on:
     rows
 }
 
-fn todos() -> Vec<Todo> {
+/// The output of the `bash` call: more lines than an expanded row shows, so the
+/// row has to say how much it left out.
+const BASH_OUTPUT: &str = "\
+   Compiling transcript v0.1.0 (/Users/you/coding/evo-gui/crates/transcript)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.03s
+     Running unittests src/lib.rs (target/debug/deps/transcript-1a3b6858d047bf83)
+
+running 14 tests
+test tests::the_todo_panel_counts_its_items_caps_its_height_and_aligns_its_glyphs ... ok
+test tests::a_tool_row_opens_on_click ... ok
+test tests::tool_arguments_read_as_a_key_value_list ... ok
+test tests::a_multi_line_string_becomes_a_capped_block ... ok
+test tests::a_long_todo_list_scrolls_inside_the_panel ... ok
+test tests::an_open_tool_row_renders_its_arguments_as_key_value_rows ... ok
+test tests::an_assistant_document_is_retained_across_deltas ... ok
+test tests::long_content_wraps_inside_a_centred_reading_measure ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+";
+
+/// The file the `write_file` call wrote, as it travels inside the call's JSON:
+/// one string with line breaks in it.
+const WRITTEN_FILE: &str = "\
+use gpui_kit::{div, AnyElement, IntoElement, ParentElement as _, Styled as _};
+use session::RowId;
+
+/// A tool call: one compact line that opens onto its arguments.
+pub(crate) fn tool_row(id: RowId, name: &str, arguments: &str) -> AnyElement {
+    div()
+        .id((\"transcript-tool\", id))
+        .flex()
+        .items_center()
+        .child(name.to_string())
+        .into_any_element()
+}
+";
+
+/// The calls of the tool-arguments stage: a `bash` call whose command is longer
+/// than the value column, and a `write_file` call carrying the whole file. Both
+/// answer with a result, one of them JSON.
+fn tool_argument_rows() -> Vec<Row> {
     vec![
+        user_row(
+            29,
+            "Show me what those two calls actually did, not the JSON.",
+        ),
+        tool_row(
+            BASH_CALL,
+            1,
+            "bash",
+            r#"{"command":"cargo test -p transcript --lib -- --nocapture --test-threads=1 2>&1 | tee /tmp/transcript.log | tail -40","timeout":120,"cwd":"~/coding/evo-gui"}"#,
+            Some(ToolResult {
+                is_error: false,
+                content: BASH_OUTPUT.into(),
+                content_chars: None,
+            }),
+        ),
+        tool_row(
+            WRITE_CALL,
+            1,
+            "write_file",
+            &format!(
+                r#"{{"path":"crates/transcript/src/rows.rs","content":"{}"}}"#,
+                escape(WRITTEN_FILE),
+            ),
+            Some(ToolResult {
+                is_error: false,
+                content: r#"{"written":1482,"path":"crates/transcript/src/rows.rs","diff":{"added":16,"removed":2}}"#.into(),
+                content_chars: None,
+            }),
+        ),
+    ]
+}
+
+/// `text` as the body of the JSON string that carries it.
+fn escape(text: &str) -> String {
+    text.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+}
+
+fn todos() -> Vec<Todo> {    vec![
         Todo {
             text: "fold /transcript into rows".into(),
             status: TodoStatus::Done,
@@ -696,6 +791,20 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
         "[capture] long todo list scrolled on its own: {} (transcript still at the tail: {following})",
         before != after
     );
+    // The panel's thumb, while the list is away from its top.
+    shot(&mut cx, window, dir, TODO_SCROLLBAR_SHOT)?;
+
+    // What an expanded tool row shows: the calls' own JSON as a key/value list,
+    // a multi-line value as a block, and both shapes of result.
+    let (tools, tools_demo) = open_capture_window(&mut cx, CAPTURE_SIZE)?;
+    tools_demo.update(&mut cx, |demo, cx| {
+        demo.transcript.update(cx, |view, cx| {
+            view.replace(1, tool_argument_rows(), cx);
+            view.set_expanded(BASH_CALL, true, cx);
+            view.set_expanded(WRITE_CALL, true, cx);
+        });
+    });
+    shot(&mut cx, tools, dir, TOOL_ARGUMENTS_SHOT)?;
 
     // The reader leaves the tail: in a window the turn overflows, the scroller
     // offers its jump affordance.
@@ -744,6 +853,9 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
         });
     });
     shot(&mut cx, window, dir, DARK_TURN_SHOT)?;
+
+    // And the open tool rows in the dark theme.
+    shot(&mut cx, tools, dir, DARK_TOOL_ARGUMENTS_SHOT)?;
 
     Ok(())
 }

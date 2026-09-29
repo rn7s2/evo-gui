@@ -7,17 +7,21 @@
 //! a new turn begins.
 //!
 //! Nothing here prints protocol payloads: a row is a user turn, rendered
-//! markdown, a one-line tool row that can open, a report block, or a dim line.
+//! markdown, a one-line tool row that opens onto its arguments and result as a
+//! key/value list, a report block, or a dim line.
 
 use std::time::Duration;
 
 use gpui_kit::base::Easing;
 use gpui_kit::component::text::{TextView, TextViewMotion};
+use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::{Icon, IconName};
 use gpui_kit::TestSupportExt as _;
 use gpui_kit::{
-    div, px, AnyElement, App, InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
-    StatefulInteractiveElement as _, Styled as _, WeakEntity,
+    div, px, AnyElement, App, ElementId, InteractiveElement as _, IntoElement, ParentElement as _,
+    Pixels, StatefulInteractiveElement as _, Styled as _, WeakEntity,
 };
+use serde_json::Value;
 use session::{DimStyle, Row, RowId, RowKind, ToolResult};
 
 use crate::style::{text_style, Palette, BLOCK_GAP, GROUP_GAP, MEASURE, TIGHT_GAP, TURN_GAP};
@@ -28,13 +32,25 @@ const STREAM_FADE: Duration = Duration::from_millis(350);
 /// A little later for each further word of one delta, so chunks overlap into
 /// one gradient tail instead of blinking in.
 const STREAM_FADE_STAGGER: Duration = Duration::from_millis(30);
-/// Longest tool argument or result text an expanded row shows.
-const TOOL_TEXT_LIMIT: usize = 4_000;
+/// Longest tool argument or result text an expanded row shows, in characters.
+pub(crate) const TOOL_TEXT_LIMIT: usize = 4_000;
+/// Lines a multi-line string — a file's contents, a command — is shown in
+/// before the block is capped.
+pub(crate) const BLOCK_LINES: usize = 8;
+/// Longest a one-line value shows before it is elided; the whole text stays a
+/// hover away.
+pub(crate) const VALUE_LIMIT: usize = 96;
 /// Height of a collapsed tool row, so a long run of them stays a list.
 const TOOL_ROW_HEIGHT: Pixels = px(24.);
 /// Width of the disclosure and status columns of a tool row.
-const DISCLOSURE_WIDTH: Pixels = px(10.);
+const DISCLOSURE_WIDTH: Pixels = px(14.);
 const STATUS_DOT: Pixels = px(6.);
+/// The disclosure chevron: a glyph with about ten pixels of ink, centred in its
+/// own column. The glyph box is larger than the ink a chevron actually draws.
+const CARET_SIZE: Pixels = px(14.);
+/// Width of the key column of an expanded argument list: enough for a nested
+/// key like `diff.removed` without eliding it.
+const KEY_WIDTH: Pixels = px(112.);
 /// Width of the label column of a report row.
 const REPORT_LABEL_WIDTH: Pixels = px(66.);
 
@@ -290,7 +306,8 @@ fn assistant_row(
 }
 
 /// A tool call: one compact line — `name · ok|error|running` — that opens onto
-/// the truncated arguments and result.
+/// the call's arguments and its result, each as a key/value list when it is
+/// JSON and as capped text when it is not.
 fn tool_row(
     id: RowId,
     name: &str,
@@ -307,32 +324,26 @@ fn tool_row(
     };
 
     let view = view.clone();
-    // Baseline-aligned: the monospace name sits a point smaller than body text
-    // (mono faces read larger at the same size), and the dot and the status
-    // word share its baseline instead of its box.
+    // One size for the whole row: the mono name, the status word and the
+    // caret, so a run of tool calls reads as one list rather than three
+    // weights of type.
+    let text_size = palette.font_size - px(1.);
     let header = div()
         .id(("transcript-tool", id))
         .flex()
-        .items_baseline()
+        .items_center()
         .gap_2()
         .h(TOOL_ROW_HEIGHT)
         .cursor_pointer()
         .on_click(move |_, _, cx| {
             let _ = view.update(cx, |view, cx| view.toggle_expanded(id, cx));
         })
-        .child(
-            div()
-                .w(DISCLOSURE_WIDTH)
-                .flex_shrink_0()
-                .text_xs()
-                .text_color(palette.muted_foreground)
-                .child(if expanded { "▾" } else { "▸" }),
-        )
+        .child(caret(expanded, palette))
         .child(
             div()
                 .min_w_0()
                 .font_family(palette.mono.clone())
-                .text_size(palette.font_size - px(1.))
+                .text_size(text_size)
                 .text_color(palette.foreground)
                 .child(name.to_string()),
         )
@@ -341,13 +352,12 @@ fn tool_row(
                 .flex_shrink_0()
                 .size(STATUS_DOT)
                 .rounded_full()
-                .bg(status_color)
-                .self_center(),
+                .bg(status_color),
         )
         .child(
             div()
                 .flex_shrink_0()
-                .text_xs()
+                .text_size(text_size)
                 .text_color(palette.muted_foreground)
                 .child(status),
         )
@@ -377,32 +387,253 @@ fn tool_row(
     row.test_support().into_any_element()
 }
 
-/// The arguments of an open tool row, when the call had any.
+/// The disclosure of a tool row: a chevron at [`CARET_SIZE`] in a column of its
+/// own, so an opened row and a closed one keep their name on the same axis.
+fn caret(expanded: bool, palette: &Palette) -> AnyElement {
+    let chevron = if expanded {
+        IconName::ChevronDown
+    } else {
+        IconName::ChevronRight
+    };
+
+    div()
+        .w(DISCLOSURE_WIDTH)
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            Icon::new(chevron)
+                .size(CARET_SIZE)
+                .text_color(palette.muted_foreground),
+        )
+        .into_any_element()
+}
+
+/// The arguments of an open tool row: the call's JSON as a key/value list, or
+/// the text exactly as it came when it is not a JSON object.
 fn arguments_block(id: RowId, arguments: &str, palette: &Palette) -> AnyElement {
     if arguments.is_empty() {
         return div().into_any_element();
     }
-    text_block(
-        ("transcript-tool-arguments", id),
-        "arguments",
-        arguments,
-        None,
-        palette,
-    )
+    match json_fields(arguments) {
+        Some(fields) if !fields.is_empty() => {
+            fields_block(("transcript-tool-arguments", id), "arguments", &fields, palette)
+        }
+        _ => text_block(
+            ("transcript-tool-arguments", id),
+            "arguments",
+            arguments,
+            None,
+            palette,
+        ),
+    }
 }
 
-/// The result of an open tool row, when it has one and it says anything.
+/// The result of an open tool row: a JSON object as the same key/value list, any
+/// other text as a capped mono block.
 fn result_block(id: RowId, result: Option<&ToolResult>, palette: &Palette) -> AnyElement {
     let Some(result) = result.filter(|result| !result.content.is_empty()) else {
         return div().into_any_element();
     };
-    text_block(
-        ("transcript-tool-result", id),
-        if result.is_error { "error" } else { "result" },
-        &result.content,
-        result.content_chars,
-        palette,
-    )
+    let label = if result.is_error { "error" } else { "result" };
+
+    match json_fields(&result.content) {
+        Some(fields) if !fields.is_empty() => {
+            fields_block(("transcript-tool-result", id), label, &fields, palette)
+        }
+        _ => text_block(
+            ("transcript-tool-result", id),
+            label,
+            &result.content,
+            result.content_chars,
+            palette,
+        ),
+    }
+}
+
+/// One field of a tool call's arguments, or of a JSON result.
+#[derive(Debug, PartialEq)]
+pub(crate) struct Field {
+    /// The key the reader sees: `timeout`, or `env.RUST_LOG` when the call
+    /// nested one object inside another.
+    pub(crate) key: String,
+    pub(crate) value: FieldValue,
+}
+
+/// How a field's value is drawn.
+#[derive(Debug, PartialEq)]
+pub(crate) enum FieldValue {
+    /// One line of text. `full` is the whole string when the line had to be
+    /// elided to fit.
+    Text { text: String, full: Option<String> },
+    /// A string with line breaks in it: a small mono block, capped.
+    Block(String),
+}
+
+/// `text` as the fields of a JSON object — or of an array, keyed by index — in
+/// the order the call wrote them, or `None` when it is neither, so a caller can
+/// show the text as it came instead of guessing.
+pub(crate) fn json_fields(text: &str) -> Option<Vec<Field>> {
+    let value: Value = serde_json::from_str(text).ok()?;
+    let mut fields = Vec::new();
+
+    match value {
+        Value::Object(object) => {
+            for (key, value) in object {
+                push_field(&mut fields, key, &value, true);
+            }
+        }
+        Value::Array(items) => {
+            for (index, value) in items.iter().enumerate() {
+                push_field(&mut fields, index.to_string(), value, true);
+            }
+        }
+        _ => return None,
+    }
+    Some(fields)
+}
+
+/// Add what `value` draws as. A container directly inside the object flattens
+/// into one field per leaf (`key.sub`, `key.0`); anything nested deeper is
+/// compact JSON on one line, so a structure never arrives as a wall of braces.
+fn push_field(fields: &mut Vec<Field>, key: String, value: &Value, flatten: bool) {
+    match (value, flatten) {
+        (Value::Object(object), true) => {
+            for (sub, value) in object {
+                push_field(fields, format!("{key}.{sub}"), value, false);
+            }
+        }
+        (Value::Array(items), true) => {
+            for (index, value) in items.iter().enumerate() {
+                push_field(fields, format!("{key}.{index}"), value, false);
+            }
+        }
+        // A string with line breaks in it is not a line of a list: it gets a
+        // block of its own, so file contents and multi-line commands stay
+        // readable.
+        (Value::String(text), _) if text.contains('\n') => fields.push(Field {
+            key,
+            value: FieldValue::Block(text.clone()),
+        }),
+        (Value::String(text), _) => {
+            let (text, full) = elide(text);
+            fields.push(Field {
+                key,
+                value: FieldValue::Text { text, full },
+            });
+        }
+        (other, _) => {
+            let (text, full) = elide(&other.to_string());
+            fields.push(Field {
+                key,
+                value: FieldValue::Text { text, full },
+            });
+        }
+    }
+}
+
+/// A one-line string, cut at [`VALUE_LIMIT`] with an ellipsis. The whole string
+/// comes back too, for the tooltip of a value that had to be cut.
+fn elide(text: &str) -> (String, Option<String>) {
+    if text.chars().count() <= VALUE_LIMIT {
+        return (text.to_string(), None);
+    }
+    let mut shown: String = text.chars().take(VALUE_LIMIT).collect();
+    shown.push('…');
+    (shown, Some(text.to_string()))
+}
+
+/// A JSON object as a compact list: one `key  value` row per field, the key
+/// muted and the value plain — never the braces and quotes it arrived in.
+fn fields_block(
+    id: impl Into<ElementId>,
+    label: &str,
+    fields: &[Field],
+    palette: &Palette,
+) -> AnyElement {
+    let id = id.into();
+    let mut block = div()
+        .id(id.clone())
+        .flex()
+        .flex_col()
+        .gap_1()
+        .w_full()
+        .min_w_0()
+        .rounded(palette.radius)
+        .bg(palette.muted)
+        .border_1()
+        .border_color(palette.border)
+        .px_2()
+        .py_1()
+        .child(
+            div()
+                .text_xs()
+                .text_color(palette.muted_foreground)
+                .child(label.to_string()),
+        );
+
+    for (index, field) in fields.iter().enumerate() {
+        block = block.child(field_row(&id, index, field, palette));
+    }
+
+    block.test_support().into_any_element()
+}
+
+/// One `key  value` row of a [`fields_block`].
+fn field_row(base: &ElementId, index: usize, field: &Field, palette: &Palette) -> AnyElement {
+    let elided = match &field.value {
+        FieldValue::Text { full, .. } => full.clone(),
+        FieldValue::Block(_) => None,
+    };
+    let row = div()
+        .id((base.clone(), index.to_string()))
+        .w_full()
+        .min_w_0()
+        .flex()
+        .items_start()
+        .gap_2()
+        .line_height(px(18.))
+        .text_size(palette.font_size - px(1.))
+        .child(
+            div()
+                .w(KEY_WIDTH)
+                .flex_shrink_0()
+                .truncate()
+                .font_family(palette.mono.clone())
+                .text_color(palette.muted_foreground)
+                .child(field.key.clone()),
+        )
+        .child(match &field.value {
+            FieldValue::Text { text, .. } => div()
+                .flex_1()
+                .min_w_0()
+                .font_family(palette.mono.clone())
+                .text_color(palette.foreground)
+                .child(text.clone())
+                .into_any_element(),
+            FieldValue::Block(text) => div()
+                .flex_1()
+                .min_w_0()
+                .pl_2()
+                .border_l_2()
+                .border_color(palette.border)
+                .font_family(palette.mono.clone())
+                .text_color(palette.foreground)
+                .child(block_text(text, None))
+                .into_any_element(),
+        });
+
+    match elided {
+        // Cut to fit: the whole text is one hover away.
+        Some(full) => row
+            .tooltip(move |window, cx| {
+                Tooltip::new(full.clone()).max_w(px(520.)).build(window, cx)
+            })
+            .test_support()
+            .into_any_element(),
+        None => row.test_support().into_any_element(),
+    }
 }
 
 /// A lane report: its own block, one labeled field per non-empty part.
@@ -519,8 +750,8 @@ fn dim_line(
         .into_any_element()
 }
 
-/// A labeled, bordered block of tool text, truncated to keep the transcript
-/// readable.
+/// A labeled, bordered block of tool text, capped so one result cannot take the
+/// whole transcript.
 fn text_block(
     id: impl Into<gpui_kit::ElementId>,
     label: &str,
@@ -541,7 +772,9 @@ fn text_block(
         .border_color(palette.border)
         .px_2()
         .py_1()
-        .text_sm()
+        .font_family(palette.mono.clone())
+        .text_size(palette.font_size - px(1.))
+        .line_height(px(18.))
         .child(
             div()
                 .text_xs()
@@ -551,24 +784,37 @@ fn text_block(
         .child(
             div()
                 .min_w_0()
-                .font_family(palette.mono.clone())
                 .text_color(palette.foreground)
-                .child(truncate(text, total_chars)),
+                .child(block_text(text, total_chars)),
         )
         .test_support()
         .into_any_element()
 }
 
-/// `text`, capped at [`TOOL_TEXT_LIMIT`] characters with a note saying how much
-/// was left out.
-fn truncate(text: &str, total_chars: Option<u64>) -> String {
+/// `text` as a block: its first [`BLOCK_LINES`] lines, or [`TOOL_TEXT_LIMIT`]
+/// characters, and a note saying how much was left out. `total_chars` is what
+/// the swarm said the result holds, when the copy that arrived was already
+/// shortened.
+pub(crate) fn block_text(text: &str, total_chars: Option<u64>) -> String {
+    let shown = text.chars().count();
     let total = total_chars
         .map(|chars| chars as usize)
-        .unwrap_or_else(|| text.chars().count());
-    if total <= TOOL_TEXT_LIMIT && text.chars().count() <= TOOL_TEXT_LIMIT {
-        return text.to_string();
+        .unwrap_or(shown)
+        .max(shown);
+    let lines: Vec<&str> = text.lines().collect();
+
+    if lines.len() > BLOCK_LINES {
+        let mut capped = lines[..BLOCK_LINES].join("\n");
+        capped.push_str(&format!("\n… {} more lines", lines.len() - BLOCK_LINES));
+        return capped;
     }
-    let mut truncated: String = text.chars().take(TOOL_TEXT_LIMIT).collect();
-    truncated.push_str(&format!("\n… truncated ({total} characters)"));
-    truncated
+    if shown > TOOL_TEXT_LIMIT {
+        let mut capped: String = text.chars().take(TOOL_TEXT_LIMIT).collect();
+        capped.push_str(&format!("\n… truncated ({total} characters)"));
+        return capped;
+    }
+    if total > shown {
+        return format!("{text}\n… truncated ({total} characters)");
+    }
+    text.to_string()
 }

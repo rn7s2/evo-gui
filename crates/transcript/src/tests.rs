@@ -7,13 +7,21 @@ use gpui_kit::{
     div, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, Styled as _, TestAppContext, TestSupportExt as _, Window,
 };
-use session::{DimStyle, Row, RowId, RowKind, Todo, TodoStatus};
+use session::{DimStyle, Row, RowId, RowKind, Todo, TodoStatus, ToolResult};
 
 use gpui_kit::px;
 
-use crate::rows::run_outcome_style;
+use crate::rows::{
+    block_text, json_fields, run_outcome_style, Field, FieldValue, BLOCK_LINES, TOOL_TEXT_LIMIT,
+    VALUE_LIMIT,
+};
 use crate::style::MEASURE;
+use crate::todo::MAX_LIST_HEIGHT;
 use crate::{TodoPanel, TranscriptView};
+
+/// The element ids of a tool row's two blocks: its arguments and its result.
+const ARGUMENTS: &str = "transcript-tool-arguments";
+const RESULT: &str = "transcript-tool-result";
 
 /// A dim row of the given style.
 fn dim(id: RowId, style: DimStyle, text: &str) -> Row {
@@ -72,6 +80,20 @@ fn assistant_with_thinking(id: RowId, markdown: &str, thinking: &str) -> Row {
             thinking: thinking.into(),
             streaming: true,
             error: None,
+        },
+    }
+}
+
+/// A tool row with the arguments and result a call actually carries.
+fn tool_with(id: RowId, name: &str, arguments: &str, result: Option<ToolResult>) -> Row {
+    Row {
+        id,
+        version: 1,
+        kind: RowKind::Tool {
+            call_id: format!("call-{id}"),
+            name: name.into(),
+            arguments: arguments.into(),
+            result,
         },
     }
 }
@@ -378,6 +400,192 @@ fn a_tool_row_opens_on_click(cx: &mut TestAppContext) {
     });
 }
 
+/// One field of the list a tool's JSON draws as.
+fn field(key: &str, value: &str) -> Field {
+    Field {
+        key: key.into(),
+        value: FieldValue::Text {
+            text: value.into(),
+            full: None,
+        },
+    }
+}
+
+/// The id of the `index`th key/value row of a tool row's block.
+fn field_row_id(block: &'static str, id: RowId, index: usize) -> (gpui_kit::ElementId, String) {
+    ((block, id).into(), index.to_string())
+}
+
+#[test]
+fn tool_arguments_read_as_a_key_value_list() {
+    let fields = json_fields(
+        r#"{"path":"crates/transcript/src/rows.rs","timeout":120,"dry_run":false,"note":null,"env":{"RUST_LOG":"debug","RUST_BACKTRACE":"1"},"args":["--lib","--nocapture"],"matrix":[[1,2]]}"#,
+    )
+    .expect("a JSON object is a key/value list");
+
+    assert_eq!(
+        fields,
+        vec![
+            // The call's own key order, not a sorted one: a `write_file` reads
+            // `path` before `content`, the way the call was written.
+            field("path", "crates/transcript/src/rows.rs"),
+            field("timeout", "120"),
+            field("dry_run", "false"),
+            field("note", "null"),
+            field("env.RUST_LOG", "debug"),
+            field("env.RUST_BACKTRACE", "1"),
+            field("args.0", "--lib"),
+            field("args.1", "--nocapture"),
+            // Only one level flattens: what is left of a deeper structure is one
+            // line of compact JSON, not a wall of braces.
+            field("matrix.0", "[1,2]"),
+        ]
+    );
+
+    // Anything that is not JSON — or a bare number or string, which is not a
+    // structure at all — is left to the caller to show as it came.
+    assert_eq!(json_fields("crates/transcript/src/rows.rs"), None);
+    assert_eq!(json_fields("42"), None);
+    assert_eq!(json_fields("\"a string\""), None);
+}
+
+#[test]
+fn a_json_array_reads_as_a_list_keyed_by_index() {
+    // A result that is a list rather than an object is still JSON: it reads as
+    // one row per entry, not as the brackets it arrived in.
+    assert_eq!(
+        json_fields(r#"[{"path":"a.rs","ok":true},{"path":"b.rs","ok":false}]"#)
+            .expect("a JSON array is a key/value list"),
+        vec![
+            field("0.path", "a.rs"),
+            field("0.ok", "true"),
+            field("1.path", "b.rs"),
+            field("1.ok", "false"),
+        ]
+    );
+
+    // A list of plain values is keyed by position.
+    assert_eq!(
+        json_fields(r#"["--lib","--nocapture"]"#).expect("a JSON array"),
+        vec![field("0", "--lib"), field("1", "--nocapture")]
+    );
+}
+
+#[test]
+fn a_long_value_is_elided_with_the_whole_text_kept_for_the_tooltip() {
+    let command = "cargo test -p transcript --lib -- --nocapture ".to_string() + &"x".repeat(80);
+    let fields = json_fields(&format!(r#"{{"command":"{command}"}}"#)).expect("an object");
+
+    let FieldValue::Text { text, full } = &fields[0].value else {
+        panic!("a one-line string is one line of the list: {:?}", fields[0]);
+    };
+    assert!(!text.contains('"'), "the value carries no quotes: {text:?}");
+    assert!(text.ends_with('…'), "a long value ends in an ellipsis: {text:?}");
+    assert_eq!(
+        text.chars().count(),
+        VALUE_LIMIT + 1,
+        "and it is cut at the limit"
+    );
+    assert_eq!(
+        full.as_deref(),
+        Some(command.as_str()),
+        "the whole text is on hover"
+    );
+
+    // A value that fits is shown whole and carries no tooltip.
+    let fields = json_fields(r#"{"timeout":120}"#).expect("an object");
+    assert_eq!(fields, vec![field("timeout", "120")]);
+}
+
+#[test]
+fn a_multi_line_string_becomes_a_capped_block() {
+    let content: String = (0..14).map(|line| format!("line {line}\n")).collect();
+    let arguments = format!(r#"{{"content":"{}"}}"#, content.replace('\n', "\\n"));
+    let fields = json_fields(&arguments).expect("an object");
+
+    let FieldValue::Block(text) = &fields[0].value else {
+        panic!("a string with line breaks is a block: {:?}", fields[0]);
+    };
+    assert_eq!(fields[0].key, "content");
+
+    let shown = block_text(text, None);
+    assert_eq!(
+        shown.lines().count(),
+        BLOCK_LINES + 1,
+        "the block shows its lines and the note: {shown:?}"
+    );
+    assert!(
+        shown.ends_with("… 6 more lines"),
+        "and says what it left out: {shown:?}"
+    );
+
+    // Text with few lines but far too many characters is capped too.
+    let long_line = "x".repeat(TOOL_TEXT_LIMIT + 10);
+    let shown = block_text(&long_line, None);
+    assert!(
+        shown.ends_with(&format!("… truncated ({} characters)", TOOL_TEXT_LIMIT + 10)),
+        "{shown:?}"
+    );
+}
+
+#[gpui_kit::test]
+fn an_open_tool_row_renders_its_arguments_as_key_value_rows(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (host, cx) = cx.add_window_view(|_window, cx| TranscriptHost::new(cx));
+
+    host.update(cx, |host, cx| {
+        host.transcript.update(cx, |view, cx| {
+            view.replace(
+                1,
+                vec![
+                    tool_with(
+                        1,
+                        "bash",
+                        r#"{"command":"cargo test -p transcript --lib","timeout":120}"#,
+                        Some(ToolResult {
+                            is_error: false,
+                            content: r#"{"shell":"zsh","exit":0}"#.into(),
+                            content_chars: None,
+                        }),
+                    ),
+                    // Arguments that are not JSON at all: they are shown as the
+                    // text that came, with no field rows to find.
+                    tool_with(2, "read_file", "crates/transcript/src/rows.rs", None),
+                ],
+                cx,
+            );
+            view.set_expanded(1, true, cx);
+            view.set_expanded(2, true, cx);
+        });
+    });
+
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+
+        // One row per argument, in key order — no field beyond the two.
+        assert!(window.try_find(field_row_id(ARGUMENTS, 1u64, 0)).is_some());
+        assert!(window.try_find(field_row_id(ARGUMENTS, 1, 1)).is_some());
+        assert!(window.try_find(field_row_id(ARGUMENTS, 1, 2)).is_none());
+
+        // A JSON result opens onto the same list, keyed by its own block.
+        assert!(
+            window
+                .try_find(field_row_id(RESULT, 1, 0))
+                .is_some(),
+            "a JSON result reads as a key/value list too"
+        );
+
+        // The plain-text arguments still render, as one block.
+        assert!(
+            window
+                .try_find(("transcript-tool-arguments", 2u64))
+                .is_some(),
+            "arguments that are not JSON are shown as they came"
+        );
+        assert!(window.try_find(field_row_id(ARGUMENTS, 2, 0)).is_none());
+    });
+}
+
 #[gpui_kit::test]
 fn a_run_that_ended_badly_renders_as_its_own_notice_row(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
@@ -572,6 +780,18 @@ fn a_long_todo_list_scrolls_inside_the_panel(cx: &mut TestAppContext) {
         window.render_frame(cx);
         let panel = window.find("todo-panel").bounds();
         let first = window.find(("todo-item", 0usize)).bounds().origin.y;
+
+        // The list carries a scrollbar: an overlay on the list's own box, so
+        // the thumb has the list's own height to travel down.
+        let list = window.find("todo-list").bounds();
+        let bar = window.find("todo-scrollbar").bounds();
+        assert_eq!(bar.origin, list.origin);
+        assert_eq!(bar.size, list.size);
+        assert!(
+            list.size.height < MAX_LIST_HEIGHT + px(1.),
+            "the scrollbar's viewport is the capped list: {:?}",
+            list.size
+        );
 
         window.scroll(
             "todo-panel",
