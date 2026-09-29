@@ -229,6 +229,27 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
         "walking the tab stops never focused the folder card"
     );
     shot(&mut cx, window, dir, "12-folder-card-focus-light.png")?;
+
+    // 3c. Tabbed on to the history list: the frame around the rows is the tab stop, so the
+    // frame is what carries the keyboard focus, and its hairline ring is what says the arrows
+    // will walk the rows. No pointer moves between the two shots: a focus ring is only drawn
+    // while the last input was a key, which is what Tab is.
+    let mut reached = false;
+    for _ in 0..8 {
+        cx.update_window(window, |_, window, cx| window.render_frame(cx))?;
+        if cx.update_window(window, |_, window, _| window.find(HISTORY_ID).focused())? == Some(true)
+        {
+            reached = true;
+            break;
+        }
+        cx.update_window(window, |_, window, cx| window.focus_next(cx))?;
+    }
+    assert!(
+        reached,
+        "walking the tab stops never focused the history list"
+    );
+    shot(&mut cx, window, dir, "17-history-focus-light.png")?;
+
     pointer(&mut cx, window, ElementId::Name(FOLDER_ID.into()))?;
     shot(&mut cx, window, dir, "13-folder-card-hover-light.png")?;
     pointer(&mut cx, window, history_row(1))?;
@@ -333,6 +354,8 @@ fn temp_catalog(home: &Path) -> ModelCache {
 /// The element ids the captures point the pointer at: the folder card is a Button, so it
 /// is named; a history row is one of the list's numbered items.
 const FOLDER_ID: &str = "select-folder";
+/// The frame the history list's fingers live on: the tab stop that holds its focus.
+const HISTORY_ID: &str = "history";
 fn history_row(index: usize) -> ElementId {
     ElementId::NamedInteger("history-row".into(), index as u64)
 }

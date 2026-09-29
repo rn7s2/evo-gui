@@ -360,6 +360,54 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     });
     shot(&mut cx, window, dir, "06-lane-restarted.png")?;
 
+    // The focus ring (§7.3): the click that selects a row is also what hands the column the
+    // keyboard, so the row under the pointer and the ring around the list are both on screen.
+    demo.update(&mut cx, |demo, cx| {
+        demo.step = 0;
+        demo.apply(cx);
+    });
+    click(&mut cx, window, AgentKey::Lane(3))?;
+    // The pointer leaves before the shot: the ring is the focus, not the hover.
+    park_pointer(&mut cx, window)?;
+    shot(&mut cx, window, dir, "08-list-focus.png")?;
+
+    Ok(())
+}
+
+/// Click a row's centre, so the list takes the keyboard the same way a user's click does.
+fn click(
+    cx: &mut HeadlessAppContext,
+    window: AnyWindowHandle,
+    key: AgentKey,
+) -> Result<(), Box<dyn std::error::Error>> {
+    cx.update_window(window, |_, window, cx| {
+        window.click(row_id(key), cx);
+        window.render_frame(cx);
+    })?;
+    Ok(())
+}
+
+/// Park the pointer off the column, so no row is hovered and no tooltip is mid-show.
+fn park_pointer(
+    cx: &mut HeadlessAppContext,
+    window: AnyWindowHandle,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let corner = cx
+        .update_window(window, |_, window, _| window.bounds())?
+        .bottom_right()
+        - point(px(8.), px(8.));
+    cx.update_window(window, |_, window, cx| {
+        window.dispatch_event(
+            MouseMoveEvent {
+                position: corner,
+                pressed_button: None,
+                modifiers: Default::default(),
+            }
+            .to_platform_input(),
+            cx,
+        );
+        window.render_frame(cx);
+    })?;
     Ok(())
 }
 

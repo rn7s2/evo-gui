@@ -23,11 +23,13 @@ use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
     h_flex, v_flex, ActiveTheme as _, Icon, IconName, IndexPath, Sizable as _, StyledExt as _,
+    Theme,
 };
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    div, px, relative, AnyElement, App, Context, ElementId, Entity, FocusHandle, IntoElement,
-    Pixels, SharedString, Subscription, TestSupportExt as _, WeakEntity, Window,
+    div, px, relative, AnyElement, App, Context, ElementId, Entity, FocusHandle, Hsla, IntoElement,
+    KeyDownEvent, Pixels, Role, SharedString, Subscription, TestSupportExt as _, WeakEntity,
+    Window,
 };
 use serde_json::Value;
 use session::{Choice, ChooserOption, HistoryEntry, LaunchPlan, Launcher, DEFAULT_KEY};
@@ -73,6 +75,9 @@ const FOLDER_ICON_SIZE: Pixels = px(28.);
 const HISTORY_ID: &str = "history";
 const HISTORY_ROW_ID: &str = "history-row";
 const HISTORY_HINT_ID: &str = "history-hint";
+/// What the history section is called, for a screen reader: the list's items name
+/// themselves, but the list around them has no name of its own.
+const HISTORY_LABEL: &str = "Resumable swarms";
 /// A history row reads like a document: a small folder glyph, then the folder's own name as
 /// the title, with the path and the facts under it.
 const ROW_ICON_SIZE: Pixels = px(14.);
@@ -472,6 +477,10 @@ impl EmptyTabState {
             .w_full()
             .items_center()
             .gap_4()
+            // Space opens the menu, the way Enter and the arrows already do (`gpui-base` binds
+            // those in the select's own key context, and nothing binds Space): the key arrives
+            // here from the select's trigger, which is inside this row.
+            .on_key_down(cx.listener(Self::chooser_key))
             .child(
                 div()
                     .w(LABEL_WIDTH)
@@ -486,6 +495,24 @@ impl EmptyTabState {
                     .menu_width(MENU_WIDTH)
                     .accessibility_label(label),
             )
+    }
+
+    /// The chooser's own keys. Only Space is missing from the kit's bindings: the arrows
+    /// open a closed select, `enter` opens it, and `escape` closes it without the tab going
+    /// anywhere — all of those are the select's own actions, dispatched to the focused
+    /// control. Space is the one key a user is as likely to try, so it takes the same path
+    /// the other two do: the select's `Confirm` action, which opens the menu on the value it
+    /// already has instead of moving the highlight.
+    fn chooser_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if event.keystroke.key != "space" {
+            return;
+        }
+        // The focused select opens itself; this row only knows the key was pressed inside it.
+        window.dispatch_action(
+            Box::new(gpui_kit::base::actions::Confirm { secondary: false }),
+            cx,
+        );
+        cx.stop_propagation();
     }
 
     fn render_choosers(&self, cx: &Context<Self>) -> impl IntoElement {
@@ -555,15 +582,7 @@ impl EmptyTabState {
     fn render_folder_button(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let surface = theme.secondary;
-        // Hover strengthens the surface as well as the border. The light theme's
-        // `secondary_hover` is the same tone as `secondary` (both neutral-200), so the next
-        // stronger neutral is what actually moves the fill there; the dark theme's hover tone
-        // already does.
-        let surface_hover = if theme.is_dark() {
-            theme.secondary_hover
-        } else {
-            theme.secondary_active
-        };
+        let surface_hover = card_hover_fill(theme);
         let border = theme.border;
         let accent = theme.primary;
         let ring = theme.ring;
@@ -600,7 +619,7 @@ impl EmptyTabState {
             .child(
                 div()
                     .text_xs()
-                    .text_color(theme.muted_foreground)
+                    .text_color(card_hint_color(theme))
                     .child("The swarm starts in the folder you pick"),
             )
     }
@@ -612,6 +631,29 @@ impl Render for EmptyTabState {
             .gap_6()
             .child(self.header(cx))
             .child(self.render_choosers(cx))
+    }
+}
+
+/// How much of the card's own foreground the hint line keeps: a step down from the label, so
+/// the two lines still read as a label and a hint.
+const CARD_HINT_STRENGTH: f32 = 0.75;
+
+/// The folder card's hint line. The card is filled with `secondary`, so its text is that
+/// tone's own foreground — but at full strength the hint would weigh the same as the label
+/// above it, and the muted grey is too faint to read on a filled card.
+fn card_hint_color(theme: &Theme) -> Hsla {
+    theme.secondary_foreground.opacity(CARD_HINT_STRENGTH)
+}
+
+/// The folder card's fill under the pointer. Hover strengthens the surface as well as the
+/// border, and the light theme's `secondary_hover` is the very tone `secondary` already is
+/// (both neutral-200), so the next stronger neutral is what actually moves the fill there.
+/// The dark theme's own hover tone does.
+fn card_hover_fill(theme: &Theme) -> Hsla {
+    if theme.is_dark() {
+        theme.secondary_hover
+    } else {
+        theme.secondary_active
     }
 }
 
@@ -683,17 +725,23 @@ impl TabContent {
         let rows = self.history.read(cx).delegate().rows().len();
         let current = self.history.read(cx).selected_index();
         match event.keystroke.key.as_str() {
-            "down" | "up" => {
+            // Home and End are the ends of the list, the same way an arrow is one step of it.
+            "home" | "end" | "down" | "up" => {
                 if rows == 0 {
                     return;
                 }
-                let step: isize = if event.keystroke.key == "down" { 1 } else { -1 };
-                let row = match current {
-                    Some(ix) => ix.row.saturating_add_signed(step).min(rows - 1),
+                let key = event.keystroke.key.as_str();
+                let row = match (key, current) {
+                    ("home", _) => 0,
+                    ("end", _) => rows - 1,
+                    (_, Some(ix)) => {
+                        let step: isize = if key == "down" { 1 } else { -1 };
+                        ix.row.saturating_add_signed(step).min(rows - 1)
+                    }
                     // Nothing selected yet: an arrow starts at the top, or the bottom when
                     // it points up.
-                    None if step < 0 => rows - 1,
-                    None => 0,
+                    (_, None) if key == "up" => rows - 1,
+                    (_, None) => 0,
                 };
                 self.history.update(cx, |state, cx| {
                     state.set_selected_index(Some(IndexPath::default().row(row)), window, cx)
@@ -755,9 +803,23 @@ impl TabContent {
                     // tabbing would never reach it (§7.2's keyboard order).
                     .track_focus(&self.choosers.state.read(cx).history_focus)
                     .tab_stop(true)
+                    // The frame is what has the focus, so the frame is what carries the
+                    // section's name: the List inside names its own items but not itself.
+                    .role(Role::Group)
+                    .aria_label(HISTORY_LABEL)
                     .flex_1()
                     .min_h_0()
                     .overflow_hidden()
+                    // The frame is the tab stop, so the frame is what shows the keyboard
+                    // focus: the same hairline ring the folder card carries. Only the
+                    // keyboard draws it — a pointer that lands on a row is not the list
+                    // saying it is ready for the arrows.
+                    .border_1()
+                    .border_color(cx.theme().transparent)
+                    .focus_visible({
+                        let ring = cx.theme().ring;
+                        move |style| style.border_color(ring)
+                    })
                     .on_key_down(cx.listener(Self::history_key))
                     .child(List::new(&self.history)),
             )
@@ -970,7 +1032,15 @@ impl ListDelegate for HistoryList {
         let selected = Some(ix) == self.selected;
         let theme = cx.theme();
         let muted = theme.muted_foreground;
+        // The path and the facts are the row's substance — which folder, how many lanes, how
+        // long ago, which model — so they take the theme's secondary text tone. The muted grey
+        // is lighter than that: on the light theme's white page it reads as fine print.
+        let facts = theme.tab_foreground;
+        // The pill is filled with the theme's secondary tone, so it takes that tone's own
+        // foreground: the muted grey is the page's secondary text, and at 11 px on a filled
+        // chip it reads as a smudge.
         let badge_face = theme.secondary;
+        let badge_text = theme.secondary_foreground;
         let radius = theme.radius;
         let tooltip = row.tooltip.clone();
         // The session the app had open when it last quit wears a pill, so it reads as a
@@ -987,7 +1057,7 @@ impl ListDelegate for HistoryList {
                 .py_0p5()
                 .rounded(radius)
                 .bg(badge_face)
-                .text_color(muted)
+                .text_color(badge_text)
                 // A badge, not a word: a notch under the meta's own size, the way the agent
                 // list's row badges are set.
                 .text_size(px(11.))
@@ -1056,24 +1126,32 @@ impl ListDelegate for HistoryList {
                                             .min_w_0()
                                             .truncate()
                                             .text_xs()
-                                            .text_color(muted)
+                                            .text_color(facts)
                                             .child(row.subtitle.clone()),
                                     )
-                                    .child(div().flex_none().text_xs().text_color(muted).child("·"))
+                                    .child(div().flex_none().text_xs().text_color(facts).child("·"))
                                     .child(
                                         div()
                                             .flex_none()
                                             .max_w(px(420.))
                                             .truncate()
                                             .text_xs()
-                                            .text_color(muted)
+                                            .text_color(facts)
                                             .child(row.meta.clone()),
                                     ),
                             ),
                     ),
             )
             .selected(selected)
-            .accessibility_label(format!("{} {} {}", row.title, row.subtitle, row.meta))
+            // The pill is a fact about the row, not decoration: a screen reader hears it too,
+            // in the one place the row says it.
+            .accessibility_label(match row.open_at_quit {
+                true => format!(
+                    "{} {} {} {}",
+                    row.title, row.subtitle, OPEN_AT_QUIT_TEXT, row.meta
+                ),
+                false => format!("{} {} {}", row.title, row.subtitle, row.meta),
+            })
             .tooltip(move |window, cx| {
                 Tooltip::new(tooltip.clone())
                     .max_w(px(460.))
@@ -1618,6 +1696,232 @@ mod tests {
                 folder: PathBuf::from("/Users/you/coding/foo"),
             }]
         );
+    }
+
+    /// A chooser's select, by which one it is: the tests reach them through the tab's own
+    /// state, the way the render does.
+    fn chooser(f: &Fixture, cx: &App, which: Choice) -> Entity<SelectState<Vec<ChooserItem>>> {
+        let state = f.tab.read(cx).choosers.state.clone();
+        let state = state.read(cx);
+        match which {
+            Choice::Coordinator => state.coordinator.clone(),
+            Choice::Lanes => state.lanes.clone(),
+            Choice::Workers => state.workers.clone(),
+        }
+    }
+
+    #[gpui_kit::test]
+    fn a_chooser_opens_from_space_walks_with_the_arrows_and_closes_on_escape(
+        cx: &mut TestAppContext,
+    ) {
+        let cache = CacheDir::new(REGISTRY);
+        let f = open(cx);
+        // Every step is its own act: opening and closing go through the select's own
+        // actions, which GPUI dispatches on the way out of the update they were queued in.
+        let trigger = f.act(cx, |window, cx| {
+            f.tab.update(cx, |tab, cx| {
+                tab.set_model_cache(&cache.cache(), window, cx)
+            });
+            let chooser = chooser(&f, cx, Choice::Coordinator);
+            let trigger = chooser.read(cx).focus_handle(cx);
+            window.focus(&trigger, cx);
+            window.render_frame(cx);
+            trigger
+        });
+        assert_eq!(
+            f.act(cx, |window, cx| window.focused(cx)),
+            Some(trigger.clone())
+        );
+
+        f.act(cx, |window, cx| {
+            window.press("space", cx);
+            window.render_frame(cx);
+        });
+        // Space opens the menu the way Enter and the arrows do: the options take the focus,
+        // and the trigger gives it up.
+        assert_ne!(
+            f.act(cx, |window, cx| window.focused(cx)),
+            Some(trigger.clone()),
+            "space must open the chooser: the options have the focus"
+        );
+
+        // Escape closes it and hands the trigger back — and the tab is still the tab: no tab
+        // went away, no tab was opened, and nothing was committed.
+        f.act(cx, |window, cx| {
+            window.press("escape", cx);
+            window.render_frame(cx);
+        });
+        assert_eq!(
+            f.act(cx, |window, cx| window.focused(cx)),
+            Some(trigger.clone()),
+            "escape gives the chooser back its trigger"
+        );
+        assert!(f.act(cx, |window, cx| window.find("empty-tab").visible()));
+        assert!(f.events().is_empty(), "a closed chooser launches nothing");
+        cx.update(|cx| {
+            assert_eq!(f.tab.read(cx).coordinator_model(cx).as_ref(), "Default");
+        });
+
+        // Opened again with Space, the arrows walk the menu and Enter commits what they land
+        // on: one step down is the first real model, not Default.
+        f.act(cx, |window, cx| {
+            window.press("space", cx);
+            window.render_frame(cx);
+        });
+        f.act(cx, |window, cx| {
+            window.press("down", cx);
+            window.render_frame(cx);
+        });
+        f.act(cx, |window, cx| {
+            window.press("enter", cx);
+            window.render_frame(cx);
+        });
+
+        let (committed, expected) = cx.update(|cx| {
+            let state = f.tab.read(cx).choosers.state.read(cx);
+            let expected = state.launcher.chooser(Choice::Coordinator).options[1]
+                .label
+                .clone();
+            let committed = f.tab.read(cx).coordinator_model(cx).to_string();
+            (committed, expected)
+        });
+        assert_eq!(
+            committed, expected,
+            "enter committed the option the arrows walked to"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn enter_and_the_arrows_open_a_chooser_the_way_the_kit_binds_them(cx: &mut TestAppContext) {
+        // Space is the one key the tab has to supply: the select's own key context already
+        // binds Enter and the arrows to opening, and Escape to closing. This pins that, so a
+        // kit upgrade that dropped one of them would fail here rather than in a capture.
+        let f = open(cx);
+        for key in ["enter", "down", "up"] {
+            let trigger = f.act(cx, |window, cx| {
+                let chooser = chooser(&f, cx, Choice::Coordinator);
+                let trigger = chooser.read(cx).focus_handle(cx);
+                window.focus(&trigger, cx);
+                window.render_frame(cx);
+                trigger
+            });
+            f.act(cx, |window, cx| {
+                window.press(key, cx);
+                window.render_frame(cx);
+            });
+            assert_ne!(
+                f.act(cx, |window, cx| window.focused(cx)),
+                Some(trigger.clone()),
+                "{key} opens the chooser"
+            );
+            f.act(cx, |window, cx| {
+                window.press("escape", cx);
+                window.render_frame(cx);
+            });
+            assert_eq!(
+                f.act(cx, |window, cx| window.focused(cx)),
+                Some(trigger),
+                "escape closes what {key} opened, without leaving the tab"
+            );
+            assert!(f.act(cx, |window, cx| window.find("empty-tab").visible()));
+        }
+    }
+
+    /// The row the history list has highlighted, for the keyboard tests below.
+    fn selected_history_row(cx: &App, tab: &Entity<TabContent>) -> Option<usize> {
+        tab.read(cx)
+            .history
+            .read(cx)
+            .selected_index()
+            .map(|ix| ix.row)
+    }
+
+    #[gpui_kit::test]
+    fn the_history_list_walks_with_the_arrows_and_the_ends(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.act(cx, |window, cx| {
+            let entries = ["a", "b", "c"]
+                .iter()
+                .enumerate()
+                .map(|(i, name)| {
+                    history_entry(
+                        &format!("/Users/you/.evo/sessions/{name}/1.sexp"),
+                        &format!("/Users/you/coding/{name}"),
+                        (i as i64 + 1) * 30,
+                    )
+                })
+                .collect::<Vec<_>>();
+            f.tab.update(cx, |tab, cx| {
+                tab.set_history_entries(&entries, 1_700_000_000, 0, Some("/Users/you"), cx)
+            });
+            let list = f.tab.read(cx).choosers.state.read(cx).history_focus.clone();
+            window.focus(&list, cx);
+            window.render_frame(cx);
+
+            // Nothing selected yet, so Down starts at the top and Up starts at the bottom.
+            assert_eq!(selected_history_row(cx, &f.tab), None);
+            window.press("up", cx);
+            assert_eq!(selected_history_row(cx, &f.tab), Some(2));
+            window.press("home", cx);
+            assert_eq!(selected_history_row(cx, &f.tab), Some(0));
+            window.press("down", cx);
+            assert_eq!(selected_history_row(cx, &f.tab), Some(1));
+            window.press("end", cx);
+            assert_eq!(selected_history_row(cx, &f.tab), Some(2));
+            // The ends hold: another Down does not walk past the last row.
+            window.press("down", cx);
+            assert_eq!(selected_history_row(cx, &f.tab), Some(2));
+        });
+    }
+
+    #[gpui_kit::test]
+    fn the_badge_is_part_of_what_the_row_says(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.act(cx, |window, cx| {
+            let mut opened = history_entry(
+                "/Users/you/.evo/sessions/a/1.sexp",
+                "/Users/you/coding/foo",
+                5,
+            );
+            opened.open_at_quit = true;
+            let scanned = history_entry(
+                "/Users/you/.evo/sessions/b/2.sexp",
+                "/Users/you/coding/bar",
+                90,
+            );
+            f.tab.update(cx, |tab, cx| {
+                tab.set_history_entries(
+                    &[opened, scanned],
+                    1_700_000_000,
+                    0,
+                    Some("/Users/you"),
+                    cx,
+                )
+            });
+            window.render_frame(cx);
+
+            let said = |ix: u64| {
+                window
+                    .find(ElementId::NamedInteger(HISTORY_ROW_ID.into(), ix))
+                    .label()
+                    .unwrap_or_default()
+                    .to_string()
+            };
+            let opened_said = said(0);
+            let scanned_said = said(1);
+            // The pill is the only place the row says this, so the name has to carry it.
+            assert!(
+                opened_said.contains(OPEN_AT_QUIT_TEXT),
+                "the row's name must say what the pill says: {opened_said}"
+            );
+            assert!(
+                !scanned_said.contains(OPEN_AT_QUIT_TEXT),
+                "a row the scan alone found must not claim it: {scanned_said}"
+            );
+            // ... and the row still names itself: title, path and facts.
+            assert!(opened_said.contains("foo"), "{opened_said}");
+            assert!(opened_said.contains("~/coding/foo"), "{opened_said}");
+        });
     }
 
     #[gpui_kit::test]

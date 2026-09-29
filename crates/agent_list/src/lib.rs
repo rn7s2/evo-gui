@@ -23,9 +23,9 @@ use std::sync::Arc;
 use gpui_kit::component::{h_flex, tooltip::Tooltip, v_flex, ActiveTheme as _, Theme};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    div, px, Context, ElementId, EventEmitter, FontFeatures, Hsla, InteractiveElement as _,
-    IntoElement, ParentElement as _, Pixels, Render, SharedString, StatefulInteractiveElement as _,
-    Styled as _, TestSupportExt as _, Window,
+    div, px, Context, ElementId, EventEmitter, FocusHandle, FontFeatures, Hsla,
+    InteractiveElement as _, IntoElement, KeyDownEvent, ParentElement as _, Pixels, Render, Role,
+    SharedString, StatefulInteractiveElement as _, Styled as _, TestSupportExt as _, Window,
 };
 use session::{Activity, AgentKey, LaneList, LaneRow, LaneStatus};
 
@@ -63,6 +63,10 @@ const ROWS_ID: &str = "agent-list-rows";
 /// The `6 lanes · 2 busy` summary above the rows.
 const SUMMARY_ID: &str = "agent-list-summary";
 
+/// What the column is called, for a screen reader: the rows name themselves, but the list
+/// around them needs a name of its own.
+const LIST_LABEL: &str = "Agents";
+
 /// What the list asks its owner to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AgentListEvent {
@@ -85,6 +89,9 @@ pub struct AgentList {
     /// Why a lane is down, by lane number — the last error line of its transcript,
     /// which the owner reads from `TabModel::lane_down_reason` (§9.7).
     down_reasons: BTreeMap<u32, String>,
+    /// The column's own focus (§7.3): a click takes it, and the arrows walk the rows while it
+    /// is held. The list is the thing being navigated, so it is the thing that is focused.
+    focus_handle: FocusHandle,
 }
 
 impl EventEmitter<AgentListEvent> for AgentList {}
@@ -92,7 +99,7 @@ impl EventEmitter<AgentListEvent> for AgentList {}
 impl AgentList {
     /// The context is the entity-constructor shape; there is nothing to subscribe to,
     /// because every update arrives through the setters below.
-    pub fn new(_cx: &mut Context<Self>) -> Self {
+    pub fn new(cx: &mut Context<Self>) -> Self {
         Self {
             lanes: LaneList::new(),
             activity: Activity::Idle,
@@ -100,6 +107,7 @@ impl AgentList {
             coordinator_reconnecting: false,
             selected: AgentKey::Coordinator,
             down_reasons: BTreeMap::new(),
+            focus_handle: cx.focus_handle(),
         }
     }
 
@@ -182,6 +190,47 @@ impl AgentList {
 
     fn is_selected(&self, key: AgentKey) -> bool {
         self.selected == key
+    }
+
+    /// The agents in the order the rows are drawn: the coordinator first, then the lanes.
+    /// The arrows move through this, so the order on screen is the order they walk.
+    fn keys(&self) -> Vec<AgentKey> {
+        std::iter::once(AgentKey::Coordinator)
+            .chain(
+                self.lanes
+                    .lanes
+                    .iter()
+                    .map(|row| AgentKey::Lane(row.n as u32)),
+            )
+            .collect()
+    }
+
+    /// The list's own keys (§7.3): the arrows walk the rows, Home and End go to the ends.
+    /// The list asks and does not select — every move emits [`AgentListEvent::Select`] — so
+    /// the keyboard takes the same path a click does and the owner stays the only one that
+    /// knows what a selection means.
+    fn key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        let keys = self.keys();
+        // A list with nothing highlighted starts from the top; there is always a coordinator
+        // row, so `keys` is never empty and the last index is a real one.
+        let at = keys
+            .iter()
+            .position(|key| *key == self.selected)
+            .unwrap_or_default();
+        let next = match event.keystroke.key.as_str() {
+            "down" => at + 1,
+            "up" => at.saturating_sub(1),
+            "home" => 0,
+            "end" => keys.len() - 1,
+            _ => return,
+        }
+        .min(keys.len() - 1);
+        // The arrows belong to the focused list even at its ends: a list that has nothing
+        // further to show should not also scroll whatever is behind it.
+        cx.stop_propagation();
+        if keys[next] != self.selected {
+            cx.emit(AgentListEvent::Select(keys[next]));
+        }
     }
 
     /// The small muted summary above the rows: how many lanes, how many busy.
@@ -299,6 +348,7 @@ impl AgentList {
     fn row(&self, view: RowView, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let selected = self.is_selected(view.key);
+        let rows = self.keys().len();
         let key = view.key;
         let (label_id, clock_id) = (label_id(key), clock_id(key));
         let tooltip = view.tooltip;
@@ -377,7 +427,17 @@ impl AgentList {
                         .child(badge),
                 )
             })
-            .on_click(cx.listener(move |_, _, _, cx| cx.emit(AgentListEvent::Select(key))))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                // A click is also how the list takes the keyboard: the arrows walk the rows
+                // from whatever the pointer picked (§7.3).
+                this.focus_handle.focus(window, cx);
+                cx.emit(AgentListEvent::Select(key));
+            }))
+            // One option of a list box, in the order the arrows walk it: a screen reader can
+            // then say where the selection is, which is what the highlight says on screen.
+            .role(Role::ListBoxOption)
+            .aria_position_in_set(row_index(key) as usize + 1)
+            .aria_size_of_set(rows)
             .aria_label(view.aria)
             .aria_selected(selected)
             .tooltip(move |window, cx| {
@@ -391,8 +451,9 @@ impl AgentList {
 }
 
 impl Render for AgentList {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
+        let focused = self.focus_handle.is_focused(window);
         let coordinator = self.coordinator_view(&theme);
         let lanes: Vec<RowView> = self
             .lanes
@@ -404,11 +465,14 @@ impl Render for AgentList {
 
         let mut rows = v_flex()
             .id(ROWS_ID)
+            .test_support()
             .w_full()
             .flex_1()
             .min_h_0()
             .gap_0p5()
-            .overflow_y_scroll();
+            .overflow_y_scroll()
+            .role(Role::ListBox)
+            .aria_label(LIST_LABEL);
         rows = rows.child(self.row(coordinator, cx));
         for lane in lanes {
             rows = rows.child(self.row(lane, cx));
@@ -418,6 +482,20 @@ impl Render for AgentList {
             .w_full()
             .h_full()
             .py_1()
+            // The column is the tab stop (§7.3): the frame around it is focused rather than
+            // any row, so the arrows can walk the rows without a row of its own having to be
+            // a control. The border is always laid out and only coloured in when focused, so
+            // taking focus does not move the rows by a pixel.
+            .track_focus(&self.focus_handle)
+            .tab_stop(true)
+            .on_key_down(cx.listener(Self::key_down))
+            .rounded(theme.radius)
+            .border_1()
+            .border_color(if focused {
+                theme.ring
+            } else {
+                theme.transparent
+            })
             .text_color(theme.foreground)
             .children(self.header(&theme))
             .child(rows)
@@ -801,6 +879,154 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn the_list_names_itself_and_says_where_each_row_sits(cx: &mut TestAppContext) {
+        let f = open(
+            cx,
+            lanes(vec![
+                lane(1, LaneStatus::Working, Some("one")),
+                lane(2, LaneStatus::Idle, None),
+            ]),
+        );
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            // The rows name themselves; the list box around them says what it is, so a screen
+            // reader can announce "Agents, list box" before reading the rows out.
+            let list = window.find(ROWS_ID).label().unwrap_or_default().to_string();
+            assert_eq!(list, LIST_LABEL);
+            let row = window
+                .find(row_id(AgentKey::Lane(2)))
+                .label()
+                .unwrap_or_default()
+                .to_string();
+            assert!(row.starts_with("○ lane 2"), "{row}");
+        });
+    }
+
+    #[gpui_kit::test]
+    fn clicking_a_row_gives_the_list_the_keyboard(cx: &mut TestAppContext) {
+        let f = open(
+            cx,
+            lanes(vec![
+                lane(1, LaneStatus::Working, Some("one")),
+                lane(2, LaneStatus::Idle, None),
+            ]),
+        );
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            // Nothing has the list's focus, so the arrows are not the list's to answer.
+            window.press("down", cx);
+        });
+        assert!(
+            f.events().is_empty(),
+            "the arrows belong to the focused list, not to the window"
+        );
+
+        f.act(cx, |window, cx| {
+            window.click(row_id(AgentKey::Lane(1)), cx);
+            window.render_frame(cx);
+        });
+        assert_eq!(f.events(), vec![AgentListEvent::Select(AgentKey::Lane(1))]);
+        f.act(cx, |window, cx| {
+            f.list
+                .update(cx, |list, cx| list.set_selected(AgentKey::Lane(1), cx))
+        });
+
+        // The list had no focus until the click gave it some, so this press proves the click
+        // took the keyboard: the arrow walks on from the row the pointer picked.
+        f.act(cx, |window, cx| window.press("down", cx));
+        assert_eq!(
+            f.events().last(),
+            Some(&AgentListEvent::Select(AgentKey::Lane(2))),
+            "the click left the list holding the keyboard"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn the_arrows_walk_the_rows_and_home_and_end_go_to_the_ends(cx: &mut TestAppContext) {
+        let f = open(
+            cx,
+            lanes(vec![
+                lane(1, LaneStatus::Working, Some("one")),
+                lane(2, LaneStatus::Idle, None),
+                lane(3, LaneStatus::Idle, None),
+            ]),
+        );
+        // The owner's side of the contract: every selection the list asks for is confirmed,
+        // the way `TabModel::select` does — the list never highlights a row on its own.
+        let confirm = |key: AgentKey, cx: &mut TestAppContext| {
+            f.act(cx, |_, cx| {
+                f.list.update(cx, |list, cx| list.set_selected(key, cx))
+            })
+        };
+        let press =
+            |key: &str, cx: &mut TestAppContext| f.act(cx, |window, cx| window.press(key, cx));
+
+        f.act(cx, |window, cx| {
+            window.click(row_id(AgentKey::Coordinator), cx);
+            window.render_frame(cx);
+        });
+        confirm(AgentKey::Coordinator, cx);
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+        });
+
+        // Down walks the rows in the order they are drawn, and stops at the last one.
+        let mut walked = vec![AgentListEvent::Select(AgentKey::Coordinator)];
+        for key in [AgentKey::Lane(1), AgentKey::Lane(2), AgentKey::Lane(3)] {
+            press("down", cx);
+            walked.push(AgentListEvent::Select(key));
+            confirm(key, cx);
+        }
+        assert_eq!(f.events(), walked, "down walks the rows as they are drawn");
+
+        // At the last row there is nowhere to go, and the list does not re-ask for the row it
+        // is already on.
+        press("down", cx);
+        assert_eq!(
+            f.events().len(),
+            walked.len(),
+            "down at the end asks for nothing"
+        );
+
+        // Up walks back, and Home and End are the ends themselves.
+        press("up", cx);
+        assert_eq!(
+            f.events().last(),
+            Some(&AgentListEvent::Select(AgentKey::Lane(2)))
+        );
+        confirm(AgentKey::Lane(2), cx);
+
+        press("home", cx);
+        assert_eq!(
+            f.events().last(),
+            Some(&AgentListEvent::Select(AgentKey::Coordinator))
+        );
+        confirm(AgentKey::Coordinator, cx);
+
+        press("end", cx);
+        assert_eq!(
+            f.events().last(),
+            Some(&AgentListEvent::Select(AgentKey::Lane(3)))
+        );
+    }
+
+    #[gpui_kit::test]
+    fn a_focused_list_is_the_only_thing_the_arrows_move(cx: &mut TestAppContext) {
+        let f = open(cx, lanes(vec![lane(1, LaneStatus::Working, Some("one"))]));
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            window.press("up", cx);
+            window.press("home", cx);
+            window.press("end", cx);
+        });
+        assert!(
+            f.events().is_empty(),
+            "an unfocused list answers nothing: {:?}",
+            f.events()
+        );
+    }
+
+    #[gpui_kit::test]
     fn clicking_a_row_asks_the_owner_to_select_that_agent(cx: &mut TestAppContext) {
         let f = open(
             cx,
@@ -1056,7 +1282,8 @@ mod tests {
 
             // No clock (the step was never stamped, or the run just ended): the word is what
             // shows, and a blank string is no clock either.
-            f.list.update(cx, |list, cx| list.set_coordinator_clock(None, cx));
+            f.list
+                .update(cx, |list, cx| list.set_coordinator_clock(None, cx));
             assert_eq!(coordinator_trailing(&f, cx).as_deref(), Some("compacting"));
             f.list.update(cx, |list, cx| {
                 list.set_coordinator_clock(Some("   ".to_string()), cx)
