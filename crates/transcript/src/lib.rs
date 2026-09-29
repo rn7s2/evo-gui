@@ -42,17 +42,19 @@ pub use todo::TodoPanel;
 
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
+use std::sync::Arc;
 
 use gpui_kit::base::TextViewState;
 use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
 use gpui_kit::component::{v_flex, ActiveTheme as _, Icon, IconName, Sizable as _};
 use gpui_kit::{
-    div, px, AnyElement, App, AppContext as _, Context, Entity, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, StyleRefinement, Styled as _, TestSupportExt as _,
-    Window,
+    div, px, AnyElement, App, AppContext as _, Context, Entity, FocusHandle,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, StyleRefinement, Styled as _,
+    TestSupportExt as _, Window,
 };
 use session::{AgentKey, Row, RowId, RowKind, Todo};
 
+use crate::rows::CopyFeedback;
 use crate::style::Palette;
 
 /// How many assistant rows keep their parsed document.
@@ -85,6 +87,14 @@ pub(crate) struct TranscriptData {
     pub(crate) expanded: HashSet<RowId>,
     /// Whether assistant thinking text is shown (hidden by default).
     pub(crate) show_thinking: bool,
+    /// How often each of the transcript's copy buttons has been used, so one
+    /// can acknowledge a click. Shared through an `Arc` because the buttons of
+    /// a message's code blocks are built by a `Send + Sync` closure.
+    pub(crate) copy_feedback: Arc<CopyFeedback>,
+    /// The focus the rows take on a click, so the keyboard reaches the window's
+    /// own copy binding: text a reader selected has to be copiable whether or
+    /// not the element it lives in is a text view.
+    pub(crate) focus: FocusHandle,
 }
 
 impl TranscriptData {
@@ -199,13 +209,15 @@ impl TranscriptView {
 
         Self {
             revision: 0,
-            data: cx.new(|_| TranscriptData {
+            data: cx.new(|cx| TranscriptData {
+                focus: cx.focus_handle(),
                 rows: Vec::new(),
                 documents: HashMap::new(),
                 rendered: HashMap::new(),
                 frame: 0,
                 expanded: HashSet::new(),
                 show_thinking: false,
+                copy_feedback: Arc::new(CopyFeedback::default()),
             }),
             scroller,
             todos: Vec::new(),

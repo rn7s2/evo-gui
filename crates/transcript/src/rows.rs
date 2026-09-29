@@ -10,17 +10,19 @@
 //! markdown, a one-line tool row that opens onto its arguments and result as a
 //! key/value list, a report block, or a dim line.
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use gpui_kit::base::Easing;
+use gpui_kit::base::{Easing, SelectableText};
 use gpui_kit::component::text::{TextView, TextViewMotion};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{h_flex, Icon, IconName};
 use gpui_kit::TestSupportExt as _;
 use gpui_kit::{
-    div, px, Animation, AnimationExt as _, AnyElement, App, Context, ElementId, FontWeight,
-    InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
-    StatefulInteractiveElement as _, Styled as _, WeakEntity,
+    div, px, Animation, AnimationExt as _, AnyElement, App, ClipboardItem, Context, Div, ElementId,
+    FontWeight, InteractiveElement as _, IntoElement, ParentElement, Pixels, SharedString,
+    Stateful, StatefulInteractiveElement as _, Styled as _, WeakEntity,
 };
 use serde_json::Value;
 use session::{DimStyle, Row, RowId, RowKind, ToolResult};
@@ -85,6 +87,147 @@ pub(crate) fn stream_motion() -> TextViewMotion {
         .with_stream_fade(STREAM_FADE)
         .with_stream_fade_stagger(STREAM_FADE_STAGGER)
         .with_stream_fade_easing(Easing::EaseOut)
+}
+
+/// The group a row declares so its copy buttons are out of the way until the
+/// reader is over it: an assistant message's own copy action and the one each of
+/// its code blocks carries both wait for hover.
+pub(crate) const COPY_GROUP: &str = "transcript-copy";
+
+/// How long a copy button says "Copied" after it was used.
+const COPIED_HOLD: Duration = Duration::from_millis(1_200);
+
+/// The size of a copy button's icon and label: the smallest thing in a row, so
+/// the affordance reads as a tool rather than as part of the transcript.
+const COPY_SIZE: Pixels = px(11.);
+
+/// Which copy button was used.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum CopyTarget {
+    /// An assistant message: its whole markdown source.
+    Message(RowId),
+    /// One of the message's code blocks, at the byte offset its fence opens at.
+    Block(RowId, usize),
+}
+
+/// How often each copy button has been used.
+///
+/// The count is what times the acknowledgement: it is part of the "Copied"
+/// element's id, so every click mounts a fresh one-shot animation instead of
+/// reusing a finished one, and the button is back to rest when that animation
+/// ends. The base `TextView` asks a code block's actions to be `Send + Sync`,
+/// so the count is shared through an `Arc` rather than read from the view that
+/// renders the buttons.
+#[derive(Default)]
+pub(crate) struct CopyFeedback {
+    uses: Mutex<HashMap<CopyTarget, u64>>,
+}
+
+impl CopyFeedback {
+    /// How many times this button has been used.
+    fn uses(&self, target: CopyTarget) -> u64 {
+        self.lock().get(&target).copied().unwrap_or(0)
+    }
+
+    /// Note a use, so the button renders its acknowledgement on the next frame.
+    fn record(&self, target: CopyTarget) {
+        *self.lock().entry(target).or_default() += 1;
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<CopyTarget, u64>> {
+        self.uses
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+/// The row a copy button's icon and word sit in.
+fn copy_face() -> Div {
+    div().flex().items_center().gap(px(4.))
+}
+
+/// Fill a copy button's face: the resting one, or the acknowledgement it shows
+/// while `copied`.
+fn fill_copy_face<E: ParentElement>(face: E, copied: bool, with_label: bool, key: &ElementId) -> E {
+    let icon = if copied {
+        IconName::Check
+    } else {
+        IconName::Copy
+    };
+    let mut face = face.child(Icon::new(icon).size(COPY_SIZE));
+    if copied {
+        face = face.child(
+            div()
+                .id((key.clone(), "copied"))
+                .child("Copied")
+                .test_support(),
+        );
+    } else if with_label {
+        face = face.child("Copy");
+    }
+    face
+}
+
+/// A copy button: quiet, and out of the way until the reader hovers the row it
+/// belongs to.
+///
+/// Pressing it copies `text` — a message's markdown source, or a code block's
+/// raw code — and the button acknowledges with "Copied" for [`COPIED_HOLD`].
+/// `with_label` drops the word next to the icon, for the buttons that have to be
+/// unobtrusive (a message's own action, at the top of the row).
+fn copy_button(
+    id: impl Into<ElementId>,
+    target: CopyTarget,
+    text: SharedString,
+    feedback: &Arc<CopyFeedback>,
+    with_label: bool,
+    palette: &Palette,
+) -> Stateful<Div> {
+    let id = id.into();
+    let feedback = feedback.clone();
+    let uses = feedback.uses(target);
+
+    let button = div()
+        .id(id.clone())
+        .px(px(6.))
+        .py(px(1.))
+        .rounded(palette.radius)
+        .bg(palette.muted)
+        // A hairline, because a muted chip on a code block's own background is
+        // otherwise the same tone as what it sits on.
+        .border_1()
+        .border_color(palette.border)
+        .text_size(COPY_SIZE)
+        .line_height(px(14.))
+        .text_color(palette.muted_foreground)
+        .cursor_pointer()
+        .hover(|style| style.text_color(palette.foreground))
+        .invisible()
+        .group_hover(COPY_GROUP, |style| style.visible())
+        .on_click(move |_, window, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
+            feedback.record(target);
+            window.refresh();
+        });
+
+    // An unused button has nothing to acknowledge, so it is the plain one until
+    // it has been pressed once.
+    let key = id.clone();
+    if uses == 0 {
+        button.child(fill_copy_face(copy_face(), false, with_label, &key))
+    } else {
+        button.child(
+            copy_face()
+                // The count is in the id on purpose: a later use is a new
+                // element, which starts the acknowledgement over rather than
+                // inheriting the finished animation of the one before it.
+                .with_animation(
+                    (id, uses.to_string()),
+                    Animation::new(COPIED_HOLD),
+                    move |face, delta| fill_copy_face(face, delta < 1., with_label, &key),
+                ),
+        )
+    }
 }
 
 /// How a row spaces itself against the one before it.
@@ -167,6 +310,7 @@ pub(crate) fn render_row(
     let palette = Palette::from_app(cx);
     let previous = index.checked_sub(1).and_then(|index| data.rows.get(index));
 
+    let focus = data.focus.clone();
     let mut stack = div().flex().flex_col().w_full().min_w_0();
     // A user turn opens a new turn: say so, rather than printing a run marker.
     if matches!(row.kind, RowKind::User { .. }) && previous.is_some() {
@@ -235,6 +379,12 @@ pub(crate) fn render_row(
                 .child(stack),
         )
         .test_support()
+        // A drag in a row takes the focus, so ⌘C reaches the window's copy —
+        // the transcript itself is not a text view with a binding of its own.
+        // It is not a tab stop: the keyboard walks into the transcript, not
+        // through every row of it.
+        .track_focus(&focus)
+        .tab_stop(false)
         .into_any_element()
 }
 
@@ -273,7 +423,10 @@ fn user_row(id: RowId, text: &str, palette: &Palette) -> AnyElement {
         .px_3()
         .py_2()
         .text_color(palette.foreground)
-        .child(text.to_string())
+        .child(SelectableText::new(
+            ("transcript-user-text", id),
+            text.to_string(),
+        ))
         .test_support()
         .into_any_element()
 }
@@ -295,6 +448,8 @@ fn assistant_row(
 ) -> AnyElement {
     let mut row = div()
         .id(("transcript-assistant", id))
+        .group(COPY_GROUP)
+        .relative()
         .w_full()
         .min_w_0()
         .flex()
@@ -306,11 +461,45 @@ fn assistant_row(
     } else {
         row = match data.documents.get(&id) {
             // The retained document: never recreated per delta, `set_text` extends it.
-            Some(document) => row.child(
-                TextView::new(document)
-                    .style(text_style(cx))
-                    .motion(stream_motion()),
-            ),
+            Some(document) => {
+                let feedback = data.copy_feedback.clone();
+                let message = markdown.to_string();
+                let code_palette = palette.clone();
+                row.child(
+                    TextView::new(document)
+                        .style(text_style(cx))
+                        .motion(stream_motion())
+                        // A fenced block carries its own Copy: the reader who
+                        // wants the code wants only the code, not the prose
+                        // around it.
+                        .code_block_actions(move |code_block, _, _| {
+                            let block = code_block.span.map(|span| span.start).unwrap_or(0);
+                            copy_button(
+                                ("transcript-copy-block", id),
+                                CopyTarget::Block(id, block),
+                                code_block.code(),
+                                &feedback,
+                                true,
+                                &code_palette,
+                            )
+                            .test_support()
+                        }),
+                )
+                .child(
+                    copy_button(
+                        ("transcript-copy-message", id),
+                        CopyTarget::Message(id),
+                        message.into(),
+                        &data.copy_feedback,
+                        false,
+                        palette,
+                    )
+                    .absolute()
+                    .top_0()
+                    .right_0()
+                    .test_support(),
+                )
+            }
             // Unreachable while every assistant row gets a document on the way in;
             // fall back to the source rather than dropping the message.
             None => row.child(
@@ -342,7 +531,10 @@ fn assistant_row(
                         .text_sm()
                         .italic()
                         .text_color(palette.muted_foreground)
-                        .child(thinking.to_string()),
+                        .child(SelectableText::new(
+                            ("transcript-thinking-text", id),
+                            thinking.to_string(),
+                        )),
                 )
                 .test_support(),
         );
@@ -419,7 +611,9 @@ fn tool_row(
     let view = view.clone();
     // The header is a quiet line: the name in the mono face at its own size,
     // the status word a point smaller in the UI font, so neither shouts over
-    // the other and a run of tool calls reads as one list.
+    // the other and a run of tool calls reads as one list. It is the row's
+    // control — a click opens and closes it — so it is the one line of a tool
+    // row that is not selectable text; what the call carried is.
     let header = div()
         .id(("transcript-tool", id))
         .flex()
@@ -697,8 +891,9 @@ fn field_row(base: &ElementId, index: usize, field: &Field, palette: &Palette) -
         FieldValue::Text { full, .. } => full.clone(),
         FieldValue::Block(_) => None,
     };
+    let id: ElementId = (base.clone(), index.to_string()).into();
     let row = div()
-        .id((base.clone(), index.to_string()))
+        .id(id.clone())
         .w_full()
         .min_w_0()
         .flex()
@@ -711,7 +906,7 @@ fn field_row(base: &ElementId, index: usize, field: &Field, palette: &Palette) -
                 .truncate()
                 .text_size(KEY_SIZE)
                 .text_color(palette.muted_foreground)
-                .child(field.key.clone()),
+                .child(SelectableText::new((id.clone(), "key"), field.key.clone())),
         )
         .child(match &field.value {
             FieldValue::Text { text, .. } => {
@@ -721,7 +916,7 @@ fn field_row(base: &ElementId, index: usize, field: &Field, palette: &Palette) -
                     .flex_1()
                     .min_w_0()
                     .text_color(palette.foreground)
-                    .child(text.clone());
+                    .child(SelectableText::new((id.clone(), "value"), text.clone()));
                 if looks_like_code(text) {
                     value.font_family(palette.mono.clone()).into_any_element()
                 } else {
@@ -736,7 +931,10 @@ fn field_row(base: &ElementId, index: usize, field: &Field, palette: &Palette) -
                 .border_color(palette.border)
                 .font_family(palette.mono.clone())
                 .text_color(palette.foreground)
-                .child(block_text(text, None))
+                .child(SelectableText::new(
+                    (id.clone(), "value"),
+                    block_text(text, None),
+                ))
                 .into_any_element(),
         });
 
@@ -791,6 +989,11 @@ fn report_row(
         if value.is_empty() {
             continue;
         }
+        let value_id: ElementId = (
+            SharedString::from(format!("transcript-report-{label}")),
+            id as usize,
+        )
+            .into();
         row = row.child(
             div()
                 .flex()
@@ -804,7 +1007,12 @@ fn report_row(
                         .text_color(palette.muted_foreground)
                         .child(label),
                 )
-                .child(div().min_w_0().text_color(color).child(value.to_string())),
+                .child(
+                    div()
+                        .min_w_0()
+                        .text_color(color)
+                        .child(SelectableText::new(value_id, value.to_string())),
+                ),
         );
     }
 
@@ -850,15 +1058,16 @@ fn dim_line(
         DimStyle::Notice => palette.info,
         DimStyle::Error => palette.destructive,
     };
+    let id = id.into();
 
     div()
-        .id(id)
+        .id(id.clone())
         .w_full()
         .min_w_0()
         .text_sm()
         .line_height(px(18.))
         .text_color(color)
-        .child(text.to_string())
+        .child(SelectableText::new((id, "text"), text.to_string()))
         .test_support()
         .into_any_element()
 }
@@ -892,14 +1101,17 @@ fn text_block(
         // column of it.
         .child(
             div()
-                .id((id, "text"))
+                .id((id.clone(), "text"))
                 .w_full()
                 .min_w_0()
                 .font_family(palette.mono.clone())
                 .text_size(palette.payload_size)
                 .line_height(palette.payload_size * PAYLOAD_LINE_HEIGHT)
                 .text_color(palette.foreground)
-                .child(block_text(text, total_chars))
+                .child(SelectableText::new(
+                    (id.clone(), "body"),
+                    block_text(text, total_chars),
+                ))
                 .test_support(),
         )
         .test_support()

@@ -38,8 +38,9 @@ use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
     div, point, px, size, AnyWindowHandle, AppContext as _, Bounds, Context, Entity,
-    HeadlessAppContext, InputEvent as _, IntoElement, MouseMoveEvent, ParentElement as _, Render,
-    ScrollDelta, ScrollWheelEvent, Styled as _, Task, Window, WindowBounds, WindowOptions,
+    HeadlessAppContext, InputEvent as _, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, ParentElement as _, Render, ScrollDelta, ScrollWheelEvent, Styled as _, Task,
+    Window, WindowBounds, WindowOptions,
 };
 use session::{AgentKey, DimStyle, Row, RowId, RowKind, Todo, TodoStatus, ToolResult};
 
@@ -82,6 +83,14 @@ const LONG_TODOS_SHOT: &str = "12-long-todo-list.png";
 /// The dark theme, mid-stream and whole.
 const DARK_STREAM_SHOT: &str = "13-dark-mid-stream.png";
 const DARK_TURN_SHOT: &str = "14-dark-turn.png";
+/// The copy affordances: with the pointer over a finished message, its own Copy
+/// and the one its code block carries are both showing.
+const COPY_HOVER_SHOT: &str = "23-copy-affordances-on-hover.png";
+/// The same block a moment after its Copy was pressed.
+const COPIED_SHOT: &str = "24-code-block-copied.png";
+/// The copy affordances in the dark theme, which is the one the application
+/// runs in by default.
+const DARK_COPY_HOVER_SHOT: &str = "25-dark-copy-affordances-on-hover.png";
 /// A `bash` call and a `write_file` call, opened: what an expanded row shows
 /// instead of the JSON the call carried.
 const TOOL_ARGUMENTS_SHOT: &str = "15-tool-arguments-expanded.png";
@@ -728,6 +737,31 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     });
     shot(&mut cx, window, dir, MESSAGE_END_SHOT)?;
 
+    // What a reader gets with the pointer over the message: its own Copy, and
+    // the one its code block carries. Both wait for the hover.
+    let message = cx.update_window(window, |_, window, _| {
+        window.find(("transcript-measure", ASSISTANT_ID)).bounds()
+    })?;
+    pointer_at(&mut cx, window, message.center())?;
+    shot(&mut cx, window, dir, COPY_HOVER_SHOT)?;
+
+    // The block's Copy, pressed: the button says so before going quiet.
+    let button = cx.update_window(window, |_, window, _| {
+        window
+            .find(("transcript-copy-block", ASSISTANT_ID))
+            .bounds()
+    })?;
+    println!(
+        "[capture] the code block's Copy is at {:?} in a window of {:?}",
+        button, message
+    );
+    click_at(&mut cx, window, button.center())?;
+    shot(&mut cx, window, dir, COPIED_SHOT)?;
+
+    // The pointer leaves the column, so the stages after this are not shot with
+    // a message still hovered.
+    pointer_at(&mut cx, window, point(px(4.), px(4.)))?;
+
     for row in turn_rows() {
         demo.update(&mut cx, |demo, cx| {
             demo.transcript.update(cx, |view, cx| {
@@ -904,6 +938,19 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     });
     shot(&mut cx, window, dir, DARK_TURN_SHOT)?;
 
+    // The copy affordances in the dark: the same quiet chips, on a dark row.
+    demo.update(&mut cx, |demo, cx| {
+        demo.transcript.update(cx, |view, cx| {
+            view.replace(2, vec![assistant_row(38, ASSISTANT_SOURCE, false)], cx);
+        });
+    });
+    let dark_message = cx.update_window(window, |_, window, _| {
+        window.find(("transcript-measure", ASSISTANT_ID)).bounds()
+    })?;
+    pointer_at(&mut cx, window, dark_message.center())?;
+    shot(&mut cx, window, dir, DARK_COPY_HOVER_SHOT)?;
+    pointer_at(&mut cx, window, point(px(4.), px(4.)))?;
+
     // And the open tool rows in the dark theme.
     shot(&mut cx, tools, dir, DARK_TOOL_ARGUMENTS_SHOT)?;
 
@@ -1000,6 +1047,63 @@ fn wheel(
     }))
 }
 
+/// Put the pointer at `position` and draw the frame that reacts to it: a hover
+/// is painted, so a capture of one needs the event and the frame.
+fn pointer_at(
+    cx: &mut HeadlessAppContext,
+    window: AnyWindowHandle,
+    position: gpui_kit::Point<gpui_kit::Pixels>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    cx.update_window(window, |_, window, cx| {
+        window.dispatch_event(
+            MouseMoveEvent {
+                position,
+                pressed_button: None,
+                modifiers: Default::default(),
+            }
+            .to_platform_input(),
+            cx,
+        );
+        window.render_frame(cx);
+    })?;
+    Ok(())
+}
+
+/// Press and release at `position`, as a pointer would.
+fn click_at(
+    cx: &mut HeadlessAppContext,
+    window: AnyWindowHandle,
+    position: gpui_kit::Point<gpui_kit::Pixels>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    cx.update_window(window, |_, window, cx| {
+        let button = MouseButton::Left;
+        window.dispatch_event(
+            MouseDownEvent {
+                button,
+                position,
+                modifiers: Default::default(),
+                click_count: 1,
+                first_mouse: false,
+            }
+            .to_platform_input(),
+            cx,
+        );
+        window.render_frame(cx);
+        window.dispatch_event(
+            MouseUpEvent {
+                button,
+                position,
+                modifiers: Default::default(),
+                click_count: 1,
+            }
+            .to_platform_input(),
+            cx,
+        );
+        window.render_frame(cx);
+    })?;
+    Ok(())
+}
+
 /// Send `times` wheel steps of `y` px at `position`, after moving the pointer
 /// there: a scroll needs something under the cursor.
 fn wheel_at(
@@ -1010,19 +1114,10 @@ fn wheel_at(
     times: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
     for _ in 0..times {
+        // The frame is what puts the element under the pointer: without it the
+        // wheel has nothing to land on.
+        pointer_at(cx, window, position)?;
         cx.update_window(window, |_, window, cx| {
-            window.dispatch_event(
-                MouseMoveEvent {
-                    position,
-                    pressed_button: None,
-                    modifiers: Default::default(),
-                }
-                .to_platform_input(),
-                cx,
-            );
-            // The frame is what puts the element under the pointer: without it
-            // the wheel has nothing to land on.
-            window.render_frame(cx);
             let wheel = ScrollWheelEvent {
                 position,
                 delta: ScrollDelta::Pixels(delta),

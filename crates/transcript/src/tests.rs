@@ -1,11 +1,13 @@
 //! `TestAppContext` tests: row building, the retained markdown documents, the
 //! interactive rows, and the todo panel.
 
-use gpui_kit::base::TextViewState;
+use gpui_kit::base::{Root, TextViewState};
 use gpui_kit::test::TestWindowExt as _;
+use gpui_kit::Keystroke;
 use gpui_kit::{
-    div, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, Styled as _, TestAppContext, TestSupportExt as _, Window,
+    div, point, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, Styled as _, TestAppContext, TestSupportExt as _,
+    VisualTestContext, Window,
 };
 use session::{DimStyle, Row, RowId, RowKind, Todo, TodoStatus, ToolResult};
 
@@ -1303,6 +1305,275 @@ fn a_resync_of_the_same_rows_changes_nothing(cx: &mut TestAppContext) {
             view.read(cx).is_following_tail(cx),
             anchored.1,
             "and following the tail is where it was"
+        );
+    });
+}
+
+/// Mount the transcript the way the application does: inside the base `Root`.
+///
+/// That is what puts a `TextSelectionLayer` over the content, and selection
+/// with it: a dragged selection needs the layer's window-level mouse handling,
+/// so a bare view in a test window never selects anything.
+fn add_root_window(cx: &mut TestAppContext) -> (Entity<TranscriptHost>, &mut VisualTestContext) {
+    let (root, cx) = cx.add_window_view(|window, cx| {
+        let host = cx.new(TranscriptHost::new);
+        Root::new(host, window, cx)
+    });
+    let host = root.read_with(cx, |root, _| {
+        root.view()
+            .clone()
+            .downcast::<TranscriptHost>()
+            .expect("the root hosts the transcript")
+    });
+    (host, cx)
+}
+
+/// What the test platform's clipboard holds, as text.
+fn clipboard(cx: &VisualTestContext) -> Option<String> {
+    cx.read_from_clipboard().and_then(|item| item.text())
+}
+
+/// Empty the clipboard, so an assertion can only pass on what the drag and ⌘C
+/// under test put there.
+fn clear_clipboard(cx: &VisualTestContext) {
+    cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(String::new()));
+}
+
+/// The button that copies a message's own markdown source.
+fn message_copy(row: RowId) -> gpui_kit::ElementId {
+    ("transcript-copy-message", row).into()
+}
+
+/// The button that copies one of a message's code blocks.
+///
+/// A block's button is scoped by the block's own element path, so the id is the
+/// same in every block of a message.
+fn block_copy(row: RowId) -> gpui_kit::ElementId {
+    ("transcript-copy-block", row).into()
+}
+
+/// A row's text is a reading surface: it can be dragged over, and ⌘C takes the
+/// selection.
+#[gpui_kit::test]
+fn dragging_over_a_row_selects_it_and_command_c_copies_it(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (host, cx) = add_root_window(cx);
+    let view = cx.read(|cx| host.read(cx).transcript.clone());
+
+    view.update(cx, |view, cx| {
+        view.replace(
+            1,
+            vec![
+                user(1, 1, "rename the foo helper"),
+                assistant(2, 1, "The quick brown fox jumps over the lazy dog."),
+                dim(3, DimStyle::Status, "step 4 - 12s"),
+            ],
+            cx,
+        );
+    });
+
+    let handle = cx.update(|window, cx| {
+        window.render_frame(cx);
+        window.window_handle()
+    });
+
+    // The message: a drag across its first line, then ⌘C.
+    clear_clipboard(cx);
+    let message = cx.read(|cx| document(&view, cx, 2).read(cx).bounds());
+    cx.update(|window, cx| {
+        window.drag(
+            message.origin + point(px(1.), px(6.)),
+            message.origin + point(message.size.width - px(1.), px(6.)),
+            cx,
+        );
+    });
+    cx.dispatch_keystroke(handle, Keystroke::parse("cmd-c").expect("a keystroke"));
+    let copied = clipboard(cx).unwrap_or_default();
+    assert!(
+        copied.contains("lazy dog"),
+        "the message's own text is copied, not its markup: {copied:?}"
+    );
+
+    // A user row is plain text, and is selectable all the same.
+    clear_clipboard(cx);
+    let row = cx.update(|window, cx| {
+        window.render_frame(cx);
+        window.find(("transcript-user", 1u64)).bounds()
+    });
+    cx.update(|window, cx| {
+        window.drag(
+            row.origin + point(px(14.), px(14.)),
+            row.origin + point(px(120.), px(14.)),
+            cx,
+        );
+    });
+    cx.dispatch_keystroke(handle, Keystroke::parse("cmd-c").expect("a keystroke"));
+    let copied = clipboard(cx).unwrap_or_default();
+    assert!(
+        copied.contains("rename"),
+        "a user row is selectable: {copied:?}"
+    );
+
+    // A dim line is a row like any other.
+    clear_clipboard(cx);
+    let row = cx.update(|window, cx| {
+        window.render_frame(cx);
+        window.find(("transcript-dim", 3u64)).bounds()
+    });
+    cx.update(|window, cx| {
+        window.drag(
+            row.origin + point(px(1.), px(8.)),
+            row.origin + point(px(70.), px(8.)),
+            cx,
+        );
+    });
+    cx.dispatch_keystroke(handle, Keystroke::parse("cmd-c").expect("a keystroke"));
+    let copied = clipboard(cx).unwrap_or_default();
+    assert!(
+        copied.contains("step 4"),
+        "a dim line is selectable: {copied:?}"
+    );
+}
+
+/// What a tool call came back with is payload, not a picture of one: an open
+/// row's text can be selected and copied like the prose of a message.
+#[gpui_kit::test]
+fn a_tool_payload_is_selectable(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (host, cx) = add_root_window(cx);
+
+    host.update(cx, |host, cx| {
+        host.transcript.update(cx, |view, cx| {
+            view.replace(
+                1,
+                vec![tool_with(
+                    1,
+                    "bash",
+                    r#"{"command":"cargo test -p transcript"}"#,
+                    Some(ToolResult {
+                        is_error: false,
+                        content: "running 24 tests\ntest result: ok".into(),
+                        content_chars: None,
+                    }),
+                )],
+                cx,
+            );
+            view.set_expanded(1, true, cx);
+        });
+    });
+
+    let handle = cx.update(|window, cx| {
+        window.render_frame(cx);
+        window.window_handle()
+    });
+    let result: gpui_kit::ElementId = ("transcript-tool-result", 1u64).into();
+    clear_clipboard(cx);
+    let text = cx.update(|window, _| window.find((result, "text")).bounds());
+    cx.update(|window, cx| {
+        window.drag(
+            text.origin + point(px(1.), px(6.)),
+            text.origin + point(px(200.), px(6.)),
+            cx,
+        );
+    });
+
+    cx.dispatch_keystroke(handle, Keystroke::parse("cmd-c").expect("a keystroke"));
+    let copied = clipboard(cx).unwrap_or_default();
+    assert!(
+        copied.contains("running 24 tests"),
+        "an open tool row's payload is selectable: {copied:?}"
+    );
+}
+
+/// A fenced block carries its own Copy, out of the way until the reader is over
+/// the message, and acknowledges the click.
+#[gpui_kit::test]
+fn a_code_block_copies_its_own_text(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (host, cx) = add_root_window(cx);
+
+    host.update(cx, |host, cx| {
+        host.transcript.update(cx, |view, cx| {
+            view.replace(
+                1,
+                vec![assistant(
+                    1,
+                    1,
+                    "Run it:\n\n```sh\ncargo test -p transcript\n```\n\nThat is all.",
+                )],
+                cx,
+            );
+        });
+    });
+
+    let button = block_copy(1);
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        assert!(
+            !window.find(button.clone()).visible(),
+            "the block's Copy is out of the way until the message is hovered"
+        );
+
+        window.hover(("transcript-assistant", 1u64), cx);
+        assert!(
+            window.find(button.clone()).visible(),
+            "hovering the message shows the block's Copy"
+        );
+
+        window.click(button.clone(), cx);
+    });
+
+    assert_eq!(
+        clipboard(cx).as_deref(),
+        Some("cargo test -p transcript"),
+        "the block copies its raw code, not the prose around it"
+    );
+
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        assert!(
+            window.try_find((button.clone(), "copied")).is_some(),
+            "the button acknowledges the click"
+        );
+    });
+}
+
+/// A message's own action copies its markdown source — markup and all — which
+/// is what a reader wants to quote or paste elsewhere.
+#[gpui_kit::test]
+fn a_message_copies_its_markdown_source(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (host, cx) = add_root_window(cx);
+    let source = "A **bold** claim and a `code` run.";
+
+    host.update(cx, |host, cx| {
+        host.transcript.update(cx, |view, cx| {
+            view.replace(1, vec![assistant(1, 1, source)], cx);
+        });
+    });
+
+    let button = message_copy(1);
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        assert!(
+            !window.find(button.clone()).visible(),
+            "the message's Copy is out of the way until it is hovered"
+        );
+        window.hover(("transcript-assistant", 1u64), cx);
+        window.click(button.clone(), cx);
+    });
+
+    assert_eq!(
+        clipboard(cx).as_deref(),
+        Some(source),
+        "the message copies its source, so the markup survives"
+    );
+
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        assert!(
+            window.try_find((button.clone(), "copied")).is_some(),
+            "the button acknowledges the click"
         );
     });
 }

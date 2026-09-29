@@ -25,6 +25,7 @@ pub(crate) const TIGHT_GAP: Pixels = px(3.);
 /// Semantic tokens cover the surfaces and text roles; the status colors an ok /
 /// warn / error row needs are still only on the legacy component palette, so
 /// those come from there.
+#[derive(Clone)]
 pub(crate) struct Palette {
     pub(crate) foreground: Hsla,
     pub(crate) muted: Hsla,
