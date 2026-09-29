@@ -1,11 +1,18 @@
 # evo-desktop
 
 A native macOS app for the evo agent runtime (sibling repo `../evo-agent`): one window whose
-title bar is a browser-like tab strip, one tab per `evo-swarm serve` process —
-a coordinator agent plus a pool of worker lanes. The app is a *client*: it
-drives evo over its HTTP API and reimplements none of it.
+title bar is a browser-like tab strip, named after the folder of the tab you are looking at;
+one tab per `evo-swarm serve` process — a coordinator agent plus a pool of worker lanes. The
+app is a *client*: it drives evo over its HTTP API and reimplements none of it.
 
 ![evo-desktop icon](assets/icon/icon-1024.png)
+
+![The empty tab at launch: three choosers on Default, the folder card, and the resumable swarms](docs/screens/01-launch-light.png)
+![A live swarm: the agent list, the transcript, the composer](docs/screens/02-three-tabs-light.png)
+![The lanes chooser, one model greyed out because no lane can register it](docs/screens/01b-lanes-chooser-dark.png)
+
+Those are three of the twenty captures in [`docs/screens.md`](docs/screens.md), which is
+also the recipe for taking them again.
 
 ## Requirements
 
@@ -13,8 +20,9 @@ drives evo over its HTTP API and reimplements none of it.
 - A recent stable Rust toolchain. The `store` crate uses `File::try_lock`, so
   1.89 or newer.
 - The evo binaries — `/usr/local/bin/evo-swarm` and `/usr/local/bin/evo-agent`
-  by default. Point the app elsewhere by editing `binaries` in
-  `~/.evo/desktop/app.json`.
+  by default. Point the app elsewhere under **Settings… (⌘,)**, or by editing
+  `binaries` in `~/.evo/desktop/app.json`. If the swarm binary is not one that
+  runs, the empty tab says so in its own line and that line opens Settings.
 - A model provider evo can reach. No provider? Use the stub home below.
 
 ## Build, run, test, bundle
@@ -22,12 +30,23 @@ drives evo over its HTTP API and reimplements none of it.
 ```sh
 cargo run -p evo-desktop              # debug build, one window
 cargo build --release -p evo-desktop
+
 cargo test                            # every crate
 cargo test -p store                   # one crate
+
+scripts/check.sh                      # the gate: fmt --check, clippy, every crate's tests
+scripts/check.sh --head               # the same, against HEAD in a worktree of its own
 
 scripts/bundle.sh                     # → dist/evo-desktop.app (ad-hoc signed)
 scripts/bundle.sh --no-build          # bundle the binary already built
 ```
+
+`scripts/check.sh` is the whole gate: `cargo fmt --check` per crate, then
+`clippy --workspace --all-targets`, then `cargo test -p <crate>` crate by crate,
+one at a time (each crate gets its own target directory, so the steps do not
+contend for one lock). It prints a table at the end and keeps every step's log
+under `target/check/`. `--head` checks what is committed rather than the working
+tree. It starts real servers and swarms, so run it on an idle machine.
 
 `scripts/bundle.sh` writes the icon into the bundle from
 `assets/icon/AppIcon.icns`; regenerate it with
@@ -55,14 +74,14 @@ Everything the app owns lives in `~/.evo/desktop/` (§6 of the spec):
 
 | path | what |
 |---|---|
-| `app.json` | window bounds, the open tabs, the binary paths, the recent sessions, theme |
+| `app.json` | window bounds, the recorded tab set, the binary paths, the recent sessions, the theme |
 | `lock`, `activate.sock` | the single-instance lock (`flock`, dies with the process) and its activation socket |
 | `model-cache.json` | the last `/registry` catalog, for the empty tab's choosers |
 | `probe/` | scratch directory for the catalog probe |
 | `tabs/<id>/tab.json` | one tab: folder, resumed session, swarm id, chosen models, workers |
 | `tabs/<id>/token` | that swarm's bearer token, written by the server (0600) — never logged, never shown |
 | `tabs/<id>/swarm.log` | that swarm's stdout and stderr (the log a tab shows when boot fails) |
-| `app.log` | the app's own log |
+| `app.log` | the app's own log (RFC 3339 UTC timestamps) |
 
 The one file it writes outside that directory is the managed block at the top
 of a project's `<folder>/.evo/swarm.lisp`, which is what gives that project's
@@ -70,26 +89,41 @@ lanes their model (§9.6). Everything else it reads — journals under
 `~/.evo/sessions`, a swarm's directory under `~/.evo/swarm/<id>` — is
 read-only.
 
+A launch always opens **one empty tab**, whatever `app.json` said (§14.6): the
+tab set is recorded for the app's own bookkeeping, not reopened. The sessions
+that were open at the last quit come back at the top of the empty tab's history
+wearing an `open at last quit` badge.
+
 ## Architecture
 
 - [`docs/architecture.md`](docs/architecture.md) — which crate owns what.
 - [`docs/PROMPT.md`](docs/PROMPT.md) — the build spec; §-references in the code
   point here.
-- [`docs/usage.md`](docs/usage.md) — how to drive the app: tabs, the model
-  choosers, history, the Send/Stop button, lane glyphs, logs.
+- [`docs/usage.md`](docs/usage.md) — how to drive the app: tabs and their
+  shortcuts, the model choosers, history, the tab page's three columns, Settings,
+  failures, and where the logs are.
+- [`docs/screens.md`](docs/screens.md) — the twenty captures, and what is real
+  versus scripted in them.
 
 ## Status
 
-The tree holds the whole app: the client (`swarm_client`), the data layout
-(`store`), the per-agent view model (`session`), one tab's I/O (`tab_engine`),
-the UI crates (`transcript`, `composer`, `agent_list`, `workspace`), and the app
-shell (`crates/app`: single instance, remembered bounds, startup loading, quit).
-One wiring step is still open:
+The tree holds the whole app, and every part of it is wired: the client
+(`swarm_client`), the data layout (`store`), the per-agent view model
+(`session`), one tab's I/O (`tab_engine`), the UI crates (`transcript`,
+`composer`, `agent_list`, `workspace`) and the app shell (`crates/app`: single
+instance, remembered bounds, startup loading, quit, the menu bar, About, and the
+Settings panel).
 
-- `agent_list` exists, is tested, and has its own example, but `workspace` does
-  not depend on it yet — the tab page still draws the lane column itself, and
-  the swap is the next change. `crates/app/src/quit.rs` carries the tree's only
-  `TODO`.
+What is genuinely not here:
+
+- A command surface (slash commands) and lane control endpoints — deliberate v1
+  non-goals; lanes are watched, never typed to.
+- Windows and Linux packaging: the bundle target is macOS.
+- Settings covers the two binaries and the theme and nothing else (§13); there
+  is no other preference to change.
+- The transcript is a reading surface, not a browser: an image reference is
+  drawn as `[image: alt]` and nothing is fetched, raw HTML shows as its source,
+  and a link opens only `http(s)` or `mailto`.
 
 Two things worth knowing when you run it:
 
