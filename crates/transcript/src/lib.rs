@@ -17,6 +17,11 @@
 //! and are dropped when it is older than the last accepted one, so late results
 //! from a previous revision cannot reach the UI.
 //!
+//! Rows are normalised on the way in: a run marker that only says "a run began"
+//! is dropped (the turn separator between two user turns says the same thing in
+//! place), and a run that **ended** is kept only when the outcome was not `ok`,
+//! where it is a notice rather than a line of bookkeeping.
+//!
 //! ```ignore
 //! let transcript = cx.new(TranscriptView::new);
 //! transcript.update(cx, |view, cx| view.replace(1, rows, cx));
@@ -37,11 +42,13 @@ use std::ops::Range;
 
 use gpui_kit::base::TextViewState;
 use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
+use gpui_kit::component::ActiveTheme as _;
+use gpui_kit::component::Sizable as _;
 use gpui_kit::{
     App, AppContext as _, Context, Entity, IntoElement, Render, StyleRefinement, Styled as _,
     Window,
 };
-use session::{Row, RowId, RowKind, Todo};
+use session::{DimStyle, Row, RowId, RowKind, Todo};
 
 /// The data the row renderer reads.
 ///
@@ -210,6 +217,10 @@ impl TranscriptView {
             return false;
         }
 
+        let rows = rows
+            .into_iter()
+            .filter_map(display_row)
+            .collect::<Vec<Row>>();
         let change = self.data.update(cx, |data, cx| {
             data.sync_documents(&rows, cx);
             let change = ListChange::between(&data.rows, &rows);
@@ -225,11 +236,15 @@ impl TranscriptView {
     ///
     /// A row that is already there is replaced only when its `version` is
     /// newer — the version is the contract for "this row's content changed".
-    /// Returns `true` when the view changed.
+    /// A row the view drops as bookkeeping ([`display_row`]) is not added and
+    /// does not count as a change. Returns `true` when the view changed.
     pub fn upsert(&mut self, revision: u64, row: Row, cx: &mut Context<Self>) -> bool {
         if !self.accept_revision(revision) {
             return false;
         }
+        let Some(row) = display_row(row) else {
+            return false;
+        };
 
         // `(index, appended)`: a row that was already there keeps its place and
         // only needs remeasuring; a new one extends the list.
@@ -337,6 +352,7 @@ impl Render for TranscriptView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let data = self.data.clone();
         let view = cx.weak_entity();
+        let theme = cx.theme().clone();
 
         MessageScroller::new(
             "transcript",
@@ -346,12 +362,62 @@ impl Render for TranscriptView {
                 rows::render_row(&data.read(cx), index, &view, cx)
             },
         )
-        // Tighter than the chat default: a transcript row is a line of text or
-        // a document, not a bubble.
-        .with_list_style(StyleRefinement::default().px_4().py_3())
-        .with_row_style(StyleRefinement::default().pb_4())
+        // Rows carry their own leading space (they know what came before them),
+        // so the list adds none: only the column inset around the measure.
+        .with_list_style(StyleRefinement::default().px_4().py_4())
+        .with_row_style(StyleRefinement::default().pb_0())
+        // A pill rather than a bare arrow: it says what it does, and carries an
+        // accessible name instead of only a tooltip.
+        .with_jump_button_renderer(|button| button.small().label("Jump to latest"))
+        .with_jump_button_style(
+            StyleRefinement::default()
+                .bg(theme.secondary)
+                .border_color(theme.border)
+                .text_color(theme.secondary_foreground)
+                .shadow_sm(),
+        )
         .with_jump_button_label("Jump to latest")
         .size_full()
         .min_h_0()
     }
+}
+
+/// The row as it should appear, or `None` when it is bookkeeping.
+///
+/// A run that started is only interesting as the turn boundary the transcript
+/// already draws, and a run that ended `ok` says nothing a reader needs; one
+/// that ended any other way is worth a line, as a notice. Everything else
+/// passes through untouched.
+fn display_row(row: Row) -> Option<Row> {
+    let RowKind::Dim { style, text } = &row.kind else {
+        return Some(row);
+    };
+    if !matches!(style, DimStyle::Status) {
+        return Some(row);
+    }
+
+    if text.trim_start().starts_with("run-start") {
+        return None;
+    }
+    if text.trim_start().starts_with("run-end") {
+        let outcome = text.rsplit("outcome").next().unwrap_or("").trim();
+        return match outcome {
+            "" | "ok" => None,
+            "error" | "failed" | "failure" => Some(Row {
+                kind: RowKind::Dim {
+                    style: DimStyle::Error,
+                    text: text.clone(),
+                },
+                ..row
+            }),
+            _ => Some(Row {
+                kind: RowKind::Dim {
+                    style: DimStyle::Notice,
+                    text: text.clone(),
+                },
+                ..row
+            }),
+        };
+    }
+    Some(row)
 }
