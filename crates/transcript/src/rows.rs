@@ -323,21 +323,7 @@ pub(crate) fn render_row(
 
     stack = stack.child(match &row.kind {
         RowKind::User { text, .. } => user_row(row.id, text, &palette),
-        RowKind::Assistant {
-            markdown,
-            thinking,
-            error,
-            ..
-        } => assistant_row(
-            row.id,
-            markdown,
-            thinking,
-            waiting,
-            error.as_deref(),
-            data,
-            cx,
-            &palette,
-        ),
+        RowKind::Assistant { .. } => assistant_row(row, data, cx, &palette),
         RowKind::Tool {
             name,
             arguments,
@@ -436,16 +422,19 @@ fn user_row(id: RowId, text: &str, palette: &Palette) -> AnyElement {
 ///
 /// A message that has started but has not sent a word yet has no document to
 /// show — [`waiting_dots`] holds its place until the first delta arrives.
-fn assistant_row(
-    id: RowId,
-    markdown: &str,
-    thinking: &str,
-    streaming: bool,
-    error: Option<&str>,
-    data: &TranscriptData,
-    cx: &App,
-    palette: &Palette,
-) -> AnyElement {
+fn assistant_row(row: &Row, data: &TranscriptData, cx: &App, palette: &Palette) -> AnyElement {
+    let RowKind::Assistant {
+        markdown,
+        thinking,
+        streaming,
+        error,
+    } = &row.kind
+    else {
+        // Only an assistant row is drawn this way.
+        return div().into_any_element();
+    };
+    let error = error.as_deref();
+    let id = row.id;
     let mut row = div()
         .id(("transcript-assistant", id))
         .group(COPY_GROUP)
@@ -456,7 +445,7 @@ fn assistant_row(
         .flex_col()
         .gap_2();
 
-    if streaming && markdown.trim().is_empty() {
+    if *streaming && markdown.trim().is_empty() {
         row = row.child(waiting_dots(id, palette));
     } else {
         row = match data.documents.get(&id) {

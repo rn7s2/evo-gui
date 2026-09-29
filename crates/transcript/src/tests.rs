@@ -135,7 +135,7 @@ fn row_kinds(view: &Entity<TranscriptView>, cx: &App) -> Vec<RowKind> {
 #[gpui_kit::test]
 fn building_rows_replace_upsert_and_the_revision_guard(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
-    let view = cx.new(|cx| TranscriptView::new(cx));
+    let view = cx.new(TranscriptView::new);
 
     // A rebuild at revision 1 installs the whole transcript.
     view.update(cx, |view, cx| {
@@ -206,7 +206,7 @@ struct TranscriptHost {
 impl TranscriptHost {
     fn new(cx: &mut Context<Self>) -> Self {
         Self {
-            transcript: cx.new(|cx| TranscriptView::new(cx)),
+            transcript: cx.new(TranscriptView::new),
         }
     }
 }
@@ -1090,7 +1090,7 @@ fn a_waiting_message_shows_pips_until_its_first_delta(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn the_thinking_toggle_has_nothing_to_show_until_a_message_has_thinking(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
-    let view = cx.new(|cx| TranscriptView::new(cx));
+    let view = cx.new(TranscriptView::new);
 
     // Nothing to reveal: no rows, and rows that carry no thinking.
     cx.read(|cx| assert!(!view.read(cx).has_thinking(cx)));
@@ -1134,7 +1134,7 @@ fn a_message_is_parsed_when_its_row_is_shown_and_not_before(cx: &mut TestAppCont
 
     // A view nobody has mounted holds the rows and no documents at all: the
     // parse is what a message costs, and it waits for a frame that shows it.
-    let unwatched = cx.new(|cx| TranscriptView::new(cx));
+    let unwatched = cx.new(TranscriptView::new);
     unwatched.update(cx, |view, cx| {
         view.replace(1, many_messages(200), cx);
     });

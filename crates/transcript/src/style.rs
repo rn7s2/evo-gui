@@ -98,19 +98,20 @@ pub(crate) fn text_style(cx: &App) -> TextViewStyle {
     // floor, which is what a token with no word boundary is.
     let table_cell = StyleRefinement::default().px(px(0.));
 
-    let mut style = TextViewStyle::default();
-    style.paragraph_gap = rems(0.5);
-    style.heading_base_font_size = base;
-    style.heading_font_size = Some(std::sync::Arc::new(|level, base| {
-        let scale = match level {
-            1 => 1.25,
-            2 => 1.1,
-            3 => 1.05,
-            _ => 1.,
-        };
-        px(f32::from(base) * scale)
-    }));
-    style.table = table;
-    style.table_cell = table_cell;
-    style
+    TextViewStyle {
+        paragraph_gap: rems(0.5),
+        heading_base_font_size: base,
+        heading_font_size: Some(std::sync::Arc::new(|level, base| {
+            let scale = match level {
+                1 => 1.25,
+                2 => 1.1,
+                3 => 1.05,
+                _ => 1.,
+            };
+            px(f32::from(base) * scale)
+        })),
+        table,
+        table_cell,
+        ..TextViewStyle::default()
+    }
 }

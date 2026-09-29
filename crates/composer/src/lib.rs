@@ -7,6 +7,8 @@
 //! is what keeps a failed send's draft alive, and what keeps the button
 //! disabled only while its own request is in flight.
 
+use gpui_kit::base::input::Position;
+use gpui_kit::base::TextSelection;
 use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
@@ -16,9 +18,10 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    div, px, App, AppContext as _, Context, Entity, EventEmitter, Global, InteractiveElement as _,
-    IntoElement, KeyBinding, ParentElement as _, Pixels, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, TestSupportExt as _, Window,
+    div, px, App, AppContext as _, ClipboardItem, Context, Entity, EventEmitter, Global,
+    InteractiveElement as _, IntoElement, KeyBinding, Keystroke, KeystrokeEvent,
+    ParentElement as _, Pixels, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
+    Subscription, TestSupportExt as _, WeakEntity, Window,
 };
 use session::Activity;
 
@@ -54,6 +57,11 @@ const READOUT_TOOLTIP_WIDTH: Pixels = px(340.);
 /// Key context of the composer, so `Esc` reaches the composer even though the
 /// textarea holds the focus and handles `Escape` first.
 const KEY_CONTEXT: &str = "Composer";
+
+/// How many prompts one composer remembers for its ↑/↓ history; the oldest fall
+/// off past this. In memory, per tab: a composer is not a shell, and nothing
+/// here is written down.
+const HISTORY_LIMIT: usize = 64;
 
 /// The action button's element id: one button, addressed by name.
 pub const BUTTON_ID: &str = "composer-action";
@@ -99,6 +107,34 @@ impl ActionFace {
     }
 }
 
+/// Where the caret goes when a prompt is recalled: the end of it, on the last
+/// line. Columns are counted in characters, which is what the input's cursor
+/// positions are.
+fn end_position(text: &str) -> Position {
+    let line = text.matches('\n').count();
+    let character = text
+        .rsplit('\n')
+        .next()
+        .map_or(0, |last| last.chars().count());
+    Position::new(line as u32, character as u32)
+}
+
+/// Whether a keystroke is this platform's copy shortcut — the chord the input's
+/// own `Copy` is bound to, and the one the window's `Copy` answers.
+fn is_copy_shortcut(keystroke: &Keystroke) -> bool {
+    if keystroke.key != "c" || keystroke.modifiers.shift || keystroke.modifiers.alt {
+        return false;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        keystroke.modifiers.platform
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        keystroke.modifiers.control
+    }
+}
+
 /// Marks the app-wide key binding as installed, so any number of composers
 /// share one binding.
 struct KeysBound;
@@ -112,6 +148,15 @@ pub struct Composer {
     /// True while this composer's own request is in flight — the only reason
     /// the button is disabled.
     in_flight: bool,
+    /// The prompts this tab has sent, oldest first: what ↑/↓ walks.
+    history: Vec<String>,
+    /// Where in `history` the input is, while it is showing a recalled prompt.
+    /// `None` means the input holds the reader's own draft.
+    walking: Option<usize>,
+    /// The text the walk put in the input, so an edit of it — the reader typing
+    /// over a recalled prompt — is visible before the input's own `Change` event
+    /// has had a chance to arrive.
+    recalled: String,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -135,9 +180,26 @@ impl Composer {
                     let draft = input.read(cx).value().to_string();
                     this.send(draft, cx);
                 }
-                // The button's enabled state follows whether the draft is blank.
-                InputEvent::Change => cx.notify(),
+                InputEvent::Change => {
+                    // An edit is what ends a walk through the history: the reader
+                    // has taken the recalled prompt and made it their own draft.
+                    this.walking = None;
+                    cx.notify();
+                }
                 _ => {}
+            }
+        });
+
+        // The keys the input handles itself but has no use for here: a window
+        // selection is not the input's to copy, and an empty composer has no
+        // caret to walk through its own prompts.
+        let weak_input = input.downgrade();
+        let weak_self = cx.weak_entity();
+        let interceptor = cx.intercept_keystrokes(move |event, window, cx| {
+            if let Some(composer) = weak_self.upgrade() {
+                composer.update(cx, |composer, cx| {
+                    composer.intercept(&weak_input, event, window, cx)
+                });
             }
         });
 
@@ -146,8 +208,17 @@ impl Composer {
             readout: SharedString::default(),
             activity: Activity::Idle,
             in_flight: false,
-            _subscriptions: vec![subscription],
+            history: Vec::new(),
+            walking: None,
+            recalled: String::new(),
+            _subscriptions: vec![subscription, interceptor],
         }
+    }
+
+    /// The prompts this composer has sent, oldest first — the tab's own history
+    /// for ↑/↓, and nothing that outlives the process.
+    pub fn history(&self) -> &[String] {
+        &self.history
     }
 
     /// Installs the composer's key bindings; idempotent, and called by every
@@ -222,8 +293,122 @@ impl Composer {
             return;
         }
         self.in_flight = true;
+        // A prompt is remembered the moment it is sent, not when the server takes
+        // it: the reader's ↑ should bring back what they just sent even if the
+        // request is still on its way.
+        self.remember(&draft);
+        self.walking = None;
         cx.emit(ComposerEvent::Send(draft));
         cx.notify();
+    }
+
+    /// Remember a prompt this tab sent, so ↑ can bring it back.
+    fn remember(&mut self, prompt: &str) {
+        // Sending the same prompt again — the retry after a refusal, most often
+        // — is one entry, not two.
+        if self.history.last().map(String::as_str) == Some(prompt) {
+            return;
+        }
+        if self.history.len() == HISTORY_LIMIT {
+            self.history.remove(0);
+        }
+        self.history.push(prompt.to_string());
+    }
+
+    /// Walk the sent prompts: ↑ back in time, ↓ forward, past the newest one and
+    /// out of the walk.
+    ///
+    /// The input a walk starts from is empty, which is the draft it comes back to.
+    fn recall(&mut self, back: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let next = match (self.walking, back) {
+            // The oldest prompt is where ↑ stops: it is not a way out of the walk.
+            (Some(index), true) => Some(index.saturating_sub(1)),
+            (Some(index), false) => (index + 1 < self.history.len()).then_some(index + 1),
+            (None, true) => self.history.len().checked_sub(1),
+            (None, false) => None,
+        };
+        self.walking = next;
+        let text = next.map_or_else(String::new, |index| self.history[index].clone());
+        self.recalled = text.clone();
+        let caret = end_position(&text);
+        self.input.update(cx, |input, cx| {
+            input.set_value(text.as_str(), window, cx);
+            // A multi-line `set_value` leaves the caret at the start; a recalled
+            // prompt is read and typed onto from its end.
+            input.set_cursor_position(caret, window, cx);
+        });
+        cx.notify();
+    }
+
+    /// Take the keys the input handles without doing what the reader means,
+    /// while its caret is in this composer.
+    ///
+    /// The input owns ↑/↓ (caret movement) and the copy shortcut (its own
+    /// selection), and handles both itself rather than letting either through.
+    /// An empty composer has no caret to move and nothing to copy, though: ↑
+    /// belongs to the tab's prompt history, and a window selection — the
+    /// reader's, made in the transcript — is what the shortcut was aimed at.
+    fn intercept(
+        &mut self,
+        input: &WeakEntity<TextareaState>,
+        event: &KeystrokeEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(input) = input.upgrade() else {
+            return;
+        };
+        if !input
+            .read(cx)
+            .presentation()
+            .focus_handle()
+            .is_focused(window)
+        {
+            return;
+        }
+
+        // A recalled prompt the reader has typed in is their draft now, whatever
+        // the input's own `Change` event has yet to say about it.
+        if self
+            .walking
+            .is_some_and(|index| input.read(cx).value().as_ref() != self.history[index].as_str())
+        {
+            self.walking = None;
+        }
+
+        let keystroke = &event.keystroke;
+        let empty = input.read(cx).value().is_empty();
+        match keystroke.key.as_str() {
+            "up" if self.walking.is_some() || empty => {
+                self.recall(true, window, cx);
+                cx.stop_propagation();
+            }
+            "down" if self.walking.is_some() => {
+                self.recall(false, window, cx);
+                cx.stop_propagation();
+            }
+            // With nothing of its own selected the input has no copy to make;
+            // the window's selection is the one the reader means.
+            "c" if is_copy_shortcut(keystroke)
+                && !input.read(cx).is_copyable()
+                && self.copy_window_selection(window, cx) =>
+            {
+                cx.stop_propagation();
+            }
+            _ => {}
+        }
+    }
+
+    /// Copy what the window has selected — a selection the reader made outside
+    /// the input — the way the window's own copy does. Answers whether there was
+    /// anything to copy.
+    fn copy_window_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let text = TextSelection::selected_text(window, cx).trim().to_string();
+        if text.is_empty() {
+            return false;
+        }
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        true
     }
 
     /// Emit `Interrupt`, unless a request is already in flight.
@@ -365,6 +550,8 @@ impl Render for Composer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui_kit::base::{TextView, TextViewState};
+    use gpui_kit::FocusHandle;
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{
         point, px, AnyWindowHandle, Bounds, EntityId, TestAppContext, WindowBounds, WindowOptions,
@@ -414,6 +601,32 @@ mod tests {
             window.input(text, cx);
         }
 
+        /// The composer's caret, as the input reports it (a byte offset).
+        fn caret(&self, cx: &App) -> usize {
+            self.composer.read(cx).input.read(cx).cursor()
+        }
+
+        /// The prompts this tab has sent, oldest first.
+        fn history(&self, cx: &TestAppContext) -> Vec<String> {
+            cx.read(|cx| self.composer.read(cx).history().to_vec())
+        }
+
+        /// Send what is in the input the way a reader does, and let the server
+        /// take it.
+        ///
+        /// Each step is its own app update: the composer hears about `Enter`
+        /// when the update it arrived in returns, and it reads the draft from
+        /// the input then.
+        fn send_prompt(&self, prompt: &str, cx: &mut TestAppContext) {
+            self.act(cx, |window, cx| self.type_draft(prompt, window, cx));
+            self.act(cx, |window, cx| window.press("enter", cx));
+            self.act(cx, |window, cx| {
+                self.composer.update(cx, |composer, cx| {
+                    composer.request_finished(true, window, cx)
+                });
+            });
+        }
+
         /// Replace the whole draft, as pasting over a selected draft does.
         fn set_draft(&self, text: &str, window: &mut Window, cx: &mut App) {
             self.composer.update(cx, |composer, cx| {
@@ -433,17 +646,160 @@ mod tests {
         }
     }
 
+    gpui_kit::actions!(composer_probe, [ProbeUp, ProbeCopy]);
+
+    /// Something else in the window that claims ↑ and the copy shortcut for
+    /// itself: a list row, a settings field, a transcript row.
+    struct Probe {
+        focus: FocusHandle,
+        ups: usize,
+        copies: usize,
+    }
+
+    impl Probe {
+        fn new(cx: &mut Context<Self>) -> Self {
+            Self {
+                focus: cx.focus_handle(),
+                ups: 0,
+                copies: 0,
+            }
+        }
+    }
+
+    impl Render for Probe {
+        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .id("probe")
+                .key_context("Probe")
+                .track_focus(&self.focus)
+                .on_action(cx.listener(|this, _: &ProbeUp, _, cx| {
+                    this.ups += 1;
+                    cx.notify();
+                }))
+                .on_action(cx.listener(|this, _: &ProbeCopy, _, cx| {
+                    this.copies += 1;
+                    cx.notify();
+                }))
+                .size_full()
+        }
+    }
+
+    /// The composer, and something else that wants the same keys.
+    struct Beside {
+        probe: Entity<Probe>,
+        composer: Entity<Composer>,
+    }
+
+    impl Render for Beside {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            v_flex()
+                .size_full()
+                .child(div().h(px(200.)).child(self.probe.clone()))
+                .child(div().h(px(160.)).child(self.composer.clone()))
+        }
+    }
+
+    /// The composer takes ↑ and the copy shortcut only while its caret is in it:
+    /// the rest of the window keeps both (§7.3).
+    #[gpui_kit::test]
+    fn the_composer_takes_its_keys_only_while_its_caret_is_in_it(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (window, beside) = cx.update(|cx| {
+            cx.bind_keys([
+                KeyBinding::new("up", ProbeUp, Some("Probe")),
+                KeyBinding::new("cmd-c", ProbeCopy, Some("Probe")),
+            ]);
+            gpui_kit::open_window(window_options(), cx, |window, cx| {
+                cx.new(|cx| Beside {
+                    probe: cx.new(Probe::new),
+                    composer: cx.new(|cx| Composer::new(window, cx)),
+                })
+            })
+            .expect("a window with a composer and a probe")
+        });
+        let (probe, composer) =
+            beside.read_with(cx, |beside, _| (beside.probe.clone(), beside.composer.clone()));
+
+        // A prompt of this tab's, so a leaked ↑ would show up in the draft.
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click(("input", composer.read(cx).input.entity_id()), cx);
+            window.input("an earlier prompt", cx);
+        })
+        .expect("the composer's window");
+        cx.update_window(window, |_, window, cx| window.press("enter", cx))
+            .expect("the composer's window");
+        cx.update_window(window, |_, window, cx| {
+            composer.update(cx, |composer, cx| {
+                composer.request_finished(true, window, cx)
+            })
+        })
+        .expect("the composer's window");
+        assert_eq!(
+            composer.read_with(cx, |composer, cx| composer.history().len()),
+            1,
+            "the tab has one prompt to recall"
+        );
+
+        // With the focus elsewhere in the window, ↑ and ⌘C are that element's:
+        // the composer neither answers them nor keeps them from answering.
+        cx.update_window(window, |_, window, cx| {
+            window.click("probe", cx);
+            assert!(
+                probe.read(cx).focus.is_focused(window),
+                "the probe holds the focus"
+            );
+            window.press("up", cx);
+            window.press("cmd-c", cx);
+        })
+        .expect("the probe's window");
+
+        assert_eq!(probe.read_with(cx, |probe, _| probe.ups), 1, "the probe's ↑");
+        assert_eq!(
+            probe.read_with(cx, |probe, _| probe.copies),
+            1,
+            "the probe's copy"
+        );
+        assert_eq!(
+            composer.read_with(cx, |composer, cx| composer.input.read(cx).value().to_string()),
+            "",
+            "and the composer recalled nothing over its own draft"
+        );
+
+        // With the caret back in the input the same keys are the composer's, and
+        // the element that had them does not hear them.
+        cx.update_window(window, |_, window, cx| {
+            window.click(("input", composer.read(cx).input.entity_id()), cx);
+            window.press("up", cx);
+        })
+        .expect("the composer's window");
+        assert_eq!(
+            composer.read_with(cx, |composer, cx| composer.input.read(cx).value().to_string()),
+            "an earlier prompt",
+            "the composer's ↑ recalls this tab's prompt"
+        );
+        assert_eq!(
+            probe.read_with(cx, |probe, _| probe.ups),
+            1,
+            "and the probe's ↑ did not fire"
+        );
+    }
+
+    /// A window the width of the composer's column (§7.3).
+    fn window_options() -> WindowOptions {
+        WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(Bounds {
+                origin: point(px(0.), px(0.)),
+                size: COLUMN,
+            })),
+            ..Default::default()
+        }
+    }
+
     fn open(cx: &mut TestAppContext) -> Fixture {
         cx.update(gpui_kit::init);
         let (window, composer) = cx.update(|cx| {
-            let options = WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(Bounds {
-                    origin: point(px(0.), px(0.)),
-                    size: COLUMN,
-                })),
-                ..Default::default()
-            };
-            gpui_kit::open_window(options, cx, |window, cx| {
+            gpui_kit::open_window(window_options(), cx, |window, cx| {
                 cx.new(|cx| Composer::new(window, cx))
             })
             .expect("composer window")
@@ -768,5 +1124,377 @@ mod tests {
                 button.bounds()
             );
         });
+    }
+    #[gpui_kit::test]
+    fn the_up_arrow_walks_the_prompts_this_tab_sent(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.send_prompt("first prompt", cx);
+        f.send_prompt("second prompt", cx);
+
+        assert_eq!(f.draft_now(cx), "", "an accepted send clears the input");
+        assert_eq!(f.history(cx), ["first prompt", "second prompt"]);
+
+        f.act(cx, |window, cx| {
+            // ↑ brings back the last thing sent, caret at its end; ↑ again, the
+            // one before it, and no further.
+            window.press("up", cx);
+            assert_eq!(f.draft(cx), "second prompt");
+            assert_eq!(f.caret(cx), "second prompt".len());
+            window.press("up", cx);
+            assert_eq!(f.draft(cx), "first prompt");
+            window.press("up", cx);
+            assert_eq!(f.draft(cx), "first prompt", "there is nothing older");
+
+            // ↓ walks forward again, and past the newest prompt is the empty
+            // draft the walk started from.
+            window.press("down", cx);
+            assert_eq!(f.draft(cx), "second prompt");
+            window.press("down", cx);
+            assert_eq!(f.draft(cx), "");
+        });
+
+        // A draft of the reader's own owns ↑: the caret walks through it, and
+        // nothing is recalled over it.
+        f.act(cx, |window, cx| {
+            f.type_draft("first line", window, cx);
+            window.press("shift-enter", cx);
+            window.input("second line", cx);
+            let end = f.caret(cx);
+
+            window.press("up", cx);
+            assert_eq!(f.draft(cx), "first line\nsecond line");
+            assert!(
+                f.caret(cx) < end,
+                "the input moved the caret up a line: {} -> {}",
+                end,
+                f.caret(cx)
+            );
+        });
+
+        // A prompt of several lines comes back whole, with the caret at its end
+        // — where the reader left off — and not at the start `set_value` leaves
+        // it at.
+        const TWO_LINES: &str = "first line\nsecond line";
+        f.act(cx, |window, cx| f.set_draft(TWO_LINES, window, cx));
+        f.act(cx, |window, cx| window.press("enter", cx));
+        f.act(cx, |window, cx| {
+            f.composer.update(cx, |composer, cx| {
+                composer.request_finished(true, window, cx)
+            })
+        });
+        assert_eq!(f.history(cx).last().map(String::as_str), Some(TWO_LINES));
+        f.act(cx, |window, cx| {
+            window.press("up", cx);
+            assert_eq!(f.draft(cx), TWO_LINES);
+            assert_eq!(f.caret(cx), TWO_LINES.len(), "the caret is at the end");
+        });
+
+        assert_eq!(f.events().len(), 3, "walking the history sends nothing");
+    }
+
+    #[gpui_kit::test]
+    fn a_prompt_typed_over_ends_the_walk(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.send_prompt("an earlier prompt", cx);
+
+        f.act(cx, |window, cx| {
+            window.press("up", cx);
+            assert_eq!(f.draft(cx), "an earlier prompt");
+        });
+
+        // Editing a recalled prompt makes it the reader's own draft: ↓ has no
+        // walk left to walk, so it does not throw the draft away.
+        f.act(cx, |window, cx| {
+            window.input("!", cx);
+            assert_eq!(f.draft(cx), "an earlier prompt!");
+            window.press("down", cx);
+            assert_eq!(f.draft(cx), "an earlier prompt!");
+            assert_eq!(f.caret(cx), "an earlier prompt!".len());
+        });
+    }
+
+    #[gpui_kit::test]
+    fn sending_the_same_prompt_again_is_one_entry(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.send_prompt("try this", cx);
+
+        // A refused send leaves the draft; the retry is the same prompt.
+        f.act(cx, |window, cx| window.press("enter", cx));
+        f.act(cx, |window, cx| {
+            f.composer.update(cx, |composer, cx| {
+                composer.request_finished(false, window, cx)
+            })
+        });
+        f.act(cx, |window, cx| window.press("enter", cx));
+        f.act(cx, |window, cx| {
+            f.composer.update(cx, |composer, cx| {
+                composer.request_finished(true, window, cx)
+            })
+        });
+
+        assert_eq!(f.history(cx), ["try this"], "a retry is not a new prompt");
+    }
+
+    #[gpui_kit::test]
+    fn a_refused_send_keeps_the_draft_and_the_caret_at_its_end(cx: &mut TestAppContext) {
+        const DRAFT: &str = "first line\nsecond line";
+        let f = open(cx);
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            f.type_draft("first line", window, cx);
+            window.press("shift-enter", cx);
+            window.input("second line", cx);
+            assert_eq!(f.draft(cx), DRAFT);
+        });
+        f.act(cx, |window, cx| window.press("enter", cx));
+        f.act(cx, |window, cx| {
+            f.composer.update(cx, |composer, cx| {
+                composer.request_finished(false, window, cx)
+            });
+            window.render_frame(cx);
+
+            assert_eq!(f.draft(cx), DRAFT, "a refused send keeps the draft");
+            assert_eq!(
+                f.caret(cx),
+                DRAFT.len(),
+                "and the caret is where the reader left it, at the end"
+            );
+
+            // The next keystroke continues the draft rather than prepending to it.
+            window.input("!", cx);
+            assert_eq!(f.draft(cx), format!("{DRAFT}!"));
+        });
+
+        assert_eq!(f.events(), vec![ComposerEvent::Send(DRAFT.into())]);
+    }
+
+    /// One window, two tabs' composers, one of them mounted — what the tab page
+    /// does when the reader switches tabs: the other tab's composer stays alive
+    /// off-tree, with its own draft (the workspace keeps one per `TabContent`,
+    /// crates/workspace/src/tab.rs).
+    struct Tabs {
+        composers: [Entity<Composer>; 2],
+        showing: usize,
+    }
+
+    impl Render for Tabs {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .child(self.composers[self.showing].clone())
+        }
+    }
+
+    #[gpui_kit::test]
+    fn a_draft_belongs_to_its_tab(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (window, tabs) = cx.update(|cx| {
+            gpui_kit::open_window(window_options(), cx, |window, cx| {
+                cx.new(|cx| Tabs {
+                    composers: [
+                        cx.new(|cx| Composer::new(window, cx)),
+                        cx.new(|cx| Composer::new(window, cx)),
+                    ],
+                    showing: 0,
+                })
+            })
+            .expect("a window with two composers")
+        });
+        let first = tabs.read_with(cx, |tabs, _| tabs.composers[0].clone());
+        let second = tabs.read_with(cx, |tabs, _| tabs.composers[1].clone());
+
+        let type_into =
+            |composer: &Entity<Composer>, text: &str, window: &mut Window, cx: &mut App| {
+                let input = ("input", composer.read(cx).input.entity_id());
+                window.click(input, cx);
+                window.input(text, cx);
+            };
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            type_into(&first, "half a prompt", window, cx);
+        })
+        .expect("the first tab's window");
+
+        // Switch to the second tab, type there, and come back.
+        tabs.update(cx, |tabs, cx| {
+            tabs.showing = 1;
+            cx.notify();
+        });
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                second.read(cx).input.read(cx).value(),
+                "",
+                "a fresh tab's composer is empty"
+            );
+            type_into(&second, "the other tab", window, cx);
+
+            tabs.update(cx, |tabs, cx| {
+                tabs.showing = 0;
+                cx.notify();
+            });
+            window.render_frame(cx);
+        })
+        .expect("the second tab's window");
+
+        assert_eq!(
+            first.read_with(cx, |composer, cx| composer
+                .input
+                .read(cx)
+                .value()
+                .to_string()),
+            "half a prompt",
+            "the tab that was left behind kept its draft"
+        );
+        assert_eq!(
+            second.read_with(cx, |composer, cx| composer
+                .input
+                .read(cx)
+                .value()
+                .to_string()),
+            "the other tab",
+            "and the tab that was opened has its own"
+        );
+
+        // The draft is still the input's, and typing continues in it.
+        cx.update_window(window, |_, window, cx| {
+            type_into(&first, " and more", window, cx);
+        })
+        .expect("the first tab's window");
+        assert_eq!(
+            first.read_with(cx, |composer, cx| composer
+                .input
+                .read(cx)
+                .value()
+                .to_string()),
+            "half a prompt and more",
+            "typing goes on where the surviving draft left off"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn a_large_paste_lands_in_one_piece(cx: &mut TestAppContext) {
+        let f = open(cx);
+        // Prompts run long: a pasted log, a diff, a stack trace.
+        let pasted: String = (0..1_200)
+            .map(|line| format!("line {line} of a prompt pasted whole into the composer\n"))
+            .collect();
+        assert!(pasted.len() > 50_000, "the paste is at least 50 KB");
+
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            window.click(f.input_frame(cx), cx);
+        });
+        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(pasted.clone()));
+
+        let started = std::time::Instant::now();
+        f.act(cx, |window, cx| window.press("cmd-v", cx));
+        let elapsed = started.elapsed();
+
+        assert_eq!(f.draft_now(cx), pasted, "the whole paste lands, unclipped");
+        println!(
+            "[composer] a {} byte paste into the input took {elapsed:?}",
+            pasted.len()
+        );
+    }
+
+    /// A window with selectable text beside a composer: what the reader selects
+    /// outside the input is not the input's to copy.
+    struct Reader {
+        text: Entity<TextViewState>,
+        composer: Entity<Composer>,
+    }
+
+    impl Render for Reader {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            v_flex()
+                .size_full()
+                .gap_2()
+                .child(
+                    div()
+                        .h(px(80.))
+                        .child(TextView::new(&self.text).selectable(true)),
+                )
+                .child(div().h(px(160.)).child(self.composer.clone()))
+        }
+    }
+
+    /// A window with a selectable text view and a composer, the text already
+    /// dragged over, and the caret moved into the composer the way the tab page
+    /// moves it — no mouse-down in the input, so the selection survives.
+    fn reader_fixture(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<Composer>) {
+        cx.update(gpui_kit::init);
+        let source = "Select me outside the input, then copy me.";
+        let (window, reader) = cx.update(|cx| {
+            gpui_kit::open_window(window_options(), cx, |window, cx| {
+                cx.new(|cx| Reader {
+                    text: cx.new(|cx| TextViewState::markdown(source, cx)),
+                    composer: cx.new(|cx| Composer::new(window, cx)),
+                })
+            })
+            .expect("a window with text and a composer")
+        });
+        let (composer, bounds) = reader.read_with(cx, |reader, cx| {
+            (reader.composer.clone(), reader.text.read(cx).bounds())
+        });
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.drag(
+                bounds.origin + point(px(1.), px(4.)),
+                bounds.origin + point(bounds.size.width - px(1.), px(4.)),
+                cx,
+            );
+            composer.update(cx, |composer, cx| composer.focus_input(window, cx));
+        })
+        .expect("the reader's window");
+
+        (window, composer)
+    }
+
+    #[gpui_kit::test]
+    fn the_copy_shortcut_takes_the_windows_selection_when_the_input_has_none(
+        cx: &mut TestAppContext,
+    ) {
+        let (window, composer) = reader_fixture(cx);
+
+        cx.update_window(window, |_, window, cx| window.press("cmd-c", cx))
+            .expect("the reader's window");
+
+        let copied = cx.read_from_clipboard().and_then(|item| item.text());
+        let copied = copied.unwrap_or_default();
+        assert!(
+            copied.starts_with("Select me outside the input"),
+            "the reader's selection is what ⌘C took: {copied:?}"
+        );
+        assert_eq!(
+            composer.read_with(cx, |composer, cx| composer
+                .input
+                .read(cx)
+                .value()
+                .to_string()),
+            "",
+            "the input's own text is untouched"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn the_inputs_own_selection_wins_the_copy(cx: &mut TestAppContext) {
+        let (window, composer) = reader_fixture(cx);
+
+        cx.update_window(window, |_, window, cx| {
+            window.click(("input", composer.read(cx).input.entity_id()), cx);
+            window.input("a draft of my own", cx);
+            window.press("cmd-a", cx);
+            window.press("cmd-c", cx);
+        })
+        .expect("the reader's window");
+
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("a draft of my own".to_string()),
+            "the input copies its own selection, not the window's"
+        );
     }
 }

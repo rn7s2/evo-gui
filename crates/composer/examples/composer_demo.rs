@@ -23,7 +23,7 @@ use gpui_kit::component::{h_flex, ActiveTheme as _, Theme, ThemeMode};
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
     div, point, px, size, AnyWindowHandle, App, AppContext as _, Bounds, Context, Entity,
-    HeadlessAppContext, IntoElement, InteractiveElement as _, ParentElement as _, Render,
+    HeadlessAppContext, InteractiveElement as _, IntoElement, ParentElement as _, Render,
     Styled as _, Subscription, Task, WeakEntity, Window, WindowBounds, WindowOptions,
 };
 use session::Activity;
