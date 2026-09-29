@@ -474,7 +474,9 @@ impl Lanes {
     }
 
     pub fn all_idle(&self) -> bool {
-        self.lanes.iter().all(|lane| lane.state() == LaneState::Idle)
+        self.lanes
+            .iter()
+            .all(|lane| lane.state() == LaneState::Idle)
     }
 }
 
@@ -570,7 +572,11 @@ impl Envelope {
 
     /// The output lines joined, for a notice shown in one piece.
     pub fn output_text(&self) -> String {
-        self.output.iter().map(|line| line.text.as_str()).collect::<Vec<_>>().join("\n")
+        self.output
+            .iter()
+            .map(|line| line.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }
 
@@ -585,16 +591,30 @@ pub struct Client {
 impl Client {
     /// The coordinator of a tab: loopback, that tab's token.
     pub fn loopback(port: u16, token: Token) -> Client {
-        Client { http: HttpClient::loopback(port, token) }
+        Client {
+            http: HttpClient::loopback(port, token),
+        }
     }
 
     pub fn new(host: impl Into<String>, port: u16, token: Token) -> Result<Client> {
-        Ok(Client { http: HttpClient::new(host, port, token)? })
+        Ok(Client {
+            http: HttpClient::new(host, port, token)?,
+        })
     }
 
     /// The same server, asked with a shorter patience.
     pub fn with_timeout(&self, timeout: std::time::Duration) -> Client {
-        Client { http: self.http.with_timeout(timeout) }
+        Client {
+            http: self.http.with_timeout(timeout),
+        }
+    }
+
+    /// The same server, with the patience a *stream* is given: how long it may go
+    /// with no bytes at all before it is considered gone.
+    pub fn with_stream_timeout(&self, timeout: std::time::Duration) -> Client {
+        Client {
+            http: self.http.with_stream_timeout(timeout),
+        }
     }
 
     pub fn http(&self) -> &HttpClient {
