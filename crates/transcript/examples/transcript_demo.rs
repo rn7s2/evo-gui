@@ -139,6 +139,11 @@ const DARK_GOAL_NUDGE_SHOT: &str = "37-dark-goal-nudges.png";
 /// about it, and the reader gets one line naming the command.
 const COMMAND_NOTE_SHOT: &str = "38-command-notes.png";
 const DARK_COMMAND_NOTE_SHOT: &str = "39-dark-command-notes.png";
+/// A call that ran the whole sweep: a command longer than the arguments panel
+/// shows, and a log longer than the result panel shows. Each panel stops at its
+/// own limit and counts what it left out.
+const LONG_CALL_SHOT: &str = "40-long-call.png";
+const DARK_LONG_CALL_SHOT: &str = "41-dark-long-call.png";
 
 const ASSISTANT_ID: RowId = 2;
 const SECOND_ASSISTANT_ID: RowId = 21;
@@ -168,6 +173,11 @@ const WRAPUP: RowId = 83;
 /// The rows of the command-note stage.
 const MEMORY_REQUEST: RowId = 91;
 const DOCTOR_REQUEST: RowId = 94;
+/// The call of the long-call stage.
+const LONG_CALL: RowId = 100;
+/// A window that holds that call's two capped panels at once, so the shot is the
+/// whole call rather than whichever panel the tail left in view.
+const LONG_CALL_SIZE: (f32, f32) = (1000., 1330.);
 
 /// The message the demo streams. Headings, bold, a list, a table and a fenced
 /// code block — all of them half-typed at some point mid-stream.
@@ -708,6 +718,100 @@ fn command_note_rows() -> Vec<Row> {
                 text: doctor_request_text(),
             },
         },
+    ]
+}
+
+/// The command of the long-call stage: the sweep, pasted as the one line a `bash`
+/// call usually is — longer than the arguments panel shows.
+fn long_command() -> String {
+    [
+        "export CARGO_TERM_COLOR=never",
+        "cargo fmt --all -- --check",
+        "cargo clippy --workspace --all-targets -- -D warnings",
+        "cargo test -p transcript -p composer -p session --all-targets",
+        "cargo test -p workspace -p store -p app --all-targets",
+        "cargo test -p tab_engine -p settings -p swarm_client -p agent_list --all-targets",
+        "CARGO_TARGET_DIR=target/proofs cargo test -p proofs",
+        "python3 crates/session/tests/capture_context_fixture.py",
+        "python3 crates/store/tests/capture_swarm_fixture.py",
+        "cargo test -p transcript --doc",
+        "cargo build --workspace --all-targets",
+        "cargo run -q -p transcript --example transcript_demo -- --capture crates/transcript/screenshots",
+        "cargo run -q -p app --example real_gui_run -- --capture docs/screens/real",
+        "git status --short | tee /tmp/sweep.log",
+        "rg -n 'TODO|FIXME|XXX' crates/ docs/ | head -40 | tee -a /tmp/sweep.log",
+        "cargo doc --workspace --no-deps --document-private-items 2>&1 | tail -20 | tee -a /tmp/sweep.log",
+        "cargo build --workspace --release 2>&1 | tail -40 | tee -a /tmp/sweep.log",
+        "tail -200 /tmp/sweep.log",
+    ]
+    .join(" && ")
+}
+
+/// What the sweep printed, as the call sent it: several times longer than the
+/// result panel shows, so the note under the panel is what says where it stops.
+fn long_output() -> String {
+    let mut log = String::from(
+        "   Compiling transcript v0.1.0 (/Users/bytedance/coding/evo-gui/crates/transcript)\n\
+         \x20   Finished `test` profile [unoptimized + debuginfo] target(s) in 3.41s\n",
+    );
+    let crates = [
+        ("transcript", 55, "1.45s"),
+        ("composer", 21, "0.19s"),
+        ("session", 92, "0.61s"),
+        ("workspace", 48, "0.88s"),
+        ("store", 26, "0.34s"),
+        ("app", 17, "2.10s"),
+        ("tab_engine", 9, "0.27s"),
+        ("proofs", 5, "12.42s"),
+    ];
+    for (name, tests, seconds) in crates {
+        log.push_str(&format!(
+            "\n     Running unittests src/lib.rs (target/debug/deps/{name}-6f1c0a2d)\n\
+             running {tests} tests\n"
+        ));
+        for test in [
+            "a_resync_of_the_same_rows_changes_nothing",
+            "a_cut_lands_between_characters_whatever_the_text_is_written_in",
+            "a_long_call_is_capped_at_the_panel_limits_and_says_what_it_left_out",
+            "documents_stay_bounded_as_the_reader_scrolls_away",
+        ] {
+            log.push_str(&format!("test {test} ... ok\n"));
+        }
+        log.push_str(&format!(
+            "test result: ok. {tests} passed; 0 failed; 0 ignored; 0 measured;              0 filtered out; finished in {seconds}\n"
+        ));
+    }
+    log.push_str(
+        "\n     Running tests/m2_relaunch.rs (target/debug/deps/m2_relaunch-9ab31c)\n\
+         running 1 test\n\
+         test m2_relaunch ... ok\n\
+         \n\
+         test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; \
+         finished in 0.62s\n",
+    );
+    log
+}
+
+/// The long-call stage: one `bash` call that ran the whole sweep, opened — a
+/// command the arguments panel cuts at its limit, and a log the result panel cuts
+/// at its own, each with a note counting the rest.
+fn long_call_rows() -> Vec<Row> {
+    vec![
+        user_row(99, "Run the whole sweep and show me what it printed."),
+        tool_row(
+            LONG_CALL,
+            1,
+            "bash",
+            &format!(
+                r#"{{"command":"{}","timeout":900,"cwd":"~/coding/evo-gui"}}"#,
+                escape(&long_command()),
+            ),
+            Some(ToolResult {
+                is_error: false,
+                content: long_output(),
+                content_chars: None,
+            }),
+        ),
     ]
 }
 
@@ -1370,6 +1474,18 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     });
     shot(&mut cx, nudges, dir, GOAL_NUDGE_SHOT)?;
 
+    // A call that ran the whole sweep: a command the arguments panel cuts at its
+    // own limit, and a log the result panel cuts at its own — each with the muted
+    // note that says how much of the call is not on screen.
+    let (long, long_demo) = open_capture_window(&mut cx, LONG_CALL_SIZE)?;
+    long_demo.update(&mut cx, |demo, cx| {
+        demo.transcript.update(cx, |view, cx| {
+            view.replace(1, long_call_rows(), cx);
+            view.set_expanded(LONG_CALL, true, cx);
+        });
+    });
+    shot(&mut cx, long, dir, LONG_CALL_SHOT)?;
+
     // The turn the swarm talks in: the delegation, the lane's report, the line that
     // says its run ended, and the coordinator's answer to them.
     let (follow_up, follow_up_demo) = open_capture_window(&mut cx, FOLLOW_UP_SIZE)?;
@@ -1464,6 +1580,9 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
 
     // The goal nudges in the dark theme.
     shot(&mut cx, nudges, dir, DARK_GOAL_NUDGE_SHOT)?;
+
+    // And the long call's capped panels in the dark theme.
+    shot(&mut cx, long, dir, DARK_LONG_CALL_SHOT)?;
 
     // The same turn in the dark theme.
     shot(&mut cx, follow_up, dir, DARK_FOLLOW_UP_SHOT)?;

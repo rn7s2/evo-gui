@@ -36,11 +36,15 @@ const STREAM_FADE: Duration = Duration::from_millis(350);
 /// A little later for each further word of one delta, so chunks overlap into
 /// one gradient tail instead of blinking in.
 const STREAM_FADE_STAGGER: Duration = Duration::from_millis(30);
-/// Longest tool argument or result text an expanded row shows, in characters.
-pub(crate) const TOOL_TEXT_LIMIT: usize = 4_000;
-/// Lines a multi-line string — a file's contents, a command — is shown in
-/// before the block is capped.
-pub(crate) const BLOCK_LINES: usize = 8;
+/// Longest a tool call's arguments an open row shows, in characters — the
+/// command among them, which is one of the arguments.
+pub(crate) const ARGUMENTS_LIMIT: usize = 1_024;
+/// Longest what a tool call returned an open row shows, in characters. A result
+/// may be longer than the call that asked for it.
+pub(crate) const RESULT_LIMIT: usize = 2_048;
+/// The key a call's command arrives under. evo's tools name it: `bash` says
+/// `command` (`read` says `path`, `eval` says `code`).
+const COMMAND_KEY: &str = "command";
 /// Longest a one-line value shows before it is elided; the whole text stays a
 /// hover away.
 pub(crate) const VALUE_LIMIT: usize = 96;
@@ -1004,6 +1008,7 @@ fn arguments_block(id: RowId, arguments: &str, palette: &Palette) -> AnyElement 
             ("transcript-tool-arguments", id),
             "arguments",
             &fields,
+            ARGUMENTS_LIMIT,
             palette,
         ),
         _ => text_block(
@@ -1011,6 +1016,7 @@ fn arguments_block(id: RowId, arguments: &str, palette: &Palette) -> AnyElement 
             "arguments",
             arguments,
             None,
+            ARGUMENTS_LIMIT,
             palette,
         ),
     }
@@ -1025,14 +1031,19 @@ fn result_block(id: RowId, result: Option<&ToolResult>, palette: &Palette) -> An
     let label = if result.is_error { "error" } else { "result" };
 
     match json_fields(&result.content) {
-        Some(fields) if !fields.is_empty() => {
-            fields_block(("transcript-tool-result", id), label, &fields, palette)
-        }
+        Some(fields) if !fields.is_empty() => fields_block(
+            ("transcript-tool-result", id),
+            label,
+            &fields,
+            RESULT_LIMIT,
+            palette,
+        ),
         _ => text_block(
             ("transcript-tool-result", id),
             label,
             &result.content,
             result.content_chars,
+            RESULT_LIMIT,
             palette,
         ),
     }
@@ -1157,8 +1168,10 @@ fn push_field(fields: &mut Vec<Field>, key: String, value: &Value, depth: usize,
         Value::Object(_) | Value::Array(_) => fields.push(collapsed(key, value)),
         // A string with line breaks in it is not a line of a list: it gets a
         // block of its own, so file contents and multi-line commands stay
-        // readable.
-        Value::String(text) if text.contains('\n') => fields.push(Field {
+        // readable. A command is a block whether or not it breaks lines: it is
+        // what the call does, and the panel's budget is what caps it, not the
+        // one-line elision.
+        Value::String(text) if text.contains('\n') || key == COMMAND_KEY => fields.push(Field {
             key,
             value: FieldValue::Block(text.clone()),
         }),
@@ -1210,6 +1223,144 @@ fn elide(text: &str) -> (String, Option<String>) {
     (shown, Some(text.to_string()))
 }
 
+/// A panel's budget as it is fitted to its limit: how many characters it may
+/// still show, and how many the limit has made it cut.
+pub(crate) struct Cap {
+    left: usize,
+    hidden: usize,
+}
+
+impl Cap {
+    pub(crate) fn new(limit: usize) -> Self {
+        Self {
+            left: limit,
+            hidden: 0,
+        }
+    }
+
+    /// Takes the first `chars` of a value the panel would otherwise draw whole:
+    /// as many as the budget has left, and the rest — the part of it the limit
+    /// cuts — is what the note counts.
+    fn take(&mut self, chars: usize) -> usize {
+        let shown = chars.min(self.left);
+        self.left -= shown;
+        self.hidden += chars - shown;
+        shown
+    }
+
+    /// What the panel did not show, for the note under it.
+    pub(crate) fn hidden(&self) -> usize {
+        self.hidden
+    }
+}
+
+/// The first `chars` characters of `text`. A cut lands between characters, so a
+/// payload written in emoji or CJK is shortened, never torn.
+pub(crate) fn take_chars(text: &str, chars: usize) -> String {
+    if chars >= text.chars().count() {
+        return text.to_string();
+    }
+    text.chars().take(chars).collect()
+}
+
+/// The fields of a panel, fitted to the budget: values the budget does not reach
+/// are dropped and values it can only partly reach are cut. The limit is counted
+/// over the text the panel draws — a value's own characters, not the key it is
+/// labeled with, and not the text a value keeps to itself (the ellipsis of an
+/// elided line, the count of a collapsed container) — because what the note
+/// under the panel counts is what the limit cut, not what the panel never draws.
+pub(crate) fn cap_fields(fields: &[Field], cap: &mut Cap) -> Vec<Field> {
+    let mut capped = Vec::new();
+    for field in fields {
+        if let Some(value) = cap_value(&field.value, cap) {
+            capped.push(Field {
+                key: field.key.clone(),
+                value,
+            });
+        }
+    }
+    capped
+}
+
+/// One value as the budget can show it, or `None` when it can show none of it.
+fn cap_value(value: &FieldValue, cap: &mut Cap) -> Option<FieldValue> {
+    if cap.left == 0 {
+        // Nothing left to draw this with: the whole of it is left out.
+        cap.hidden += drawn_chars_of(value);
+        return None;
+    }
+
+    match value {
+        FieldValue::Nested(children) => {
+            // A container whose own fields the limit could not reach is no row
+            // at all: a key with nothing under it is worse than no key.
+            let fitted = cap_fields(children, cap);
+            (!fitted.is_empty()).then_some(FieldValue::Nested(fitted))
+        }
+        FieldValue::Text { text, full } => {
+            let shown = cap.take(text.chars().count());
+            (shown > 0).then(|| FieldValue::Text {
+                text: take_chars(text, shown),
+                full: full.clone(),
+            })
+        }
+        FieldValue::Block(text) => {
+            let shown = cap.take(text.chars().count());
+            (shown > 0).then(|| FieldValue::Block(take_chars(text, shown)))
+        }
+        FieldValue::Collapsed { summary, full } => {
+            let shown = cap.take(summary.chars().count());
+            (shown > 0).then(|| FieldValue::Collapsed {
+                summary: take_chars(summary, shown),
+                full: full.clone(),
+            })
+        }
+    }
+}
+
+/// Characters of text a value draws: what the panel shows of it when the limit
+/// does not cut it first.
+fn drawn_chars_of(value: &FieldValue) -> usize {
+    let count = |text: &str| text.chars().count();
+    match value {
+        FieldValue::Text { text, .. } => count(text),
+        FieldValue::Block(text) => count(text),
+        FieldValue::Collapsed { summary, .. } => count(summary),
+        FieldValue::Nested(children) => children
+            .iter()
+            .map(|field| drawn_chars_of(&field.value))
+            .sum(),
+    }
+}
+
+/// What the note under a capped panel says: how many characters the panel's
+/// limit leaves out.
+pub(crate) fn cap_note_text(hidden: usize) -> String {
+    if hidden == 1 {
+        "… (1 more char)".to_string()
+    } else {
+        format!("… ({hidden} more chars)")
+    }
+}
+
+/// The muted line under a panel the limit cut: how many characters of the call
+/// are not on screen. The full text stays in the row — this says where the view
+/// stops, not where the call did.
+fn cap_note(id: impl Into<ElementId>, hidden: usize, palette: &Palette) -> AnyElement {
+    let note = cap_note_text(hidden);
+    let id = id.into();
+    div()
+        .id(id)
+        .w_full()
+        .min_w_0()
+        .text_size(CAPTION_SIZE)
+        .text_color(palette.muted_foreground)
+        .aria_label(note.clone())
+        .child(note)
+        .test_support()
+        .into_any_element()
+}
+
 /// Whether a value should be drawn in the mono face: a path, a command, an
 /// identifier. `cargo test -p transcript` reads as code; "the provider returned
 /// 429" does not.
@@ -1217,15 +1368,18 @@ pub(crate) fn looks_like_code(text: &str) -> bool {
     text.contains('/') || text.contains("::") || text.contains('(') || text.contains('=')
 }
 
-/// The caption of a payload panel: what the block below it holds, in the small
-/// caps a label is set in — quiet enough not to read as a line of the
-/// transcript. (GPUI has no letter spacing, so the caption is upper case and
-/// small rather than tracked.)
-fn caption(label: &str, palette: &Palette) -> AnyElement {
+/// The caption of a payload panel: what the block below it holds, small and
+/// muted — quiet enough not to read as a line of the transcript. (GPUI has no
+/// letter spacing, so a caption is set small rather than tracked; it is not
+/// upper-cased, which shouts.)
+fn caption(id: &ElementId, label: &str, palette: &Palette) -> AnyElement {
     div()
+        .id((id.clone(), "caption"))
         .text_size(CAPTION_SIZE)
         .text_color(palette.muted_foreground)
-        .child(label.to_uppercase())
+        .aria_label(label.to_string())
+        .child(label.to_string())
+        .test_support()
         .into_any_element()
 }
 
@@ -1239,9 +1393,12 @@ fn fields_block(
     id: impl Into<ElementId>,
     label: &str,
     fields: &[Field],
+    limit: usize,
     palette: &Palette,
 ) -> AnyElement {
     let id = id.into();
+    let mut cap = Cap::new(limit);
+    let fields = cap_fields(fields, &mut cap);
     let mut block = div()
         .id(id.clone())
         .flex()
@@ -1256,10 +1413,13 @@ fn fields_block(
         .py_1()
         .text_size(palette.payload_size)
         .line_height(palette.payload_size * PAYLOAD_LINE_HEIGHT)
-        .child(caption(label, palette));
+        .child(caption(&id, label, palette));
 
     for (index, field) in fields.iter().enumerate() {
         block = block.child(field_row(&id, index, field, palette));
+    }
+    if cap.hidden() > 0 {
+        block = block.child(cap_note((id.clone(), "note"), cap.hidden(), palette));
     }
 
     block.test_support().into_any_element()
@@ -1373,10 +1533,9 @@ fn value_cell(id: &ElementId, value: &FieldValue, palette: &Palette) -> AnyEleme
             .border_color(palette.border)
             .font_family(palette.mono.clone())
             .text_color(palette.foreground)
-            .child(SelectableText::new(
-                (id.clone(), "value"),
-                block_text(text, None),
-            ))
+            // The panel's budget has already cut it: nothing more is left out
+            // here.
+            .child(SelectableText::new((id.clone(), "value"), text.clone()))
             .test_support()
             .into_any_element(),
         // A container the panel does not draw out: what it holds, quiet enough
@@ -1589,10 +1748,12 @@ fn text_block(
     label: &str,
     text: &str,
     total_chars: Option<u64>,
+    limit: usize,
     palette: &Palette,
 ) -> AnyElement {
     let id = id.into();
-    div()
+    let (body, hidden) = cap_text(text, total_chars, limit);
+    let mut block = div()
         .id(id.clone())
         .flex()
         .flex_col()
@@ -1604,7 +1765,7 @@ fn text_block(
         .border_color(palette.border)
         .px_2()
         .py_1()
-        .child(caption(label, palette))
+        .child(caption(&id, label, palette))
         // A body with no keys of its own starts at the panel's own edge, under
         // its caption: a text result is the whole width of the panel, not a
         // column of it.
@@ -1617,40 +1778,30 @@ fn text_block(
                 .text_size(palette.payload_size)
                 .line_height(palette.payload_size * PAYLOAD_LINE_HEIGHT)
                 .text_color(palette.foreground)
-                .child(SelectableText::new(
-                    (id.clone(), "body"),
-                    block_text(text, total_chars),
-                ))
+                .child(SelectableText::new((id.clone(), "body"), body))
                 .test_support(),
-        )
-        .test_support()
-        .into_any_element()
+        );
+
+    if hidden > 0 {
+        block = block.child(cap_note((id.clone(), "note"), hidden, palette));
+    }
+
+    block.test_support().into_any_element()
 }
 
-/// `text` as a block: its first [`BLOCK_LINES`] lines, or [`TOOL_TEXT_LIMIT`]
-/// characters, and a note saying how much was left out. `total_chars` is what
-/// the swarm said the result holds, when the copy that arrived was already
-/// shortened.
-pub(crate) fn block_text(text: &str, total_chars: Option<u64>) -> String {
-    let shown = text.chars().count();
+/// `text` as a panel body: its first `limit` characters, and how many
+/// characters of the whole that leaves out. `total_chars` is what the swarm
+/// said the result holds, when the copy that arrived was already shortened —
+/// the note counts from there, so a reader is told what the tool really sent.
+pub(crate) fn cap_text(text: &str, total_chars: Option<u64>, limit: usize) -> (String, usize) {
+    let content = text.chars().count();
+    // The note counts from what the tool sent, when the swarm said the copy that
+    // arrived was already shortened: the panel is not showing that either.
     let total = total_chars
         .map(|chars| chars as usize)
-        .unwrap_or(shown)
-        .max(shown);
-    let lines: Vec<&str> = text.lines().collect();
+        .unwrap_or(content)
+        .max(content);
+    let shown = content.min(limit);
 
-    if lines.len() > BLOCK_LINES {
-        let mut capped = lines[..BLOCK_LINES].join("\n");
-        capped.push_str(&format!("\n… {} more lines", lines.len() - BLOCK_LINES));
-        return capped;
-    }
-    if shown > TOOL_TEXT_LIMIT {
-        let mut capped: String = text.chars().take(TOOL_TEXT_LIMIT).collect();
-        capped.push_str(&format!("\n… truncated ({total} characters)"));
-        return capped;
-    }
-    if total > shown {
-        return format!("{text}\n… truncated ({total} characters)");
-    }
-    text.to_string()
+    (take_chars(text, shown), total - shown)
 }

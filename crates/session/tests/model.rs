@@ -1410,6 +1410,49 @@ fn a_replayed_tool_call_updates_its_row_instead_of_stacking_a_copy() {
     }
 }
 
+/// The view caps what an open row draws — a command at the transcript's arguments
+/// limit, a result at its result limit — so the model has to keep the whole of it:
+/// this is what a "show all" would be drawn from.
+#[test]
+fn a_tool_call_keeps_its_whole_command_and_output() {
+    let mut model = AgentModel::new();
+    let command = "cargo test -p transcript --all-targets ".to_string() + &"x".repeat(8_000);
+    model.apply_event(
+        1,
+        "tool-call-start",
+        &json!({
+            "name": "bash",
+            "id": "toolu_1",
+            "arguments": {},
+            "arguments_json": json!({ "command": command }).to_string(),
+        }),
+    );
+    let output = "y".repeat(50_000);
+    model.apply_event(
+        2,
+        "tool-result",
+        &json!({"name": "bash", "id": "toolu_1", "is_error": false, "content": output}),
+    );
+
+    match &model.rows()[0].kind {
+        RowKind::Tool {
+            arguments, result, ..
+        } => {
+            assert!(
+                arguments.contains(&command),
+                "the whole command is in the row: {} characters",
+                arguments.chars().count()
+            );
+            assert_eq!(
+                result.as_ref().unwrap().content.chars().count(),
+                50_000,
+                "and the whole output"
+            );
+        }
+        other => panic!("unexpected row: {other:?}"),
+    }
+}
+
 /// §3: a restarted coordinator is a new event log whose ids start again at 1, announced by
 /// `hello`. The view must keep working — no duplicated rows, no lost events.
 #[test]

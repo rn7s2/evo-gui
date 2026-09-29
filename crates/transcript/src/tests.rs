@@ -14,9 +14,10 @@ use session::{DimStyle, GoalNudgeKind, Row, RowId, RowKind, Todo, TodoStatus, To
 use gpui_kit::px;
 
 use crate::rows::{
-    block_text, json_fields, looks_like_code, run_outcome_style, Field, FieldValue, BLOCK_LINES,
-    COLUMN_GAP, CONTEXT_BLOCK_LINES, KEY_WIDTH, MAX_ARRAY, MAX_DEPTH, NEST_INDENT,
-    PAYLOAD_LINE_HEIGHT, TOOL_ROW_HEIGHT, TOOL_TEXT_LIMIT, VALUE_LIMIT,
+    cap_fields, cap_note_text, cap_text, json_fields, looks_like_code, run_outcome_style,
+    take_chars, Cap, Field, FieldValue, ARGUMENTS_LIMIT, COLUMN_GAP, CONTEXT_BLOCK_LINES,
+    KEY_WIDTH, MAX_ARRAY, MAX_DEPTH, NEST_INDENT, PAYLOAD_LINE_HEIGHT, RESULT_LIMIT,
+    TOOL_ROW_HEIGHT, VALUE_LIMIT,
 };
 use crate::style::Palette;
 use crate::style::MEASURE;
@@ -1195,8 +1196,8 @@ fn a_json_array_reads_as_a_list_keyed_by_index() {
 
 #[test]
 fn a_long_value_is_elided_with_the_whole_text_kept_for_the_tooltip() {
-    let command = "cargo test -p transcript --lib -- --nocapture ".to_string() + &"x".repeat(80);
-    let fields = json_fields(&format!(r#"{{"command":"{command}"}}"#)).expect("an object");
+    let path = "crates/transcript/src/rows.rs ".to_string() + &"x".repeat(80);
+    let fields = json_fields(&format!(r#"{{"path":"{path}"}}"#)).expect("an object");
 
     let FieldValue::Text { text, full } = &fields[0].value else {
         panic!("a one-line string is one line of the list: {:?}", fields[0]);
@@ -1213,7 +1214,7 @@ fn a_long_value_is_elided_with_the_whole_text_kept_for_the_tooltip() {
     );
     assert_eq!(
         full.as_deref(),
-        Some(command.as_str()),
+        Some(path.as_str()),
         "the whole text is on hover"
     );
 
@@ -1223,7 +1224,7 @@ fn a_long_value_is_elided_with_the_whole_text_kept_for_the_tooltip() {
 }
 
 #[test]
-fn a_multi_line_string_becomes_a_capped_block() {
+fn a_multi_line_string_becomes_a_block() {
     let content: String = (0..14).map(|line| format!("line {line}\n")).collect();
     let arguments = format!(r#"{{"content":"{}"}}"#, content.replace('\n', "\\n"));
     let fields = json_fields(&arguments).expect("an object");
@@ -1232,28 +1233,106 @@ fn a_multi_line_string_becomes_a_capped_block() {
         panic!("a string with line breaks is a block: {:?}", fields[0]);
     };
     assert_eq!(fields[0].key, "content");
+    assert_eq!(text, &content, "and it carries the whole string");
 
-    let shown = block_text(text, None);
+    // A command is a block too, however it is written: it is what the call
+    // does, and a line of the grid is not what a reader reads it on.
+    let command = "cargo test -p transcript --lib -- --nocapture ".to_string() + &"x".repeat(80);
+    let fields = json_fields(&format!(r#"{{"command":"{command}"}}"#)).expect("an object");
+
     assert_eq!(
-        shown.lines().count(),
-        BLOCK_LINES + 1,
-        "the block shows its lines and the note: {shown:?}"
+        fields[0].value,
+        FieldValue::Block(command.clone()),
+        "a one-line command is drawn as a block"
     );
+}
+
+#[test]
+fn a_panels_text_is_capped_at_its_own_limit_and_says_what_it_left_out() {
+    // A command is one of the call's arguments: the arguments panel's cap is
+    // the command's cap, and it is measured on the text the panel draws.
+    let command = "echo ".to_string() + &"x".repeat(ARGUMENTS_LIMIT);
+    let fields = json_fields(&format!(r#"{{"command":"{command}"}}"#)).expect("an object");
+    let mut cap = Cap::new(ARGUMENTS_LIMIT);
+    let fitted = cap_fields(&fields, &mut cap);
+
+    let FieldValue::Block(shown) = &fitted[0].value else {
+        panic!("a command is a block: {:?}", fitted[0]);
+    };
+    assert_eq!(
+        shown.chars().count(),
+        ARGUMENTS_LIMIT,
+        "exactly the arguments limit is shown"
+    );
+    assert_eq!(command.len() - ARGUMENTS_LIMIT, 5);
+    assert_eq!(cap.hidden(), 5, "and the note counts the rest");
     assert!(
-        shown.ends_with("… 6 more lines"),
-        "and says what it left out: {shown:?}"
+        command.starts_with(shown.as_str()),
+        "a prefix of the command"
     );
 
-    // Text with few lines but far too many characters is capped too.
-    let long_line = "x".repeat(TOOL_TEXT_LIMIT + 10);
-    let shown = block_text(&long_line, None);
-    assert!(
-        shown.ends_with(&format!(
-            "… truncated ({} characters)",
-            TOOL_TEXT_LIMIT + 10
-        )),
-        "{shown:?}"
+    // A result that is not JSON is capped at the result limit.
+    let output = "y".repeat(RESULT_LIMIT + 512);
+    let (body, hidden) = cap_text(&output, None, RESULT_LIMIT);
+    assert_eq!(body.chars().count(), RESULT_LIMIT);
+    assert_eq!(hidden, 512);
+    assert_eq!(cap_note_text(hidden), "… (512 more chars)");
+
+    // Where the swarm said the result was longer than the copy that arrived,
+    // the note counts from what it said it sent.
+    let (body, hidden) = cap_text(&output, Some(50_000), RESULT_LIMIT);
+    assert_eq!(hidden, 50_000 - RESULT_LIMIT);
+    assert_eq!(body.chars().count(), RESULT_LIMIT);
+
+    // Text the panel can show whole is shown whole, and says nothing: there is
+    // nothing left out.
+    let (body, hidden) = cap_text("cargo test\ntest result: ok\n", None, RESULT_LIMIT);
+    assert_eq!(body, "cargo test\ntest result: ok\n");
+    assert_eq!(hidden, 0);
+
+    // What the budget runs out of is counted: the tail of the value it cut
+    // into, and the whole of the two fields it never reached.
+    let fields = json_fields(r#"{"path":"a.rs","offset":10,"limit":20}"#).expect("an object");
+    let mut cap = Cap::new(3);
+    let fitted = cap_fields(&fields, &mut cap);
+    assert_eq!(
+        fitted,
+        vec![field("path", "a.r")],
+        "the budget stops mid-value"
     );
+    assert_eq!(cap.hidden(), 1 + 2 + 2, "a.rs cut, and two fields dropped");
+
+    // One character left out reads as one character.
+    assert_eq!(cap_note_text(1), "… (1 more char)");
+}
+
+#[test]
+fn a_cut_lands_between_characters_whatever_the_text_is_written_in() {
+    for unit in ["é", "→", "漢", "🙂"] {
+        let text: String = unit.repeat(ARGUMENTS_LIMIT + 5);
+
+        assert_eq!(
+            take_chars(&text, ARGUMENTS_LIMIT),
+            unit.repeat(ARGUMENTS_LIMIT)
+        );
+
+        let (body, hidden) = cap_text(&text, None, ARGUMENTS_LIMIT);
+        assert_eq!(body.chars().count(), ARGUMENTS_LIMIT);
+        assert_eq!(hidden, 5);
+        assert_eq!(body, unit.repeat(ARGUMENTS_LIMIT), "cut between characters");
+        assert!(text.starts_with(&body));
+        assert!(body.is_char_boundary(body.len()), "and never torn");
+
+        // The same for a value inside a key/value panel.
+        let fields = json_fields(&format!(r#"{{"command":"{text}"}}"#)).expect("an object");
+        let mut cap = Cap::new(ARGUMENTS_LIMIT);
+        let fitted = cap_fields(&fields, &mut cap);
+        let FieldValue::Block(shown) = &fitted[0].value else {
+            panic!("a command is a block");
+        };
+        assert_eq!(shown, &unit.repeat(ARGUMENTS_LIMIT));
+        assert_eq!(cap.hidden(), 5);
+    }
 }
 
 #[test]
@@ -1313,7 +1392,9 @@ fn a_plain_result_starts_at_the_panels_own_edge(cx: &mut TestAppContext) {
         // A body with no keys of its own is the whole width of its panel: it
         // starts at the panel's padding, not indented into a value column, so a
         // long line of output is not wrapped for the sake of a grid.
-        let result: gpui_kit::ElementId = ("transcript-tool-result", 1u64).into();
+        let arguments: gpui_kit::ElementId = (ARGUMENTS, 1u64).into();
+        let result: gpui_kit::ElementId = (RESULT, 1u64).into();
+        let result_note = result.clone();
         let panel = window.find(result.clone()).bounds();
         let text = window.find((result, "text")).bounds();
         assert_eq!(
@@ -1326,6 +1407,100 @@ fn a_plain_result_starts_at_the_panels_own_edge(cx: &mut TestAppContext) {
         let key = window.find(row_id(ARGUMENTS, 1, &[0])).bounds();
         assert!(text.origin.x < key.origin.x + KEY_WIDTH);
         assert!(window.find(row_id(ARGUMENTS, 1, &[1])).bounds().origin.x == key.origin.x);
+
+        // And nothing the panel can show whole gets a note under it.
+        assert!(window.try_find((arguments, "note")).is_none());
+        assert!(window.try_find((result_note, "note")).is_none());
+    });
+}
+
+/// A call whose command and whose output are both longer than a panel shows:
+/// each panel is captioned in lower case, stops at its own limit, and ends in a
+/// muted note saying how much of the call is not on screen.
+#[gpui_kit::test]
+fn a_long_call_is_capped_at_the_panel_limits_and_says_what_it_left_out(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (host, cx) = cx.add_window_view(|_window, cx| TranscriptHost::new(cx));
+
+    // A command of 1029 characters, and two results — one twice the result
+    // limit, one ten times it.
+    let command = "echo ".to_string() + &"x".repeat(ARGUMENTS_LIMIT);
+    let output = "y".repeat(RESULT_LIMIT + 512);
+    let huge = "z".repeat((RESULT_LIMIT + 512) * 10);
+    let call = || format!(r#"{{"command":"{command}"}}"#);
+
+    host.update(cx, |host, cx| {
+        host.transcript.update(cx, |view, cx| {
+            view.replace(
+                1,
+                vec![
+                    tool_with(
+                        1,
+                        "bash",
+                        &call(),
+                        Some(ToolResult {
+                            is_error: false,
+                            content: output.clone(),
+                            content_chars: None,
+                        }),
+                    ),
+                    tool_with(
+                        2,
+                        "bash",
+                        &call(),
+                        Some(ToolResult {
+                            is_error: false,
+                            content: huge.clone(),
+                            content_chars: None,
+                        }),
+                    ),
+                ],
+                cx,
+            );
+            view.set_expanded(1, true, cx);
+            view.set_expanded(2, true, cx);
+        });
+    });
+
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        let arguments: gpui_kit::ElementId = (ARGUMENTS, 1u64).into();
+        let result: gpui_kit::ElementId = (RESULT, 1u64).into();
+        let longer: gpui_kit::ElementId = (RESULT, 2u64).into();
+
+        // The captions name their sections in lower case: a label, not a shout.
+        assert_eq!(
+            window.find((arguments.clone(), "caption")).label(),
+            Some("arguments")
+        );
+        assert_eq!(
+            window.find((result.clone(), "caption")).label(),
+            Some("result")
+        );
+
+        // The command is drawn as a block, and the panel shows
+        // `ARGUMENTS_LIMIT` of its 1029 characters.
+        assert_eq!(
+            window.find((arguments.clone(), "note")).label(),
+            Some("… (5 more chars)")
+        );
+
+        assert_eq!(
+            window.find((result.clone(), "note")).label(),
+            Some("… (512 more chars)")
+        );
+        assert_eq!(
+            window.find((longer.clone(), "note")).label(),
+            Some(format!("… ({} more chars)", huge.chars().count() - RESULT_LIMIT).as_str())
+        );
+
+        // A result ten times longer draws the same panel: what the limit cuts
+        // is what the panel draws, not what the tool sent.
+        assert_eq!(
+            window.find(longer).bounds().size.height,
+            window.find(result).bounds().size.height,
+            "and the panel it draws is the same height"
+        );
     });
 }
 

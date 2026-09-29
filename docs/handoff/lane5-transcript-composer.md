@@ -92,6 +92,25 @@ Invariants
   `MAX_DEPTH` (4) — past that, or for an array longer than `MAX_ARRAY` (20), the container is one muted `{…3 keys}` /
   `[…42 items]` row whose tooltip carries its compact JSON. Row ids nest: `((("transcript-tool-arguments", row), i), j)`,
   and each row's cells are `(row_id, "key")` / `(row_id, "value")`.
+- An open row caps what it draws, by characters, not by lines: `ARGUMENTS_LIMIT` (1024) of a call's arguments — its
+  `command` among them — and `RESULT_LIMIT` (2048) of what came back. The old `TOOL_TEXT_LIMIT` (4000 chars) and
+  `BLOCK_LINES` (8 lines) are gone; `CONTEXT_BLOCK_LINES` (12) still caps the quiet rows, which are not tool panels.
+  `Cap`/`cap_fields`/`cap_value` fit a panel's fields to its budget — a value the budget cannot reach is dropped, one it
+  can only partly reach is cut, and `take_chars` cuts between characters, so a payload written in emoji or CJK is
+  shortened, never torn — and `cap_text` does the same for a body with no keys of its own, counting from
+  `result.content_chars` when the swarm said the copy that arrived was already shortened. What the limit cut is what the
+  note under the panel counts (`cap_note_text`, `… (N more chars)`: one muted line, id `(panel, "note")`, the note as its
+  accessible name, and not part of the selectable text). The note is about the limit, not about the panel's own
+  elisions: a value elided to `VALUE_LIMIT` or a container collapsed to `{…3 keys}` keeps its text on hover and counts
+  as drawn — otherwise every panel holding a long path would claim to have been cut. The drawn text is what the
+  `SelectableText` carries, so a copy takes the shortened text; the row keeps the whole of the call, `arguments` and the
+  result content unfiltered (`a_tool_call_keeps_its_whole_command_and_output` in session), which is what a later
+  "show all" would be drawn from.
+- A call's `command` is a block whether or not it breaks lines: it is what the call does, and the panel's budget is what
+  caps it, not the one-line elision. The key is evo's own vocabulary (`*tool-key-args*`, `src/command/command.lisp:420`,
+  names `command` for `bash`; `read` says `path`, `eval` says `code`).
+- Panel captions are lower case — `arguments`, `result`, `error` — small and muted, each with id `(panel, "caption")`
+  and its own text as its accessible name.
 
 ## composer
 - `lib.rs` — `Composer::new(window, cx)`, `set_readout`, `set_activity(Activity)`, `request_finished(ok, window, cx)`,
@@ -102,7 +121,7 @@ Invariants
   found (`c1b901c`, `dfdb3d3`).
 
 ## Commands
-- `cargo test -p transcript` (52) and `cargo test -p composer` (21), plus `cargo test -p session` (the context row is
+- `cargo test -p transcript` (55) and `cargo test -p composer` (21), plus `cargo test -p session` (the context row is
   fixture-driven: `crates/session/tests/fixtures/context-transcript.json`, recorded by
   `crates/session/tests/capture_context_fixture.py`); `cargo fmt -p transcript -p composer`;
   `cargo clippy -p transcript --all-targets` is clean. Note `cargo fmt -p session` reaches `lanes.rs`/`tab.rs` through
@@ -113,7 +132,9 @@ Invariants
   coordinator's answer), and `36-goal-nudges.png` / `37-dark-goal-nudges.png` the goal evo keeps going by itself (a
   continuation opened onto its message, and the wrap-up), and `38-command-notes.png` / `39-dark-command-notes.png` the
   commands the reader ran while the agent worked (`Command · /global-memory` closed, `/notify doctor` opened onto its
-  capped block). Cost harness: `cargo run -q -p transcript --example
+  capped block), and `40-long-call.png` / `41-dark-long-call.png` a call that ran the whole sweep — a command the
+  arguments panel cuts at 1024 characters and a log the result panel cuts at 2048, each with the note that counts the
+  rest. Cost harness: `cargo run -q -p transcript --example
   transcript_stress [-- rows stream delta message_chars]`.
 
 ## Kit facts worth not re-deriving (gpui-kit 0.7.0 / gpui-base 0.7.0)
