@@ -364,6 +364,7 @@ fn row_chars(row: &session::Row) -> usize {
     match &row.kind {
         session::RowKind::User { text } => text.chars().count(),
         session::RowKind::Context { text, .. } => text.chars().count(),
+        session::RowKind::LaneNotice { text, .. } => text.chars().count(),
         session::RowKind::Assistant { markdown, .. } => markdown.chars().count(),
         session::RowKind::Tool { name, .. } => name.chars().count(),
         session::RowKind::Report { done, .. } => done.chars().count(),

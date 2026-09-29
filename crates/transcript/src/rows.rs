@@ -264,7 +264,11 @@ impl Group {
             RowKind::Assistant { .. } => Self::Assistant,
             RowKind::Tool { .. } => Self::Tool,
             RowKind::Report { .. } => Self::Report,
-            RowKind::Dim { .. } | RowKind::RunOutcome { .. } => Self::Dim,
+            // A lane notice is a quiet status line like a dim row, and the swarm's
+            // own chatter reads as one block when several land together.
+            RowKind::Dim { .. } | RowKind::RunOutcome { .. } | RowKind::LaneNotice { .. } => {
+                Self::Dim
+            }
             RowKind::Context { .. } => Self::Context,
         }
     }
@@ -363,13 +367,10 @@ pub(crate) fn render_row(
             view,
             &palette,
         ),
-        RowKind::Report {
-            done,
-            evidence,
-            next,
-            blocked,
-            requests,
-        } => report_row(row.id, done, evidence, next, blocked, requests, &palette),
+        RowKind::Report { .. } => report_row(row, &palette),
+        RowKind::LaneNotice { lane, text, tone } => {
+            lane_notice_row(row.id, *lane, text, *tone, &palette)
+        }
         RowKind::Dim { style, text } => dim_row(row.id, *style, text, &palette),
         RowKind::RunOutcome { outcome, text } => run_outcome_row(row.id, outcome, text, &palette),
     });
@@ -445,6 +446,10 @@ fn user_row(id: RowId, text: &str, palette: &Palette) -> AnyElement {
 /// How much of an opened context row's text is on screen at once: the rest is a
 /// scroll inside the block.
 pub(crate) const CONTEXT_BLOCK_LINES: usize = 12;
+
+/// How wide a lane notice's tooltip may grow: one line of the swarm's words, wider than
+/// the reading measure they were cut to but not the full length of a task path.
+const NOTICE_TOOLTIP_WIDTH: Pixels = px(520.);
 
 /// Content an extension injected (`evo:inject-context`): one quiet line saying
 /// what it is and where it came from, which opens onto the text itself.
@@ -1225,22 +1230,35 @@ fn value_cell(id: &ElementId, value: &FieldValue, palette: &Palette) -> AnyEleme
     }
 }
 
-fn report_row(
-    id: RowId,
-    done: &str,
-    evidence: &str,
-    next: &str,
-    blocked: &str,
-    requests: &str,
-    palette: &Palette,
-) -> AnyElement {
-    let fields = [
-        ("done", done, palette.foreground),
-        ("evidence", evidence, palette.muted_foreground),
-        ("next", next, palette.foreground),
-        ("blocked", blocked, palette.destructive),
-        ("requests", requests, palette.primary),
+fn report_row(row: &Row, palette: &Palette) -> AnyElement {
+    let RowKind::Report {
+        done,
+        evidence,
+        next,
+        blocked,
+        requests,
+        goal,
+        lane,
+    } = &row.kind
+    else {
+        unreachable!("report_row draws a report row")
+    };
+    let id = row.id;
+    let heading = match lane {
+        Some(lane) => format!("Lane {lane} report"),
+        None => "report".to_string(),
+    };
+
+    let mut fields = vec![
+        ("done", done.as_str(), palette.foreground),
+        ("evidence", evidence.as_str(), palette.muted_foreground),
+        ("next", next.as_str(), palette.foreground),
+        ("blocked", blocked.as_str(), palette.destructive),
+        ("requests", requests.as_str(), palette.primary),
     ];
+    if let Some(goal) = goal {
+        fields.push(("goal", goal.as_str(), palette.muted_foreground));
+    }
 
     let mut row = div()
         .id(("transcript-report", id))
@@ -1255,10 +1273,16 @@ fn report_row(
         .px_3()
         .py_2()
         .child(
+            // A report the swarm passed to the coordinator is about one of its lanes,
+            // so it is headed with that lane: in the lane's own tab the heading is the
+            // one it has always had.
             div()
+                .id(("transcript-report-heading", id))
                 .text_xs()
                 .text_color(palette.muted_foreground)
-                .child("report"),
+                .aria_label(heading.clone())
+                .child(heading)
+                .test_support(),
         );
 
     for (label, value, color) in fields {
@@ -1293,6 +1317,51 @@ fn report_row(
     }
 
     row.test_support().into_any_element()
+}
+
+/// A line the swarm wrote to the coordinator about one of its lanes: `Lane 1 · run
+/// ended (stop) — task: …`.
+///
+/// It is not the reader's message and not the coordinator's prose — the swarm steered it
+/// in — so it keeps the swarm's own words, one line, with the lane named in front of
+/// them and the whole of it a hover away. Not a card, and not a turn: this is what the
+/// swarm is saying, while the reader's own words stay the only thing that opens a turn.
+fn lane_notice_row(
+    id: RowId,
+    lane: u32,
+    text: &str,
+    tone: DimStyle,
+    palette: &Palette,
+) -> AnyElement {
+    let color = match tone {
+        DimStyle::Error => palette.destructive,
+        _ => palette.muted_foreground,
+    };
+    let full: SharedString = format!("Lane {lane} · {text}").into();
+    let tooltip = full.clone();
+    let notice = div()
+        .id(("transcript-lane-notice", id))
+        .w_full()
+        .min_w_0()
+        .truncate()
+        .text_sm()
+        .line_height(px(18.))
+        .text_color(color)
+        // The line on screen is cut to the measure; this is the whole of what the swarm
+        // said, which is what a reader using a screen reader (or a test) is told.
+        .aria_label(full.clone())
+        .child(full);
+    // Only the lane's own line is cut: the row has no second line to fall back on, and
+    // the rest of what the swarm said is what its tooltip is for. The tooltip carries
+    // the lane's name too, since a cut line can cut the task that names it.
+    notice
+        .tooltip(move |window, cx| {
+            Tooltip::new(tooltip.clone())
+                .max_w(NOTICE_TOOLTIP_WIDTH)
+                .build(window, cx)
+        })
+        .test_support()
+        .into_any_element()
 }
 
 /// An `output` line or status event: one dim line, readable but out of the way.

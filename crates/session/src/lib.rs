@@ -60,13 +60,42 @@ pub enum RowKind {
         arguments: String,
         result: Option<ToolResult>,
     },
-    /// A lane's `report` event.
+    /// A lane's report: the lane's own `report` event, or the same report as the swarm
+    /// passed it to the coordinator in its own words — `[lane 2 report] done: …\nevidence:
+    /// …\nnext: …\nblocked: …\nrequests: …\ngoal: …` (`swarm/lanes.lisp:220`). Both are
+    /// one row, because they are one thing: what a lane said it did.
     Report {
         done: String,
         evidence: String,
         next: String,
         blocked: String,
         requests: String,
+        /// The lane's goal status, when the report carried one (`active`, `complete`,
+        /// …). evo appends it as a last `goal: …` line and only when the lane has a
+        /// goal, so an absent one is `None` rather than an empty field.
+        goal: Option<String>,
+        /// Which lane reported, for a row built from the coordinator's own input
+        /// (`[lane N report] …`); `None` for a row from the lane's own stream, whose
+        /// lane the tab showing it already knows.
+        lane: Option<u32>,
+    },
+    /// A line the swarm wrote to the coordinator about one of its lanes: `[lane 1] run
+    /// ended (stop) — task: …`, `[lane 1] failed to start — see …/lane.log`,
+    /// `[lane 1] initialization failed: …`, `[lane 1] error: …`, `[lane 1] is down: …`,
+    /// `[lane 1] crashed and was restarted …` (`swarm/lanes.lisp`).
+    ///
+    /// These reach the coordinator as input through `tell-coordinator` →
+    /// `evo:steer` (`lanes.lisp:19`), with no `meta` key and no event of their own, so
+    /// the `[lane N]` prefix — evo's own fixed format — is what marks them: a reader
+    /// does not type it, and the line is the swarm talking, not a turn of theirs.
+    LaneNotice {
+        lane: u32,
+        /// The message without its `[lane N] ` prefix, as evo wrote it.
+        text: String,
+        /// How loudly to say it: [`DimStyle::Error`] for the lines evo sends
+        /// `:style :error` (a lane that failed, errored or is down), [`DimStyle::Notice`]
+        /// for a run that merely ended.
+        tone: DimStyle,
     },
     /// `output` lines and status events (compaction, provider-retry, a reconnect...).
     Dim { style: DimStyle, text: String },

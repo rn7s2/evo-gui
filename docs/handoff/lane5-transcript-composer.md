@@ -10,7 +10,7 @@ Owner: `crates/transcript/**`, `crates/composer/**`. Other crates belong to othe
 - `rows.rs` — `render_row(&mut TranscriptData, index, &WeakEntity<TranscriptView>, &mut Context<TranscriptData>)`, one
   function per `RowKind`, `waiting_dots`/`dot_ink` (pips), `json_fields`/`Field`/`FieldValue` (tool payloads),
   `key_cell`/`value_cell`, `NEST_INDENT`/`MAX_DEPTH`/`MAX_ARRAY`, `block_text`, `context_row`/`context_label`/`context_text`
-  with `CONTEXT_BLOCK_LINES = 12`.
+  with `CONTEXT_BLOCK_LINES = 12`, `lane_notice_row` and `report_row` (headed with the lane when the row names one).
 - `link.rs` — `openable(url)` (http/https/mailto only) and `on_click()`, the handler an assistant message's links are
   opened with; `rows::assistant_row` attaches it. Tests: `a_left_click_on_a_link_opens_it`,
   `a_click_on_plain_text_opens_nothing`, `a_right_click_on_a_link_opens_nothing`,
@@ -43,6 +43,21 @@ Invariants
   clicked, and never a `turn N` separator: turn numbers count `RowKind::User` only. Opened, it shows its text in a mono
   block capped at twelve lines with a scroll of its own. Spaces as `TIGHT_GAP` against another context row, `BLOCK_GAP`
   otherwise, plus the block's own `mb` so an opened one is not glued to the row below.
+- The swarm's own words are not the reader's. `tell-coordinator` (`swarm/lanes.lisp:19`) steers the coordinator with
+  `[lane N report] …` (`report-text`, :220) and `[lane N] …` (:237 run end, :193 failed to start, :202 initialization
+  failed, :286 error, :295 output, :341 down, :359 crashed) — no `meta` key, no event of their own, so the prefix is the
+  contract and it is evo's own format, not something a reader types. session's `lane_row`/`lane_prefix` turn them into
+  `RowKind::Report { lane: Some(n), .. }` and `RowKind::LaneNotice { lane, text, tone }` on both paths (the `/transcript`
+  rebuild and the `user-input`/`steering` events), and the transcript draws the report as the report card ("Lane 2 report")
+  and the notice as one muted line, `Lane 1 · run ended (stop) — task: …`, ellipsized to the measure with the whole line
+  in its tooltip and as its accessible name. Neither opens a turn: turn numbers count `RowKind::User` only. `tone` is
+  `DimStyle::Error` when the body says `failed to start` / `initialization failed:` / `error:` / `is down:` /
+  `crashed and was restarted` (case-insensitively, so a lane's own `Error:` output counts), `DimStyle::Notice` otherwise —
+  the swarm's `:style :error` is the TUI's and does not cross the wire, so the wording is all there is.
+  Cross-lane consequences: `crates/proofs/tests/m1_delegation.rs:182` waits for a *user* row containing `[lane 1 report]`
+  and now has to wait for `RowKind::Report { lane: Some(1), done, .. }`; and `session/src/tab.rs`'s own `lane_of_line`
+  reads the same prefix off the coordinator's `Dim` (`output`) rows for a lane's down reason — untouched by these rows,
+  but it is a second parser of the same format and the two could become one.
 - Tool payloads: one `key  value` row per field; a container the top level holds directly flattens (`env.RUST_LOG`,
   `args.0`), anything deeper is drawn as rows indented `NEST_INDENT` (12px) per level under their own key, up to
   `MAX_DEPTH` (4) — past that, or for an array longer than `MAX_ARRAY` (20), the container is one muted `{…3 keys}` /
@@ -58,13 +73,15 @@ Invariants
   found (`c1b901c`, `dfdb3d3`).
 
 ## Commands
-- `cargo test -p transcript` (45) and `cargo test -p composer` (21), plus `cargo test -p session` (the context row is
+- `cargo test -p transcript` (48) and `cargo test -p composer` (21), plus `cargo test -p session` (the context row is
   fixture-driven: `crates/session/tests/fixtures/context-transcript.json`, recorded by
   `crates/session/tests/capture_context_fixture.py`); `cargo fmt -p transcript -p composer`;
   `cargo clippy -p transcript --all-targets` is clean. Note `cargo fmt -p session` reaches `lanes.rs`/`tab.rs` through
   `lib.rs`'s `mod` list — format those files by path, not through the crate, while other lanes are in session.
 - Captures: `cargo run -q -p transcript --example transcript_demo -- --capture crates/transcript/screenshots`, and the
-  same for `-p composer`'s `composer_demo` (both dirs git-ignored). Cost harness: `cargo run -q -p transcript --example
+  same for `-p composer`'s `composer_demo` (both dirs git-ignored). `34-lane-report-and-run-end.png` /
+  `35-dark-lane-report-and-run-end.png` are the turn the swarm talks in (delegation, lane report, run end, the
+  coordinator's answer). Cost harness: `cargo run -q -p transcript --example
   transcript_stress [-- rows stream delta message_chars]`.
 
 ## Kit facts worth not re-deriving (gpui-kit 0.7.0 / gpui-base 0.7.0)
@@ -111,5 +128,9 @@ Invariants
   `div().aria_label(...).aria_expanded(...).test_support()` is the only way a test sees what a row *says*. `SelectableText`
   itself is never an observed element (it inserts a hitbox, not a `Registration`), so wrap the run in an observed div and
   find that; `find` matches on the last component of a global id.
+- **Ellipsis vs selection**: only a plain string child of a `.truncate()` div is ellipsized — GPUI shapes that child with
+  the div's own text style (which is where `text_overflow` lives). A `SelectableText` below the same div is clipped
+  instead (it shapes itself); that is why a `key_cell`'s long key is cut and its tooltip carries it. A lane notice takes
+  the ellipsis, and so gives up selection — the line is the swarm's, one line long, and the whole of it is on hover.
 - **Text ranges**: `TextViewState::set_range_highlights` paints a background for a `Range<usize>` of the rendered text and
   carries no element or tooltip, so it is not a route to clickable file paths either.

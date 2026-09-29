@@ -222,31 +222,30 @@ fn a_lane_run_gives_its_todo_list_and_its_tool_pair() {
 fn a_report_event_becomes_a_report_row() {
     let mut model = AgentModel::new();
     apply_capture(&mut model, "lane2-events.sse");
-    let report = model
+    let row = model
         .rows()
         .iter()
-        .find_map(|row| match &row.kind {
-            RowKind::Report {
-                done,
-                evidence,
-                next,
-                blocked,
-                requests,
-            } => Some((
-                done.clone(),
-                evidence.clone(),
-                next.clone(),
-                blocked.clone(),
-                requests.clone(),
-            )),
-            _ => None,
-        })
+        .find(|row| matches!(row.kind, RowKind::Report { .. }))
         .expect("a report row");
-    assert_eq!(report.0, "lane 2 finished the fixture work");
-    assert_eq!(report.1, "lane2-transcript.json");
-    assert_eq!(report.2, "nothing");
-    assert_eq!(report.3, "");
-    assert_eq!(report.4, "none");
+    let RowKind::Report {
+        done,
+        evidence,
+        next,
+        blocked,
+        requests,
+        goal,
+        lane,
+    } = &row.kind
+    else {
+        unreachable!("the row above is a report")
+    };
+    assert_eq!(done, "lane 2 finished the fixture work");
+    assert_eq!(evidence, "lane2-transcript.json");
+    assert_eq!(next, "nothing");
+    assert_eq!(blocked, "");
+    assert_eq!(requests, "none");
+    assert_eq!(*goal, None, "the captured lane had no goal");
+    assert_eq!(*lane, None, "the lane's own stream does not name its lane");
 }
 
 /// The memory extension injects a snapshot into a fresh session with
@@ -257,6 +256,216 @@ fn a_report_event_becomes_a_report_row() {
 ///
 /// The capture is `tests/fixtures/context-transcript.json`, recorded by
 /// `tests/capture_context_fixture.py` from a real server.
+/// The swarm talks to the coordinator by steering it (`tell-coordinator` →
+/// `evo:steer`, `swarm/lanes.lisp:19`), so its own words arrive as user-role messages.
+/// This is the coordinator's captured transcript from a run that delegated to two
+/// lanes: the three lane messages in it are the swarm's, not the reader's, and none of
+/// them is a turn.
+#[test]
+fn the_swarms_words_about_a_lane_are_not_the_readers() {
+    let mut model = AgentModel::new();
+    model.rebuild_from_transcript(&fixture("transcript.json"));
+    let rows = transcript_rows(&model);
+
+    assert!(
+        !rows
+            .iter()
+            .any(|row| matches!(row, RowView::User(text) if text.starts_with("[lane "))),
+        "the swarm's words stop looking like the reader's: {rows:#?}"
+    );
+
+    let lane_rows: Vec<&RowView> = rows
+        .iter()
+        .filter(|row| {
+            matches!(
+                row,
+                RowView::LaneNotice { .. } | RowView::Report { lane: Some(_), .. }
+            )
+        })
+        .collect();
+    assert_eq!(lane_rows.len(), 3, "lane rows: {lane_rows:#?}");
+
+    match lane_rows[0] {
+        RowView::LaneNotice { lane, text, tone } => {
+            assert_eq!(*lane, 1);
+            // evo truncates the task itself (`truncate-string … 80 "…"`, lanes.lisp:241).
+            assert!(
+                text.starts_with("run ended (stop) — task: DELAY3"),
+                "{text:?}"
+            );
+            assert_eq!(*tone, DimStyle::Notice, "a run that ended as asked");
+        }
+        other => panic!("lane 1's run end is not a notice: {other:#?}"),
+    }
+    match lane_rows[1] {
+        RowView::Report {
+            done,
+            evidence,
+            next,
+            blocked,
+            requests,
+            goal,
+            lane,
+        } => {
+            assert_eq!(*lane, Some(2));
+            assert_eq!(done, "lane 2 finished the fixture work");
+            assert_eq!(evidence, "lane2-transcript.json");
+            assert_eq!(next, "nothing");
+            // evo writes the line for an empty value too (the report's `blocked` was "").
+            assert_eq!(blocked, "");
+            assert_eq!(requests, "none");
+            assert_eq!(*goal, None, "the captured lane had no goal");
+        }
+        other => panic!("lane 2's report is not a report row: {other:#?}"),
+    }
+    match lane_rows[2] {
+        RowView::LaneNotice { lane, text, .. } => {
+            assert_eq!(*lane, 2);
+            assert!(
+                text.starts_with("run ended (stop) — task: CALL report"),
+                "{text:?}"
+            );
+        }
+        other => panic!("lane 2's run end is not a notice: {other:#?}"),
+    }
+}
+
+/// Every line the swarm writes, in evo's own words: the formats are quoted from
+/// `swarm/lanes.lisp`, which is where these strings come from — there is no `meta` key
+/// and no event of their own, so the wording is all the app has to go on.
+#[test]
+fn every_line_the_swarm_writes_becomes_a_lane_row() {
+    let mut model = AgentModel::new();
+    let steering = |model: &mut AgentModel, id: u64, text: &str| {
+        model.apply_event(id, "steering", &json!({ "text": text }));
+    };
+
+    // :193 `"[lane ~d] failed to start — see ~a"`, ~a the lane's log.
+    steering(
+        &mut model,
+        1,
+        "[lane 1] failed to start — see /tmp/evo/lanes/1/lane.log",
+    );
+    // :202 `"[lane ~d] initialization failed: ~a"`.
+    steering(
+        &mut model,
+        2,
+        "[lane 3] initialization failed: no model is configured",
+    );
+    // :237 `"[lane ~d] run ended (~a)~@[ — goal: ~a~]~@[ — task: ~a~]"`.
+    steering(&mut model, 3, "[lane 2] run ended (stop) — goal: active, but the lane is idle until steered — task: port the readout");
+    // :286 `"[lane ~d] error: ~a"`.
+    steering(
+        &mut model,
+        4,
+        "[lane 1] error: eval failed: undefined function",
+    );
+    // :295 `"[lane ~d] ~a"`, a lane's own error output, which evo only forwards when the
+    // output itself was styled an error.
+    steering(&mut model, 5, "[lane 1] Error: no such package");
+    // :341 `"[lane ~d] is down: its process exited. restart_lane brings it back."`
+    steering(
+        &mut model,
+        6,
+        "[lane 2] is down: its process exited. restart_lane brings it back.",
+    );
+    // :359 `"[lane ~d] crashed and was restarted by its supervisor (pid ~a → ~a); …"`
+    steering(&mut model, 7, "[lane 2] crashed and was restarted by its supervisor (pid 4711 → 4712); its session was resumed and it was re-initialized.");
+    // :220 `"[lane ~d report] done: ~a~@[~%evidence: ~a~]~@[~%next: ~a~]~@[~%blocked: ~a~]~@[~%requests: ~a~]~@[~%goal: ~a~]"`
+    // with a `done` of more than one line, a blank line inside it, an empty `blocked`,
+    // and a goal.
+    steering(&mut model, 8, "[lane 2 report] done: ported the readout\n\nand its tests\nevidence: cargo test -p session\nnext: wait for the review\nblocked: \nrequests: none\ngoal: active, but the lane is idle until steered");
+
+    let kinds: Vec<&RowKind> = model.rows().iter().map(|row| &row.kind).collect();
+    assert!(
+        !kinds
+            .iter()
+            .any(|kind| matches!(kind, RowKind::User { .. })),
+        "the swarm steering the coordinator is not the reader typing: {kinds:#?}"
+    );
+
+    let notices: Vec<(u32, &str, DimStyle)> = kinds
+        .iter()
+        .filter_map(|kind| match kind {
+            RowKind::LaneNotice { lane, text, tone } => Some((*lane, text.as_str(), *tone)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        notices,
+        vec![
+            (1, "failed to start — see /tmp/evo/lanes/1/lane.log", DimStyle::Error),
+            (3, "initialization failed: no model is configured", DimStyle::Error),
+            (2, "run ended (stop) — goal: active, but the lane is idle until steered — task: port the readout", DimStyle::Notice),
+            (1, "error: eval failed: undefined function", DimStyle::Error),
+            (1, "Error: no such package", DimStyle::Error),
+            (2, "is down: its process exited. restart_lane brings it back.", DimStyle::Error),
+            (2, "crashed and was restarted by its supervisor (pid 4711 → 4712); its session was resumed and it was re-initialized.", DimStyle::Error),
+        ],
+        "one line per thing the swarm said"
+    );
+
+    let Some(RowKind::Report {
+        done,
+        evidence,
+        next,
+        blocked,
+        requests,
+        goal,
+        lane,
+    }) = kinds.last()
+    else {
+        panic!("the last row is not the report: {kinds:#?}")
+    };
+    assert_eq!(*lane, Some(2));
+    assert_eq!(done, "ported the readout\n\nand its tests");
+    assert_eq!(evidence, "cargo test -p session");
+    assert_eq!(next, "wait for the review");
+    assert_eq!(blocked, "");
+    assert_eq!(requests, "none");
+    assert_eq!(
+        goal.as_deref(),
+        Some("active, but the lane is idle until steered")
+    );
+}
+
+/// The same lines on the rebuild path, where they arrive as the user-role messages
+/// `/transcript` carries — and a line the reader wrote that happens to open with the
+/// prefix is still theirs.
+#[test]
+fn a_rebuilt_transcript_reads_the_swarms_words_too() {
+    let mut model = AgentModel::new();
+    model.rebuild_from_transcript(&json!({
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "[lane 4] failed to start — see /tmp/evo/lanes/4/lane.log"}]},
+            {"role": "user", "content": [{"type": "text", "text": "[lane 1 report] done: nothing to do\nrequests: none"}]},
+            {"role": "user", "content": [{"type": "text", "text": "[lane four] is that right?"}]},
+            {"role": "user", "content": [{"type": "text", "text": "over to you"}]},
+        ]
+    }));
+    assert_eq!(
+        transcript_rows(&model),
+        vec![
+            RowView::LaneNotice {
+                lane: 4,
+                text: "failed to start — see /tmp/evo/lanes/4/lane.log".to_string(),
+                tone: DimStyle::Error,
+            },
+            RowView::Report {
+                done: "nothing to do".to_string(),
+                evidence: String::new(),
+                next: String::new(),
+                blocked: String::new(),
+                requests: "none".to_string(),
+                goal: None,
+                lane: Some(1),
+            },
+            RowView::User("[lane four] is that right?".to_string()),
+            RowView::User("over to you".to_string()),
+        ]
+    );
+}
+
 #[test]
 fn an_injected_message_is_context_rather_than_a_user_turn() {
     let mut model = AgentModel::new();

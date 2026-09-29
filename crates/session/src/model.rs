@@ -207,16 +207,15 @@ impl AgentModel {
                 Some("user") => {
                     let text = join_blocks(message.get("content"), "text", "text");
                     if !text.is_empty() {
-                        // An extension's injected message is a user-role message
-                        // with a `meta.key`; the reader did not write it, so it is
-                        // context rather than a turn of theirs.
-                        match context_key(message) {
-                            Some(key) => {
-                                self.push_row(RowKind::Context { key, text });
-                            }
-                            None => {
-                                self.push_row(RowKind::User { text });
-                            }
+                        // A user-role message the reader did not write: the swarm's own
+                        // words about a lane (`[lane N] …`), or content an extension
+                        // injected with a `meta.key`. Only what is left is their turn.
+                        if let Some(row) = lane_row(&text) {
+                            self.push_row(row);
+                        } else if let Some(key) = context_key(message) {
+                            self.push_row(RowKind::Context { key, text });
+                        } else {
+                            self.push_row(RowKind::User { text });
                         }
                     }
                 }
@@ -354,7 +353,16 @@ impl AgentModel {
                 if text.is_empty() {
                     return Effect::NONE;
                 }
-                self.push_row(RowKind::User { text });
+                // A steering entry is not always the reader typing: the swarm steers the
+                // coordinator with its own words too (`tell-coordinator`).
+                match lane_row(&text) {
+                    Some(row) => {
+                        self.push_row(row);
+                    }
+                    None => {
+                        self.push_row(RowKind::User { text });
+                    }
+                }
                 Effect::ROWS
             }
             "report" => {
@@ -364,6 +372,9 @@ impl AgentModel {
                     next: string_field(data, "next").unwrap_or_default(),
                     blocked: string_field(data, "blocked").unwrap_or_default(),
                     requests: string_field(data, "requests").unwrap_or_default(),
+                    goal: string_field(data, "goal").filter(|goal| !goal.is_empty()),
+                    // The lane's own stream: the tab it is read in knows which lane.
+                    lane: None,
                 });
                 Effect::ROWS
             }
@@ -902,6 +913,112 @@ fn join_blocks(content: Option<&Value>, block_type: &str, key: &str) -> String {
         }
     }
     parts.join("\n")
+}
+
+/// The row for a message the swarm wrote about one of its lanes, or `None` when the
+/// text is not one.
+///
+/// `tell-coordinator` (`swarm/lanes.lisp:19`) steers the coordinator with these strings
+/// and nothing marks them — there is no event type of their own and no `meta` key — so
+/// evo's own fixed format is the contract: `[lane N report] …` for a report
+/// (`report-text`, :220), `[lane N] …` for everything else the swarm has to say —
+/// `run ended (<outcome>) — goal: … — task: …` (:237), `failed to start — see …` (:193),
+/// `initialization failed: …` (:202), `error: …` (:286), the lane's own error output
+/// (:295), `is down: …` (:341), `crashed and was restarted …` (:359).
+fn lane_row(text: &str) -> Option<RowKind> {
+    let (lane, report, body) = lane_prefix(text)?;
+    if report {
+        return Some(report_row(lane, body));
+    }
+    Some(RowKind::LaneNotice {
+        lane,
+        text: body.to_string(),
+        tone: lane_notice_tone(body),
+    })
+}
+
+/// `[lane N] body` or `[lane N report] body`: which lane, whether it is a report, and
+/// the body. `None` for anything else — a sentence that opens with `[lane ` is the
+/// reader's own, since it carries no number evo could have written.
+fn lane_prefix(text: &str) -> Option<(u32, bool, &str)> {
+    let rest = text.strip_prefix("[lane ")?;
+    let (head, rest) = rest.split_once(']')?;
+    let (number, report) = match head.strip_suffix(" report") {
+        Some(number) => (number, true),
+        None => (head, false),
+    };
+    let lane: u32 = number.parse().ok()?;
+    Some((lane, report, rest.strip_prefix(' ').unwrap_or(rest)))
+}
+
+/// A report as evo wrote it back into the fields the `report` event carries, one row
+/// (`swarm/lanes.lisp:220`).
+///
+/// `done` opens the first value, with no label of its own on the wire: it is the rest of
+/// the first line. Each of evo's other labels opens another value, and any line that is
+/// not a label continues the value above it — so a `done` that is a paragraph of its own
+/// arrives whole rather than cut at its first newline.
+fn report_row(lane: u32, body: &str) -> RowKind {
+    const LABELS: [&str; 5] = ["evidence:", "next:", "blocked:", "requests:", "goal:"];
+    let body = body
+        .strip_prefix("done:")
+        .map(|rest| rest.strip_prefix(' ').unwrap_or(""))
+        .unwrap_or(body);
+
+    let mut fields: [String; 6] = Default::default();
+    let mut current = 0;
+    for line in body.lines() {
+        match LABELS.iter().position(|label| line.starts_with(*label)) {
+            Some(index) => {
+                current = index + 1;
+                fields[current] = line[LABELS[index].len()..]
+                    .strip_prefix(' ')
+                    .unwrap_or("")
+                    .to_string();
+            }
+            None => {
+                if !fields[current].is_empty() {
+                    fields[current].push('\n');
+                }
+                fields[current].push_str(line);
+            }
+        }
+    }
+
+    let [done, evidence, next, blocked, requests, goal] = fields;
+    RowKind::Report {
+        done,
+        evidence,
+        next,
+        blocked,
+        requests,
+        goal: (!goal.is_empty()).then_some(goal),
+        lane: Some(lane),
+    }
+}
+
+/// How loudly a lane notice is said.
+///
+/// The swarm marks its failures `:style :error`, but that is the TUI's own scrollback
+/// style and does not cross the wire, so the wording is what is left. These are the
+/// phrases evo writes for a lane in trouble (`swarm/lanes.lisp`); anything else — a
+/// `run ended` line above all — stays quiet.
+fn lane_notice_tone(body: &str) -> DimStyle {
+    const FAILURES: [&str; 5] = [
+        "failed to start",
+        "initialization failed:",
+        "error:",
+        "is down:",
+        "crashed and was restarted",
+    ];
+    // A lane's own error output is prose evo did not write, so `Error:` with a capital
+    // E counts the same as the swarm's own `error:`.
+    let body = body.to_lowercase();
+    if FAILURES.iter().any(|phrase| body.contains(phrase)) {
+        DimStyle::Error
+    } else {
+        DimStyle::Notice
+    }
 }
 
 /// A message's `meta.key`: the tag an extension gave the content it injected with

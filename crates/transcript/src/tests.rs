@@ -107,6 +107,38 @@ fn context(id: RowId, key: &str, text: &str) -> Row {
     }
 }
 
+/// A line the swarm wrote to the coordinator about one of its lanes, as the session
+/// reads it out of the coordinator's own input (`[lane N] …`, `swarm/lanes.lisp`).
+fn lane_notice(id: RowId, lane: u32, text: &str, tone: DimStyle) -> Row {
+    Row {
+        id,
+        version: 1,
+        kind: RowKind::LaneNotice {
+            lane,
+            text: text.into(),
+            tone,
+        },
+    }
+}
+
+/// A lane's report as the swarm passed it to the coordinator: the lane's own fields,
+/// headed with the lane they belong to.
+fn lane_report(id: RowId, lane: u32, done: &str) -> Row {
+    Row {
+        id,
+        version: 1,
+        kind: RowKind::Report {
+            done: done.into(),
+            evidence: String::new(),
+            next: String::new(),
+            blocked: String::new(),
+            requests: "none".into(),
+            goal: None,
+            lane: Some(lane),
+        },
+    }
+}
+
 /// A tool row with the arguments and result a call actually carries.
 fn tool_with(id: RowId, name: &str, arguments: &str, result: Option<ToolResult>) -> Row {
     Row {
@@ -428,6 +460,165 @@ fn a_tool_row_opens_on_click(cx: &mut TestAppContext) {
                 .try_find(("transcript-tool-arguments", 1u64))
                 .is_some(),
             "clicking the header opens the row"
+        );
+    });
+}
+
+/// The swarm talking to the coordinator is not the coordinator's turn: one quiet line
+/// per thing it said, with the lane named in front of it and the whole line a hover
+/// away.
+#[gpui_kit::test]
+fn a_lane_notice_is_one_quiet_line(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (host, cx) = cx.add_window_view(|_window, cx| TranscriptHost::new(cx));
+
+    let long = format!("run ended (stop) — task: {}", long_path());
+    host.update(cx, |host, cx| {
+        host.transcript.update(cx, |view, cx| {
+            view.replace(
+                1,
+                vec![
+                    lane_notice(1, 1, &long, DimStyle::Notice),
+                    lane_notice(
+                        2,
+                        3,
+                        "failed to start — see /tmp/evo/lanes/3/lane.log",
+                        DimStyle::Error,
+                    ),
+                ],
+                cx,
+            );
+        });
+    });
+
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+
+        // What the row says is the swarm's own words, with the lane they are about.
+        let notice = window.find(("transcript-lane-notice", 1u64));
+        assert_eq!(notice.label(), Some(format!("Lane 1 · {long}").as_str()));
+        assert_eq!(
+            window.find(("transcript-lane-notice", 2u64)).label(),
+            Some("Lane 3 · failed to start — see /tmp/evo/lanes/3/lane.log")
+        );
+
+        // One line, whatever the swarm's task path is, and never wider than the
+        // reading measure: a notice does not push the column out.
+        assert!(
+            notice.bounds().size.height <= px(20.),
+            "the notice wrapped: {:?}",
+            notice.bounds()
+        );
+        assert!(
+            notice.bounds().size.width <= px(MEASURE),
+            "the notice runs past the measure: {:?}",
+            notice.bounds()
+        );
+        for id in [1u64, 2] {
+            let measure = window.find(("transcript-measure", id)).bounds();
+            assert_eq!(
+                measure.size.width,
+                px(MEASURE),
+                "row {id} keeps the measure"
+            );
+        }
+    });
+}
+
+/// A report that came from the swarm is headed with the lane it is about; the lane's own
+/// transcript keeps the heading it has always had.
+#[gpui_kit::test]
+fn a_lane_report_is_headed_with_its_lane(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (host, cx) = cx.add_window_view(|_window, cx| TranscriptHost::new(cx));
+
+    host.update(cx, |host, cx| {
+        host.transcript.update(cx, |view, cx| {
+            view.replace(
+                1,
+                vec![
+                    lane_report(1, 2, "Created hello.txt and verified it"),
+                    Row {
+                        id: 2,
+                        version: 1,
+                        kind: RowKind::Report {
+                            done: "the lane's own row".into(),
+                            evidence: String::new(),
+                            next: String::new(),
+                            blocked: String::new(),
+                            requests: String::new(),
+                            goal: None,
+                            lane: None,
+                        },
+                    },
+                ],
+                cx,
+            );
+        });
+    });
+
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        assert_eq!(
+            window.find(("transcript-report-heading", 1u64)).label(),
+            Some("Lane 2 report")
+        );
+        assert_eq!(
+            window.find(("transcript-report-heading", 2u64)).label(),
+            Some("report")
+        );
+    });
+}
+
+/// Neither the swarm's notices nor its reports are turns: the reader's own message is
+/// still turn 1, and everything the swarm said stays above it.
+#[gpui_kit::test]
+fn the_swarms_own_words_open_no_turn(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (host, cx) = cx.add_window_view(|_window, cx| TranscriptHost::new(cx));
+
+    host.update(cx, |host, cx| {
+        host.transcript.update(cx, |view, cx| {
+            view.replace(
+                1,
+                vec![
+                    lane_report(1, 2, "Created hello.txt"),
+                    lane_notice(
+                        2,
+                        2,
+                        "run ended (stop) — task: create hello.txt",
+                        DimStyle::Notice,
+                    ),
+                    user(3, 1, "Did it work?"),
+                    assistant(4, 1, "Yes."),
+                    user(5, 1, "Thanks."),
+                ],
+                cx,
+            );
+        });
+    });
+
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        let first = window
+            .try_find(("transcript-turn", 1usize))
+            .expect("the reader's first turn is turn 1");
+        assert!(
+            first.bounds().origin.y
+                > window
+                    .find(("transcript-lane-notice", 2u64))
+                    .bounds()
+                    .origin
+                    .y,
+            "no turn opens above the swarm's own words"
+        );
+        assert!(
+            window.try_find(("transcript-turn", 2usize)).is_some(),
+            "the reader's second message is turn 2"
+        );
+        assert!(
+            window.try_find(("transcript-turn", 3usize)).is_none(),
+            "two reports from the swarm are not three turns"
         );
     });
 }
@@ -966,6 +1157,8 @@ fn long_content_wraps_inside_a_centred_reading_measure(cx: &mut TestAppContext) 
                             next: String::new(),
                             blocked: String::new(),
                             requests: String::new(),
+                            goal: None,
+                            lane: None,
                         },
                     },
                 ],

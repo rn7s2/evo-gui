@@ -124,6 +124,10 @@ const DARK_NESTED_ARGUMENTS_SHOT: &str = "31-dark-nested-tool-arguments.png";
 /// the global one opened onto the twelve lines it shows at once.
 const CONTEXT_SHOT: &str = "32-injected-context.png";
 const DARK_CONTEXT_SHOT: &str = "33-dark-injected-context.png";
+/// The turn the swarm talks in: the reader delegates, the lane reports, its run ends,
+/// and the coordinator answers — the messages that used to read as the reader's own.
+const FOLLOW_UP_SHOT: &str = "34-lane-report-and-run-end.png";
+const DARK_FOLLOW_UP_SHOT: &str = "35-dark-lane-report-and-run-end.png";
 
 const ASSISTANT_ID: RowId = 2;
 const SECOND_ASSISTANT_ID: RowId = 21;
@@ -140,6 +144,13 @@ const WRITE_CALL: RowId = 31;
 /// The two injected snapshots of the context stage.
 const GLOBAL_CONTEXT: RowId = 60;
 const PROJECT_CONTEXT: RowId = 61;
+/// The rows of the follow-up stage.
+const DELEGATE_CALL: RowId = 70;
+const LANE_REPORT: RowId = 73;
+const LANE_RUN_END: RowId = 74;
+/// A window that holds that whole turn, so the capture does not depend on where the
+/// scroller sits.
+const FOLLOW_UP_SIZE: (f32, f32) = (1000., 620.);
 
 /// The message the demo streams. Headings, bold, a list, a table and a fenced
 /// code block — all of them half-typed at some point mid-stream.
@@ -319,6 +330,8 @@ fn turn_rows() -> Vec<Row> {
                 next: "".into(),
                 blocked: "".into(),
                 requests: "".into(),
+                goal: None,
+                lane: None,
             },
         },
         dim_row(8, DimStyle::Notice, "Compacted 12 messages into 9"),
@@ -519,6 +532,77 @@ fn coverage_rows() -> Vec<Row> {
                 error: None,
             },
         },
+    ]
+}
+
+/// What the swarm said while the reader's delegation ran, verbatim from the capture of
+/// a real run (`docs/screens/real/real-04-follow-up.png`, and the `[lane …]` messages in
+/// `crates/session/tests/fixtures/transcript.json`): a report as `report-text` writes it
+/// (`swarm/lanes.lisp:220`), and a run end as `run-ended-text` writes it (:237), with the
+/// lane's task cut to eighty characters by the swarm itself.
+const LANE_1_REPORT_DONE: &str = "Created hello.txt containing 'hi' and verified via cat.";
+const LANE_1_REPORT_EVIDENCE: &str =
+    "write wrote 2 chars to \u{2026}/project/hello.txt; `cat hello.txt` printed `hi`.";
+const LANE_1_RUN_END: &str =
+    "run ended (stop) \u{2014} task: Create a file named hello.txt in the directory /private/var/folders/5d/bgm58_151\u{2026}";
+
+/// The follow-up stage: one turn in which the swarm does the talking.
+///
+/// The delegation, the swarm's own two lines about lane 1, and the coordinator's answer
+/// to them. Neither of the swarm's lines is a turn, and neither is drawn as input the
+/// reader typed: the report is a report, and the run end is one line of the swarm's own
+/// words under the lane it is about.
+fn follow_up_rows() -> Vec<Row> {
+    vec![
+        user_row(
+            69,
+            "Delegate to a lane: create hello.txt containing 'hi' in this folder, then \
+             tell me when it is done. Keep every reply to one short sentence.",
+        ),
+        tool_row(
+            DELEGATE_CALL,
+            1,
+            "delegate",
+            r#"{"lane":1,"task":"Create a file named hello.txt containing 'hi' in this folder."}"#,
+            Some(ToolResult {
+                is_error: false,
+                content: "lane 1 is working".into(),
+                content_chars: None,
+            }),
+        ),
+        assistant_row(
+            72,
+            "I've handed this to lane 1 and will tell you when hello.txt is created.",
+            false,
+        ),
+        Row {
+            id: LANE_REPORT,
+            version: 1,
+            kind: RowKind::Report {
+                done: LANE_1_REPORT_DONE.into(),
+                evidence: LANE_1_REPORT_EVIDENCE.into(),
+                next: String::new(),
+                blocked: String::new(),
+                requests: String::new(),
+                goal: None,
+                lane: Some(1),
+            },
+        },
+        Row {
+            id: LANE_RUN_END,
+            version: 1,
+            kind: RowKind::LaneNotice {
+                lane: 1,
+                text: LANE_1_RUN_END.into(),
+                tone: DimStyle::Notice,
+            },
+        },
+        assistant_row(
+            75,
+            "Done: hello.txt is in this folder and contains \"hi\", which I confirmed by \
+             reading it.",
+            false,
+        ),
     ]
 }
 
@@ -1117,6 +1201,16 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     });
     shot(&mut cx, context_stage, dir, CONTEXT_SHOT)?;
 
+    // The turn the swarm talks in: the delegation, the lane's report, the line that
+    // says its run ended, and the coordinator's answer to them.
+    let (follow_up, follow_up_demo) = open_capture_window(&mut cx, FOLLOW_UP_SIZE)?;
+    follow_up_demo.update(&mut cx, |demo, cx| {
+        demo.transcript.update(cx, |view, cx| {
+            view.replace(1, follow_up_rows(), cx);
+        });
+    });
+    shot(&mut cx, follow_up, dir, FOLLOW_UP_SHOT)?;
+
     // What an expanded tool row shows: the calls' own JSON as a key/value list,
     // a multi-line value as a block, and both shapes of result.
     let (tools, tools_demo) = open_capture_window(&mut cx, CAPTURE_SIZE)?;
@@ -1195,6 +1289,9 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
 
     // And the nested arguments in the dark theme.
     shot(&mut cx, nested, dir, DARK_NESTED_ARGUMENTS_SHOT)?;
+
+    // The same turn in the dark theme.
+    shot(&mut cx, follow_up, dir, DARK_FOLLOW_UP_SHOT)?;
 
     // And the injected context in the dark theme.
     shot(&mut cx, context_stage, dir, DARK_CONTEXT_SHOT)?;

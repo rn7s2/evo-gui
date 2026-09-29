@@ -576,6 +576,7 @@ pub fn signature(row: &session::Row) -> String {
     match &row.kind {
         session::RowKind::User { text } => format!("user:{text}"),
         session::RowKind::Context { key, text } => format!("context:{key}:{text}"),
+        session::RowKind::LaneNotice { lane, text, .. } => format!("lane{lane}:{text}"),
         session::RowKind::Assistant {
             markdown,
             thinking,
@@ -606,6 +607,9 @@ pub fn row_summary(model: &session::AgentModel) -> Vec<String> {
         .map(|row| match &row.kind {
             session::RowKind::User { text } => format!("user:{}", clip(text, 60)),
             session::RowKind::Context { key, .. } => format!("context:{key}"),
+            session::RowKind::LaneNotice { lane, text, .. } => {
+                format!("lane{lane}:{}", clip(text, 60))
+            }
             session::RowKind::Assistant { markdown, .. } => {
                 format!("assistant:{}", clip(markdown, 60))
             }

@@ -107,6 +107,13 @@ pub enum RowView {
         next: String,
         blocked: String,
         requests: String,
+        goal: Option<String>,
+        lane: Option<u32>,
+    },
+    LaneNotice {
+        lane: u32,
+        text: String,
+        tone: session::DimStyle,
     },
     Dim(String),
     RunOutcome {
@@ -149,12 +156,21 @@ impl RowView {
                 next,
                 blocked,
                 requests,
+                goal,
+                lane,
             } => RowView::Report {
                 done: done.clone(),
                 evidence: evidence.clone(),
                 next: next.clone(),
                 blocked: blocked.clone(),
                 requests: requests.clone(),
+                goal: goal.clone(),
+                lane: *lane,
+            },
+            session::RowKind::LaneNotice { lane, text, tone } => RowView::LaneNotice {
+                lane: *lane,
+                text: text.clone(),
+                tone: *tone,
             },
             session::RowKind::Dim { text, .. } => RowView::Dim(text.clone()),
             session::RowKind::RunOutcome { outcome, text } => RowView::RunOutcome {
