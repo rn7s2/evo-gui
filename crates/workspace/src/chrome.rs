@@ -17,9 +17,10 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    div, point, px, size, AnyElement, App, Bounds, Context, ElementId, Entity, FocusHandle, Global,
-    IntoElement, KeyBinding, MouseButton, MouseDownEvent, Pixels, ScrollHandle, SharedString, Size,
-    Subscription, Task, TestSupportExt as _, Window, WindowBounds, WindowOptions,
+    div, linear_color_stop, linear_gradient, point, px, size, AnyElement, App, Background, Bounds,
+    Context, ElementId, Entity, FocusHandle, Global, Hsla, IntoElement, KeyBinding, MouseButton,
+    MouseDownEvent, Pixels, Rgba, ScrollHandle, SharedString, Size, Subscription, Task,
+    TestSupportExt as _, Window, WindowBounds, WindowOptions,
 };
 
 use std::rc::Rc;
@@ -56,6 +57,44 @@ const TITLE_BAR_LEFT_INSET: f32 = if cfg!(target_os = "macos") { 80. } else { 12
 
 /// The `+` at the end of the strip: always present, always the last thing.
 const ADD_TAB_ID: &str = "tab-add";
+
+/// The row the strip is drawn in: the tabs' box and the `+`'s box, side by side.
+const TAB_STRIP_ID: &str = "tab-strip";
+
+/// The box the tabs scroll inside — the edge they are clipped at, which is the
+/// edge the `+` begins at. A tab is never drawn past it (§7.1).
+const TAB_STRIP_SCROLL_ID: &str = "tab-strip-scroll";
+
+/// The kit's tab bar inside that box. Its id is only a name: the strip's own
+/// element is [`TAB_STRIP_SCROLL_ID`], which is the one with the edge.
+const TAB_BAR_ID: &str = "tab-bar";
+
+/// The `+`'s box, which is what keeps a tab's tail off the button.
+const ADD_TAB_BOX_ID: &str = "tab-add-box";
+
+/// The title bar's own background, for a box that has to be opaque over it.
+///
+/// The kit draws it as a vertical gradient — 55% `title_bar` mixed with
+/// `background` at the top, `title_bar` at the bottom, in
+/// `gpui_component::title_bar`'s `default_title_bar_background`, which is private
+/// — so a solid colour would leave a visible patch where the button is. This is
+/// that gradient, and the only thing in this file that mirrors the kit's chrome.
+fn title_bar_background(cx: &App) -> Background {
+    let title_bar = cx.theme().title_bar;
+    let background = cx.theme().background.to_rgb();
+    let title_bar_rgb = title_bar.to_rgb();
+    let mixed = Hsla::from(Rgba {
+        r: title_bar_rgb.r * 0.55 + background.r * 0.45,
+        g: title_bar_rgb.g * 0.55 + background.g * 0.45,
+        b: title_bar_rgb.b * 0.55 + background.b * 0.45,
+        a: title_bar_rgb.a * 0.55 + background.a * 0.45,
+    });
+    linear_gradient(
+        180.,
+        linear_color_stop(mixed, 0.),
+        linear_color_stop(title_bar, 1.),
+    )
+}
 
 /// The key context the window's own shortcuts are bound in (§7.1).
 ///
@@ -671,29 +710,61 @@ impl WorkspaceView {
         }
     }
 
+    /// The strip: the tabs, and the `+` that adds one (§7.1).
+    ///
+    /// The `+` is not the tab bar's *suffix*. A suffix sits at the bar's right
+    /// edge while the tabs scroll under it, so a tab whose edge is past the
+    /// window's overflows into the button's pixels — and since the button is
+    /// drawn after them, what a reader sees is the last visible tab's label with
+    /// the `+` on top of it (§7.1, and `docs/screens/09-bad-run-dark.png`, where
+    /// it reads `● evo-desktoj +`).
+    ///
+    /// So the scrolling part gets a box of its own, [clipped](Self::render_tab_scroll)
+    /// and sized to end where the button begins: a tab is cut off at that edge
+    /// instead of running under it.
+    ///
+    /// The cap is in pixels — the window, less the title bar's own left padding —
+    /// rather than `max_w_full`, because a percentage does not resolve against the
+    /// kit's title bar: the row would end up as wide as its content, `+` and all,
+    /// which is what once pushed the button off the screen. It is measured afresh
+    /// every frame, so a resized window reflows.
     fn render_tab_strip(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // The room the strip has: the window, less the title bar's own left
-        // padding. The cap is in pixels rather than `max_w_full` because a
-        // percentage does not resolve against the kit's title bar — the bar ends
-        // up as wide as its content, `+` and all, which is what pushed the `+`
-        // off the screen — and it is measured afresh every frame, so a resized
-        // window reflows (§7.1).
         let room = window.bounds().size.width - px(TITLE_BAR_LEFT_INSET);
-        TabBar::new("tab-strip")
-            // The bar takes the width its tabs need, so the `+` sits right after
-            // the last one — and it stops at ROOM, so a strip with more tabs than
-            // fit scrolls them inside the bar, with the `+` — which the kit lays
-            // out after the scrolling part — still on the screen (§7.1).
+        h_flex()
+            .id(TAB_STRIP_ID)
             .min_w_0()
+            .h_full()
             .max_w(room)
-            .max_width(px(TAB_MAX_WIDTH))
-            .track_scroll(&self.strip_scroll)
-            .selected_index(self.selected)
-            .on_click(
-                cx.listener(|this, index: &usize, window, cx| this.select_tab(*index, window, cx)),
+            .child(self.render_tab_scroll(cx))
+            .child(self.render_add_tab_button(cx))
+    }
+
+    /// The scrolling part of the strip: the tabs, and nothing else.
+    ///
+    /// `min_w_0` + `flex_shrink_1` is what makes it give way: with room for every
+    /// tab it is as wide as they are (and the `+` sits right after the last one),
+    /// and with more tabs than fit it shrinks to what is left of the window and
+    /// clips the rest. Scrolling is the bar's own business — it happens inside the
+    /// bar, on `track_scroll`, a hair inside this edge — so what this box decides
+    /// is only where the tabs stop being drawn.
+    fn render_tab_scroll(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id(TAB_STRIP_SCROLL_ID)
+            .test_support()
+            .min_w_0()
+            .flex_shrink_1()
+            .overflow_x_hidden()
+            .child(
+                TabBar::new(TAB_BAR_ID)
+                    .min_w_0()
+                    .max_width(px(TAB_MAX_WIDTH))
+                    .track_scroll(&self.strip_scroll)
+                    .selected_index(self.selected)
+                    .on_click(cx.listener(|this, index: &usize, window, cx| {
+                        this.select_tab(*index, window, cx)
+                    }))
+                    .children(self.tabs.iter().map(|tab| self.render_tab(tab, cx))),
             )
-            .suffix(self.render_add_tab_button(cx))
-            .children(self.tabs.iter().map(|tab| self.render_tab(tab, cx)))
     }
 
     /// One tab: the folder's name, the whole path plus the swarm's state on
@@ -821,14 +892,35 @@ impl WorkspaceView {
     }
 
     fn render_add_tab_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        Button::new(ADD_TAB_ID)
-            .ghost()
-            .xsmall()
-            .icon(IconName::Plus)
-            .tooltip("New tab")
-            .on_click(cx.listener(|this, _, window, cx| {
-                this.open_empty_tab(window, cx);
-            }))
+        // The strip is wider than the room it has, so the button has tabs behind
+        // it: it says where the strip ends. With every tab on screen it sits in
+        // open space, and a line there would divide nothing.
+        let overflowing = self.strip_scroll.max_offset().x > px(0.);
+        h_flex()
+            .id(ADD_TAB_BOX_ID)
+            .test_support()
+            .flex_none()
+            .h_full()
+            .items_center()
+            // Opaque, and the title bar's own colour rather than the strip's:
+            // whatever the strip scrolls past this edge stops at the clip, and
+            // nothing of it shows through the box.
+            .bg(title_bar_background(cx))
+            .when(overflowing, |this| {
+                this.pl_1()
+                    .border_l_1()
+                    .border_color(cx.theme().title_bar_border)
+            })
+            .child(
+                Button::new(ADD_TAB_ID)
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Plus)
+                    .tooltip("New tab")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.open_empty_tab(window, cx);
+                    })),
+            )
     }
 
     /// Register what happens when the user closes the window (§9.8). Once per

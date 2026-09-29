@@ -633,3 +633,89 @@ fn the_window_is_named_after_the_folder_of_the_tab_being_shown(cx: &mut TestAppC
     })
     .unwrap();
 }
+
+/// §7.1: an overflowing strip scrolls **past** the `+`, not under it. The `+` is
+/// the last thing on the strip's row and the tabs are clipped where it begins, so
+/// no tab's name is ever drawn beneath it.
+///
+/// The bug this pins down is in `docs/screens/09-bad-run-dark.png`: the button was
+/// the tab bar's own suffix, laid over the tabs as they scrolled by, and the last
+/// visible tab read `● evo-desktoj +` — the `+` sitting on the `p`.
+#[gpui_kit::test]
+fn the_add_button_never_sits_on_a_tab(cx: &mut TestAppContext) {
+    let home = std::env::temp_dir().join(format!("workspace-ui-strip-{}", std::process::id()));
+    std::fs::create_dir_all(&home).expect("a home to work in");
+    let root = home.clone();
+
+    let (handle, view) = open_window_with(cx, move |window, cx| {
+        WorkspaceView::with_config(
+            Arc::new(SwarmConfig {
+                // A tab reaches its folder without a process behind it: the strip is
+                // what this test is about, and a swarm would only add noise.
+                swarm_bin: PathBuf::from("/nonexistent/evo-swarm"),
+                root: store::paths::Root::at(root),
+                ..SwarmConfig::default()
+            }),
+            window,
+            cx,
+        )
+    });
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        view.update(cx, |view, cx| {
+            for index in 0..14 {
+                // Names long enough to take the strip's own tab width — the shape
+                // that has tabs running past the window's edge.
+                let folder = home.join(format!("evo-desktop-visual-review-deep-context-{index}"));
+                std::fs::create_dir_all(&folder).expect("a folder to work in");
+                let tab = if index == 0 {
+                    view.selected_tab().clone()
+                } else {
+                    view.add_tab(window, cx)
+                };
+                tab.update(cx, |tab, cx| {
+                    tab.launch(
+                        Launch::New {
+                            folder,
+                            plan: LaunchPlan::default(),
+                        },
+                        window,
+                        cx,
+                    )
+                });
+            }
+            // A tab in the middle of the strip: the seven tabs to its right are
+            // past the window's edge, which is where the `+` is.
+            view.select_tab(6, window, cx);
+        });
+        window.render_frame(cx);
+        // One more frame: the strip is its widest now, so this is the layout with
+        // the most tabs behind the button.
+        window.render_frame(cx);
+
+        let add = window.find("tab-add-box");
+        let add_bounds = add.bounds();
+        let strip = window.find("tab-strip-scroll").bounds();
+        assert!(
+            strip.right() <= add_bounds.left(),
+            "the tabs are clipped where the + begins: strip {strip:?}, + {add_bounds:?}"
+        );
+
+        for index in 0..14 {
+            let label = window.find(tab_label(tab_id(&view, index, cx))).bounds();
+            // What a reader can see of it: the label's own bounds, cut at the
+            // strip's edge — the part the clip leaves on the screen.
+            let visible = label.left().max(strip.left())..label.right().min(strip.right());
+            if visible.is_empty() {
+                continue;
+            }
+            assert!(
+                visible.end <= add_bounds.left(),
+                "tab {index}'s name is drawn under the +: label {label:?} shows {visible:?}, \
+                 and the + is at {add_bounds:?}"
+            );
+        }
+    })
+    .unwrap();
+}
