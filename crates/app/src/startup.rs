@@ -16,16 +16,17 @@
 //! Each arrival goes through [`crate::launcher`], which both pushes it into the
 //! tabs that exist and remembers it for the ones created later.
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use gpui_kit::App;
 
-use store::app_state::Binaries;
+use store::app_state::{AppState, Binaries};
 use store::history::{self, ScanBudget};
 use store::model_cache::ModelCache;
 use store::paths::Root;
 use store::time;
 
+use crate::housekeeping;
 use crate::launcher;
 use crate::logging::AppLog;
 use crate::Shell;
@@ -106,7 +107,11 @@ pub fn start(cx: &mut App) {
     })
     .detach();
 
-    // 3. The catalog probe, when the cache cannot be trusted.
+    // 3. Tab directories nobody has touched for a week, on a thread of its own:
+    //    the walk is I/O and §9.7's evidence is what is at stake, not speed.
+    prune_tab_dirs(root.clone(), log.clone());
+
+    // 4. The catalog probe, when the cache cannot be trusted.
     if cache_is_stale(&cache, time::now_epoch()) {
         log.info(format!(
             "catalog: probing with {} (cache older than {:?} or missing)",
@@ -151,6 +156,47 @@ pub fn start(cx: &mut App) {
             });
         })
         .detach();
+    }
+}
+
+/// Remove the `tabs/<id>/` directories the app is done with (§6).
+///
+/// A directory that `app.json` names as an open tab is kept whatever its age, and
+/// so is anything touched inside [`housekeeping::TAB_DIR_TTL`] — a swarm's
+/// `swarm.log` is the evidence §9.7 shows when a boot fails, so it is never
+/// thrown away while it might still be wanted.
+fn prune_tab_dirs(root: Root, log: AppLog) {
+    let thread_log = log.clone();
+    let spawned = std::thread::Builder::new()
+        .name("evo-desktop-prune".to_owned())
+        .spawn(move || {
+            let keep: Vec<String> = AppState::load(&root)
+                .tabs
+                .iter()
+                .map(|id| id.as_str().to_owned())
+                .collect();
+            let pruned =
+                housekeeping::prune_tab_dirs(&root, &keep, housekeeping::TAB_DIR_TTL, SystemTime::now());
+            match pruned {
+                Ok(pruned) if pruned.removed.is_empty() && pruned.failed == 0 => {
+                    thread_log
+                        .info(format!("tab dirs: {} kept, none old enough to prune", pruned.kept));
+                }
+                Ok(pruned) => thread_log.info(format!(
+                    "tab dirs: pruned {:?}, kept {}{}",
+                    pruned.removed,
+                    pruned.kept,
+                    if pruned.failed > 0 {
+                        format!(", {} could not be removed", pruned.failed)
+                    } else {
+                        String::new()
+                    }
+                )),
+                Err(error) => thread_log.warn(format!("tab dirs: could not be pruned: {error}")),
+            }
+        });
+    if let Err(error) = spawned {
+        log.error(format!("could not start the tab-directory prune: {error}"));
     }
 }
 

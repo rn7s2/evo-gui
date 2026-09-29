@@ -15,7 +15,8 @@
 
 use std::time::Duration;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+
 
 use gpui_kit::{App, WeakEntity};
 
@@ -109,36 +110,36 @@ pub struct TabRecord {
 impl TabRecord {
     /// The id `app.json` stores for this tab.
     ///
-    /// **TODO(lane 1):** `WorkspaceView::tab_records` is asked for the tab's own
-    /// `tabs/<id>/` id, which is what this should be; today the window's handle
-    /// is the only id a tab has, and it is a per-run counter. The list is a
-    /// record of the strip — nothing restores from it yet — so the difference
-    /// only matters when a relaunch starts reading tab descriptors again.
+    /// This should be the tab's own `tabs/<id>/` id — the one its `tab.json` and
+    /// `swarm.log` live under — so that the stored set and the directories on
+    /// disk name the same tabs. It is not reachable today: `TabContent` creates
+    /// that directory in `launch::start` from a fresh `TabId` and keeps only the
+    /// *path* privately, and `WorkspaceView::tab_records` hands back the window's
+    /// own per-run handle. Asked of lane 1; when it lands this is one line.
+    ///
+    /// Until then the id is derived from that handle, which keeps the set ordered
+    /// and unique — nothing restores from it yet — and the tab-directory prune
+    /// (which matches ids to directories) simply never recognises a live one. A
+    /// live tab's directory is minutes old, so the week-long prune does not reach
+    /// it either way.
     pub fn stored_id(&self) -> StoredTabId {
         StoredTabId::parse(&format!("tab-{}", self.id)).expect("`tab-<n>` is safe as a path segment")
     }
 }
 
 /// The window's open tabs in strip order, and which one is shown (§6, §7.1).
-///
-/// **TODO(lane 1):** this is `WorkspaceView::tab_records(&self, cx)` plus
-/// `selected_index()`; until that lands, the same three fields come off the tab
-/// entities directly.
 pub fn open_tabs(cx: &App) -> (Vec<TabRecord>, Option<usize>) {
     let Some(view) = view(cx) else {
         return (Vec::new(), None);
     };
     let view = view.read(cx);
     let records = view
-        .tabs()
-        .iter()
-        .map(|tab| {
-            let tab = tab.read(cx);
-            TabRecord {
-                id: tab.id().get(),
-                folder: tab.folder().map(Path::to_path_buf),
-                session: tab.session_path().map(Path::to_path_buf),
-            }
+        .tab_records(cx)
+        .into_iter()
+        .map(|(id, folder, session)| TabRecord {
+            id: id.get(),
+            folder,
+            session,
         })
         .collect();
     (records, Some(view.selected_index()))
@@ -199,6 +200,10 @@ fn save_state(cx: &mut App) {
     if let Some(bounds) = bounds {
         state.window = bounds;
     }
+    // The theme the run used. Nothing changes it yet (there is no settings UI),
+    // so this is a write-through — but a `Light` in the file has to survive a
+    // quit, or the next launch would be the system's again.
+    state.theme = cx.global::<Shell>().theme;
     let (records, selected) = open_tabs(cx);
     let open_with_session = records.iter().filter(|record| record.session.is_some()).count();
     remember_tab_set(&mut state, &records, selected);
@@ -236,6 +241,7 @@ fn view_handle(cx: &App) -> Option<&WeakEntity<WorkspaceView>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     fn record(id: u64, folder: Option<&str>, session: Option<&str>) -> TabRecord {
         TabRecord {

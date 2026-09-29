@@ -23,7 +23,7 @@ use gpui_kit::{
     WindowOptions, px, size,
 };
 use session::LaunchPlan;
-use store::app_state::Binaries;
+use store::app_state::{AppState, Binaries};
 use store::model_cache::ModelCache;
 use store::paths::Root as AppRoot;
 use workspace::{TabContent, TabContentEvent, TabState, WorkspaceView};
@@ -67,7 +67,11 @@ fn open(cx: &mut TestAppContext, root: &AppRoot, binaries: Binaries) -> (AnyWind
     let root = root.clone();
     let (window, view) = cx
         .update(move |cx| {
-            Shell::new(root, log, binaries, Vec::new(), ModelCache::default()).install(cx);
+            let state = AppState {
+                binaries,
+                ..AppState::default()
+            };
+            Shell::new(root, log, state, ModelCache::default()).install(cx);
             let config = Arc::new(swarm_config(cx));
             gpui_kit::open_window(
                 WindowOptions {
@@ -114,7 +118,7 @@ fn a_swarm_binary_that_is_not_there_shows_the_reason_and_retries(cx: &mut TestAp
     });
 
     wait_for(cx, "the failure screen", |cx| matches!(state(cx, &tab), TabState::Failed { .. }));
-    let TabState::Failed { folder: failed_in, log_tail } = state(cx, &tab) else {
+    let TabState::Failed { folder: failed_in, log_tail, .. } = state(cx, &tab) else {
         unreachable!("just matched")
     };
     assert_eq!(failed_in, folder, "the screen names the folder it could not start in");
@@ -123,19 +127,28 @@ fn a_swarm_binary_that_is_not_there_shows_the_reason_and_retries(cx: &mut TestAp
         "the reason names the binary that could not run: {log_tail:?}"
     );
 
-    // The screen the user is looking at: the log box and its Retry.
-    let (drawn_tail, retry_visible) = cx
+    // The screen the user is looking at: the reason, and its Retry. (The log box
+    // is for a tail that says something the reason does not — §9.7 — which a
+    // process that never started cannot have.)
+    let (drawn_reason, retry_visible) = cx
         .update_window(window, |_, window, cx| {
             window.render_frame(cx);
-            let tail = window.find("boot-log-tail");
+            let reason = window.find("boot-failure-reason");
             let retry = window.find("tab-retry");
             (
-                tail.label().map(str::to_owned).or_else(|| tail.value().map(str::to_owned)),
+                reason
+                    .label()
+                    .map(str::to_owned)
+                    .or_else(|| reason.value().map(str::to_owned)),
                 retry.visible(),
             )
         })
         .expect("a drawn frame");
     assert!(retry_visible, "the failure screen offers a Retry");
+    assert!(
+        drawn_reason.as_deref().is_some_and(|reason| reason.contains("evo-swarm")),
+        "the screen itself names what could not run: {drawn_reason:?}"
+    );
 
     // Clicking it asks the window to launch again — the failure screen's own path
     // (§9.7), not a call this test makes behind the UI's back.
@@ -164,10 +177,6 @@ fn a_swarm_binary_that_is_not_there_shows_the_reason_and_retries(cx: &mut TestAp
     let TabState::Failed { log_tail, .. } = state(cx, &tab) else { unreachable!("just matched") };
     assert!(log_tail.contains("evo-swarm"), "still the reason, not an empty box: {log_tail:?}");
 
-    if let Some(tail) = drawn_tail {
-        // The box's own text, when the element reports it.
-        assert!(!tail.trim().is_empty(), "the log box is not empty: {tail:?}");
-    }
     let _ = std::fs::remove_dir_all(root.path());
 }
 
@@ -195,7 +204,7 @@ fn a_folder_that_cannot_be_written_fails_the_tab_before_anything_starts(cx: &mut
     });
     cx.run_until_parked();
 
-    let TabState::Failed { folder, log_tail } = state(cx, &tab) else {
+    let TabState::Failed { folder, log_tail, .. } = state(cx, &tab) else {
         panic!("a folder that cannot be written is a failure, not a boot: {:?}", state(cx, &tab));
     };
     assert_eq!(folder, nowhere);

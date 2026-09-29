@@ -212,10 +212,11 @@ It reads the lanes' states out of the model, which is only possible because of t
 tab_engine fix below: before that, a lane that came up idle without ever having
 worked stayed `starting` in the list for the whole session.
 
-### m2_resume — a swarm that ran once is found and comes back
+### m2_resume — a swarm that ran once is found, offered first, and comes back
 
-A swarm runs one prompt in the temp project and is shut down the ladder's way; then
-the app's own path is followed.
+A swarm runs one prompt in the temp project and is shut down the ladder's way; a
+*second*, newer swarm runs one prompt after it; then the app's own path is followed —
+the history list the empty tab shows, and the tab a row opens.
 
 Proven automatically:
 
@@ -225,17 +226,19 @@ Proven automatically:
   canonically — macOS reports the temp path resolved) and its swarm id;
 - `resume_args()` hands back the folder, the session path and the lane count a tab
   starts from;
+- **the app's own recents win over recency** (§9.5): with two journals on disk — the
+  one we care about and a newer one, so the scan alone shows the newer first — an
+  `app.json` whose single `Recent` flags the first as *open at the last quit* puts it
+  at the top of `store::history::load_history`'s list, **older mtime and all**; it is
+  the scan's own row (source `Scanned` — the app adds the flag, not the row), the
+  newer one is second and unflagged, and the flag is what moved it (the scan's own
+  order, newest first, is asserted beside it). The same flag is read back off
+  `app.json` through `AppState::load`. This is the empty tab's list: flagged row
+  first, then everything the walk found;
 - a new tab with `TabSpec::with_resume(entry.session)` and **no `--workers`** rebuilds
   the earlier conversation (the first prompt is in the coordinator's rows again),
   brings back two lanes, keeps writing to **the same session file**, and runs a new
   prompt whose answer streams in and lands in the transcript.
-
-**To extend when lane 2's persistence lands** (its tab set + the "open at last quit"
-history flag): add a case that writes an `app.json` with a `Recent` carrying
-`open_at_quit`, runs `store::history::merge` over a scan of a directory holding that
-session, and asserts the `Recent` is at the top of the merged list (and that the scan
-alone would have placed it elsewhere) — the UI-level half of §9.5's "the last swarm
-is offered first".
 
 ### m3_lane_down_up — a lane dies and the swarm brings it back
 
@@ -326,3 +329,65 @@ coordinator under its supervisor, and one per lane — and, after the shutdown l
 inside the deadline (`Drive::join_and_assert_gone`). A proof that leaks a swarm, a
 coordinator or a lane fails; the fixtures' temp `HOME`s are removed by their `TempDir`
 on the way out.
+
+## M4 — appearance, window geometry, and the tab directories
+
+The other three things this milestone owns, each checked in a real launch with a
+throwaway `HOME` (`/tmp/evo-app-check/home`, deleted afterwards) and the log lines
+that say which way it went.
+
+### Light or dark (§7.1)
+
+`app.json`'s `theme` decides, and `system` follows the system — live, while the
+app runs:
+
+```
+# theme: "system", on a Mac in dark mode
+2026-09-29T13:16:57Z info  theme: dark (the system appearance)
+
+# the system appearance switched to light, then back, with the app running
+2026-09-29T13:17:28Z info  theme: light (the system appearance)
+2026-09-29T13:17:32Z info  theme: dark (the system appearance)
+
+# theme: "light" in app.json, on the same dark-mode Mac
+2026-09-29T13:16:21Z info  theme: light (app.json)
+```
+
+Screen captures of the same window confirm it: dark with `theme: "system"`, light
+with `theme: "light"`. `crates/app/tests/appearance.rs` covers the choice (a
+`Dark` window on the test platform's light one) and the log line; the live switch
+itself is gpui's appearance observer, which the test platform offers no lever for.
+
+### The window's geometry (§2 rule 1)
+
+`app.json`'s bounds are a **request**, clamped to the display's work area — a
+window last used on a display that is gone must still open somewhere visible:
+
+```
+# app.json asked for {"x": 9000, "y": -5000, "width": 99999, "height": 99999}
+2026-09-29T13:15:53Z info  app.json: window 99999x99999 at Some(9000.0),Some(-5000.0), …
+2026-09-29T13:15:54Z info  window open
+2026-09-29T13:15:54Z info  window bounds 1728x992 at 0,33        # the work area
+
+# and that is what the quit wrote back
+{"window": {"x": 0.0, "y": 33.0, "width": 1728.0, "height": 992.0}}
+```
+
+### Tab directories (§6)
+
+Every launch mints `tabs/<id>/` for a swarm's `tab.json`, token and `swarm.log`.
+Those are evidence — §9.7 shows the log's tail when a boot fails — so the only
+ones removed are the ones nobody has touched for a week and that `app.json` does
+not have open, at startup, off the UI thread:
+
+```
+# tabs/ancient-tab/ (two months old) beside tabs/recent-tab/
+2026-09-29T13:16:21Z info  tab dirs: pruned ["ancient-tab"], kept 1
+$ ls ~/.evo/desktop/tabs/
+recent-tab
+```
+
+`crates/app/src/housekeeping.rs` holds the rule with its own tests: the newest of
+a directory's times decides its age (a swarm appends to its log without changing
+the directory's own time), an id `app.json` has open is kept however old it is,
+and anything the app cannot date it leaves alone.

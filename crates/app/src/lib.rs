@@ -19,13 +19,16 @@
 //! ```
 
 mod bounds;
+mod housekeeping;
 mod launcher;
 mod logging;
 mod menus;
 mod quit;
 mod startup;
+mod theme;
 
 pub use bounds::{Tracker, window_bounds, window_options};
+pub use housekeeping::{Pruned, TAB_DIR_TTL, prune_tab_dirs};
 pub use launcher::{
     Launcher, history_entries, hook_live_registry, on_live_registry, push_launcher_data,
     tab_count, utc_offset_seconds,
@@ -37,11 +40,12 @@ pub use quit::{
     take_engines,
 };
 pub use startup::{CACHE_MAX_AGE, cache_is_stale};
+pub use theme::{follow_appearance, mode_for};
 
 use gpui_kit::prelude::*;
 use gpui_kit::{App, Entity, Global, QuitMode, Subscription, WeakEntity};
 
-use store::app_state::{AppState, Binaries, Recent};
+use store::app_state::{AppState, Binaries, Recent, Theme};
 use store::model_cache::ModelCache;
 use store::paths::Root;
 use store::single::{Activation, SingleInstance};
@@ -63,6 +67,9 @@ pub struct Shell {
     /// What every empty tab is shown (§9.4, §9.5): the catalog, the history,
     /// and the errors when either could not be learned.
     pub launcher: Launcher,
+    /// Light, dark, or whatever the system says (§7.1). `app.json`'s setting,
+    /// kept here so the appearance observer and the quit path can both read it.
+    pub theme: Theme,
     /// The binaries this launch spawns.
     pub binaries: Binaries,
     /// The recents `app.json` held at launch; the session scan merges with them
@@ -79,18 +86,13 @@ impl Global for Shell {}
 impl Shell {
     /// The app's shared state. [`run`] builds one; a test can build one too,
     /// which is how the quit sequence is exercised without a real window.
-    pub fn new(
-        root: Root,
-        log: AppLog,
-        binaries: Binaries,
-        recents: Vec<Recent>,
-        cache: ModelCache,
-    ) -> Shell {
+    pub fn new(root: Root, log: AppLog, state: AppState, cache: ModelCache) -> Shell {
         Shell {
             root,
             log,
-            binaries,
-            recents,
+            theme: state.theme,
+            binaries: state.binaries,
+            recents: state.recents,
             launcher: Launcher::new(cache),
             view: None,
             tracker: None,
@@ -182,7 +184,7 @@ pub fn run() {
         .with_quit_mode(QuitMode::Explicit)
         .run(move |cx| {
             gpui_kit::init(cx);
-            Shell::new(root.clone(), log.clone(), binaries, recents, cache).install(cx);
+            Shell::new(root.clone(), log.clone(), state, cache).install(cx);
 
             // The menu bar, its shortcuts, and the app's action handlers.
             menus::install(cx);
@@ -197,7 +199,7 @@ pub fn run() {
                 cx.update_global::<Shell, _>(|shell, _| shell.tracker = Some(tracker));
                 view
             });
-            let (_window, view) = match opened {
+            let (window, view) = match opened {
                 Ok(opened) => opened,
                 Err(error) => {
                     log.error(format!("could not open the window: {error}"));
@@ -206,6 +208,27 @@ pub fn run() {
                 }
             };
             log.info("window open");
+            // Where the window actually is, after the clamp — `app.json`'s
+            // numbers are a request (§2 rule 1), and this is the answer.
+            if let Ok(bounds) = window.update(cx, |_root, window, _cx| bounds::stored_from_window(window))
+            {
+                log.info(format!(
+                    "window bounds {}x{} at {:.0},{:.0}",
+                    bounds.width,
+                    bounds.height,
+                    bounds.x.unwrap_or(0.0),
+                    bounds.y.unwrap_or(0.0)
+                ));
+            }
+            // Light or dark, and following the system from here on (§7.1).
+            let appearance = window
+                .update(cx, |_root, window, cx| theme::follow_appearance(cx, window))
+                .ok();
+            cx.update_global::<Shell, _>(|shell, _| {
+                if let Some(appearance) = appearance {
+                    shell.subscriptions.push(appearance);
+                }
+            });
             // Closing the window: the workspace hands the tabs' engines over, and
             // the app owns stopping them.
             view.update(cx, |view, _cx| {

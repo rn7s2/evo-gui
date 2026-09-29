@@ -23,8 +23,11 @@ fn temp_root(name: &str) -> Root {
 
 fn install(cx: &mut App, root: &Root) -> AppLog {
     let log = AppLog::open(root);
-    Shell::new(root.clone(), log.clone(), Binaries::default(), Vec::new(), ModelCache::default())
-        .install(cx);
+    let state = AppState {
+        binaries: Binaries::default(),
+        ..AppState::default()
+    };
+    Shell::new(root.clone(), log.clone(), state, ModelCache::default()).install(cx);
     log
 }
 
