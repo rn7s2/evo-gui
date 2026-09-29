@@ -35,3 +35,14 @@ Findings from screenshots, to be addressed in the polish pass once the tab page 
 - Centre column empty state missing.
 - Right column is a tall blank area under the composer; fine per spec, but give the composer a
   subtle top padding aligned with the lane list's first row.
+
+## Transcript, round 2 (captures 11/14 after f632f52)
+- Table cells break words mid-token ("call|s", "cach|e", "320m|s", "write_fil|e"): give columns a
+  min width of their longest word (no intra-word breaks) and let the table scroll sideways instead.
+- Tool name in mono renders visibly larger than body text; match the body size (or 1px smaller).
+- Todo panel is flush with the window edge while rows sit in the centred measure: align it with the
+  measure. Glyphs still render at different visual weights (☑ tiny, ◐ bold): draw them as icons/shapes
+  (check box, half disc, empty box) at one size instead of font glyphs.
+- Status rows read like protocol ("provider-retry 1/3 in 500ms", "run-end · outcome aborted",
+  "output · …"): humanize in session ("Retrying provider (1/3) in 500 ms", "Run aborted", plain
+  output text) and give session a first-class run-outcome row so the view stops sniffing strings.
