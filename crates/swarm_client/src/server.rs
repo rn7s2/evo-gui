@@ -615,16 +615,8 @@ fn spawn(cfg: &ServerConfig, port: u16) -> Result<Child> {
         .current_dir(&cfg.cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::from(log.try_clone()?))
-        .stderr(Stdio::from(log))
-        // The swarm and its lanes shut down if we die (§3), and the token is
-        // learned from the file, never handed over in the environment.
-        .env("EVO_SERVE_WATCH_PID", std::process::id().to_string());
-    for name in SCRUB_ENV.iter().copied().chain(cfg.env_remove.iter().map(String::as_str)) {
-        command.env_remove(name);
-    }
-    for (key, value) in &cfg.extra_env {
-        command.env(key, value);
-    }
+        .stderr(Stdio::from(log));
+    apply_environment(&mut command, cfg);
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -634,6 +626,26 @@ fn spawn(cfg: &ServerConfig, port: u16) -> Result<Child> {
     command
         .spawn()
         .map_err(|e| Error::Config(format!("cannot run {}: {e}", cfg.bin.display())))
+}
+
+/// The child's environment (§3).
+///
+/// The order here is the whole point. Everything that would tie a server to
+/// *our* evo session is removed first, the caller's variables come next, and the
+/// watch pid is set **last**: `Command::env_remove` overrides an earlier
+/// `env` for the same name whatever the order of the calls looks like, and
+/// `SCRUB_ENV` names `EVO_SERVE_WATCH_PID` — so setting it before the scrub
+/// silently unsets it, and a server whose driver dies then idles forever instead
+/// of stopping (§3). The token is never handed over in the environment: the
+/// server writes it to `--token-file`, and nothing else knows it.
+pub(crate) fn apply_environment(command: &mut Command, cfg: &ServerConfig) {
+    for name in SCRUB_ENV.iter().copied().chain(cfg.env_remove.iter().map(String::as_str)) {
+        command.env_remove(name);
+    }
+    for (key, value) in &cfg.extra_env {
+        command.env(key, value);
+    }
+    command.env("EVO_SERVE_WATCH_PID", std::process::id().to_string());
 }
 
 /// `evo-swarm serve: listening on http://127.0.0.1:56750/ (token in …)` — the
@@ -684,6 +696,26 @@ mod tests {
         );
         // --allow-remote is never passed (§3).
         assert!(!cfg.argv(8421).iter().any(|arg| arg == "--allow-remote"));
+    }
+
+    #[test]
+    fn the_watch_pid_survives_the_scrub_list() {
+        // `/usr/bin/env` prints the environment it was handed, which is the one
+        // way to see what a child really gets. `SCRUB_ENV` names
+        // EVO_SERVE_WATCH_PID (it must not be inherited from the evo session
+        // that started us), and `env_remove` overrides an earlier `env`, so the
+        // assignment has to come after both.
+        let cfg = ServerConfig::swarm("/usr/bin/env", "/tmp", Path::new("/tmp/tab"));
+        let mut command = Command::new("/usr/bin/env");
+        apply_environment(&mut command, &cfg);
+        let output = command.output().expect("/usr/bin/env runs");
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            text.contains(&format!("EVO_SERVE_WATCH_PID={}", std::process::id())),
+            "the child must be told to watch us: {text}"
+        );
+        assert!(!text.contains("EVO_SERVE_TOKEN="), "the token never comes through the environment: {text}");
+        assert!(!text.contains("EVO_SUPERVISED_CHILD="), "and the evo session is scrubbed: {text}");
     }
 
     #[test]
