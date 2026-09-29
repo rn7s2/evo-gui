@@ -283,26 +283,11 @@ pub fn wait_nothing_left(cx: &mut TestAppContext, fixture: &Fixture, what: &str)
     }
 }
 
-/// Whether a process is still *running*, not merely still in the table.
-///
-/// A process that has exited but has not been reaped is a zombie, and
-/// `kill(pid, 0)` — `swarm_client::server::process_alive` — says yes to one. A
-/// swarm this app spawned is the app's child, so "it exited" and "it was reaped"
-/// are moments apart, and only the second is worth asserting: the process state
-/// `Z` is what tells them apart.
+/// Whether a process is still running: `swarm_client`'s own rule, which asks a child
+/// of ours for its status, so a swarm the app spawned stops being "alive" the moment
+/// it exits rather than when someone waits on it (a zombie answers `kill(pid, 0)`).
 pub fn running(pid: u32) -> bool {
-    if pid == 0 {
-        return false;
-    }
-    let Ok(out) = std::process::Command::new("ps")
-        .args(["-o", "stat=", "-p", &pid.to_string()])
-        .output()
-    else {
-        return false;
-    };
-    let state = String::from_utf8_lossy(&out.stdout);
-    let state = state.trim();
-    !state.is_empty() && !state.starts_with('Z')
+    swarm_client::server::process_alive(pid)
 }
 
 /// The command line of a live process, for the `--resume` argument and for

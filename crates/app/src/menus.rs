@@ -30,6 +30,8 @@ gpui_kit::actions!(
     [
         /// About Evo Desktop.
         AboutApp,
+        /// Settings… (⌘,): the two binaries this app spawns, and the theme.
+        SettingsApp,
         /// Hide this app.
         HideApp,
         /// Hide every other app.
@@ -59,10 +61,12 @@ pub fn install(cx: &mut App) {
         KeyBinding::new("cmd-t", NewTab, None),
         KeyBinding::new("cmd-w", CloseTab, None),
         KeyBinding::new("cmd-m", MinimizeWindow, None),
+        KeyBinding::new("cmd-,", SettingsApp, None),
     ]);
 
     cx.on_action(|_: &QuitApp, cx: &mut App| quit::begin(cx));
     cx.on_action(|_: &AboutApp, cx: &mut App| open_about(cx));
+    cx.on_action(|_: &SettingsApp, cx: &mut App| open_settings(cx));
     cx.on_action(|_: &HideApp, cx: &mut App| {
         cx.hide();
         log(cx, "hide");
@@ -108,6 +112,7 @@ pub fn menus() -> Vec<Menu> {
     vec![
         Menu::new("Evo Desktop").items([
             MenuItem::action("About Evo Desktop", AboutApp),
+            MenuItem::action("Settings…", SettingsApp),
             MenuItem::separator(),
             MenuItem::action("Hide Evo Desktop", HideApp),
             MenuItem::action("Hide Others", HideOthers),
@@ -131,6 +136,13 @@ pub fn menus() -> Vec<Menu> {
             MenuItem::os_action("Select All", input::SelectAll, OsAction::SelectAll),
         ]),
         Menu::new("Window").items([
+            // The window's tabs. The keys (⌃⇥, ⌃⇧⇥, ⌘9) are the workspace's own
+            // bindings — macOS draws them from there — so the items only name the
+            // actions, and the tab strip handles them wherever focus is.
+            MenuItem::action("Select Next Tab", workspace::SelectNextTab),
+            MenuItem::action("Select Previous Tab", workspace::SelectPreviousTab),
+            MenuItem::action("Select Last Tab", workspace::SelectLastTab),
+            MenuItem::separator(),
             MenuItem::action("Minimize", MinimizeWindow),
             MenuItem::action("Zoom", ZoomWindow),
         ]),
@@ -150,6 +162,16 @@ pub fn open_about(cx: &mut App) {
     let log = cx.global::<crate::Shell>().log.clone();
     log.info(format!("about: evo-desktop {}", env!("CARGO_PKG_VERSION")));
     in_window_later(cx, crate::about::open);
+}
+
+/// "Settings…" (⌘,): the two binaries the app spawns and the theme (§13). The
+/// panel itself is `crates/settings`; this is the menu item's half of it, and Save
+/// is what persists — the panel owns the dialog.
+pub fn open_settings(cx: &mut App) {
+    log(cx, "settings");
+    in_window_later(cx, |window, cx| {
+        crate::settings::open(window, cx);
+    });
 }
 
 /// Run `f` with the app's window — the one window the app opens (§7.1) — at the
@@ -206,6 +228,7 @@ mod tests {
             names,
             [
                 "About Evo Desktop",
+                "Settings…",
                 "Hide Evo Desktop",
                 "Hide Others",
                 "Show All",
@@ -245,6 +268,55 @@ mod tests {
             ],
             "every editing item is an OS action the text field handles"
         );
+    }
+
+    #[test]
+    fn the_window_menu_offers_the_tabs_and_the_window() {
+        let menus = menus();
+        let window = menus.last().expect("the Window menu");
+        assert_eq!(window.name.as_ref(), "Window");
+        assert_eq!(
+            names(window),
+            [
+                "Select Next Tab",
+                "Select Previous Tab",
+                "Select Last Tab",
+                "Minimize",
+                "Zoom",
+            ],
+            "the tab items come first, in the order the keys walk them"
+        );
+        // They are the workspace's actions, not copies of them: the workspace binds
+        // ⌃⇥, ⌃⇧⇥ and ⌘9, and the menu item is what carries the key equivalent.
+        let actions: Vec<&str> = window
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                MenuItem::Action { action, .. } => Some(action.name()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            actions,
+            [
+                "workspace::SelectNextTab",
+                "workspace::SelectPreviousTab",
+                "workspace::SelectLastTab",
+                "evo_desktop::MinimizeWindow",
+                "evo_desktop::ZoomWindow",
+            ]
+        );
+    }
+
+    /// The names of a menu's items, separators left out.
+    fn names(menu: &Menu) -> Vec<String> {
+        menu.items
+            .iter()
+            .filter_map(|item| match item {
+                MenuItem::Action { name, .. } => Some(name.to_string()),
+                _ => None,
+            })
+            .collect()
     }
 
     #[test]

@@ -541,3 +541,78 @@ recognises the directories of the tabs that are open instead of only their age. 
 tab that has never started one names no directory and is stored under its window
 handle, which keeps the set ordered and unique. `crates/app/src/quit.rs` covers
 both, and the tab that started a swarm keeps its directory id through the write.
+
+## M2 — relaunch, through the app
+
+The milestone's own proof, with the app's machinery rather than a model of it: two
+real `evo-swarm serve` processes started from the empty tab's `Launch` event (the
+installed binaries, into a temp `EVO_HOME` whose `init.lisp` registers a stub
+provider), the real composer, the real quit sequence, and a **second app instance**
+on the same data root (`TestAppContext::new_app`).
+
+```
+$ cargo test -p evo-desktop --test m2_relaunch -- --nocapture
+[proof] A's swarm: 414ms  [proof] A's reply: 61ms
+[proof] A's journal: <EVO_HOME>/sessions/-private-var-…-A/20260929T152146Z_5af3ece8….sexp
+[proof] B's swarm: 317ms  [proof] B's reply: 74ms   [proof] C's swarm: 404ms   [proof] quit: 3.748s
+[proof] after the first quit: nothing left running (53ms)
+[proof] the resumed swarm: 320ms  [proof] the earlier turn: 50µs  [proof] the new reply: 59ms
+[proof] quit: 12ms                        [proof] after the second quit: nothing left running (3.38s)
+[proof] the whole run: 10.28s
+test result: ok. 1 passed; 0 failed; finished in 10.31s
+```
+
+What it asserts, in order:
+
+* the first launch holds **four tabs** — three swarms, A, B and C, and one left
+  empty — and `app.json` is written as `4 tab(s), 2 of them resumable`;
+* exactly **two recents** carry `open_at_quit`, A and B, and each names the journal a
+  resume needs. A and B were each given a turn; **C was not**, and a swarm writes its
+  journal with its first *reply* — so C names a session, has no file behind it, and is
+  not offered: the app does not record it as a recent (`crates/app/src/quit.rs`), the
+  history merge does not list a recent whose session is missing
+  (`crates/store/src/history.rs`), and the log line counts the same way
+  (`4 tab(s), 2 of them resumable`);
+* the second instance opens **one empty tab** (§14.6), whatever the stored strip
+  says, and the launch-time history — the store's own `load_history`: the scan of the
+  temp `EVO_HOME` plus `app.json`'s recents — puts **A and B first**, both wearing the
+  badge on screen;
+* **clicking A's row** boots a swarm with `--resume <A's journal>` (asserted from the
+  process's own `ps` line), on A's own journal;
+* the transcript it restores still holds the earlier prompt *and* its reply, a turn
+  sent after the resume gets its reply, and nothing the test started — the swarms and
+  the lanes they spawned — outlives it.
+
+## M3 — a lane dies, at the UI level
+
+The same app, one swarm with two lanes. The pid is the one *this* swarm's `/lanes`
+reports for lane 1, so nothing else on the machine is touched:
+
+```
+$ cargo test -p evo-desktop --test m3_lane_ui -- --nocapture
+[proof] the swarm: 410ms
+[proof] killed lane 1 (80877)
+[proof] lane 1 down: Some("✗ lane 1 down, down")
+[proof] lane 1 walked through: [("idle", Idle, 0, Some(80877)), ("down", Down, 0, Some(80877)), ("idle", Idle, 1, Some(81077))]
+[proof] the reply after the restart: 75ms     [proof] quit: 2.687s
+[proof] after the quit: nothing left running (51ms)   [proof] the whole run: 8.53s
+test result: ok. 1 passed; 0 failed; finished in 8.55s
+```
+
+The row on screen reads `✗ lane 1 down, down` while it is down — the left column's
+own accessibility label — the model walks idle → down → idle with `restarts = 1`
+behind a **fresh pid**, and the tab keeps working: a turn sent after the restart gets
+its reply.
+
+### What these two changed
+
+`swarm_client::server::process_alive` asks a child of ours for its status
+(`waitpid(WNOHANG)`) instead of `kill(pid, 0)`: a swarm the app spawned that has
+exited but not been reaped is a zombie, and `kill(pid, 0)` called it alive — which is
+how "the ladder finished" was being read. A process that is not our child is still
+asked the other way.
+
+And a tab whose swarm never answered used to be offered as "open at the last quit"
+with nothing behind it (its journal is written with the first reply): the app no
+longer records it, and `store::history::merge` no longer lists a recent whose session
+file is missing.

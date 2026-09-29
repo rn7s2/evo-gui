@@ -40,7 +40,11 @@ pub struct ScanBudget {
 
 impl Default for ScanBudget {
     fn default() -> Self {
-        ScanBudget { max_files: 500, max_duration: Duration::from_secs(5), max_file_bytes: 8 << 20 }
+        ScanBudget {
+            max_files: 500,
+            max_duration: Duration::from_secs(5),
+            max_file_bytes: 8 << 20,
+        }
     }
 }
 
@@ -179,7 +183,9 @@ pub fn scan(dir: &Path, budget: &ScanBudget) -> ScanOutcome {
     }
     // Newest first, then by path so equal mtimes still order deterministically.
     outcome.entries.sort_by(|a, b| {
-        b.mtime.cmp(&a.mtime).then_with(|| a.session.cmp(&b.session))
+        b.mtime
+            .cmp(&a.mtime)
+            .then_with(|| a.session.cmp(&b.session))
     });
     outcome
 }
@@ -213,6 +219,14 @@ pub fn merge(scanned: Vec<HistoryEntry>, recents: &[Recent]) -> Vec<HistoryEntry
     }
     for recent in recents {
         if recent.session.as_os_str().is_empty() {
+            continue;
+        }
+        // A recent whose journal is gone is not a row. Only a swarm that got as far
+        // as its first reply writes one (`evo-agent`'s journal flushes with the first
+        // assistant message), so a tab that was opened and quit again records a
+        // session path with nothing behind it — and `--resume` on a file that is not
+        // there is a launch that cannot come back.
+        if !recent.session.is_file() {
             continue;
         }
         if let Some(existing) = entries.iter_mut().find(|e| e.session == recent.session) {
@@ -289,7 +303,10 @@ fn fill_from_recent(entry: &mut HistoryEntry, recent: &Recent) {
 
 /// `20260929T090956Z_ed99c60d1dee3c3f.sexp` → `ed99c60d1dee3c3f`.
 fn session_id_of(path: &Path) -> String {
-    let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
     match stem.split_once('_') {
         Some((_, id)) => id.to_owned(),
         None => stem,
@@ -338,7 +355,11 @@ fn candidates(dir: &Path) -> Vec<(PathBuf, u64)> {
 /// balance, everything else is skipped. A journal entry whose *text* happens to
 /// contain a column-0 line that looks like one of those headers would be read as
 /// one — the price of not walking every byte of every journal.
-fn read_history(path: &Path, mtime: u64, max_bytes: u64) -> io::Result<(Option<HistoryEntry>, bool)> {
+fn read_history(
+    path: &Path,
+    mtime: u64,
+    max_bytes: u64,
+) -> io::Result<(Option<HistoryEntry>, bool)> {
     let file = fs::File::open(path)?;
     let mut reader = BufReader::new(file);
 
@@ -405,9 +426,7 @@ fn read_history(path: &Path, mtime: u64, max_bytes: u64) -> io::Result<(Option<H
                     // conversation turn. Only its header is read, only for the
                     // model it names, and only until one is found — this is the
                     // fallback for journals that recorded no model change.
-                    Some("message")
-                        if model_change.is_none() && first_message_model.is_none() =>
-                    {
+                    Some("message") if model_change.is_none() && first_message_model.is_none() => {
                         first_message_model = message_model(trimmed);
                     }
                     _ => {}
@@ -451,8 +470,15 @@ fn read_history(path: &Path, mtime: u64, max_bytes: u64) -> io::Result<(Option<H
                 .collect()
         })
         .unwrap_or_default();
-    let workers = swarm.get_i64("workers").unwrap_or(0).clamp(0, u32::MAX as i64) as u32;
-    let lanes = if lane_cwds.is_empty() { workers } else { lane_cwds.len() as u32 };
+    let workers = swarm
+        .get_i64("workers")
+        .unwrap_or(0)
+        .clamp(0, u32::MAX as i64) as u32;
+    let lanes = if lane_cwds.is_empty() {
+        workers
+    } else {
+        lane_cwds.len() as u32
+    };
 
     let folder = header
         .get_str("cwd")
@@ -466,14 +492,21 @@ fn read_history(path: &Path, mtime: u64, max_bytes: u64) -> io::Result<(Option<H
             session: path.to_path_buf(),
             folder,
             when_epoch: time::parse_rfc3339(&when),
-            when: if when.is_empty() { time::format_rfc3339(mtime) } else { when },
+            when: if when.is_empty() {
+                time::format_rfc3339(mtime)
+            } else {
+                when
+            },
             mtime,
             session_id: header.get_str("id").unwrap_or_default().to_string(),
             swarm_id: swarm.get_str("id").unwrap_or_default().to_string(),
             workers,
             lanes,
             lane_cwds,
-            models: TabModels { coordinator: model_change.or(first_message_model), lanes: None },
+            models: TabModels {
+                coordinator: model_change.or(first_message_model),
+                lanes: None,
+            },
             source: HistorySource::Scanned,
             open_at_quit: false,
         }),
@@ -534,7 +567,9 @@ fn message_model(line: &str) -> Option<String> {
     while let Ok((key, read)) = Sexp::parse_prefix(&header[pos..]) {
         pos += read;
         let Some(key) = key.as_symbol() else { break };
-        let Ok((value, read)) = Sexp::parse_prefix(&header[pos..]) else { break };
+        let Ok((value, read)) = Sexp::parse_prefix(&header[pos..]) else {
+            break;
+        };
         pos += read;
         match key {
             "role" => role = value.as_symbol().map(str::to_owned),
@@ -602,7 +637,12 @@ mod tests {
     fn write_journal(path: &Path, contents: &str, mtime: &str) {
         fs::write(path, contents).unwrap();
         let at = std::time::UNIX_EPOCH + Duration::from_secs(time::parse_rfc3339(mtime).unwrap());
-        fs::OpenOptions::new().write(true).open(path).unwrap().set_modified(at).unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(at)
+            .unwrap();
     }
 
     fn header(cwd: &str, id: &str, ts: &str) -> String {
@@ -614,7 +654,10 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(i, cwd)| {
-                format!("(:n {} :cwd \"{cwd}\" :worktree nil :branch nil :task nil :extra-forms #())", i + 1)
+                format!(
+                    "(:n {} :cwd \"{cwd}\" :worktree nil :branch nil :task nil :extra-forms #())",
+                    i + 1
+                )
             })
             .collect();
         format!(
@@ -686,7 +729,11 @@ mod tests {
         );
 
         // A file with no header at all, and a non-journal file.
-        write_journal(&dir.join("-Users-x-bar").join("broken.sexp"), "garbage\n", "2026-09-29T04:00:00Z");
+        write_journal(
+            &dir.join("-Users-x-bar").join("broken.sexp"),
+            "garbage\n",
+            "2026-09-29T04:00:00Z",
+        );
         fs::write(dir.join("-Users-x-bar").join("notes.txt"), "ignore me").unwrap();
 
         (root, dir)
@@ -707,17 +754,26 @@ mod tests {
         assert_eq!(newest.folder, PathBuf::from("/Users/x/foo/"));
         assert_eq!(newest.folder_name(), "foo");
         assert_eq!(newest.when, "2026-09-29T02:00:00Z");
-        assert_eq!(newest.when_epoch, time::parse_rfc3339("2026-09-29T02:00:00Z"));
+        assert_eq!(
+            newest.when_epoch,
+            time::parse_rfc3339("2026-09-29T02:00:00Z")
+        );
         // A recorded `:model-change` is authoritative and wins over the
         // assistant message in the same file; the message is only the fallback
         // for journals that never recorded a change (see the older entry).
-        assert_eq!(newest.models.coordinator.as_deref(), Some("claude-sonnet-5"));
+        assert_eq!(
+            newest.models.coordinator.as_deref(),
+            Some("claude-sonnet-5")
+        );
         assert_eq!(newest.models.lanes, None);
         assert_eq!(newest.source, HistorySource::Scanned);
         // The last record wins: one lane, whose cwd is a worktree.
         assert_eq!(newest.lanes, 2);
         assert_eq!(newest.workers, 1);
-        assert_eq!(newest.lane_cwds[1], PathBuf::from("/Users/x/.evo/swarm/bbbb/lane-2/"));
+        assert_eq!(
+            newest.lane_cwds[1],
+            PathBuf::from("/Users/x/.evo/swarm/bbbb/lane-2/")
+        );
 
         let older = &outcome.entries[1];
         assert_eq!(older.session_id, "aaaa1111");
@@ -726,7 +782,10 @@ mod tests {
         // No `:model-change` in this file at all: the model comes from the
         // assistant message's header, and the message's own text (which spans
         // lines and even quotes a `:model`) never leaks into it.
-        assert_eq!(older.models.coordinator.as_deref(), Some("ark-deepseek-v4.1-flash"));
+        assert_eq!(
+            older.models.coordinator.as_deref(),
+            Some("ark-deepseek-v4.1-flash")
+        );
         assert_eq!(older.age_secs(older.mtime + 90), Some(90));
         fs::remove_dir_all(root.path()).unwrap();
     }
@@ -738,17 +797,30 @@ mod tests {
         let line = assistant_message("claude-opus-5-5", "hello");
         assert_eq!(message_model(&line).as_deref(), Some("claude-opus-5-5"));
         // Any order of the header's keys works.
-        let shuffled = "(:type :message :id \"m\" :message (:provider :aiden :role :assistant :model \"m-2\" \
+        let shuffled =
+            "(:type :message :id \"m\" :message (:provider :aiden :role :assistant :model \"m-2\" \
                         :usage (:input 1) :content ((:type :text :text \"x\"))))";
         assert_eq!(message_model(shuffled).as_deref(), Some("m-2"));
         // The message's text is not searched: only the header is.
-        let quoted = assistant_message("honest", "the header of a message is (:role :assistant :model \"liar\")");
+        let quoted = assistant_message(
+            "honest",
+            "the header of a message is (:role :assistant :model \"liar\")",
+        );
         assert_eq!(message_model(&quoted).as_deref(), Some("honest"));
 
         // Not a message, not an assistant, or a header that never says :model.
-        assert_eq!(message_model("(:type :custom :role :assistant :model \"no\")"), None);
-        assert_eq!(message_model("(:type :message :id \"u\" :message (:role :user :content ()))"), None);
-        assert_eq!(message_model("(:type :message :id \"a\" :message (:role :assistant :content ()))"), None);
+        assert_eq!(
+            message_model("(:type :custom :role :assistant :model \"no\")"),
+            None
+        );
+        assert_eq!(
+            message_model("(:type :message :id \"u\" :message (:role :user :content ()))"),
+            None
+        );
+        assert_eq!(
+            message_model("(:type :message :id \"a\" :message (:role :assistant :content ()))"),
+            None
+        );
         // A header cut off mid-value still yields what came before the cut.
         let cut = "(:type :message :id \"a\" :message (:role :assistant :model \"cut\" :content ((:type :text :text \"oops";
         assert_eq!(message_model(cut).as_deref(), Some("cut"));
@@ -759,18 +831,27 @@ mod tests {
     #[test]
     fn budgets_stop_the_scan() {
         let (root, dir) = fixture("budget");
-        let one = ScanBudget { max_files: 1, ..ScanBudget::default() };
+        let one = ScanBudget {
+            max_files: 1,
+            ..ScanBudget::default()
+        };
         let outcome = scan(&dir, &one);
         assert_eq!(outcome.files_read, 1);
         assert!(outcome.stopped_early);
 
-        let tiny = ScanBudget { max_file_bytes: 40, ..ScanBudget::default() };
+        let tiny = ScanBudget {
+            max_file_bytes: 40,
+            ..ScanBudget::default()
+        };
         let outcome = scan(&dir, &tiny);
         // Nothing past 40 bytes can be recognized as a swarm.
         assert!(outcome.entries.is_empty());
         assert!(outcome.stopped_early);
 
-        let no_time = ScanBudget { max_duration: Duration::ZERO, ..ScanBudget::default() };
+        let no_time = ScanBudget {
+            max_duration: Duration::ZERO,
+            ..ScanBudget::default()
+        };
         let outcome = scan(&dir, &no_time);
         assert!(outcome.entries.is_empty());
         assert!(outcome.stopped_early);
@@ -779,7 +860,10 @@ mod tests {
 
     #[test]
     fn a_missing_directory_is_an_empty_scan() {
-        let outcome = scan(Path::new("/nonexistent/store/history"), &ScanBudget::default());
+        let outcome = scan(
+            Path::new("/nonexistent/store/history"),
+            &ScanBudget::default(),
+        );
         assert_eq!(outcome.entries.len(), 0);
         assert_eq!(outcome.files_seen, 0);
         assert!(!outcome.stopped_early);
@@ -819,13 +903,25 @@ mod tests {
         let mut recent_same = Recent::new(&older, "/Users/x/foo", 3);
         recent_same.when = "2026-09-29T09:00:00Z".into(); // app used it later than the journal
         recent_same.models.lanes = Some("lanes-model".into());
-        let mut recent_orphan = Recent::new("/Users/x/gone/9.sexp", "/Users/x/gone", 2);
+        // A session the app knows and the scan does not: its own folder, and a
+        // journal that is really there (a recent whose file is gone is not a row).
+        let gone = root.path().join("Users-x-gone");
+        fs::create_dir_all(&gone).unwrap();
+        let orphan_session = gone.join("9.sexp");
+        fs::write(&orphan_session, "(:type :session)\n").unwrap();
+        let mut recent_orphan = Recent::new(&orphan_session, gone.clone(), 2);
         // Pinned so the row order does not depend on when the test runs.
         recent_orphan.when = "2026-09-29T00:30:00Z".into();
 
-        let merged = merge(scanned.clone(), &[recent_same.clone(), recent_orphan.clone()]);
+        let merged = merge(
+            scanned.clone(),
+            &[recent_same.clone(), recent_orphan.clone()],
+        );
         assert_eq!(merged.len(), 3);
-        assert_eq!(merged[0].session, older, "the app's later use moves it to the top");
+        assert_eq!(
+            merged[0].session, older,
+            "the app's later use moves it to the top"
+        );
         // Scanned facts survive the merge; the app's lanes model is added.
         assert_eq!(merged[0].source, HistorySource::Scanned);
         assert_eq!(merged[0].swarm_id, "20260929T010000-aaaa");
@@ -833,28 +929,82 @@ mod tests {
         assert_eq!(merged[0].when, "2026-09-29T09:00:00Z");
         assert_eq!(merged[0].lanes, 3);
 
-        let orphan = merged.iter().find(|e| e.session == recent_orphan.session).unwrap();
+        let orphan = merged
+            .iter()
+            .find(|e| e.session == recent_orphan.session)
+            .unwrap();
         assert_eq!(orphan.source, HistorySource::Recent);
         assert_eq!(orphan.session_id, "9");
-        assert_eq!(orphan.folder, PathBuf::from("/Users/x/gone"));
+        assert_eq!(orphan.folder, gone);
         assert_eq!(orphan.resume_args().1, recent_orphan.session);
         assert_eq!(orphan.age_secs(orphan.mtime + 1), Some(1));
 
         // A recent with no session path is not a row.
-        let empty = Recent { session: PathBuf::new(), ..Recent::default() };
+        let empty = Recent {
+            session: PathBuf::new(),
+            ..Recent::default()
+        };
         assert_eq!(merge(Vec::new(), &[empty]).len(), 0);
+        fs::remove_dir_all(root.path()).unwrap();
+    }
+
+    #[test]
+    fn a_recent_whose_journal_is_gone_is_not_a_row() {
+        let (root, dir) = fixture("recent-gone");
+        let scanned = scan(&dir, &ScanBudget::default()).entries;
+        assert_eq!(scanned.len(), 2);
+        // What a tab that was opened and quit again leaves behind: a session path, and
+        // no journal behind it (the swarm writes one with its first reply).
+        let mut missing = Recent::new(
+            root.path().join("never-written").join("1.sexp"),
+            root.path().join("never-written"),
+            1,
+        );
+        missing.when = "2026-09-29T09:00:00Z".into();
+        missing.open_at_quit = true;
+
+        let merged = merge(scanned, &[missing.clone()]);
+        assert_eq!(
+            merged.len(),
+            2,
+            "only the swarms that really wrote a journal"
+        );
+        assert!(
+            !merged.iter().any(|entry| entry.session == missing.session),
+            "and not the one that cannot come back: {:?}",
+            merged.iter().map(|e| &e.session).collect::<Vec<_>>()
+        );
+        assert!(!merged.iter().any(|entry| entry.open_at_quit));
+
+        // The moment the journal exists, the same recent is a row again.
+        fs::create_dir_all(missing.folder.clone()).unwrap();
+        fs::write(&missing.session, "(:type :session)\n").unwrap();
+        let merged = merge(
+            scan(&dir, &ScanBudget::default()).entries,
+            &[missing.clone()],
+        );
+        assert_eq!(merged.len(), 3);
+        assert_eq!(
+            merged[0].session, missing.session,
+            "and it was open at the last quit"
+        );
+        assert!(merged[0].open_at_quit);
         fs::remove_dir_all(root.path()).unwrap();
     }
 
     #[test]
     fn load_history_reads_recents_from_app_json() {
         let (root, dir) = fixture("load");
+        let elsewhere = root.path().join("Users-x-elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+        let session = elsewhere.join("1.sexp");
+        fs::write(&session, "(:type :session)\n").unwrap();
         let mut app = crate::app_state::AppState::default();
-        app.touch_recent(Recent::new("/Users/x/elsewhere/1.sexp", "/Users/x/elsewhere", 4));
+        app.touch_recent(Recent::new(&session, &elsewhere, 4));
         app.save(&root).unwrap();
         let history = load_history(&root, &dir, &ScanBudget::default());
         assert_eq!(history.len(), 3);
-        assert!(history.iter().any(|e| e.folder == *"/Users/x/elsewhere"));
+        assert!(history.iter().any(|e| e.folder == elsewhere));
         fs::remove_dir_all(root.path()).unwrap();
     }
 
@@ -872,7 +1022,10 @@ mod tests {
 
         let merged = merge(scanned.clone(), &[recent]);
         assert_eq!(merged.len(), scanned.len());
-        assert_eq!(merged[0].session, open, "open at the last quit, so it is first");
+        assert_eq!(
+            merged[0].session, open,
+            "open at the last quit, so it is first"
+        );
         assert!(merged[0].open_at_quit);
         // The scan found it too, so the swarm facts survive the merge.
         assert_eq!(merged[0].source, HistorySource::Scanned);
@@ -882,10 +1035,17 @@ mod tests {
         // Without the flag: the scan's own order, oldest-data last.
         let plain = merge(scanned.clone(), &[]);
         assert_eq!(plain[0].session, scanned[0].session);
-        assert!(plain.iter().all(|entry| !entry.open_at_quit), "the scan cannot know");
+        assert!(
+            plain.iter().all(|entry| !entry.open_at_quit),
+            "the scan cannot know"
+        );
 
         // A row only the app remembers carries the flag through as well.
-        let orphan = Recent::new("/Users/x/gone/9.sexp", "/Users/x/gone", 2).open_at_quit();
+        let elsewhere = root.path().join("Users-x-elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+        let orphan_session = elsewhere.join("9.sexp");
+        fs::write(&orphan_session, "(:type :session)\n").unwrap();
+        let orphan = Recent::new(&orphan_session, &elsewhere, 2).open_at_quit();
         let merged = merge(Vec::new(), &[orphan]);
         assert_eq!(merged[0].source, HistorySource::Recent);
         assert!(merged[0].open_at_quit);
@@ -906,14 +1066,20 @@ mod tests {
     #[test]
     fn entry_type_is_read_cheaply() {
         assert_eq!(entry_type_of("(:type :custom :id \"x\")"), Some("custom"));
-        assert_eq!(entry_type_of("(:type :swarm-state :x 1)"), Some("swarm-state"));
+        assert_eq!(
+            entry_type_of("(:type :swarm-state :x 1)"),
+            Some("swarm-state")
+        );
         assert_eq!(entry_type_of("  (:type :custom)"), None);
         assert_eq!(entry_type_of("(:type)"), None);
     }
 
     #[test]
     fn session_ids_come_from_the_filename() {
-        assert_eq!(session_id_of(Path::new("/a/20260929T090956Z_ed99c60d1dee3c3f.sexp")), "ed99c60d1dee3c3f");
+        assert_eq!(
+            session_id_of(Path::new("/a/20260929T090956Z_ed99c60d1dee3c3f.sexp")),
+            "ed99c60d1dee3c3f"
+        );
         assert_eq!(session_id_of(Path::new("/a/odd.sexp")), "odd");
     }
 
@@ -922,7 +1088,10 @@ mod tests {
         // No `EVO_HOME`: the user's own `~/.evo`.
         assert_eq!(sessions_dir_in(None), paths::evo_dir().join("sessions"));
         // An empty value is not a home (the variable is set and useless).
-        assert_eq!(sessions_dir_in(Some("".into())), paths::evo_dir().join("sessions"));
+        assert_eq!(
+            sessions_dir_in(Some("".into())),
+            paths::evo_dir().join("sessions")
+        );
         // `EVO_HOME`, with or without the separator — joining is path-aware,
         // unlike evo's own textual `merge-pathnames` (docs/proofs-real.md R2).
         assert_eq!(

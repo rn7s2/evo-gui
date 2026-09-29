@@ -1738,6 +1738,7 @@ dependencies = [
  "libc",
  "serde_json",
  "session",
+ "settings",
  "store",
  "swarm_client",
  "tab_engine",

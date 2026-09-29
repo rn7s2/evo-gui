@@ -61,11 +61,17 @@ pub struct Readiness {
 
 impl Readiness {
     pub fn swarm() -> Readiness {
-        Readiness { name: Some("evo-swarm".into()), features: vec!["swarm".into()] }
+        Readiness {
+            name: Some("evo-swarm".into()),
+            features: vec!["swarm".into()],
+        }
     }
 
     pub fn agent() -> Readiness {
-        Readiness { name: Some("evo-agent".into()), features: Vec::new() }
+        Readiness {
+            name: Some("evo-agent".into()),
+            features: Vec::new(),
+        }
     }
 
     fn matches(&self, health: &Health) -> bool {
@@ -77,14 +83,29 @@ impl Readiness {
                 return false;
             }
         }
-        self.features.iter().all(|feature| health.has_feature(feature))
+        self.features
+            .iter()
+            .all(|feature| health.has_feature(feature))
     }
 }
 
-/// How patiently a cancellation waits for the process to leave on its own,
-/// before `SIGTERM`, and then `SIGKILL` — a boot a caller aborted has to be
-/// over in about a second (§3, and the app's quit path).
+/// How long a cancellation waits for an answer to the `POST /shutdown` it sends a
+/// server it can still talk to. Short: the reply is a courtesy, the stopping is
+/// not — the request's own work goes on whether or not we wait for it.
 const CANCEL_SHUTDOWN_GRACE: Duration = Duration::from_millis(400);
+/// How long a cancellation then waits for the process to leave on its own, before
+/// `SIGTERM`, and then `SIGKILL` — but only for a server that is answering.
+///
+/// A boot a caller aborted should be over in about a second (§3, the app's quit
+/// path), and for a server that never came up it is: nothing is listening, so there
+/// is nothing to ask and no reason to wait. A server that *is* up is a different
+/// matter. Its lanes are in process groups of their own (`evo-swarm` gives each one
+/// its own, deliberately), so a signal to the supervisor's group never reaches them,
+/// and a `SIGKILL`ed supervisor leaves its lanes running — ten of them, for as long
+/// as the machine is up, in one afternoon's capture. The supervisor is the only
+/// process that can take them down, and `/shutdown` is how it is asked; this is the
+/// time that gets to happen before the signal.
+const CANCEL_STOP_GRACE: Duration = Duration::from_secs(5);
 const CANCEL_TERM_GRACE: Duration = Duration::from_millis(200);
 /// How long one readiness probe may take. A server that has written its token is
 /// listening, so `/health` answers at once; a short patience keeps an abort from
@@ -354,7 +375,10 @@ impl Server {
             None => free_port()?,
         };
         if !cfg.cwd.is_dir() {
-            return Err(Error::Config(format!("{} is not a directory", cfg.cwd.display())));
+            return Err(Error::Config(format!(
+                "{} is not a directory",
+                cfg.cwd.display()
+            )));
         }
         let mut child = spawn(cfg, port)?;
         let pid = child.id();
@@ -371,10 +395,15 @@ impl Server {
                 // Nothing to ask over HTTP until the server has written its token
                 // and we know its port; then `SIGTERM` is the first thing, and
                 // `SIGKILL` only follows if it is ignored.
-                let impatient = client.as_ref().map(|c| c.with_timeout(CANCEL_SHUTDOWN_GRACE));
-                let grace = if impatient.is_some() { CANCEL_SHUTDOWN_GRACE } else { Duration::ZERO };
-                let outcome =
-                    ladder(impatient.as_ref(), &mut child, grace, CANCEL_TERM_GRACE);
+                let impatient = client
+                    .as_ref()
+                    .map(|c| c.with_timeout(CANCEL_SHUTDOWN_GRACE));
+                let grace = if impatient.is_some() {
+                    CANCEL_STOP_GRACE
+                } else {
+                    Duration::ZERO
+                };
+                let outcome = ladder(impatient.as_ref(), &mut child, grace, CANCEL_TERM_GRACE);
                 return Err(Error::Cancelled(outcome.outcome));
             }
             match child.try_wait() {
@@ -430,7 +459,12 @@ impl Server {
             }
             if Instant::now() >= deadline {
                 let mut child = child;
-                ladder(client.as_ref(), &mut child, cfg.shutdown_grace, cfg.term_grace);
+                ladder(
+                    client.as_ref(),
+                    &mut child,
+                    cfg.shutdown_grace,
+                    cfg.term_grace,
+                );
                 return Err(Error::Boot(Box::new(BootFailure {
                     message: format!(
                         "no ready server after {:?} (name {:?}, features {:?})",
@@ -531,7 +565,10 @@ impl Server {
             self.term_grace,
         );
         self.reaped = true;
-        Ok(Shutdown { waited: started.elapsed(), ..outcome })
+        Ok(Shutdown {
+            waited: started.elapsed(),
+            ..outcome
+        })
     }
 
     /// `SIGKILL` now, for a caller that has given up on the ladder (a panic path).
@@ -574,15 +611,27 @@ fn ladder(
         let _ = client.shutdown();
     }
     if let Some(code) = wait_for_exit(child, shutdown_grace) {
-        return Shutdown { outcome: ShutdownOutcome::Graceful, exit_code: Some(code), waited: Duration::ZERO };
+        return Shutdown {
+            outcome: ShutdownOutcome::Graceful,
+            exit_code: Some(code),
+            waited: Duration::ZERO,
+        };
     }
     signal_group(child.id(), libc::SIGTERM);
     if let Some(code) = wait_for_exit(child, term_grace) {
-        return Shutdown { outcome: ShutdownOutcome::Terminated, exit_code: Some(code), waited: Duration::ZERO };
+        return Shutdown {
+            outcome: ShutdownOutcome::Terminated,
+            exit_code: Some(code),
+            waited: Duration::ZERO,
+        };
     }
     signal_group(child.id(), libc::SIGKILL);
     let code = child.wait().ok().and_then(|status| status.code());
-    Shutdown { outcome: ShutdownOutcome::Killed, exit_code: code, waited: Duration::ZERO }
+    Shutdown {
+        outcome: ShutdownOutcome::Killed,
+        exit_code: code,
+        waited: Duration::ZERO,
+    }
 }
 
 fn wait_for_exit(child: &mut Child, timeout: Duration) -> Option<i32> {
@@ -688,7 +737,11 @@ fn spawn(cfg: &ServerConfig, port: u16) -> Result<Child> {
 /// of stopping (§3). The token is never handed over in the environment: the
 /// server writes it to `--token-file`, and nothing else knows it.
 pub(crate) fn apply_environment(command: &mut Command, cfg: &ServerConfig) {
-    for name in SCRUB_ENV.iter().copied().chain(cfg.env_remove.iter().map(String::as_str)) {
+    for name in SCRUB_ENV
+        .iter()
+        .copied()
+        .chain(cfg.env_remove.iter().map(String::as_str))
+    {
         command.env_remove(name);
     }
     for (key, value) in &cfg.extra_env {
@@ -702,7 +755,10 @@ pub(crate) fn apply_environment(command: &mut Command, cfg: &ServerConfig) {
 fn port_from_log(text: &str) -> Option<u16> {
     let marker = "http://127.0.0.1:";
     let start = text.rfind(marker)? + marker.len();
-    let digits: String = text[start..].chars().take_while(char::is_ascii_digit).collect();
+    let digits: String = text[start..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
     digits.parse().ok()
 }
 
@@ -748,11 +804,19 @@ mod tests {
         let pid = child.id();
         assert!(process_alive(pid), "a running child is alive");
         child.kill().expect("kill the child");
-        // Deliberately not reaped yet: this is the zombie window.
+        // `SIGKILL` is not instant, so wait for the child to reach the zombie state —
+        // exited, not yet reaped. Nothing here reaps it: that is the case under test.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while (!is_zombie(pid)) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(is_zombie(pid), "the kill landed");
         assert!(
             !process_alive(pid),
             "an exited child is gone, not a zombie to report as running"
         );
+        // And it says so again: the answer is final, not once-only.
+        assert!(!process_alive(pid), "reaped, and still gone");
         let _ = child.wait();
 
         // Anything that is not our child is asked the kernel instead.
@@ -761,17 +825,40 @@ mod tests {
         assert!(!process_alive(0), "and 0 is never a process");
     }
 
+    /// Whether the process is a zombie: exited, and not yet reaped. The one state
+    /// `kill(pid, 0)` cannot tell from "running".
+    fn is_zombie(pid: u32) -> bool {
+        std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .map(|out| String::from_utf8_lossy(&out.stdout).trim().starts_with('Z'))
+            .unwrap_or(false)
+    }
+
     #[test]
     fn argv_is_the_documented_one() {
-        let cfg = ServerConfig::swarm("/usr/local/bin/evo-swarm", "/tmp/proj", Path::new("/tmp/tab"))
-            .with_workers(3)
-            .with_model("m-1")
-            .with_resume(Resume::Path(PathBuf::from("/tmp/s.sexp")));
+        let cfg = ServerConfig::swarm(
+            "/usr/local/bin/evo-swarm",
+            "/tmp/proj",
+            Path::new("/tmp/tab"),
+        )
+        .with_workers(3)
+        .with_model("m-1")
+        .with_resume(Resume::Path(PathBuf::from("/tmp/s.sexp")));
         assert_eq!(
             cfg.argv(8421),
             vec![
-                "serve", "--port", "8421", "--token-file", "/tmp/tab/token",
-                "--workers", "3", "--model", "m-1", "--resume", "/tmp/s.sexp",
+                "serve",
+                "--port",
+                "8421",
+                "--token-file",
+                "/tmp/tab/token",
+                "--workers",
+                "3",
+                "--model",
+                "m-1",
+                "--resume",
+                "/tmp/s.sexp",
             ]
         );
         // --allow-remote is never passed (§3).
@@ -815,8 +902,14 @@ mod tests {
             text.contains(&format!("EVO_SERVE_WATCH_PID={}", std::process::id())),
             "the child must be told to watch us: {text}"
         );
-        assert!(!text.contains("EVO_SERVE_TOKEN="), "the token never comes through the environment: {text}");
-        assert!(!text.contains("EVO_SUPERVISED_CHILD="), "and the evo session is scrubbed: {text}");
+        assert!(
+            !text.contains("EVO_SERVE_TOKEN="),
+            "the token never comes through the environment: {text}"
+        );
+        assert!(
+            !text.contains("EVO_SUPERVISED_CHILD="),
+            "and the evo session is scrubbed: {text}"
+        );
     }
 
     #[test]

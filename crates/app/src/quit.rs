@@ -170,6 +170,12 @@ pub fn remember_tab_set(state: &mut AppState, records: &[TabRecord], selected: O
         let Some(session) = record.session.clone() else {
             continue;
         };
+        // A swarm writes its journal with its first reply, so a tab that was opened
+        // and quit again names a session with no file behind it: nothing to resume,
+        // and therefore nothing to offer as "open at the last quit".
+        if !session.is_file() {
+            continue;
+        }
         // What the app already knew about this session (its lanes model, its lane
         // count) outlives this quit: the entry is refreshed, not replaced.
         let known = state.recent_for(&session).cloned();
@@ -205,14 +211,22 @@ fn save_state(cx: &mut App) {
     // quit, or the next launch would be the system's again.
     state.theme = cx.global::<Shell>().theme;
     let (records, selected) = open_tabs(cx);
-    let open_with_session = records
+    // "Resumable" is the same thing everywhere else here: a session whose journal is
+    // a file. A swarm that never answered names a session and writes nothing, so
+    // counting the *paths* would promise a resume that cannot come back.
+    let resumable = records
         .iter()
-        .filter(|record| record.session.is_some())
+        .filter(|record| {
+            record
+                .session
+                .as_ref()
+                .is_some_and(|session| session.is_file())
+        })
         .count();
     remember_tab_set(&mut state, &records, selected);
     match state.save(&root) {
         Ok(()) => log.info(format!(
-            "saved {}: {} tab(s), {open_with_session} of them resumable",
+            "saved {}: {} tab(s), {resumable} of them resumable",
             root.app_json().display(),
             state.tabs.len()
         )),
@@ -247,7 +261,6 @@ fn view_handle(cx: &App) -> Option<&WeakEntity<WorkspaceView>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
 
     fn record(id: u64, folder: Option<&str>, session: Option<&str>) -> TabRecord {
         TabRecord {
@@ -279,6 +292,25 @@ mod tests {
             state.selected.as_ref().map(StoredTabId::as_str),
             Some("tab-5")
         );
+    }
+
+    /// A temp directory holding `count` journals that really exist.
+    ///
+    /// A session is only a recent once its file does: a swarm writes its journal with
+    /// its first reply, so a tab that was opened and quit again has a session path and
+    /// nothing behind it.
+    fn journals(name: &str, count: usize) -> (PathBuf, Vec<PathBuf>) {
+        let dir = std::env::temp_dir().join(format!("evo-quit-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a directory for the journals");
+        let paths = (0..count)
+            .map(|n| {
+                let path = dir.join(format!("{n}.sexp"));
+                std::fs::write(&path, "(:type :session)\n").expect("a journal");
+                path
+            })
+            .collect();
+        (dir, paths)
     }
 
     fn sessions(state: &AppState) -> Vec<(String, bool)> {
@@ -331,28 +363,72 @@ mod tests {
 
     #[test]
     fn only_a_tab_with_a_session_becomes_a_recent() {
+        let (dir, journals) = journals("with-sessions", 2);
         let mut state = AppState::default();
         let records = [
-            record(1, Some("/coding/a"), Some("/sessions/one.sexp")),
+            record(1, Some("/coding/a"), journals[0].to_str()),
             record(2, Some("/coding/b"), None),
-            record(3, Some("/coding/c"), Some("/sessions/three.sexp")),
+            record(3, Some("/coding/c"), journals[1].to_str()),
         ];
         remember_tab_set(&mut state, &records, Some(0));
 
         assert_eq!(
             sessions(&state),
             [
-                ("/sessions/three.sexp".to_owned(), true),
-                ("/sessions/one.sexp".to_owned(), true),
+                (journals[1].display().to_string(), true),
+                (journals[0].display().to_string(), true),
             ],
             "newest first, and only the tabs that had a session"
         );
-        let one = state
-            .recent_for(Path::new("/sessions/one.sexp"))
-            .expect("a recent");
+        let one = state.recent_for(&journals[0]).expect("a recent");
         assert_eq!(one.folder, PathBuf::from("/coding/a"));
         assert!(one.open_at_quit, "it was open when the app quit");
         assert!(!one.when.is_empty(), "the tab's use is stamped");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_tab_whose_journal_was_never_written_is_not_a_recent() {
+        // The tab was opened and quit again without a turn: the swarm named a session
+        // path and never wrote the file, so there is nothing to resume — and nothing
+        // to offer as "open at the last quit".
+        let (dir, journals) = journals("never-written", 1);
+        let never = dir.join("never.sexp");
+
+        // Nothing knew about it, and nothing records it.
+        let mut state = AppState::default();
+        remember_tab_set(
+            &mut state,
+            &[record(1, Some("/coding/never"), never.to_str())],
+            Some(0),
+        );
+        assert!(
+            state.recents.is_empty(),
+            "a session with no journal is not recorded: {:?}",
+            sessions(&state)
+        );
+
+        // An older `app.json` did record one (before the tab's own recording was
+        // gated): it is not what "open at the last quit" means any more.
+        state.touch_recent(Recent::new(&never, "/coding/never", 1).open_at_quit());
+        remember_tab_set(
+            &mut state,
+            &[
+                record(1, Some("/coding/a"), journals[0].to_str()),
+                record(2, Some("/coding/never"), never.to_str()),
+            ],
+            Some(0),
+        );
+        assert_eq!(
+            sessions(&state),
+            [
+                (journals[0].display().to_string(), true),
+                (never.display().to_string(), false),
+            ],
+            "the tab with a journal is a recent; the one without is not flagged"
+        );
+        assert_eq!(state.tabs.len(), 2, "both tabs are still part of the strip");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -378,23 +454,22 @@ mod tests {
 
     #[test]
     fn an_existing_recent_keeps_what_the_app_knew_and_moves_to_the_top() {
+        let (dir, journals) = journals("known-session", 1);
         let mut state = AppState::default();
-        let mut known = Recent::new("/sessions/a.sexp", "/coding/a", 4);
+        let mut known = Recent::new(&journals[0], "/coding/a", 4);
         known.models.coordinator = Some("coord-model".to_owned());
         known.models.lanes = Some("lanes-model".to_owned());
         known.when = "2026-01-01T00:00:00Z".to_owned();
         state.touch_recent(known);
-        state.touch_recent(Recent::new("/sessions/b.sexp", "/coding/b", 2));
+        state.touch_recent(Recent::new(dir.join("b.sexp"), "/coding/b", 2));
 
         remember_tab_set(
             &mut state,
-            &[record(1, Some("/coding/a"), Some("/sessions/a.sexp"))],
+            &[record(1, Some("/coding/a"), journals[0].to_str())],
             Some(0),
         );
 
-        let refreshed = state
-            .recent_for(Path::new("/sessions/a.sexp"))
-            .expect("still there");
+        let refreshed = state.recent_for(&journals[0]).expect("still there");
         assert!(refreshed.open_at_quit);
         assert_eq!(refreshed.models.lanes.as_deref(), Some("lanes-model"));
         assert_eq!(refreshed.lanes, 4, "the lane count it was started with");
@@ -405,7 +480,7 @@ mod tests {
         );
         assert_eq!(
             sessions(&state).first().map(|(path, _)| path.as_str()),
-            Some("/sessions/a.sexp"),
+            Some(journals[0].to_str().unwrap()),
             "and it is the most recent now"
         );
         assert_eq!(
@@ -413,6 +488,7 @@ mod tests {
             2,
             "no duplicate row for the same session"
         );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

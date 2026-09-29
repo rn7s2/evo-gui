@@ -25,6 +25,7 @@ mod launcher;
 mod logging;
 mod menus;
 mod quit;
+mod settings;
 mod startup;
 mod theme;
 
@@ -37,11 +38,12 @@ pub use launcher::{
 };
 pub use logging::{AppLog, Level, LOG_NAME};
 pub use menus::open_about;
-pub use menus::{CloseTab, NewTab, QuitApp};
+pub use menus::{open_settings, CloseTab, NewTab, QuitApp};
 pub use quit::{
     begin as begin_quit, is_quitting, open_tabs, remember_tab_set, take_engines, TabRecord,
     SHUTDOWN_DEADLINE,
 };
+pub use settings::{apply as apply_settings, open as open_settings_panel};
 pub use startup::{cache_is_stale, CACHE_MAX_AGE};
 pub use theme::{follow_appearance, mode_for};
 

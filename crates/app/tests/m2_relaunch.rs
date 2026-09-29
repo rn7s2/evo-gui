@@ -5,7 +5,9 @@
 //! processes and their lanes, started from the installed binaries into a temp
 //! `EVO_HOME` whose `init.lisp` registers a stub provider, the real `Shell`,
 //! window, tabs, composer, quit sequence and `app.json` — read back by a *second*
-//! app instance on the same data root (`TestAppContext::new_app`).
+//! app instance on the same data root (`TestAppContext::new_app`). Each swarm gets
+//! one turn: a swarm writes its journal with its first reply, and only a tab with a
+//! journal is something the next launch can offer.
 //!
 //! The milestone's two claims are what the assertions are about: the first launch
 //! leaves three tabs and marks exactly the two swarms open at quit, and the second
@@ -36,6 +38,9 @@ use workspace::TabState;
 /// The first turn, and what the stub model answers it with (`ok: <the turn>`).
 const PROMPT: &str = "M2 first turn";
 const PROMPT_REPLY: &str = "ok: M2 first turn";
+/// The turn B gets, so that both swarms have written a journal by the quit.
+const B_PROMPT: &str = "M2 first turn in B";
+const B_REPLY: &str = "ok: M2 first turn in B";
 /// A turn sent after the resume, in the second launch.
 const SECOND: &str = "M2 after the resume";
 const SECOND_REPLY: &str = "ok: M2 after the resume";
@@ -117,16 +122,40 @@ fn a_swarm_that_ran_once_is_offered_first_and_comes_back(cx: &mut TestAppContext
         })
         .expect("a second tab");
     launch(cx, &b_tab, &b, 1);
-    let (_, b_pid) = wait_booted(cx, "B's swarm", &b_tab);
+    let (b_session, b_pid) = wait_booted(cx, "B's swarm", &b_tab);
+    // B gets a turn too: a swarm writes its journal with its first reply, and a tab
+    // with no journal is nothing the next launch can offer
+    // (`quit::tests::a_tab_whose_journal_was_never_written_is_not_a_recent`).
+    send(cx, window, &b_tab, B_PROMPT);
+    wait_for_text(cx, "B's reply", &b_tab, B_REPLY);
+    wait_for(cx, "B's journal on disk", |_| b_session.is_file());
+
+    // A third swarm, launched in C and never spoken to: it names a session and
+    // writes no journal (the file arrives with the first reply), so the next launch
+    // has nothing to resume and must not offer it.
+    let c = fixture.dir.join("C");
+    std::fs::create_dir_all(&c).expect("folder C");
+    let c_tab = cx
+        .update_window(window, |_, window, cx| {
+            view.update(cx, |view, cx| view.open_empty_tab(window, cx))
+        })
+        .expect("a third tab");
+    launch(cx, &c_tab, &c, 1);
+    let (c_session, c_pid) = wait_booted(cx, "C's swarm", &c_tab);
+    assert!(
+        !c_session.is_file(),
+        "a swarm that has answered nothing has written no journal: {}",
+        c_session.display()
+    );
 
     let empty_tab = cx
         .update_window(window, |_, window, cx| {
             view.update(cx, |view, cx| view.open_empty_tab(window, cx))
         })
-        .expect("a third tab");
+        .expect("a fourth tab");
     assert!(
         matches!(tab_state(cx, &empty_tab), TabState::Empty),
-        "the third tab stays empty — nothing was launched in it"
+        "the last tab stays empty — nothing was launched in it"
     );
     let records = cx.update(|cx| view.read(cx).tab_records(cx));
     assert_eq!(
@@ -134,8 +163,8 @@ fn a_swarm_that_ran_once_is_offered_first_and_comes_back(cx: &mut TestAppContext
             .iter()
             .map(|record| record.folder.clone())
             .collect::<Vec<_>>(),
-        vec![Some(a.clone()), Some(b.clone()), None],
-        "three tabs, in the strip's order: A, B, and the empty one"
+        vec![Some(a.clone()), Some(b.clone()), Some(c.clone()), None],
+        "four tabs, in the strip's order: A, B, C, and the empty one"
     );
 
     // --- the quit: the engines are handed over, `app.json` is written ---------
@@ -143,13 +172,13 @@ fn a_swarm_that_ran_once_is_offered_first_and_comes_back(cx: &mut TestAppContext
     drain(cx);
     wait_nothing_left(cx, &fixture, "after the first quit");
     assert!(
-        !running(a_pid) && !running(b_pid),
-        "both swarms are gone: A {a_pid}, B {b_pid}"
+        !running(a_pid) && !running(b_pid) && !running(c_pid),
+        "every swarm is gone: A {a_pid}, B {b_pid}, C {c_pid}"
     );
 
     let state = AppState::load(&root);
     let tabs: Vec<&str> = state.tabs.iter().map(store::paths::TabId::as_str).collect();
-    assert_eq!(tabs.len(), 3, "three tabs were stored: {tabs:?}");
+    assert_eq!(tabs.len(), 4, "four tabs were stored: {tabs:?}");
     let flagged: Vec<&Recent> = state
         .recents
         .iter()
@@ -158,7 +187,7 @@ fn a_swarm_that_ran_once_is_offered_first_and_comes_back(cx: &mut TestAppContext
     assert_eq!(
         flagged.len(),
         2,
-        "the two swarms were open at the last quit, and nothing else: {:?}",
+        "only the swarms that wrote a journal were open at the last quit: {:?}",
         state
             .recents
             .iter()
@@ -186,7 +215,19 @@ fn a_swarm_that_ran_once_is_offered_first_and_comes_back(cx: &mut TestAppContext
             .recents
             .iter()
             .all(|recent| recent.folder == a || recent.folder == b),
-        "the empty tab had no session, so it is nobody's recent"
+        "the silent swarm and the empty tab are nobody's recent: {:?}",
+        state
+            .recents
+            .iter()
+            .map(|recent| (recent.folder.clone(), recent.open_at_quit))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        !state
+            .recents
+            .iter()
+            .any(|recent| same_path(&recent.folder, &c) || same_path(&recent.session, &c_session)),
+        "the tab that was launched and never answered is not offered: it has no journal"
     );
 
     // --- the second launch: offered first, and it comes back ------------------
@@ -248,6 +289,13 @@ fn a_swarm_that_ran_once_is_offered_first_and_comes_back(cx: &mut TestAppContext
     assert!(
         rows.iter().skip(2).all(|row| !row.open_at_quit),
         "and nothing else claims to have been open"
+    );
+    assert!(
+        !rows.iter().any(|row| same_path(&row.folder, &c)),
+        "and the silent swarm is not listed at all: {:?}",
+        rows.iter()
+            .map(|row| row.folder.clone())
+            .collect::<Vec<_>>()
     );
     let a_row = rows
         .iter()
