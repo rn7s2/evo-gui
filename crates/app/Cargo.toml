@@ -1,0 +1,10 @@
+[package]
+name = "evo-desktop"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "evo-desktop"
+path = "src/main.rs"
+
+[dependencies]

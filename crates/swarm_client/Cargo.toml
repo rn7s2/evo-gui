@@ -1,0 +1,6 @@
+[package]
+name = "swarm_client"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

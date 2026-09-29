@@ -1,0 +1,6 @@
+[package]
+name = "transcript"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
