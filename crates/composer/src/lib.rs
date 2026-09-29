@@ -464,6 +464,10 @@ impl Composer {
             .truncate()
             .text_size(READOUT_SIZE)
             .text_color(cx.theme().muted_foreground)
+            // The whole line as the element's accessible name: the visible cell is
+            // truncated to the column, and this is what a reader who cannot see the
+            // ellipsis (or a test) is meant to read.
+            .aria_label(full.clone())
             // The whole line, wrapped rather than a single line wider than the
             // window it is read in.
             .tooltip(move |window, cx| {
@@ -1145,6 +1149,10 @@ mod tests {
             let readout = window.find(READOUT_ID);
             let button = window.find(BUTTON_ID);
             assert!(readout.visible() && button.visible());
+
+            // The cell is truncated to the column, so the whole line is its
+            // accessible name — what a workspace test asserts the status row says.
+            assert_eq!(readout.label(), Some(line), "the readout's own line");
 
             // One line high and on the same row: readout left, button right.
             assert!(
