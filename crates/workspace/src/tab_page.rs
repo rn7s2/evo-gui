@@ -484,8 +484,8 @@ impl TabContent {
             .child(status_line(status_text(self.model()), cx))
     }
 
-    /// The coordinator's composer: the input, and the readout and the single
-    /// action button on one line beneath it (§7.3).
+    /// The coordinator's composer: the input, and the single action button
+    /// beneath it (§7.3; the readout lives at the foot of the centre column).
     ///
     /// A refused POST says so here — above the input that caused it, in the
     /// server's own words, and gone on its own (§4, §9.2).
