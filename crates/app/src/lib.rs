@@ -28,21 +28,21 @@ mod quit;
 mod startup;
 mod theme;
 
-pub use about::{Versions, start as start_version_probe};
-pub use menus::open_about;
-pub use bounds::{Tracker, window_bounds, window_options};
-pub use housekeeping::{Pruned, TAB_DIR_TTL, prune_tab_dirs};
+pub use about::{start as start_version_probe, Versions};
+pub use bounds::{window_bounds, window_options, Tracker};
+pub use housekeeping::{prune_tab_dirs, Pruned, TAB_DIR_TTL};
 pub use launcher::{
-    Launcher, history_entries, hook_live_registry, on_live_registry, push_launcher_data,
-    tab_count, utc_offset_seconds,
+    history_entries, hook_live_registry, on_live_registry, push_launcher_data, tab_count,
+    utc_offset_seconds, Launcher,
 };
 pub use logging::{AppLog, Level, LOG_NAME};
+pub use menus::open_about;
 pub use menus::{CloseTab, NewTab, QuitApp};
 pub use quit::{
-    SHUTDOWN_DEADLINE, TabRecord, begin as begin_quit, is_quitting, open_tabs, remember_tab_set,
-    take_engines,
+    begin as begin_quit, is_quitting, open_tabs, remember_tab_set, take_engines, TabRecord,
+    SHUTDOWN_DEADLINE,
 };
-pub use startup::{CACHE_MAX_AGE, cache_is_stale};
+pub use startup::{cache_is_stale, CACHE_MAX_AGE};
 pub use theme::{follow_appearance, mode_for};
 
 use gpui_kit::prelude::*;
@@ -217,7 +217,8 @@ pub fn run() {
             log.info("window open");
             // Where the window actually is, after the clamp — `app.json`'s
             // numbers are a request (§2 rule 1), and this is the answer.
-            if let Ok(bounds) = window.update(cx, |_root, window, _cx| bounds::stored_from_window(window))
+            if let Ok(bounds) =
+                window.update(cx, |_root, window, _cx| bounds::stored_from_window(window))
             {
                 log.info(format!(
                     "window bounds {}x{} at {:.0},{:.0}",
@@ -278,7 +279,10 @@ fn raise(cx: &mut App, log: &AppLog, activation: &Activation) {
     }
     log.info(format!(
         "activated by another launch (pid {})",
-        activation.pid.map(|pid| pid.to_string()).unwrap_or_else(|| "?".to_owned())
+        activation
+            .pid
+            .map(|pid| pid.to_string())
+            .unwrap_or_else(|| "?".to_owned())
     ));
 }
 
@@ -297,7 +301,10 @@ fn spawn_activation_watcher(
         .spawn(move || {
             let primary = primary;
             loop {
-                match primary.activation_rx().recv_timeout(std::time::Duration::from_millis(250)) {
+                match primary
+                    .activation_rx()
+                    .recv_timeout(std::time::Duration::from_millis(250))
+                {
                     Ok(activation) => {
                         if tx.send_blocking(activation).is_err() {
                             break;

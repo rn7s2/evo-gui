@@ -22,7 +22,7 @@ use gpui_kit::{App, WeakEntity};
 use store::app_state::{AppState, Recent};
 use store::paths::TabId as StoredTabId;
 use store::time;
-use tab_engine::{EngineHandle, shutdown_all};
+use tab_engine::{shutdown_all, EngineHandle};
 use workspace::WorkspaceView;
 
 use crate::Shell;
@@ -190,7 +190,10 @@ pub fn remember_tab_set(state: &mut AppState, records: &[TabRecord], selected: O
 fn save_state(cx: &mut App) {
     let (root, log, bounds) = {
         let shell = cx.global::<Shell>();
-        let bounds = shell.tracker.as_ref().map(|tracker| tracker.read(cx).bounds());
+        let bounds = shell
+            .tracker
+            .as_ref()
+            .map(|tracker| tracker.read(cx).bounds());
         (shell.root.clone(), shell.log.clone(), bounds)
     };
     let mut state = AppState::load(&root);
@@ -202,7 +205,10 @@ fn save_state(cx: &mut App) {
     // quit, or the next launch would be the system's again.
     state.theme = cx.global::<Shell>().theme;
     let (records, selected) = open_tabs(cx);
-    let open_with_session = records.iter().filter(|record| record.session.is_some()).count();
+    let open_with_session = records
+        .iter()
+        .filter(|record| record.session.is_some())
+        .count();
     remember_tab_set(&mut state, &records, selected);
     match state.save(&root) {
         Ok(()) => log.info(format!(
@@ -210,7 +216,10 @@ fn save_state(cx: &mut App) {
             root.app_json().display(),
             state.tabs.len()
         )),
-        Err(error) => log.error(format!("could not save {}: {error}", root.app_json().display())),
+        Err(error) => log.error(format!(
+            "could not save {}: {error}",
+            root.app_json().display()
+        )),
     }
 }
 
@@ -266,7 +275,10 @@ mod tests {
             ["9f2c1a", "tab-5"],
             "the directory id when the tab has one, the window handle otherwise"
         );
-        assert_eq!(state.selected.as_ref().map(StoredTabId::as_str), Some("tab-5"));
+        assert_eq!(
+            state.selected.as_ref().map(StoredTabId::as_str),
+            Some("tab-5")
+        );
     }
 
     fn sessions(state: &AppState) -> Vec<(String, bool)> {
@@ -291,8 +303,15 @@ mod tests {
         remember_tab_set(&mut state, &records, Some(2));
 
         let ids: Vec<&str> = state.tabs.iter().map(StoredTabId::as_str).collect();
-        assert_eq!(ids, ["tab-7", "tab-9", "tab-12"], "in strip order, and the old set gone");
-        assert_eq!(state.selected.as_ref().map(StoredTabId::as_str), Some("tab-12"));
+        assert_eq!(
+            ids,
+            ["tab-7", "tab-9", "tab-12"],
+            "in strip order, and the old set gone"
+        );
+        assert_eq!(
+            state.selected.as_ref().map(StoredTabId::as_str),
+            Some("tab-12")
+        );
     }
 
     #[test]
@@ -304,7 +323,10 @@ mod tests {
 
         remember_tab_set(&mut state, &[], Some(3));
         assert!(state.tabs.is_empty());
-        assert!(state.selected.is_none(), "an index past the strip is not a selection");
+        assert!(
+            state.selected.is_none(),
+            "an index past the strip is not a selection"
+        );
     }
 
     #[test]
@@ -325,7 +347,9 @@ mod tests {
             ],
             "newest first, and only the tabs that had a session"
         );
-        let one = state.recent_for(Path::new("/sessions/one.sexp")).expect("a recent");
+        let one = state
+            .recent_for(Path::new("/sessions/one.sexp"))
+            .expect("a recent");
         assert_eq!(one.folder, PathBuf::from("/coding/a"));
         assert!(one.open_at_quit, "it was open when the app quit");
         assert!(!one.when.is_empty(), "the tab's use is stamped");
@@ -339,7 +363,11 @@ mod tests {
 
         // This quit: only `other` is open and it has no session, so nothing is
         // open any more and the stale flag has to go.
-        remember_tab_set(&mut state, &[record(1, Some("/coding/other"), None)], Some(0));
+        remember_tab_set(
+            &mut state,
+            &[record(1, Some("/coding/other"), None)],
+            Some(0),
+        );
         assert!(
             state.recents.iter().all(|recent| !recent.open_at_quit),
             "a flag from an earlier quit must not survive: {:?}",
@@ -358,20 +386,33 @@ mod tests {
         state.touch_recent(known);
         state.touch_recent(Recent::new("/sessions/b.sexp", "/coding/b", 2));
 
-        remember_tab_set(&mut state, &[record(1, Some("/coding/a"), Some("/sessions/a.sexp"))], Some(0));
+        remember_tab_set(
+            &mut state,
+            &[record(1, Some("/coding/a"), Some("/sessions/a.sexp"))],
+            Some(0),
+        );
 
-        let refreshed = state.recent_for(Path::new("/sessions/a.sexp")).expect("still there");
+        let refreshed = state
+            .recent_for(Path::new("/sessions/a.sexp"))
+            .expect("still there");
         assert!(refreshed.open_at_quit);
         assert_eq!(refreshed.models.lanes.as_deref(), Some("lanes-model"));
         assert_eq!(refreshed.lanes, 4, "the lane count it was started with");
         assert_eq!(refreshed.folder, PathBuf::from("/coding/a"));
-        assert_ne!(refreshed.when, "2026-01-01T00:00:00Z", "stamped with this quit");
+        assert_ne!(
+            refreshed.when, "2026-01-01T00:00:00Z",
+            "stamped with this quit"
+        );
         assert_eq!(
             sessions(&state).first().map(|(path, _)| path.as_str()),
             Some("/sessions/a.sexp"),
             "and it is the most recent now"
         );
-        assert_eq!(state.recents.len(), 2, "no duplicate row for the same session");
+        assert_eq!(
+            state.recents.len(),
+            2,
+            "no duplicate row for the same session"
+        );
     }
 
     #[test]

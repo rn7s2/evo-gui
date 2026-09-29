@@ -7,11 +7,11 @@
 //! (`TestAppContext::test_window` is gpui-internal), so the live switch is
 //! verified against a real launch instead — see `docs/proofs.md`.
 
-use evo_desktop::{AppLog, Shell, follow_appearance};
+use evo_desktop::{follow_appearance, AppLog, Shell};
 use gpui_kit::component::{ActiveTheme as _, ThemeMode};
 use gpui_kit::{
-    AnyWindowHandle, AppContext as _, Bounds, Point, TestAppContext, WindowAppearance, WindowBounds,
-    WindowOptions, px, size,
+    px, size, AnyWindowHandle, AppContext as _, Bounds, Point, TestAppContext, WindowAppearance,
+    WindowBounds, WindowOptions,
 };
 use store::app_state::{AppState, Theme};
 use store::model_cache::ModelCache;
@@ -32,7 +32,10 @@ fn open(cx: &mut TestAppContext, theme: Theme) -> (AnyWindowHandle, AppLog) {
         .update({
             let log = log.clone();
             move |cx| {
-                let state = AppState { theme, ..AppState::default() };
+                let state = AppState {
+                    theme,
+                    ..AppState::default()
+                };
                 Shell::new(root, log, state, ModelCache::default()).install(cx);
                 let config = std::sync::Arc::new(evo_desktop::swarm_config(cx));
                 gpui_kit::open_window(
@@ -63,7 +66,8 @@ fn mode(cx: &mut TestAppContext) -> ThemeMode {
 }
 
 fn appearance(cx: &mut TestAppContext, window: AnyWindowHandle) -> WindowAppearance {
-    cx.update_window(window, |_, window, _cx| window.appearance()).expect("the window")
+    cx.update_window(window, |_, window, _cx| window.appearance())
+        .expect("the window")
 }
 
 /// Apply the startup half: what `run` does when the window is up.
@@ -86,11 +90,19 @@ fn the_system_choice_is_what_the_window_reports(cx: &mut TestAppContext) {
         WindowAppearance::Dark | WindowAppearance::VibrantDark => ThemeMode::Dark,
         _ => ThemeMode::Light,
     };
-    assert_eq!(mode(cx), expected, "the system's answer on a {reported:?} window");
+    assert_eq!(
+        mode(cx),
+        expected,
+        "the system's answer on a {reported:?} window"
+    );
     assert!(
         log_text(&log).contains(&format!(
             "theme: {} (the system appearance)",
-            if expected == ThemeMode::Dark { "dark" } else { "light" }
+            if expected == ThemeMode::Dark {
+                "dark"
+            } else {
+                "light"
+            }
         )),
         "the log says which mode, and why: {}",
         log_text(&log)
@@ -104,12 +116,24 @@ fn a_choice_in_app_json_wins_over_the_window(cx: &mut TestAppContext) {
     let (window, log) = open(cx, Theme::Dark);
     start(cx, window);
 
-    assert_eq!(appearance(cx, window), WindowAppearance::Light, "the platform's window");
+    assert_eq!(
+        appearance(cx, window),
+        WindowAppearance::Light,
+        "the platform's window"
+    );
     assert_eq!(mode(cx), ThemeMode::Dark);
-    assert!(log_text(&log).contains("theme: dark (app.json)"), "{}", log_text(&log));
+    assert!(
+        log_text(&log).contains("theme: dark (app.json)"),
+        "{}",
+        log_text(&log)
+    );
 
     let (window, log) = open(cx, Theme::Light);
     start(cx, window);
     assert_eq!(mode(cx), ThemeMode::Light);
-    assert!(log_text(&log).contains("theme: light (app.json)"), "{}", log_text(&log));
+    assert!(
+        log_text(&log).contains("theme: light (app.json)"),
+        "{}",
+        log_text(&log)
+    );
 }

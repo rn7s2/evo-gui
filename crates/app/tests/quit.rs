@@ -9,7 +9,7 @@
 
 use std::time::{Duration, Instant};
 
-use evo_desktop::{AppLog, Shell, begin_quit, is_quitting, take_engines};
+use evo_desktop::{begin_quit, is_quitting, take_engines, AppLog, Shell};
 use gpui_kit::{App, TestAppContext};
 use store::app_state::{AppState, Binaries, SCHEMA_VERSION};
 use store::model_cache::ModelCache;
@@ -47,7 +47,10 @@ fn quitting_starts_once_and_runs_to_the_end(cx: &mut TestAppContext) {
         assert!(!is_quitting(cx), "nothing has asked to quit yet");
         begin_quit(cx);
         assert!(is_quitting(cx), "the quit sequence has begun");
-        assert!(take_engines(cx).is_empty(), "no tab has a swarm in this test");
+        assert!(
+            take_engines(cx).is_empty(),
+            "no tab has a swarm in this test"
+        );
         // Idempotent: a window close followed by Cmd-Q must not start a second.
         begin_quit(cx);
     });
@@ -67,8 +70,14 @@ fn quitting_starts_once_and_runs_to_the_end(cx: &mut TestAppContext) {
         1,
         "the sequence ran exactly once:\n{text}"
     );
-    assert!(text.contains("stopped; exiting"), "it ran to its end:\n{text}");
-    assert!(root.app_json().exists(), "app.json was written on the way out");
+    assert!(
+        text.contains("stopped; exiting"),
+        "it ran to its end:\n{text}"
+    );
+    assert!(
+        root.app_json().exists(),
+        "app.json was written on the way out"
+    );
     let state = AppState::load(&root);
     assert_eq!(state.version, SCHEMA_VERSION);
     let _ = std::fs::remove_dir_all(root.path());

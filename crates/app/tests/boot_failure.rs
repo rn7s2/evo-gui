@@ -16,11 +16,11 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use evo_desktop::{AppLog, Shell, swarm_config};
+use evo_desktop::{swarm_config, AppLog, Shell};
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
-    AnyWindowHandle, AppContext as _, Bounds, Entity, Point, TestAppContext, WindowBounds,
-    WindowOptions, px, size,
+    px, size, AnyWindowHandle, AppContext as _, Bounds, Entity, Point, TestAppContext,
+    WindowBounds, WindowOptions,
 };
 use session::LaunchPlan;
 use store::app_state::{AppState, Binaries};
@@ -62,7 +62,11 @@ fn wait_for(
 
 /// A window on a temp app root, with the binaries written into it: the test's own
 /// `app.json`, in effect.
-fn open(cx: &mut TestAppContext, root: &AppRoot, binaries: Binaries) -> (AnyWindowHandle, Entity<WorkspaceView>) {
+fn open(
+    cx: &mut TestAppContext,
+    root: &AppRoot,
+    binaries: Binaries,
+) -> (AnyWindowHandle, Entity<WorkspaceView>) {
     let log = AppLog::open(root);
     let root = root.clone();
     let (window, view) = cx
@@ -113,15 +117,28 @@ fn a_swarm_binary_that_is_not_there_shows_the_reason_and_retries(cx: &mut TestAp
     // is what turns it into a launch (§7.2).
     cx.update(|cx| {
         tab.update(cx, |_tab, cx| {
-            cx.emit(TabContentEvent::Launch { folder: folder.clone(), plan: LaunchPlan::default() })
+            cx.emit(TabContentEvent::Launch {
+                folder: folder.clone(),
+                plan: LaunchPlan::default(),
+            })
         });
     });
 
-    wait_for(cx, "the failure screen", |cx| matches!(state(cx, &tab), TabState::Failed { .. }));
-    let TabState::Failed { folder: failed_in, log_tail, .. } = state(cx, &tab) else {
+    wait_for(cx, "the failure screen", |cx| {
+        matches!(state(cx, &tab), TabState::Failed { .. })
+    });
+    let TabState::Failed {
+        folder: failed_in,
+        log_tail,
+        ..
+    } = state(cx, &tab)
+    else {
         unreachable!("just matched")
     };
-    assert_eq!(failed_in, folder, "the screen names the folder it could not start in");
+    assert_eq!(
+        failed_in, folder,
+        "the screen names the folder it could not start in"
+    );
     assert!(
         log_tail.contains("evo-swarm"),
         "the reason names the binary that could not run: {log_tail:?}"
@@ -146,7 +163,9 @@ fn a_swarm_binary_that_is_not_there_shows_the_reason_and_retries(cx: &mut TestAp
         .expect("a drawn frame");
     assert!(retry_visible, "the failure screen offers a Retry");
     assert!(
-        drawn_reason.as_deref().is_some_and(|reason| reason.contains("evo-swarm")),
+        drawn_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("evo-swarm")),
         "the screen itself names what could not run: {drawn_reason:?}"
     );
 
@@ -155,12 +174,17 @@ fn a_swarm_binary_that_is_not_there_shows_the_reason_and_retries(cx: &mut TestAp
     let events = Rc::new(RefCell::new(Vec::new()));
     let recorded = events.clone();
     let _subscription = cx.update(|cx| {
-        cx.subscribe(&tab, move |_, event: &TabContentEvent, _| recorded.borrow_mut().push(event.clone()))
+        cx.subscribe(&tab, move |_, event: &TabContentEvent, _| {
+            recorded.borrow_mut().push(event.clone())
+        })
     });
     cx.update_window(window, |_, window, cx| window.click("tab-retry", cx))
         .expect("the retry click");
     assert!(
-        events.borrow().iter().any(|event| matches!(event, TabContentEvent::RetryRequested(_))),
+        events
+            .borrow()
+            .iter()
+            .any(|event| matches!(event, TabContentEvent::RetryRequested(_))),
         "the click went through the screen's Retry: {:?}",
         events.borrow()
     );
@@ -173,9 +197,16 @@ fn a_swarm_binary_that_is_not_there_shows_the_reason_and_retries(cx: &mut TestAp
     );
 
     // And it fails again, the same way, with the same reason to show.
-    wait_for(cx, "the second failure screen", |cx| matches!(state(cx, &tab), TabState::Failed { .. }));
-    let TabState::Failed { log_tail, .. } = state(cx, &tab) else { unreachable!("just matched") };
-    assert!(log_tail.contains("evo-swarm"), "still the reason, not an empty box: {log_tail:?}");
+    wait_for(cx, "the second failure screen", |cx| {
+        matches!(state(cx, &tab), TabState::Failed { .. })
+    });
+    let TabState::Failed { log_tail, .. } = state(cx, &tab) else {
+        unreachable!("just matched")
+    };
+    assert!(
+        log_tail.contains("evo-swarm"),
+        "still the reason, not an empty box: {log_tail:?}"
+    );
 
     let _ = std::fs::remove_dir_all(root.path());
 }
@@ -199,16 +230,28 @@ fn a_folder_that_cannot_be_written_fails_the_tab_before_anything_starts(cx: &mut
     let nowhere = root.path().join("no").join("such").join("folder");
     cx.update(|cx| {
         tab.update(cx, |_tab, cx| {
-            cx.emit(TabContentEvent::Launch { folder: nowhere.clone(), plan: LaunchPlan::default() })
+            cx.emit(TabContentEvent::Launch {
+                folder: nowhere.clone(),
+                plan: LaunchPlan::default(),
+            })
         });
     });
     cx.run_until_parked();
 
-    let TabState::Failed { folder, log_tail, .. } = state(cx, &tab) else {
-        panic!("a folder that cannot be written is a failure, not a boot: {:?}", state(cx, &tab));
+    let TabState::Failed {
+        folder, log_tail, ..
+    } = state(cx, &tab)
+    else {
+        panic!(
+            "a folder that cannot be written is a failure, not a boot: {:?}",
+            state(cx, &tab)
+        );
     };
     assert_eq!(folder, nowhere);
-    assert!(!log_tail.trim().is_empty(), "the screen says what could not be prepared");
+    assert!(
+        !log_tail.trim().is_empty(),
+        "the screen says what could not be prepared"
+    );
     let _ = window;
     let _ = std::fs::remove_dir_all(root.path());
 }

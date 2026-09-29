@@ -153,7 +153,10 @@ pub fn push_launcher_data(cx: &mut App) {
             view.update(cx, |view, cx| view.set_launcher_data(data, window, cx));
         });
         if let Err(error) = shown {
-            log_warn(cx, format!("launcher: the window could not be updated: {error}"));
+            log_warn(
+                cx,
+                format!("launcher: the window could not be updated: {error}"),
+            );
         }
     });
 }
@@ -220,7 +223,11 @@ pub fn hook_live_registry(cx: &mut App) {
 
 /// The scan found what it found. `error` is set when the sessions directory
 /// could not be read at all.
-pub fn set_history(cx: &mut App, entries: Vec<store::history::HistoryEntry>, error: Option<String>) {
+pub fn set_history(
+    cx: &mut App,
+    entries: Vec<store::history::HistoryEntry>,
+    error: Option<String>,
+) {
     {
         let launch = &mut cx.global_mut::<Shell>().launcher;
         launch.history = history_entries(&entries);
@@ -298,13 +305,19 @@ mod tests {
     fn a_recent_entry_keeps_its_source_and_its_text_when_there_is_no_epoch() {
         let entries = history_entries(&[store_entry(StoreSource::Recent, None, 2)]);
         assert_eq!(entries[0].source, HistorySource::Recent);
-        assert_eq!(entries[0].when, When::Text("2026-09-29T09:25:44Z".to_owned()));
+        assert_eq!(
+            entries[0].when,
+            When::Text("2026-09-29T09:25:44Z".to_owned())
+        );
     }
 
     #[test]
     fn a_journal_that_does_not_say_the_lane_count_says_nothing() {
         let entries = history_entries(&[store_entry(StoreSource::Scanned, Some(1), 0)]);
-        assert_eq!(entries[0].lanes, None, "0 means the journal did not record a count");
+        assert_eq!(
+            entries[0].lanes, None,
+            "0 means the journal did not record a count"
+        );
     }
 
     #[test]
@@ -312,7 +325,10 @@ mod tests {
         let offset = utc_offset_seconds();
         // Whole minutes, within ±14 h — and the same answer twice.
         assert_eq!(offset % 60, 0, "{offset} is not a whole minute");
-        assert!(offset.abs() <= 14 * 3600, "{offset} is not a real zone offset");
+        assert!(
+            offset.abs() <= 14 * 3600,
+            "{offset} is not a real zone offset"
+        );
         assert_eq!(offset, utc_offset_seconds());
     }
 
@@ -320,7 +336,10 @@ mod tests {
     fn an_empty_catalog_is_handed_over_as_nothing_rather_than_an_empty_registry() {
         let launch = Launcher::new(ModelCache::default());
         let data = launch.data();
-        assert!(data.registry.is_none(), "the choosers stay on their loading hint");
+        assert!(
+            data.registry.is_none(),
+            "the choosers stay on their loading hint"
+        );
         assert!(data.model_cache.is_none());
         assert!(!data.scanning);
     }
@@ -335,7 +354,10 @@ mod tests {
         };
         let data = Launcher::new(cache.clone()).data();
         assert_eq!(data.registry, Some(cache.registry.clone()));
-        assert_eq!(data.model_cache.map(|c| c.kernel_apis), Some(cache.kernel_apis));
+        assert_eq!(
+            data.model_cache.map(|c| c.kernel_apis),
+            Some(cache.kernel_apis)
+        );
     }
 
     #[test]

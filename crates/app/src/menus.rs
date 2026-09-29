@@ -222,7 +222,9 @@ mod tests {
             .items
             .iter()
             .filter_map(|item| match item {
-                MenuItem::Action { action, os_action, .. } => {
+                MenuItem::Action {
+                    action, os_action, ..
+                } => {
                     // The names are namespaced (`input::SelectAll`); the menu
                     // cares only which action it is.
                     let name = action.name().rsplit("::").next().unwrap_or_default();
@@ -233,7 +235,14 @@ mod tests {
             .collect();
         assert_eq!(
             actions,
-            ["Undo:true", "Redo:true", "Cut:true", "Copy:true", "Paste:true", "SelectAll:true"],
+            [
+                "Undo:true",
+                "Redo:true",
+                "Cut:true",
+                "Copy:true",
+                "Paste:true",
+                "SelectAll:true"
+            ],
             "every editing item is an OS action the text field handles"
         );
     }

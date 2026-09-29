@@ -13,9 +13,9 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use gpui_kit::component::{ActiveTheme as _, WindowExt as _, h_flex, v_flex};
+use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, WindowExt as _};
 use gpui_kit::prelude::*;
-use gpui_kit::{App, Image, ImageFormat, ImageSource, Window, div, img, px};
+use gpui_kit::{div, img, px, App, Image, ImageFormat, ImageSource, Window};
 
 use crate::Shell;
 
@@ -39,7 +39,10 @@ pub struct Versions {
 /// which is more use in the dialog than a bare number, and it is what a person can
 /// compare against what they built.
 pub fn probe(bin: &Path) -> Option<String> {
-    let output = std::process::Command::new(bin).arg("--version").output().ok()?;
+    let output = std::process::Command::new(bin)
+        .arg("--version")
+        .output()
+        .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -95,13 +98,20 @@ pub fn tilde(path: &Path, home: Option<&str>) -> String {
 pub fn start(cx: &mut App) {
     let (swarm, agent, log) = {
         let shell = cx.global::<Shell>();
-        (shell.binaries.evo_swarm.clone(), shell.binaries.evo_agent.clone(), shell.log.clone())
+        (
+            shell.binaries.evo_swarm.clone(),
+            shell.binaries.evo_agent.clone(),
+            shell.log.clone(),
+        )
     };
     let (tx, rx) = async_channel::bounded(1);
     let spawned = std::thread::Builder::new()
         .name("evo-desktop-versions".to_owned())
         .spawn(move || {
-            let versions = Versions { swarm: probe(&swarm), agent: probe(&agent) };
+            let versions = Versions {
+                swarm: probe(&swarm),
+                agent: probe(&agent),
+            };
             let _ = tx.send_blocking(versions);
         });
     if let Err(error) = spawned {
@@ -126,7 +136,12 @@ pub fn start(cx: &mut App) {
 pub fn open(window: &mut Window, cx: &mut App) {
     let (root, log, versions, home) = {
         let shell = cx.global::<Shell>();
-        (shell.root.clone(), shell.log.clone(), shell.versions.clone(), crate::launcher::home_string())
+        (
+            shell.root.clone(),
+            shell.log.clone(),
+            shell.versions.clone(),
+            crate::launcher::home_string(),
+        )
     };
     let app_version = env!("CARGO_PKG_VERSION");
     let state_dir = tilde(root.path(), home.as_deref());
@@ -142,8 +157,16 @@ pub fn open(window: &mut Window, cx: &mut App) {
                     .w_full()
                     .mt_2()
                     .gap_1()
-                    .child(row(cx, "evo-swarm", &version_text("evo-swarm", versions.swarm.as_deref())))
-                    .child(row(cx, "evo-agent", &version_text("evo-agent", versions.agent.as_deref()))),
+                    .child(row(
+                        cx,
+                        "evo-swarm",
+                        &version_text("evo-swarm", versions.swarm.as_deref()),
+                    ))
+                    .child(row(
+                        cx,
+                        "evo-agent",
+                        &version_text("evo-agent", versions.agent.as_deref()),
+                    )),
             )
             .child(
                 v_flex()
@@ -205,9 +228,15 @@ mod tests {
     #[test]
     fn a_version_is_what_the_binary_said_without_repeating_its_name() {
         assert_eq!(version_text("evo-swarm", Some("evo-swarm 0.1.0")), "0.1.0");
-        assert_eq!(version_text("evo-agent", Some("  evo-agent   2.0.0  ")), "2.0.0");
+        assert_eq!(
+            version_text("evo-agent", Some("  evo-agent   2.0.0  ")),
+            "2.0.0"
+        );
         // A binary that answers with something else keeps its whole line.
-        assert_eq!(version_text("evo-swarm", Some("build 7f3c9d2")), "build 7f3c9d2");
+        assert_eq!(
+            version_text("evo-swarm", Some("build 7f3c9d2")),
+            "build 7f3c9d2"
+        );
         assert_eq!(version_text("evo-swarm", Some("evo-swarm")), "evo-swarm");
         assert_eq!(version_text("evo-agent", None), "no --version");
     }
@@ -224,7 +253,10 @@ mod tests {
     #[test]
     fn a_path_under_home_is_shortened() {
         let home = Some("/Users/x");
-        assert_eq!(tilde(Path::new("/Users/x/.evo/desktop"), home), "~/.evo/desktop");
+        assert_eq!(
+            tilde(Path::new("/Users/x/.evo/desktop"), home),
+            "~/.evo/desktop"
+        );
         assert_eq!(tilde(Path::new("/Users/x"), home), "~");
         assert_eq!(tilde(Path::new("/tmp/elsewhere"), home), "/tmp/elsewhere");
         // `/Users/xx` is not inside `/Users/x`: the separator is the border.

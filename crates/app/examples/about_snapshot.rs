@@ -17,8 +17,8 @@ use evo_desktop::{AppLog, Shell};
 use gpui_kit::component::theme::ThemeMode;
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
-    AnyWindowHandle, AppContext as _, Bounds, HeadlessAppContext, Point, WindowBounds, WindowOptions,
-    px, size,
+    px, size, AnyWindowHandle, AppContext as _, Bounds, HeadlessAppContext, Point, WindowBounds,
+    WindowOptions,
 };
 use store::app_state::{AppState, Theme};
 use store::model_cache::ModelCache;
@@ -50,7 +50,8 @@ fn main() {
 
 fn capture(dir: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(dir)?;
-    let root = Root::at(std::env::temp_dir().join(format!("evo-desktop-about-{}", std::process::id())));
+    let root =
+        Root::at(std::env::temp_dir().join(format!("evo-desktop-about-{}", std::process::id())));
     let _ = std::fs::remove_dir_all(root.path());
 
     let mut cx = HeadlessAppContext::with_platform(
@@ -96,7 +97,10 @@ fn capture(dir: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     // The About menu item's own call.
     cx.update(evo_desktop::open_about);
 
-    for (mode, name) in [(ThemeMode::Light, "about-light.png"), (ThemeMode::Dark, "about-dark.png")] {
+    for (mode, name) in [
+        (ThemeMode::Light, "about-light.png"),
+        (ThemeMode::Dark, "about-dark.png"),
+    ] {
         cx.update_window(window, |_, window, cx| {
             gpui_kit::component::Theme::change(mode, Some(window), cx);
         })?;
@@ -147,6 +151,11 @@ fn shot(
     let image = cx.capture_screenshot(window)?;
     let path = dir.join(name);
     image.save(&path)?;
-    println!("[capture] {}x{} -> {}", image.width(), image.height(), path.display());
+    println!(
+        "[capture] {}x{} -> {}",
+        image.width(),
+        image.height(),
+        path.display()
+    );
     Ok(())
 }

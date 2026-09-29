@@ -53,7 +53,11 @@ pub fn start(cx: &mut App) {
     log.info(format!(
         "startup: cached catalog has {} model(s), fetched {}",
         cache.models().len(),
-        if cache.fetched_at.is_empty() { "never" } else { &cache.fetched_at }
+        if cache.fetched_at.is_empty() {
+            "never"
+        } else {
+            &cache.fetched_at
+        }
     ));
 
     // 1. The cache we already have goes out first.
@@ -94,11 +98,14 @@ pub fn start(cx: &mut App) {
                 entries.len(),
                 outcome.files_read,
                 outcome.files_seen,
-                if outcome.stopped_early { ", stopped early" } else { "" }
+                if outcome.stopped_early {
+                    ", stopped early"
+                } else {
+                    ""
+                }
             ));
-            let error = (!scan_sessions.is_dir()).then(|| {
-                format!("{} could not be read", scan_sessions.display())
-            });
+            let error = (!scan_sessions.is_dir())
+                .then(|| format!("{} could not be read", scan_sessions.display()));
             if let Some(error) = &error {
                 scan_log.warn(format!("history: {error}"));
             }
@@ -126,7 +133,10 @@ pub fn start(cx: &mut App) {
                 return;
             };
             cx.update(|cx| match update {
-                tab_engine::catalog::CatalogUpdate::Done { registry, kernel_apis } => {
+                tab_engine::catalog::CatalogUpdate::Done {
+                    registry,
+                    kernel_apis,
+                } => {
                     let mut cache = ModelCache::from_probe(registry);
                     if let Some(apis) = kernel_apis {
                         cache = cache.with_kernel_apis(apis);
@@ -175,12 +185,18 @@ fn prune_tab_dirs(root: Root, log: AppLog) {
                 .iter()
                 .map(|id| id.as_str().to_owned())
                 .collect();
-            let pruned =
-                housekeeping::prune_tab_dirs(&root, &keep, housekeeping::TAB_DIR_TTL, SystemTime::now());
+            let pruned = housekeeping::prune_tab_dirs(
+                &root,
+                &keep,
+                housekeeping::TAB_DIR_TTL,
+                SystemTime::now(),
+            );
             match pruned {
                 Ok(pruned) if pruned.removed.is_empty() && pruned.failed == 0 => {
-                    thread_log
-                        .info(format!("tab dirs: {} kept, none old enough to prune", pruned.kept));
+                    thread_log.info(format!(
+                        "tab dirs: {} kept, none old enough to prune",
+                        pruned.kept
+                    ));
                 }
                 Ok(pruned) => thread_log.info(format!(
                     "tab dirs: pruned {:?}, kept {}{}",
@@ -202,7 +218,12 @@ fn prune_tab_dirs(root: Root, log: AppLog) {
 
 fn snapshot(cx: &App) -> (Root, AppLog, ModelCache, Binaries) {
     let shell = cx.global::<Shell>();
-    (shell.root.clone(), shell.log.clone(), shell.launcher.cache.clone(), shell.binaries.clone())
+    (
+        shell.root.clone(),
+        shell.log.clone(),
+        shell.launcher.cache.clone(),
+        shell.binaries.clone(),
+    )
 }
 
 #[cfg(test)]
@@ -211,7 +232,12 @@ mod tests {
     use serde_json::json;
 
     fn cache(registry: serde_json::Value, fetched_at: &str) -> ModelCache {
-        ModelCache { version: 1, fetched_at: fetched_at.to_owned(), kernel_apis: Vec::new(), registry }
+        ModelCache {
+            version: 1,
+            fetched_at: fetched_at.to_owned(),
+            kernel_apis: Vec::new(),
+            registry,
+        }
     }
 
     #[test]

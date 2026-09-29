@@ -9,8 +9,10 @@
 //! `on_window_closed` runs, so [`Tracker`] watches its bounds as they change and
 //! keeps the last ones for the quit path to persist.
 
-use gpui_kit::{px, point, size, App, Bounds, Context, Pixels, Subscription, Window, WindowOptions};
 use gpui_kit::WindowBounds as GpuiWindowBounds;
+use gpui_kit::{
+    point, px, size, App, Bounds, Context, Pixels, Subscription, Window, WindowOptions,
+};
 
 use store::app_state::{WindowBounds as StoredBounds, DEFAULT_SIZE, MIN_SIZE};
 
@@ -54,7 +56,10 @@ pub fn clamp(stored: StoredBounds, work_area: Bounds<Pixels>) -> Bounds<Pixels> 
     let x = axis_offset(stored.x.map(|x| x - offset_x), width, available_width);
     let y = axis_offset(stored.y.map(|y| y - offset_y), height, available_height);
 
-    Bounds::new(point(px(offset_x + x), px(offset_y + y)), size(px(width), px(height)))
+    Bounds::new(
+        point(px(offset_x + x), px(offset_y + y)),
+        size(px(width), px(height)),
+    )
 }
 
 /// How wide the window may be: `wanted`, or `fallback` when that is not a
@@ -98,7 +103,10 @@ impl Tracker {
         let subscription = cx.observe_window_bounds(window, |tracker, window, _cx| {
             tracker.bounds = stored_from_window(window);
         });
-        Tracker { bounds, _subscription: subscription }
+        Tracker {
+            bounds,
+            _subscription: subscription,
+        }
     }
 
     /// The last bounds the window had.
@@ -130,7 +138,12 @@ mod tests {
     }
 
     fn stored(x: Option<f32>, y: Option<f32>, w: f32, h: f32) -> StoredBounds {
-        StoredBounds { x, y, width: w, height: h }
+        StoredBounds {
+            x,
+            y,
+            width: w,
+            height: h,
+        }
     }
 
     fn parts(bounds: Bounds<Pixels>) -> (f32, f32, f32, f32) {
@@ -145,54 +158,84 @@ mod tests {
     #[test]
     fn a_window_bigger_than_the_display_fills_it() {
         // Remembered on a 1600x1000 display, opened on a 1000x700 one.
-        let got = clamp(stored(Some(0.0), Some(0.0), 1600.0, 1000.0), area(0.0, 0.0, 1000.0, 700.0));
+        let got = clamp(
+            stored(Some(0.0), Some(0.0), 1600.0, 1000.0),
+            area(0.0, 0.0, 1000.0, 700.0),
+        );
         assert_eq!(parts(got), (0.0, 0.0, 1000.0, 700.0));
     }
 
     #[test]
     fn an_offscreen_window_is_pulled_back_inside() {
-        let got = clamp(stored(Some(5000.0), Some(5000.0), 1200.0, 800.0), area(0.0, 0.0, 2000.0, 1400.0));
+        let got = clamp(
+            stored(Some(5000.0), Some(5000.0), 1200.0, 800.0),
+            area(0.0, 0.0, 2000.0, 1400.0),
+        );
         assert_eq!(parts(got), (800.0, 600.0, 1200.0, 800.0));
     }
 
     #[test]
     fn a_negative_position_is_pulled_back_inside() {
-        let got = clamp(stored(Some(-400.0), Some(-300.0), 1200.0, 800.0), area(0.0, 0.0, 2000.0, 1400.0));
+        let got = clamp(
+            stored(Some(-400.0), Some(-300.0), 1200.0, 800.0),
+            area(0.0, 0.0, 2000.0, 1400.0),
+        );
         assert_eq!(parts(got), (0.0, 0.0, 1200.0, 800.0));
     }
 
     #[test]
     fn a_window_smaller_than_the_minimum_is_grown_and_centered() {
-        let got = clamp(stored(None, None, 200.0, 150.0), area(0.0, 0.0, 2000.0, 1400.0));
+        let got = clamp(
+            stored(None, None, 200.0, 150.0),
+            area(0.0, 0.0, 2000.0, 1400.0),
+        );
         assert_eq!(parts(got), (500.0, 350.0, 1000.0, 700.0));
     }
 
     #[test]
     fn a_display_smaller_than_the_minimum_wins() {
-        let got = clamp(stored(Some(0.0), Some(0.0), 1000.0, 700.0), area(0.0, 0.0, 800.0, 600.0));
+        let got = clamp(
+            stored(Some(0.0), Some(0.0), 1000.0, 700.0),
+            area(0.0, 0.0, 800.0, 600.0),
+        );
         assert_eq!(parts(got), (0.0, 0.0, 800.0, 600.0));
     }
 
     #[test]
     fn a_secondary_display_keeps_its_origin() {
         // A display whose work area starts at (1600, 0): the window stays in it.
-        let got = clamp(stored(Some(1700.0), Some(100.0), 1200.0, 800.0), area(1600.0, 0.0, 1920.0, 1080.0));
+        let got = clamp(
+            stored(Some(1700.0), Some(100.0), 1200.0, 800.0),
+            area(1600.0, 0.0, 1920.0, 1080.0),
+        );
         assert_eq!(parts(got), (1700.0, 100.0, 1200.0, 800.0));
     }
 
     #[test]
     fn nonsense_dimensions_fall_back_to_the_defaults() {
-        let got = clamp(stored(Some(f32::NAN), Some(0.0), f32::NAN, -5.0), area(0.0, 0.0, 2000.0, 1400.0));
+        let got = clamp(
+            stored(Some(f32::NAN), Some(0.0), f32::NAN, -5.0),
+            area(0.0, 0.0, 2000.0, 1400.0),
+        );
         let (x, y, w, h) = parts(got);
-        assert_eq!((w, h), (1600.0, 1000.0), "the default size, not the nonsense");
+        assert_eq!(
+            (w, h),
+            (1600.0, 1000.0),
+            "the default size, not the nonsense"
+        );
         assert_eq!(y, 0.0);
-        assert_eq!(x, 200.0, "centered, since the remembered x was not a number");
+        assert_eq!(
+            x, 200.0,
+            "centered, since the remembered x was not a number"
+        );
     }
 
     #[test]
     fn without_a_display_the_stored_bounds_are_taken_as_they_are() {
         let bounds = window_bounds(stored(Some(40.0), Some(20.0), 1200.0, 800.0), None);
-        let GpuiWindowBounds::Windowed(bounds) = bounds else { panic!("windowed") };
+        let GpuiWindowBounds::Windowed(bounds) = bounds else {
+            panic!("windowed")
+        };
         assert_eq!(parts(bounds), (40.0, 20.0, 1200.0, 800.0));
     }
 }

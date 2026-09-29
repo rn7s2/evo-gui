@@ -66,7 +66,12 @@ impl AppLog {
                 None
             }
         };
-        AppLog { inner: Arc::new(Inner { path, file: Mutex::new(file) }) }
+        AppLog {
+            inner: Arc::new(Inner {
+                path,
+                file: Mutex::new(file),
+            }),
+        }
     }
 
     /// The log's path, for a dialog or a bug report.
@@ -76,7 +81,12 @@ impl AppLog {
 
     pub fn line(&self, level: Level, message: impl AsRef<str>) {
         let message = message.as_ref();
-        let text = format!("{} {:<5} {}\n", time::now_rfc3339(), level.as_str(), message);
+        let text = format!(
+            "{} {:<5} {}\n",
+            time::now_rfc3339(),
+            level.as_str(),
+            message
+        );
         // stderr too: a developer running the binary wants to see it live.
         eprint!("{text}");
         if let Ok(mut guard) = self.inner.file.lock() {

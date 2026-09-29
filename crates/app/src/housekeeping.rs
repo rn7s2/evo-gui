@@ -105,7 +105,9 @@ mod tests {
 
     /// A tab directory whose newest file is `age` old — the shape a swarm leaves.
     fn tab_dir(root: &Root, id: &str, age: Duration, now: SystemTime) -> String {
-        let dir = root.ensure_tab_dir(&store::paths::TabId::parse(id).expect("a safe id")).unwrap();
+        let dir = root
+            .ensure_tab_dir(&store::paths::TabId::parse(id).expect("a safe id"))
+            .unwrap();
         for name in ["swarm.log", "tab.json"] {
             let file = File::create(dir.join(name)).unwrap();
             file.set_modified(now - age).unwrap();
@@ -122,7 +124,8 @@ mod tests {
 
     #[test]
     fn a_directory_older_than_the_ttl_is_removed() {
-        let root = Root::at(std::env::temp_dir().join(format!("evo-prune-old-{}", std::process::id())));
+        let root =
+            Root::at(std::env::temp_dir().join(format!("evo-prune-old-{}", std::process::id())));
         let _ = fs::remove_dir_all(root.path());
         let now = now();
         tab_dir(&root, "ancient", TAB_DIR_TTL * 2, now);
@@ -132,18 +135,28 @@ mod tests {
         assert_eq!(pruned.removed, ["ancient"]);
         assert_eq!(pruned.kept, 1);
         assert_eq!(pruned.failed, 0);
-        assert!(!root.tab_dir(&store::paths::TabId::parse("ancient").unwrap()).exists());
-        assert!(root.tab_dir(&store::paths::TabId::parse("recent").unwrap()).exists());
+        assert!(!root
+            .tab_dir(&store::paths::TabId::parse("ancient").unwrap())
+            .exists());
+        assert!(root
+            .tab_dir(&store::paths::TabId::parse("recent").unwrap())
+            .exists());
         let _ = fs::remove_dir_all(root.path());
     }
 
     #[test]
     fn a_directory_touched_inside_the_ttl_is_kept() {
-        let root = Root::at(std::env::temp_dir().join(format!("evo-prune-young-{}", std::process::id())));
+        let root =
+            Root::at(std::env::temp_dir().join(format!("evo-prune-young-{}", std::process::id())));
         let _ = fs::remove_dir_all(root.path());
         let now = now();
         // Six days: inside the week, however old the directory's own time is.
-        tab_dir(&root, "yesterday-ish", Duration::from_secs(6 * 24 * 60 * 60), now);
+        tab_dir(
+            &root,
+            "yesterday-ish",
+            Duration::from_secs(6 * 24 * 60 * 60),
+            now,
+        );
 
         let pruned = prune_tab_dirs(&root, &[], TAB_DIR_TTL, now).unwrap();
         assert!(pruned.removed.is_empty(), "{pruned:?}");
@@ -153,7 +166,8 @@ mod tests {
 
     #[test]
     fn a_tab_app_json_has_open_is_kept_however_old() {
-        let root = Root::at(std::env::temp_dir().join(format!("evo-prune-open-{}", std::process::id())));
+        let root =
+            Root::at(std::env::temp_dir().join(format!("evo-prune-open-{}", std::process::id())));
         let _ = fs::remove_dir_all(root.path());
         let now = now();
         tab_dir(&root, "open-tab", TAB_DIR_TTL * 10, now);
@@ -167,23 +181,31 @@ mod tests {
 
     #[test]
     fn the_newest_file_decides_the_age() {
-        let root = Root::at(std::env::temp_dir().join(format!("evo-prune-newest-{}", std::process::id())));
+        let root =
+            Root::at(std::env::temp_dir().join(format!("evo-prune-newest-{}", std::process::id())));
         let _ = fs::remove_dir_all(root.path());
         let now = now();
         let id = tab_dir(&root, "writing-now", TAB_DIR_TTL * 4, now);
         // A swarm that is still writing: the log is new even though `tab.json`
         // (and the directory) is old.
         let dir = root.tab_dir(&store::paths::TabId::parse(&id).unwrap());
-        File::open(dir.join("swarm.log")).unwrap().set_modified(now).unwrap();
+        File::open(dir.join("swarm.log"))
+            .unwrap()
+            .set_modified(now)
+            .unwrap();
 
         let pruned = prune_tab_dirs(&root, &[], TAB_DIR_TTL, now).unwrap();
-        assert!(pruned.removed.is_empty(), "the log is the tab's pulse: {pruned:?}");
+        assert!(
+            pruned.removed.is_empty(),
+            "the log is the tab's pulse: {pruned:?}"
+        );
         let _ = fs::remove_dir_all(root.path());
     }
 
     #[test]
     fn a_missing_tabs_directory_is_nothing_to_do() {
-        let root = Root::at(std::env::temp_dir().join(format!("evo-prune-none-{}", std::process::id())));
+        let root =
+            Root::at(std::env::temp_dir().join(format!("evo-prune-none-{}", std::process::id())));
         let _ = fs::remove_dir_all(root.path());
         let pruned = prune_tab_dirs(&root, &[], TAB_DIR_TTL, now()).unwrap();
         assert_eq!(pruned, Pruned::default());
@@ -191,17 +213,24 @@ mod tests {
 
     #[test]
     fn files_beside_the_tab_directories_are_left_alone() {
-        let root = Root::at(std::env::temp_dir().join(format!("evo-prune-file-{}", std::process::id())));
+        let root =
+            Root::at(std::env::temp_dir().join(format!("evo-prune-file-{}", std::process::id())));
         let _ = fs::remove_dir_all(root.path());
         let now = now();
         root.ensure().unwrap();
         fs::create_dir_all(root.tabs_dir()).unwrap();
         let stray = root.tabs_dir().join("notes.txt");
-        File::create(&stray).unwrap().set_modified(now - TAB_DIR_TTL * 3).unwrap();
+        File::create(&stray)
+            .unwrap()
+            .set_modified(now - TAB_DIR_TTL * 3)
+            .unwrap();
 
         let pruned = prune_tab_dirs(&root, &[], TAB_DIR_TTL, now).unwrap();
         assert!(pruned.removed.is_empty(), "{pruned:?}");
-        assert!(stray.exists(), "only tab directories are the app's to remove");
+        assert!(
+            stray.exists(),
+            "only tab directories are the app's to remove"
+        );
         let _ = fs::remove_dir_all(root.path());
     }
 }
