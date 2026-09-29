@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use common::{fixture, one_swarm, row_summary, spec, Drive};
 use serde_json::json;
 use session::{AgentKey, LaneStatus, RowKind};
-use tab_engine::Agent;
+use tab_engine::{Agent, Update};
 
 #[test]
 fn m1_delegation() {
@@ -24,12 +24,14 @@ fn m1_delegation() {
     let mut drive = Drive::start(spec(&fixture, 2));
     let deadline = Instant::now() + Duration::from_secs(240);
 
-    // --- the tab is up, and its lanes are idle -------------------------------
+    // --- the tab is up, and its lanes are really up ------------------------
     drive.wait_connected(Agent::Coordinator, deadline);
-    drive.wait_model(deadline, "two idle lanes", |model| {
-        model.lanes().lanes.len() == 2
-            && model.lanes().lanes.iter().all(|row| row.status == LaneStatus::Idle)
-    });
+    drive.wait_for_lane_rows(deadline, 2);
+    // The event stream never announces a lane going idle before it was ever given
+    // work (`swarm/lanes.lisp`'s `sync-lane-state :announce nil`), so the swarm is
+    // asked: a delegation needs its lane genuinely idle, and this is how a client
+    // learns that.
+    drive.wait_lanes_idle(deadline, 2);
 
     // --- watch lane 1, as showing it does ------------------------------------
     // `Command::WatchLane` opens that one lane's stream and seeds its transcript;
@@ -54,47 +56,70 @@ fn m1_delegation() {
     drive.prompt(1, format!("CALL delegate {}", json!({ "lane": 1, "task": lane_task })));
 
     // --- the lane works, then goes idle, on the coordinator's own stream -----
-    // The left column folds `lane-state`; assert the transition, not just the end.
-    drive.wait_event_where(deadline, Agent::Coordinator, "lane-state", "lane 1 working", |data| {
-        data["lane"] == 1 && data["state"] == "working"
+    // The left column folds `lane-state`: assert the whole cycle, not just the end.
+    drive.wait_model(deadline, "lane 1 working", |model| {
+        model.lanes().lane(1).map(|row| row.status) == Some(LaneStatus::Working)
     });
-    assert_eq!(
-        drive.model.lanes().lane(1).map(|row| row.status),
-        Some(LaneStatus::Working),
-        "the left column shows lane 1 working"
+    drive.wait_model(deadline, "lane 1 idle again", |model| {
+        model.lanes().lane(1).map(|row| row.status) == Some(LaneStatus::Idle)
+    });
+    let states = drive.lane_states(1);
+    let working = states.iter().position(|state| state == "working");
+    let idle = states.iter().rposition(|state| state == "idle");
+    assert!(
+        matches!((working, idle), (Some(w), Some(i)) if w < i),
+        "lane 1's cycle, as the stream carried it: {states:?}"
     );
 
     // The lane's own work: the todo tool call, and the checklist it left behind.
-    drive.wait_event_where(deadline, Agent::Lane(1), "tool-call-start", "the lane's todo call", |data| {
-        data["name"] == "todo"
+    drive.wait_for_update(deadline, "the lane's todo call", |update| {
+        matches!(update, Update::Event { agent: Agent::Lane(1), kind, data, .. }
+            if kind == "tool-call-start" && data["name"] == "todo")
     });
-    let todo_event = drive.wait_event_where(deadline, Agent::Lane(1), "todo-changed", "todo-changed", |_| true);
+    let todo_event = drive.wait_for_update(deadline, "todo-changed", |update| {
+        matches!(update, Update::Event { agent: Agent::Lane(1), kind, .. } if kind == "todo-changed")
+    });
+    let todo_event = match todo_event {
+        Update::Event { data, .. } => data,
+        _ => unreachable!(),
+    };
     assert_eq!(
         todo_event["todos"].as_array().map(Vec::len),
         Some(2),
         "the lane's checklist came through its own stream: {todo_event}"
     );
-    drive.wait_event_where(deadline, Agent::Lane(1), "settled", "the lane settling", |_| true);
-    drive.wait_event_where(deadline, Agent::Coordinator, "lane-state", "lane 1 idle", |data| {
-        data["lane"] == 1 && data["state"] == "idle"
-    });
 
     // --- what the two models hold -------------------------------------------
-    // The coordinator: the delegate call as a tool row, completed by its result,
-    // and the lane's run-end notice arriving as input.
+    // The coordinator: the delegate call as a tool row, completed by the swarm's
+    // own answer.
+    drive.wait_model(deadline, "the delegate row and its result", |model| {
+        model.coordinator().rows().iter().any(|row| matches!(&row.kind, RowKind::Tool { name, result: Some(_), .. }
+            if name == "delegate"))
+    });
     let coordinator = drive.model.coordinator();
     let rows = row_summary(coordinator);
-    let delegate = coordinator.rows().iter().find_map(|row| match &row.kind {
-        RowKind::Tool { name, result, .. } if name == "delegate" => Some(result.clone()),
-        _ => None,
-    });
-    let delegate = delegate.unwrap_or_else(|| panic!("no delegate tool row; rows: {rows:?}"));
-    assert!(delegate.is_some(), "the delegate call was completed by its result; rows: {rows:?}");
+    let delegate = coordinator
+        .rows()
+        .iter()
+        .find_map(|row| match &row.kind {
+            RowKind::Tool { name, arguments, result, .. } if name == "delegate" => {
+                Some((arguments.clone(), result.clone()))
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no delegate tool row; rows: {rows:?}"));
     assert!(
-        coordinator.rows().iter().any(|row| matches!(&row.kind, RowKind::Assistant { markdown, .. }
-            if markdown.contains("Delegated to lane 1"))),
-        "the lane's line is in the coordinator's transcript; rows: {rows:?}"
+        delegate.0.contains("m1 lane one step"),
+        "the row carries the task the coordinator gave: {}",
+        delegate.0
     );
+    let result = delegate.1.unwrap_or_else(|| panic!("the delegate call has no result; rows: {rows:?}"));
+    assert!(
+        result.content.contains("Delegated to lane 1"),
+        "the swarm answered the call: {}",
+        result.content
+    );
+    assert!(!result.is_error, "the delegation succeeded: {result:?}");
 
     // The lane: its own rows, and the checklist its script made.
     let lane = drive.model.lane_model(1).expect("lane 1 has a model");
@@ -122,19 +147,32 @@ fn m1_delegation() {
         "CALL delegate {}",
         json!({ "lane": 1, "task": "CALL report {\"done\":\"m1 lane one delivered\",\"evidence\":\"the stub ran\",\"goal\":\"active\"}" })
     ));
+    drive.wait_model(deadline, "lane 1 working on the report task", |model| {
+        model.lanes().lane(1).map(|row| row.status) == Some(LaneStatus::Working)
+    });
     drive.wait_model(deadline, "the lane's report in the coordinator's transcript", |model| {
         model.coordinator().rows().iter().any(|row| matches!(&row.kind, RowKind::User { text }
             if text.contains("[lane 1 report]") && text.contains("m1 lane one delivered")))
     });
-    assert_eq!(drive.lane_state(1), Some("idle".to_string()), "the lane settled again");
+    drive.wait_model(deadline, "lane 1 idle after reporting", |model| {
+        model.lanes().lane(1).map(|row| row.status) == Some(LaneStatus::Idle)
+    });
 
-    // ...and the lane's own report row is in its own model.
-    drive.wait_model(deadline, "the lane's report row", |model| {
+    // ...and the lane's own report reaches its own model too. It arrives as a
+    // `report` event, but a report is also a *tool call*, so the resync that ends
+    // the run rebuilds the lane's rows from its transcript and shows it there —
+    // the event-only row it made is replaced, exactly as an `output` line is.
+    drive.wait_model(deadline, "the lane's report call", |model| {
         model.lane_model(1).is_some_and(|lane| {
-            lane.rows().iter().any(|row| matches!(&row.kind, RowKind::Report { done, .. }
-                if done.contains("m1 lane one delivered")))
+            lane.rows().iter().any(|row| matches!(&row.kind,
+                RowKind::Tool { name, result: Some(result), .. }
+                    if name == "report" && result.content.contains("Delivered to the coordinator")))
         })
     });
+    assert!(
+        !drive.events(Agent::Lane(1), "report").is_empty(),
+        "the lane's `report` event came through its own stream"
+    );
 
     // Nothing ran twice: one delegate row per attempt.
     let delegates = drive

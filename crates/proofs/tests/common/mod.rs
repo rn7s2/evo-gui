@@ -83,6 +83,11 @@ pub struct Drive {
     /// The swarm process the engine started, and the coordinator it supervises.
     pub swarm_pid: Option<u32>,
     pub coordinator_pid: Option<u32>,
+    /// The port the swarm listens on, and where its token lives — enough to ask the
+    /// server something directly, which a proof does when it needs a *fresh* answer
+    /// (see [`Drive::swarm_lanes`]).
+    pub port: Option<u16>,
+    pub tab_dir: std::path::PathBuf,
     /// Lane number → the lane process's pid, as `/lanes` and `lane-state` report it.
     pub lane_pids: BTreeMap<u64, u32>,
     /// The session the swarm is writing to, as `/state` reports it (`session`).
@@ -92,6 +97,7 @@ pub struct Drive {
 impl Drive {
     /// Start a swarm and take its handle.
     pub fn start(spec: TabSpec) -> Drive {
+        let tab_dir = spec.tab_dir.clone();
         let (handle, rx) = TabEngine::start(spec);
         Drive {
             handle: Some(handle),
@@ -102,6 +108,8 @@ impl Drive {
             state_revision: 0,
             swarm_pid: None,
             coordinator_pid: None,
+            port: None,
+            tab_dir,
             lane_pids: BTreeMap::new(),
             session: None,
         }
@@ -119,9 +127,10 @@ impl Drive {
     /// One update folded into the model, exactly as the tab page folds it.
     fn absorb(&mut self, update: &Update) {
         match update {
-            Update::Ready { health, pid, .. } => {
+            Update::Ready { health, pid, port } => {
                 self.swarm_pid = Some(*pid);
                 self.coordinator_pid = Some(health.pid);
+                self.port = Some(*port);
             }
             Update::State { raw, .. } => {
                 if let Some(session) = raw.get("session").and_then(Value::as_str) {
@@ -197,6 +206,51 @@ impl Drive {
         }
     }
 
+    /// Wait until an update has been seen *anywhere* in the log — order-blind on
+    /// purpose. Two streams interleave (the coordinator's and the one lane being
+    /// watched) in whatever order their threads deliver, so a cursor-based wait
+    /// stepped forward by a later update can walk straight over an earlier one.
+    pub fn wait_for_update(
+        &mut self,
+        deadline: Instant,
+        what: &str,
+        pred: impl Fn(&Update) -> bool,
+    ) -> Update {
+        loop {
+            self.pump();
+            if let Some(found) = self.log.iter().find(|update| pred(update)) {
+                return found.clone();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "no {what} before the deadline; saw {:?}",
+                self.log.iter().map(kind_of).collect::<Vec<_>>()
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Whether the log holds such an update, without waiting.
+    pub fn saw(&self, pred: impl Fn(&Update) -> bool) -> bool {
+        self.log.iter().any(pred)
+    }
+
+    /// The lane-state events the coordinator's stream carried for LANE, in the order
+    /// they arrived — the `working` → `idle` cycle the left column follows.
+    pub fn lane_states(&self, lane: u64) -> Vec<String> {
+        self.log
+            .iter()
+            .filter_map(|update| match update {
+                Update::Event { agent: Agent::Coordinator, kind, data, .. }
+                    if kind == "lane-state" && data["lane"].as_u64() == Some(lane) =>
+                {
+                    data["state"].as_str().map(str::to_string)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Wait for the model itself to say something — a lane that went down, a row
     /// that arrived — rather than for one update. `what` is the failure message.
     pub fn wait_model(
@@ -222,7 +276,9 @@ impl Drive {
     /// The coordinator's stream up, which is the moment the view is being assembled
     /// (§9.1) and a command has somewhere to land.
     pub fn wait_connected(&mut self, agent: Agent, deadline: Instant) {
-        self.next(deadline, "stream", |update| {
+        // Order-blind: a reconnect makes `Connected` arrive again, and a cursor
+        // already stepped past one by another wait would never see it.
+        self.wait_for_update(deadline, "stream connected", |update| {
             matches!(update, Update::Stream { agent: a, status: StreamStatus::Connected } if *a == agent)
         });
     }
@@ -291,6 +347,53 @@ impl Drive {
     /// view has not seen.
     pub fn lane_state(&self, n: u64) -> Option<String> {
         self.model.lanes().lane(n).map(|row| row.state.clone())
+    }
+
+    /// The swarm's own `GET /lanes`, asked directly — the answer a client gets when
+    /// it wants the *current* truth rather than the next announcement.
+    ///
+    /// It has to be asked, because the event stream only carries the lane-state
+    /// transitions the swarm chooses to publish: `swarm/lanes.lisp`'s
+    /// `sync-lane-state :announce nil` deliberately does not announce a lane going
+    /// idle when it has never been given work ("so the machine-readable stream tells
+    /// a lane's work cycle, rather than an idle event for a lane never given work").
+    /// A client that only folds events therefore keeps the `starting` of a lane's
+    /// boot announcement until something publishes a change.
+    pub fn swarm_lanes(&self) -> Option<Value> {
+        let port = self.port?;
+        let token = std::fs::read_to_string(self.tab_dir.join("token")).ok()?;
+        let client = swarm_client::HttpClient::loopback(port, swarm_client::Token::new(token.trim()))
+            .with_timeout(Duration::from_secs(10));
+        Some(client.get("/lanes").ok()?.json().ok()?)
+    }
+
+    /// Wait until the swarm itself says every lane is up and idle — the state a
+    /// delegation needs, and the one the event stream does not announce at boot.
+    pub fn wait_lanes_idle(&mut self, deadline: Instant, lanes: usize) {
+        loop {
+            self.pump();
+            if let Some(body) = self.swarm_lanes() {
+                let rows = body["lanes"].as_array().cloned().unwrap_or_default();
+                if rows.len() == lanes
+                    && rows.iter().all(|lane| lane["state"].as_str() == Some("idle"))
+                {
+                    return;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the swarm never had {lanes} idle lanes: {:?}",
+                self.swarm_lanes().map(|body| body["lanes"].clone())
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    /// The left column has one row per lane. Their *states* are whatever the last
+    /// `GET /lanes` or `lane-state` event said, which at boot is `starting` (see
+    /// [`Drive::swarm_lanes`]) — so this is the check to wait on, not "idle".
+    pub fn wait_for_lane_rows(&mut self, deadline: Instant, lanes: usize) {
+        self.wait_model(deadline, "a row per lane", |model| model.lanes().lanes.len() == lanes);
     }
 
     pub fn updates(&self) -> &[Update] {
@@ -404,6 +507,23 @@ pub fn kind_of(update: &Update) -> &'static str {
         Update::PostResult { .. } => "PostResult",
         Update::ServerGone => "ServerGone",
         Update::Exited { .. } => "Exited",
+    }
+}
+
+/// One row's identity as a reader sees it: two rows with the same signature are the
+/// same line twice — what a resync that appended instead of rebuilding would leave.
+pub fn signature(row: &session::Row) -> String {
+    match &row.kind {
+        session::RowKind::User { text } => format!("user:{text}"),
+        session::RowKind::Assistant { markdown, thinking, error, .. } => {
+            format!("assistant:{markdown}:{thinking}:{error:?}")
+        }
+        session::RowKind::Tool { call_id, name, arguments, .. } => {
+            format!("tool:{call_id}:{name}:{arguments}")
+        }
+        session::RowKind::Report { done, .. } => format!("report:{done}"),
+        session::RowKind::Dim { style, text } => format!("dim:{style:?}:{text}"),
+        session::RowKind::RunOutcome { outcome, text } => format!("run-outcome:{outcome}:{text}"),
     }
 }
 
