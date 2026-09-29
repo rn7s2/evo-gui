@@ -12,8 +12,8 @@ use session::{DimStyle, Row, RowId, RowKind, Todo, TodoStatus, ToolResult};
 use gpui_kit::px;
 
 use crate::rows::{
-    block_text, json_fields, run_outcome_style, Field, FieldValue, BLOCK_LINES, TOOL_TEXT_LIMIT,
-    VALUE_LIMIT,
+    block_text, json_fields, looks_like_code, run_outcome_style, Field, FieldValue, BLOCK_LINES,
+    COLUMN_GAP, KEY_WIDTH, TOOL_TEXT_LIMIT, VALUE_LIMIT,
 };
 use crate::style::MEASURE;
 use crate::todo::MAX_LIST_HEIGHT;
@@ -526,6 +526,73 @@ fn a_multi_line_string_becomes_a_capped_block() {
         shown.ends_with(&format!("… truncated ({} characters)", TOOL_TEXT_LIMIT + 10)),
         "{shown:?}"
     );
+}
+
+#[test]
+fn values_are_set_in_mono_only_when_they_read_as_code() {
+    // Paths, commands, flags and identifiers read as code…
+    for code in [
+        "crates/transcript/src/rows.rs",
+        "~/coding/evo-gui",
+        "RowKind::Tool",
+        "tool_row(id, name)",
+        "timeout=120",
+    ] {
+        assert!(looks_like_code(code), "{code:?} reads as code");
+    }
+
+    // …and prose does not, however long it is.
+    for prose in [
+        "the provider returned 429",
+        "Stood up the transcript view",
+        "128",
+        "true",
+        "transcript",
+    ] {
+        assert!(!looks_like_code(prose), "{prose:?} does not read as code");
+    }
+}
+
+#[gpui_kit::test]
+fn a_plain_result_starts_in_the_value_column_of_the_arguments(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (host, cx) = cx.add_window_view(|_window, cx| TranscriptHost::new(cx));
+
+    host.update(cx, |host, cx| {
+        host.transcript.update(cx, |view, cx| {
+            view.replace(
+                1,
+                vec![tool_with(
+                    1,
+                    "bash",
+                    r#"{"command":"cargo test -p transcript --lib","timeout":120}"#,
+                    // A result that is not JSON: plain lines of output.
+                    Some(ToolResult {
+                        is_error: false,
+                        content: "running 14 tests\ntest result: ok".into(),
+                        content_chars: None,
+                    }),
+                )],
+                cx,
+            );
+            view.set_expanded(1, true, cx);
+        });
+    });
+
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+
+        // The panels of one call share one left grid: the result's text starts
+        // exactly where the arguments' values start.
+        let key = window.find(field_row_id(ARGUMENTS, 1, 0)).bounds();
+        let values = key.origin.x + KEY_WIDTH + COLUMN_GAP;
+        let result: gpui_kit::ElementId = ("transcript-tool-result", 1u64).into();
+        let text = window.find((result, "text")).bounds();
+        assert_eq!(
+            text.origin.x, values,
+            "the result's text is in the value column, not against the panel's edge"
+        );
+    });
 }
 
 #[gpui_kit::test]

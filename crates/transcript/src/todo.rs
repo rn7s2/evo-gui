@@ -80,7 +80,8 @@ impl RenderOnce for TodoPanel {
             .flex()
             .flex_col()
             .px_4()
-            .py_2()
+            .pt(px(10.))
+            .pb(px(10.))
             .border_t_1()
             .border_color(palette.border)
             // The same measure as the rows above, so the panel's text starts on
@@ -102,7 +103,7 @@ impl RenderOnce for TodoPanel {
                                 .gap_2()
                                 .text_xs()
                                 .font_weight(FontWeight::MEDIUM)
-                                .text_color(palette.foreground)
+                                .text_color(palette.muted_foreground)
                                 .child(format!("Todos {done}/{total}"))
                                 .test_support(),
                         )

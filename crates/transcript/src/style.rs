@@ -38,6 +38,12 @@ pub(crate) struct Palette {
     pub(crate) mono: SharedString,
     /// The theme's body size: what a row measures itself against.
     pub(crate) font_size: Pixels,
+    /// The size a tool's payload — its arguments, its result — is drawn at.
+    ///
+    /// Half a point under the theme's mono size: a mono face reads larger than
+    /// sans at the same size, and a call's payload is read at a glance, not
+    /// like the prose of the message it belongs to.
+    pub(crate) payload_size: Pixels,
     pub(crate) radius: Pixels,
     pub(crate) radius_lg: Pixels,
 }
@@ -58,6 +64,7 @@ impl Palette {
             info: theme.info,
             mono: theme.mono_font_family.clone(),
             font_size: theme.font_size,
+            payload_size: theme.mono_font_size - px(0.5),
             radius: theme.radius,
             radius_lg: theme.radius_lg,
         }

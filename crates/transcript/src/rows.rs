@@ -50,7 +50,16 @@ const STATUS_DOT: Pixels = px(6.);
 const CARET_SIZE: Pixels = px(14.);
 /// Width of the key column of an expanded argument list: enough for a nested
 /// key like `diff.removed` without eliding it.
-const KEY_WIDTH: Pixels = px(112.);
+pub(crate) const KEY_WIDTH: Pixels = px(112.);
+/// The gap between a key and its value — and so the indent of a block whose
+/// content has no keys of its own.
+pub(crate) const COLUMN_GAP: Pixels = px(8.);
+/// The size a key is drawn at, in the UI font: a key is a label, not payload.
+const KEY_SIZE: Pixels = px(12.);
+/// The size a panel's caption is drawn at.
+const CAPTION_SIZE: Pixels = px(11.);
+/// The line height of payload text, as a multiple of its size.
+const PAYLOAD_LINE_HEIGHT: f32 = 1.45;
 /// Width of the label column of a report row.
 const REPORT_LABEL_WIDTH: Pixels = px(66.);
 
@@ -544,6 +553,25 @@ fn elide(text: &str) -> (String, Option<String>) {
     (shown, Some(text.to_string()))
 }
 
+/// Whether a value should be drawn in the mono face: a path, a command, an
+/// identifier. `cargo test -p transcript` reads as code; "the provider returned
+/// 429" does not.
+pub(crate) fn looks_like_code(text: &str) -> bool {
+    text.contains('/') || text.contains("::") || text.contains('(') || text.contains('=')
+}
+
+/// The caption of a payload panel: what the block below it holds, in the small
+/// caps a label is set in — quiet enough not to read as a line of the
+/// transcript. (GPUI has no letter spacing, so the caption is upper case and
+/// small rather than tracked.)
+fn caption(label: &str, palette: &Palette) -> AnyElement {
+    div()
+        .text_size(CAPTION_SIZE)
+        .text_color(palette.muted_foreground)
+        .child(label.to_uppercase())
+        .into_any_element()
+}
+
 /// A JSON object as a compact list: one `key  value` row per field, the key
 /// muted and the value plain — never the braces and quotes it arrived in.
 fn fields_block(
@@ -561,17 +589,13 @@ fn fields_block(
         .w_full()
         .min_w_0()
         .rounded(palette.radius)
-        .bg(palette.muted)
         .border_1()
         .border_color(palette.border)
         .px_2()
         .py_1()
-        .child(
-            div()
-                .text_xs()
-                .text_color(palette.muted_foreground)
-                .child(label.to_string()),
-        );
+        .text_size(palette.payload_size)
+        .line_height(palette.payload_size * PAYLOAD_LINE_HEIGHT)
+        .child(caption(label, palette));
 
     for (index, field) in fields.iter().enumerate() {
         block = block.child(field_row(&id, index, field, palette));
@@ -592,26 +616,31 @@ fn field_row(base: &ElementId, index: usize, field: &Field, palette: &Palette) -
         .min_w_0()
         .flex()
         .items_start()
-        .gap_2()
-        .line_height(px(18.))
-        .text_size(palette.font_size - px(1.))
+        .gap(COLUMN_GAP)
         .child(
             div()
                 .w(KEY_WIDTH)
                 .flex_shrink_0()
                 .truncate()
-                .font_family(palette.mono.clone())
+                .text_size(KEY_SIZE)
                 .text_color(palette.muted_foreground)
                 .child(field.key.clone()),
         )
         .child(match &field.value {
-            FieldValue::Text { text, .. } => div()
-                .flex_1()
-                .min_w_0()
-                .font_family(palette.mono.clone())
-                .text_color(palette.foreground)
-                .child(text.clone())
-                .into_any_element(),
+            FieldValue::Text { text, .. } => {
+                // Only a value that reads as code is set in mono; prose stays in
+                // the UI font, where it is easier to read.
+                let value = div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_color(palette.foreground)
+                    .child(text.clone());
+                if looks_like_code(text) {
+                    value.font_family(palette.mono.clone()).into_any_element()
+                } else {
+                    value.into_any_element()
+                }
+            }
             FieldValue::Block(text) => div()
                 .flex_1()
                 .min_w_0()
@@ -664,7 +693,6 @@ fn report_row(
         .rounded(palette.radius_lg)
         .border_1()
         .border_color(palette.border)
-        .bg(palette.muted)
         .px_3()
         .py_2()
         .child(
@@ -750,8 +778,9 @@ fn dim_line(
         .into_any_element()
 }
 
-/// A labeled, bordered block of tool text, capped so one result cannot take the
-/// whole transcript.
+/// A labeled panel of tool text, capped so one result cannot take the whole
+/// transcript. The text starts in the value column of a keyed panel, so the
+/// panels of one tool call share a left edge.
 fn text_block(
     id: impl Into<gpui_kit::ElementId>,
     label: &str,
@@ -759,33 +788,41 @@ fn text_block(
     total_chars: Option<u64>,
     palette: &Palette,
 ) -> AnyElement {
+    let id = id.into();
     div()
-        .id(id)
+        .id(id.clone())
         .flex()
         .flex_col()
         .gap_1()
         .w_full()
         .min_w_0()
         .rounded(palette.radius)
-        .bg(palette.muted)
         .border_1()
         .border_color(palette.border)
         .px_2()
         .py_1()
-        .font_family(palette.mono.clone())
-        .text_size(palette.font_size - px(1.))
-        .line_height(px(18.))
+        .child(caption(label, palette))
         .child(
             div()
-                .text_xs()
-                .text_color(palette.muted_foreground)
-                .child(label.to_string()),
-        )
-        .child(
-            div()
+                .flex()
+                .w_full()
                 .min_w_0()
-                .text_color(palette.foreground)
-                .child(block_text(text, total_chars)),
+                // A text body has no keys of its own, so it gets the key column
+                // as empty space: the two panels of one call then read down one
+                // left grid instead of two.
+                .child(div().w(KEY_WIDTH + COLUMN_GAP).flex_shrink_0())
+                .child(
+                    div()
+                        .id((id, "text"))
+                        .flex_1()
+                        .min_w_0()
+                        .font_family(palette.mono.clone())
+                        .text_size(palette.payload_size)
+                        .line_height(palette.payload_size * PAYLOAD_LINE_HEIGHT)
+                        .text_color(palette.foreground)
+                        .child(block_text(text, total_chars))
+                        .test_support(),
+                ),
         )
         .test_support()
         .into_any_element()
