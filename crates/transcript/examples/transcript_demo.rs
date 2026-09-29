@@ -434,7 +434,8 @@ fn escape(text: &str) -> String {
         .replace('\n', "\\n")
 }
 
-fn todos() -> Vec<Todo> {    vec![
+fn todos() -> Vec<Todo> {
+    vec![
         Todo {
             text: "fold /transcript into rows".into(),
             status: TodoStatus::Done,

@@ -17,6 +17,7 @@ use crate::rows::{
 };
 use crate::style::MEASURE;
 use crate::todo::MAX_LIST_HEIGHT;
+use crate::KEPT_DOCUMENTS;
 use crate::{TodoPanel, TranscriptView};
 
 /// The element ids of a tool row's two blocks: its arguments and its result.
@@ -194,69 +195,6 @@ fn building_rows_replace_upsert_and_the_revision_guard(cx: &mut TestAppContext) 
     });
 }
 
-#[gpui_kit::test]
-fn an_assistant_document_is_retained_across_deltas(cx: &mut TestAppContext) {
-    cx.update(gpui_kit::init);
-    let view = cx.new(|cx| TranscriptView::new(cx));
-
-    view.update(cx, |view, cx| {
-        view.replace(1, vec![assistant(1, 1, "# Head")], cx);
-    });
-
-    // Markdown is rendered, not shown as source: the heading marker is gone.
-    let first = cx.read(|cx| document(&view, cx, 1));
-    cx.read(|cx| {
-        assert_eq!(first.read(cx).rendered_text().as_str().trim(), "Head");
-    });
-
-    // A delta extends the same document instead of creating a new one.
-    view.update(cx, |view, cx| {
-        assert!(view.upsert(1, assistant(1, 2, "# Head\n\nSome **bo"), cx));
-    });
-    let second = cx.read(|cx| document(&view, cx, 1));
-    assert_eq!(
-        first.entity_id(),
-        second.entity_id(),
-        "the delta must extend the retained document, not replace it"
-    );
-    cx.read(|cx| {
-        let rendered = second.read(cx).rendered_text();
-        assert!(
-            rendered.as_str().contains("bo"),
-            "the delta is in the document"
-        );
-        assert!(
-            !rendered.as_str().contains('#'),
-            "the heading is rendered, not shown as source, while the message still grows: {:?}",
-            rendered.as_str()
-        );
-    });
-
-    // The construct completes inside the same document.
-    view.update(cx, |view, cx| {
-        assert!(view.upsert(1, assistant(1, 3, "# Head\n\nSome **bold** words"), cx));
-    });
-    let third = cx.read(|cx| document(&view, cx, 1));
-    assert_eq!(first.entity_id(), third.entity_id());
-    cx.read(|cx| {
-        let rendered = third.read(cx).rendered_text();
-        assert!(
-            rendered.as_str().contains("bold"),
-            "{:?}",
-            rendered.as_str()
-        );
-        assert!(!rendered.as_str().contains("**"), "{:?}", rendered.as_str());
-    });
-
-    // A rebuild without the row drops its document.
-    view.update(cx, |view, cx| {
-        view.replace(1, vec![user(2, 1, "gone")], cx);
-    });
-    cx.read(|cx| {
-        assert!(view.read(cx).data.read(cx).documents.is_empty());
-    });
-}
-
 /// A window host: the transcript above, the todo panel below, as the tab page
 /// arranges them.
 struct TranscriptHost {
@@ -282,6 +220,78 @@ impl Render for TranscriptHost {
             .child(TodoPanel::new(self.transcript.read(cx).todos()))
             .test_support()
     }
+}
+
+#[gpui_kit::test]
+fn an_assistant_document_is_created_when_the_row_is_shown_and_then_retained(
+    cx: &mut TestAppContext,
+) {
+    cx.update(gpui_kit::init);
+    let (host, cx) = cx.add_window_view(|_window, cx| TranscriptHost::new(cx));
+    let view = cx.read(|cx| host.read(cx).transcript.clone());
+
+    view.update(cx, |view, cx| {
+        view.replace(1, vec![assistant(1, 1, "# Head")], cx);
+    });
+
+    // Rendering it parses the markdown: the heading marker is gone.
+    cx.update(|window, cx| window.render_frame(cx));
+    let first = cx.read(|cx| document(&view, cx, 1));
+    cx.read(|cx| {
+        assert_eq!(first.read(cx).rendered_text().as_str().trim(), "Head");
+    });
+
+    // A delta extends the same document instead of creating a new one.
+    view.update(cx, |view, cx| {
+        assert!(view.upsert(1, assistant(1, 2, "# Head\n\nSome **bo"), cx));
+    });
+    cx.update(|window, cx| window.render_frame(cx));
+    let second = cx.read(|cx| document(&view, cx, 1));
+    assert_eq!(
+        first.entity_id(),
+        second.entity_id(),
+        "the delta must extend the retained document, not replace it"
+    );
+    cx.read(|cx| {
+        let rendered = second.read(cx).rendered_text();
+        assert!(
+            rendered.as_str().contains("bo"),
+            "the delta is in the document"
+        );
+        assert!(
+            !rendered.as_str().contains('#'),
+            "the heading is rendered, not shown as source, while the message still grows: {:?}",
+            rendered.as_str()
+        );
+    });
+
+    // The construct completes inside the same document.
+    view.update(cx, |view, cx| {
+        assert!(view.upsert(1, assistant(1, 3, "# Head\n\nSome **bold** words"), cx));
+    });
+    cx.update(|window, cx| window.render_frame(cx));
+    let third = cx.read(|cx| document(&view, cx, 1));
+    assert_eq!(first.entity_id(), third.entity_id());
+    cx.read(|cx| {
+        let rendered = third.read(cx).rendered_text();
+        assert!(
+            rendered.as_str().contains("bold"),
+            "{:?}",
+            rendered.as_str()
+        );
+        assert!(!rendered.as_str().contains("**"), "{:?}", rendered.as_str());
+    });
+
+    // A rebuild without the row drops its document.
+    view.update(cx, |view, cx| {
+        view.replace(1, vec![user(2, 1, "gone")], cx);
+    });
+    cx.read(|cx| {
+        assert!(
+            view.read(cx).data.read(cx).documents.is_empty(),
+            "a row that is gone takes its document with it"
+        );
+    });
 }
 
 #[gpui_kit::test]
@@ -480,7 +490,10 @@ fn a_long_value_is_elided_with_the_whole_text_kept_for_the_tooltip() {
         panic!("a one-line string is one line of the list: {:?}", fields[0]);
     };
     assert!(!text.contains('"'), "the value carries no quotes: {text:?}");
-    assert!(text.ends_with('…'), "a long value ends in an ellipsis: {text:?}");
+    assert!(
+        text.ends_with('…'),
+        "a long value ends in an ellipsis: {text:?}"
+    );
     assert_eq!(
         text.chars().count(),
         VALUE_LIMIT + 1,
@@ -523,7 +536,10 @@ fn a_multi_line_string_becomes_a_capped_block() {
     let long_line = "x".repeat(TOOL_TEXT_LIMIT + 10);
     let shown = block_text(&long_line, None);
     assert!(
-        shown.ends_with(&format!("… truncated ({} characters)", TOOL_TEXT_LIMIT + 10)),
+        shown.ends_with(&format!(
+            "… truncated ({} characters)",
+            TOOL_TEXT_LIMIT + 10
+        )),
         "{shown:?}"
     );
 }
@@ -642,9 +658,7 @@ fn an_open_tool_row_renders_its_arguments_as_key_value_rows(cx: &mut TestAppCont
 
         // A JSON result opens onto the same list, keyed by its own block.
         assert!(
-            window
-                .try_find(field_row_id(RESULT, 1, 0))
-                .is_some(),
+            window.try_find(field_row_id(RESULT, 1, 0)).is_some(),
             "a JSON result reads as a key/value list too"
         );
 
@@ -1067,6 +1081,228 @@ fn a_waiting_message_shows_pips_until_its_first_delta(cx: &mut TestAppContext) {
         assert!(
             window.try_find(("transcript-waiting", 1u64)).is_some(),
             "a row that is waiting is drawn with or without motion"
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn the_thinking_toggle_has_nothing_to_show_until_a_message_has_thinking(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let view = cx.new(|cx| TranscriptView::new(cx));
+
+    // Nothing to reveal: no rows, and rows that carry no thinking.
+    cx.read(|cx| assert!(!view.read(cx).has_thinking(cx)));
+    view.update(cx, |view, cx| {
+        view.replace(1, vec![user(1, 1, "hello"), assistant(2, 1, "# Head")], cx);
+    });
+    cx.read(|cx| assert!(!view.read(cx).has_thinking(cx)));
+
+    // An assistant row with thinking text is what the header waits for.
+    view.update(cx, |view, cx| {
+        view.replace(
+            1,
+            vec![
+                user(1, 1, "hello"),
+                assistant_with_thinking(2, "# Head", "weighing the options"),
+            ],
+            cx,
+        );
+    });
+    cx.read(|cx| {
+        assert!(view.read(cx).has_thinking(cx));
+        // And the state the toggle flips is the view's own, hidden by default.
+        assert!(!view.read(cx).is_showing_thinking(cx));
+    });
+
+    view.update(cx, |view, cx| {
+        view.toggle_thinking(cx);
+    });
+    cx.read(|cx| assert!(view.read(cx).is_showing_thinking(cx)));
+
+    // A resync that drops the thinking text takes the toggle's reason with it.
+    view.update(cx, |view, cx| {
+        view.replace(2, vec![user(1, 1, "hello")], cx);
+    });
+    cx.read(|cx| assert!(!view.read(cx).has_thinking(cx)));
+}
+
+#[gpui_kit::test]
+fn a_message_is_parsed_when_its_row_is_shown_and_not_before(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+
+    // A view nobody has mounted holds the rows and no documents at all: the
+    // parse is what a message costs, and it waits for a frame that shows it.
+    let unwatched = cx.new(|cx| TranscriptView::new(cx));
+    unwatched.update(cx, |view, cx| {
+        view.replace(1, many_messages(200), cx);
+    });
+    cx.read(|cx| {
+        assert!(
+            unwatched.read(cx).data.read(cx).documents.is_empty(),
+            "no frame, no parse"
+        );
+    });
+
+    // Mounted, it parses what the frame shows and nothing else.
+    let (host, cx) = cx.add_window_view(|_window, cx| TranscriptHost::new(cx));
+    let view = cx.read(|cx| host.read(cx).transcript.clone());
+    view.update(cx, |view, cx| {
+        view.replace(1, many_messages(200), cx);
+    });
+    cx.update(|window, cx| window.render_frame(cx));
+    let parsed = cx.read(|cx| view.read(cx).data.read(cx).documents.len());
+    assert!(
+        parsed > 0 && parsed < 60,
+        "a window's worth of rows is parsed, not the whole transcript: {parsed} of 150 messages"
+    );
+}
+
+#[gpui_kit::test]
+fn documents_stay_bounded_as_the_reader_scrolls_away(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (host, cx) = cx.add_window_view(|_window, cx| TranscriptHost::new(cx));
+    let view = cx.read(|cx| host.read(cx).transcript.clone());
+    view.update(cx, |view, cx| {
+        view.replace(1, many_messages(400), cx);
+    });
+
+    // Scroll away from the tail, a screenful at a time, remembering every row
+    // whose message was parsed on the way.
+    let mut seen: std::collections::HashSet<RowId> = std::collections::HashSet::new();
+    let mut worst = 0;
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        for _ in 0..40 {
+            seen.extend(view.read(cx).data.read(cx).documents.keys().copied());
+            worst = worst.max(view.read(cx).data.read(cx).documents.len());
+            assert!(
+                view.read(cx).data.read(cx).documents.len() <= KEPT_DOCUMENTS,
+                "a transcript holds the documents of the rows the reader is near"
+            );
+            // The wheel goes to the window's centre, which is over the
+            // transcript: the list scrolls, and the rows it shows are parsed.
+            window.scroll(
+                "transcript-host",
+                gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(320.))),
+                cx,
+            );
+            window.render_frame(cx);
+        }
+    });
+
+    assert!(
+        seen.len() > KEPT_DOCUMENTS,
+        "the scroll passed more rows than are kept, so the map is doing something: {}",
+        seen.len()
+    );
+    assert!(
+        worst <= KEPT_DOCUMENTS,
+        "the documents never passed the cap: {worst}"
+    );
+}
+
+/// `count` short assistant messages, one after another.
+fn many_messages(count: usize) -> Vec<Row> {
+    (0..count)
+        .map(|index| assistant(index as RowId + 1, 1, "## Step\n\nA line of the answer."))
+        .collect()
+}
+
+#[gpui_kit::test]
+fn a_resync_of_the_same_rows_changes_nothing(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (host, cx) = cx.add_window_view(|_window, cx| TranscriptHost::new(cx));
+    let view = cx.read(|cx| host.read(cx).transcript.clone());
+
+    // A transcript taller than the window, with a tool row the reader opened, and
+    // a window's worth of markdown already parsed.
+    let mut rows = many_messages(120);
+    rows.push(tool_with(
+        999,
+        "read_file",
+        "{\"path\":\"src/lib.rs\"}",
+        Some(ToolResult {
+            is_error: false,
+            content: "fn main() {}".into(),
+            content_chars: Some(12),
+        }),
+    ));
+    view.update(cx, |view, cx| {
+        view.replace(1, rows.clone(), cx);
+        view.set_expanded(999, true, cx);
+    });
+
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        // The reader wheels up from the tail: the place they left is what a
+        // resync has to keep.
+        window.scroll(
+            "transcript-host",
+            gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(300.))),
+            cx,
+        );
+        window.render_frame(cx);
+    });
+
+    let anchored = cx.read(|cx| {
+        let data = view.read(cx).data.read(cx);
+        let documents: Vec<(RowId, gpui_kit::EntityId)> = data
+            .documents
+            .iter()
+            .map(|(id, document)| (*id, document.entity_id()))
+            .collect();
+        (documents, view.read(cx).is_following_tail(cx))
+    });
+    let visible = cx.update(|window, cx| {
+        window.render_frame(cx);
+        let row = (0..140u64)
+            .filter_map(|id| window.try_find(("transcript-row", id)))
+            .map(|snapshot| snapshot.bounds().origin.y)
+            .next()
+            .expect("a row is on screen");
+        let arguments = window
+            .try_find(("transcript-tool-arguments", 999u64))
+            .map(|snapshot| snapshot.bounds());
+        (row, arguments)
+    });
+
+    // The same rows again, as `/transcript` hands a rebuilt transcript over.
+    view.update(cx, |view, cx| {
+        view.replace(2, rows.clone(), cx);
+    });
+
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        let row = (0..140u64)
+            .filter_map(|id| window.try_find(("transcript-row", id)))
+            .map(|snapshot| snapshot.bounds().origin.y)
+            .next()
+            .expect("a row is on screen");
+        assert_eq!(row, visible.0, "a resync does not move the reader's place");
+        assert_eq!(
+            window
+                .try_find(("transcript-tool-arguments", 999u64))
+                .map(|snapshot| snapshot.bounds()),
+            visible.1,
+            "an opened tool row stays open, where it was"
+        );
+    });
+
+    cx.read(|cx| {
+        let data = view.read(cx).data.read(cx);
+        let documents: Vec<(RowId, gpui_kit::EntityId)> = data
+            .documents
+            .iter()
+            .map(|(id, document)| (*id, document.entity_id()))
+            .collect();
+        assert_eq!(
+            documents, anchored.0,
+            "the markdown documents are reused, not re-created"
+        );
+        assert_eq!(
+            view.read(cx).is_following_tail(cx),
+            anchored.1,
+            "and following the tail is where it was"
         );
     });
 }

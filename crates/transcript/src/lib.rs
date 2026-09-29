@@ -3,9 +3,13 @@
 //! The view is fed rows from the `session` crate and owns three pieces of
 //! retained state:
 //!
-//! * one [`TextViewState`] per assistant row, keyed by [`RowId`], extended with
-//!   `set_text` on every version change so markdown is **rendered live while it
-//!   streams** and the growing row is remeasured — never recreated per delta;
+//! * one [`TextViewState`] per assistant row that has been on screen, keyed by
+//!   [`RowId`], extended with `set_text` so markdown is **rendered live while it
+//!   streams** — never recreated per delta. A row's document is created the
+//!   first time the list renders it and handed its row's text once per frame,
+//!   so a stream that lands fifty deltas between two frames is one parse, and a
+//!   transcript of thousands of rows holds the documents of the rows the reader
+//!   is near and nothing else (see `KEPT_DOCUMENTS`);
 //! * one [`MessageScrollerState`] per view, which follows the tail while the
 //!   reader is at the bottom and offers the jump-to-latest button when they
 //!   are not;
@@ -51,6 +55,13 @@ use session::{AgentKey, Row, RowId, RowKind, Todo};
 
 use crate::style::Palette;
 
+/// How many assistant rows keep their parsed document.
+///
+/// A window shows a few dozen rows, so this is room to scroll back and forth
+/// without paying for a re-parse; what it bounds is the memory a transcript of
+/// thousands of rows would otherwise hold for rows nobody is looking at.
+const KEPT_DOCUMENTS: usize = 128;
+
 /// The data the row renderer reads.
 ///
 /// It lives in an entity of its own so the virtual list can read rows while the
@@ -59,7 +70,17 @@ use crate::style::Palette;
 pub(crate) struct TranscriptData {
     pub(crate) rows: Vec<Row>,
     /// Retained markdown documents of assistant rows, keyed by row id.
+    ///
+    /// A row gets its document the first time it is rendered, not when it
+    /// arrives: a parsed message costs tens to hundreds of kilobytes, so a
+    /// transcript of thousands of rows holds the documents of the rows the
+    /// reader is near and nothing else.
     pub(crate) documents: HashMap<RowId, Entity<TextViewState>>,
+    /// The frame each document was last rendered in, so the ones the reader has
+    /// left behind can be dropped.
+    rendered: HashMap<RowId, u64>,
+    /// The frame counter `rendered` is ordered by.
+    frame: u64,
     /// Tool rows the reader has opened.
     pub(crate) expanded: HashSet<RowId>,
     /// Whether assistant thinking text is shown (hidden by default).
@@ -71,49 +92,60 @@ impl TranscriptData {
         self.rows.iter().position(|row| row.id == id)
     }
 
-    /// Give every assistant row a document: create the ones that are missing,
-    /// extend the ones whose source changed, and drop the ones whose row is
-    /// gone. `set_text` is a no-op when the source is unchanged, so this is
-    /// safe to run on every rebuild.
-    fn sync_documents(&mut self, rows: &[Row], cx: &mut Context<Self>) {
-        self.documents
-            .retain(|id, _| rows.iter().any(|row| row.id == *id));
+    /// Start a frame: age the documents and drop the ones the reader has left.
+    fn begin_frame(&mut self) {
+        self.frame = self.frame.wrapping_add(1);
+        if self.rendered.len() <= KEPT_DOCUMENTS {
+            return;
+        }
 
-        for row in rows {
-            let RowKind::Assistant { markdown, .. } = &row.kind else {
-                continue;
-            };
-            match self.documents.get(&row.id).cloned() {
-                Some(document) => {
-                    document.update(cx, |state, cx| state.set_text(markdown, cx));
-                }
-                None => {
-                    let document = cx.new(|cx| {
-                        TextViewState::markdown(markdown, cx).motion(rows::stream_motion())
-                    });
-                    self.documents.insert(row.id, document);
-                }
-            }
+        let mut ages: Vec<(RowId, u64)> = self
+            .rendered
+            .iter()
+            .map(|(id, frame)| (*id, *frame))
+            .collect();
+        ages.sort_by_key(|(_, frame)| *frame);
+        for (id, _) in ages.drain(..ages.len() - KEPT_DOCUMENTS) {
+            self.rendered.remove(&id);
+            self.documents.remove(&id);
         }
     }
 
-    /// Bring the document of `rows[index]` up to date.
-    fn sync_row_document(&mut self, index: usize, cx: &mut Context<Self>) {
+    /// Note that a row is on screen this frame.
+    pub(crate) fn note_rendered(&mut self, id: RowId) {
+        self.rendered.insert(id, self.frame);
+    }
+
+    /// Bring `rows[index]`'s document up to date, creating it the first time the
+    /// row is on screen.
+    ///
+    /// Called from the row renderer, so a row that arrives and streams its text
+    /// between two frames is handed to its document once, at the frame that
+    /// shows it — never once per delta. `set_text` is a no-op when the source is
+    /// unchanged, so rendering a still row costs a comparison.
+    pub(crate) fn sync_document(&mut self, index: usize, cx: &mut Context<Self>) {
         let row = &self.rows[index];
         let RowKind::Assistant { markdown, .. } = &row.kind else {
             return;
         };
-        let (id, markdown) = (row.id, markdown.clone());
+        let id = row.id;
         match self.documents.get(&id).cloned() {
-            Some(document) => {
-                document.update(cx, |state, cx| state.set_text(&markdown, cx));
-            }
+            Some(document) => document.update(cx, |state, cx| state.set_text(markdown, cx)),
             None => {
                 let document = cx
-                    .new(|cx| TextViewState::markdown(&markdown, cx).motion(rows::stream_motion()));
+                    .new(|cx| TextViewState::markdown(markdown, cx).motion(rows::stream_motion()));
                 self.documents.insert(id, document);
             }
         }
+    }
+
+    /// Keep the documents of the rows that are still here, and nothing else.
+    fn retain_documents(&mut self) {
+        let rows = &self.rows;
+        self.documents
+            .retain(|id, _| rows.iter().any(|row| row.id == *id));
+        self.rendered
+            .retain(|id, _| rows.iter().any(|row| row.id == *id));
     }
 }
 
@@ -170,6 +202,8 @@ impl TranscriptView {
             data: cx.new(|_| TranscriptData {
                 rows: Vec::new(),
                 documents: HashMap::new(),
+                rendered: HashMap::new(),
+                frame: 0,
                 expanded: HashSet::new(),
                 show_thinking: false,
             }),
@@ -214,6 +248,17 @@ impl TranscriptView {
         self.data.read(cx).show_thinking
     }
 
+    /// Whether this agent has any thinking text to reveal.
+    ///
+    /// The tab page's header shows its toggle only while this is true: a
+    /// control that reveals nothing is noise.
+    pub fn has_thinking(&self, cx: &App) -> bool {
+        self.data.read(cx).rows.iter().any(|row| match &row.kind {
+            RowKind::Assistant { thinking, .. } => !thinking.is_empty(),
+            _ => false,
+        })
+    }
+
     /// Show or hide assistant thinking text (hidden by default).
     pub fn set_show_thinking(&mut self, show: bool, cx: &mut Context<Self>) {
         if self.is_showing_thinking(cx) == show {
@@ -237,10 +282,10 @@ impl TranscriptView {
             return false;
         }
 
-        let change = self.data.update(cx, |data, cx| {
-            data.sync_documents(&rows, cx);
+        let change = self.data.update(cx, |data, _| {
             let change = ListChange::between(&data.rows, &rows);
             data.rows = rows;
+            data.retain_documents();
             change
         });
         self.apply_list_change(change, cx);
@@ -259,7 +304,7 @@ impl TranscriptView {
         }
         // `(index, appended)`: a row that was already there keeps its place and
         // only needs remeasuring; a new one extends the list.
-        let change = self.data.update(cx, |data, cx| {
+        let change = self.data.update(cx, |data, _| {
             let (index, appended) = match data.index_of(row.id) {
                 Some(index) => {
                     if row.version <= data.rows[index].version {
@@ -273,7 +318,6 @@ impl TranscriptView {
                     (data.rows.len() - 1, true)
                 }
             };
-            data.sync_row_document(index, cx);
             Some((index, appended))
         });
 
@@ -309,6 +353,7 @@ impl TranscriptView {
         self.data.update(cx, |data, _| {
             data.rows.clear();
             data.documents.clear();
+            data.rendered.clear();
             data.expanded.clear();
         });
         self.scroller
@@ -443,12 +488,16 @@ impl Render for TranscriptView {
             return empty_state(self.agent, &Palette::from_app(cx));
         }
 
+        // One frame's worth: the documents of the rows about to be rendered are
+        // brought up to date by the renderer itself, and the ones the reader has
+        // left behind go.
+        self.data.update(cx, |data, _| data.begin_frame());
+
         MessageScroller::new(
             "transcript",
             self.scroller.clone(),
             move |index, _window, cx| {
-                let cx: &App = &*cx;
-                rows::render_row(&data.read(cx), index, &view, cx)
+                data.update(cx, |data, cx| rows::render_row(data, index, &view, cx))
             },
         )
         // Rows carry their own leading space (they know what came before them),

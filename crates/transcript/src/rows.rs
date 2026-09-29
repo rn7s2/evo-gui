@@ -18,7 +18,7 @@ use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{h_flex, Icon, IconName};
 use gpui_kit::TestSupportExt as _;
 use gpui_kit::{
-    div, px, Animation, AnimationExt as _, AnyElement, App, ElementId, FontWeight,
+    div, px, Animation, AnimationExt as _, AnyElement, App, Context, ElementId, FontWeight,
     InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
     StatefulInteractiveElement as _, Styled as _, WeakEntity,
 };
@@ -135,14 +135,35 @@ fn gap_before(previous: Option<&Row>, row: &Row) -> Pixels {
 /// Render the row at `index`, or an empty element when the list asks for a row
 /// that is no longer there.
 pub(crate) fn render_row(
-    data: &TranscriptData,
+    data: &mut TranscriptData,
     index: usize,
     view: &WeakEntity<TranscriptView>,
-    cx: &App,
+    cx: &mut Context<TranscriptData>,
 ) -> AnyElement {
-    let Some(row) = data.rows.get(index) else {
+    if data.rows.get(index).is_none() {
         return div().into_any_element();
+    }
+
+    // An assistant row's document is brought up to date here, at the frame that
+    // shows the row, rather than on every delta that arrives for it: a stream
+    // that lands fifty updates between two frames is one parse, not fifty.
+    let waiting = match &data.rows[index].kind {
+        RowKind::Assistant {
+            markdown,
+            streaming,
+            ..
+        } => *streaming && markdown.trim().is_empty(),
+        _ => false,
     };
+    if matches!(data.rows[index].kind, RowKind::Assistant { .. }) {
+        let id = data.rows[index].id;
+        data.note_rendered(id);
+        if !waiting {
+            data.sync_document(index, cx);
+        }
+    }
+
+    let row = &data.rows[index];
     let palette = Palette::from_app(cx);
     let previous = index.checked_sub(1).and_then(|index| data.rows.get(index));
 
@@ -161,13 +182,13 @@ pub(crate) fn render_row(
         RowKind::Assistant {
             markdown,
             thinking,
-            streaming,
             error,
+            ..
         } => assistant_row(
             row.id,
             markdown,
             thinking,
-            *streaming,
+            waiting,
             error.as_deref(),
             data,
             cx,
@@ -489,9 +510,12 @@ fn arguments_block(id: RowId, arguments: &str, palette: &Palette) -> AnyElement 
         return div().into_any_element();
     }
     match json_fields(arguments) {
-        Some(fields) if !fields.is_empty() => {
-            fields_block(("transcript-tool-arguments", id), "arguments", &fields, palette)
-        }
+        Some(fields) if !fields.is_empty() => fields_block(
+            ("transcript-tool-arguments", id),
+            "arguments",
+            &fields,
+            palette,
+        ),
         _ => text_block(
             ("transcript-tool-arguments", id),
             "arguments",
@@ -719,9 +743,7 @@ fn field_row(base: &ElementId, index: usize, field: &Field, palette: &Palette) -
     match elided {
         // Cut to fit: the whole text is one hover away.
         Some(full) => row
-            .tooltip(move |window, cx| {
-                Tooltip::new(full.clone()).max_w(px(520.)).build(window, cx)
-            })
+            .tooltip(move |window, cx| Tooltip::new(full.clone()).max_w(px(520.)).build(window, cx))
             .test_support()
             .into_any_element(),
         None => row.test_support().into_any_element(),

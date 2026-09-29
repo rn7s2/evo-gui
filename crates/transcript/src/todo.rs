@@ -126,9 +126,11 @@ impl RenderOnce for TodoPanel {
                                         .gap_1()
                                         .max_h(MAX_LIST_HEIGHT)
                                         .overflow_y_scroll()
-                                        .children(self.todos.iter().enumerate().map(
-                                            |(index, todo)| todo_item(index, todo, &palette),
-                                        ))
+                                        .children(
+                                            self.todos.iter().enumerate().map(|(index, todo)| {
+                                                todo_item(index, todo, &palette)
+                                            }),
+                                        )
                                         .test_support(),
                                 )
                                 .child(
