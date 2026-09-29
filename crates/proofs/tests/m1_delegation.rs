@@ -168,7 +168,11 @@ fn m1_delegation() {
     // --- a lane that reports is heard ---------------------------------------
     // The second delegation's task is a `report` call: the lane's report is what
     // the swarm relays to the coordinator as input, which is how a lane is ever
-    // heard from.
+    // heard from. The relay arrives as a user-role message — `[lane 1 report] done:
+    // m1 lane one delivered\nevidence: the stub ran` (`report-text`,
+    // `swarm/lanes.lisp:220`) — and the session reads it as the report it is, naming
+    // the lane it came from rather than as one of the lane's own rows (whose reports
+    // carry no lane, having come from its stream).
     let before = drive.cursor();
     drive.prompt(2, format!(
         "CALL delegate {}",
@@ -182,8 +186,8 @@ fn m1_delegation() {
         "the lane's report in the coordinator's transcript",
         |model| {
             model.coordinator().rows().iter().any(|row| {
-                matches!(&row.kind, RowKind::User { text }
-            if text.contains("[lane 1 report]") && text.contains("m1 lane one delivered"))
+                matches!(&row.kind, RowKind::Report { lane: Some(1), done, evidence, .. }
+                    if done == "m1 lane one delivered" && evidence == "the stub ran")
             })
         },
     );
