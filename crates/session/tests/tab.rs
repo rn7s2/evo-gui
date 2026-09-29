@@ -271,8 +271,9 @@ fn the_todo_panel_follows_the_selected_agent() {
     assert_eq!(tab.selected_todos()[2].status, TodoStatus::Done);
 }
 
-/// §9.7: a lane that is down says why, from its own transcript's `output` lines — and the
-/// coordinator's stream answers when the lane's own transcript has nothing.
+/// §9.7: a lane that is down says why. The swarm's own account of the lane going
+/// down comes first — what a restarted lane says about itself is the noise of being
+/// restarted — and the lane's own transcript speaks when the swarm has said nothing.
 #[test]
 fn lane_down_reason_comes_from_the_lanes_own_output_rows() {
     let mut tab = TabModel::new();
@@ -289,11 +290,13 @@ fn lane_down_reason_comes_from_the_lanes_own_output_rows() {
     // Work goes on after the error; the reason stays the error line, not the newest line.
     tab.on_event(lane(1), 2, "task-start", &json!({ "task_id": "t", "kind": "run" }));
     tab.on_event(lane(1), 3, "output", &json!({ "style": "dim", "text": "queued" }));
-    // The coordinator also says something about this lane, later.
+    // The coordinator relays what the lane said, prefixed with the lane it is about.
     tab.on_event(COORDINATOR, 1, "output", &json!({
         "style": "error",
-        "text": "[lane 1] is down: its process exited. restart_lane brings it back."
+        "text": "[lane 1] ✗ lane 1 cannot use its model st-1: its API :openai-completions is not in the lane"
     }));
+    // Nothing is shown until the lane is actually down: a lane that is up is not down.
+    assert_eq!(tab.lane_down_reason(1), None, "the lane is not down yet");
 
     // The lane goes down (a lane-state on the coordinator's stream).
     let changes = tab.on_event(COORDINATOR, 2, "lane-state", &json!({
@@ -303,7 +306,7 @@ fn lane_down_reason_comes_from_the_lanes_own_output_rows() {
     let row = tab.lanes().lane(1).unwrap();
     assert_eq!(row.status, LaneStatus::Down);
     assert_eq!(row.glyph(), '✗');
-    // The lane's own account wins: it is the lane's transcript that the row describes.
+    // The lane's own account is what the tab has: the swarm has announced nothing.
     assert_eq!(
         tab.lane_down_reason(1).as_deref(),
         Some("✗ lane 1 cannot use its model st-1: its API :openai-completions is not in the lane")
@@ -313,17 +316,57 @@ fn lane_down_reason_comes_from_the_lanes_own_output_rows() {
     tab.on_event(lane(1), 4, "output", &json!({ "style": "error", "text": "✗ lane 1: second failure" }));
     assert_eq!(tab.lane_down_reason(1).as_deref(), Some("✗ lane 1: second failure"));
 
+    // ...but once the swarm says what happened to the lane, *that* is the reason: a
+    // restarted lane complains about its own fresh state (no model registered yet),
+    // and those lines are symptoms of the restart, not why the row is red.
+    tab.on_event(lane(1), 5, "output", &json!({
+        "style": "error",
+        "text": "✗ No model is configured — set one in init.lisp: (evo:set-setting :model \"...\")"
+    }));
+    tab.on_event(COORDINATOR, 3, "output", &json!({
+        "style": "error",
+        "text": "[lane 1] crashed and was restarted by its supervisor (pid 1 → 2); its session was resumed and it was re-initialized."
+    }));
+    assert_eq!(
+        tab.lane_down_reason(1).as_deref(),
+        Some("[lane 1] crashed and was restarted by its supervisor (pid 1 → 2); its session was resumed and it was re-initialized."),
+        "the swarm's account outranks what the lane said about itself"
+    );
+    // Even with the lane's noise arriving later still.
+    tab.on_event(lane(1), 6, "output", &json!({
+        "style": "error",
+        "text": "✗ No model is configured — set one in init.lisp"
+    }));
+    assert!(tab
+        .lane_down_reason(1)
+        .is_some_and(|reason| reason.contains("crashed and was restarted")));
+
+    // Back up: the row is not down any more, and nothing is claimed about it.
+    tab.on_event(COORDINATOR, 4, "lane-state", &json!({
+        "lane": 1, "state": "idle", "task": null, "goal": null, "restarts": 1, "pid": 2
+    }));
+    assert_eq!(tab.lanes().lane(1).map(|row| row.status), Some(LaneStatus::Idle));
+    assert_eq!(tab.lane_down_reason(1), None, "a lane that is up has no reason");
+
     // A lane whose own transcript is not loaded falls back to the coordinator's line about
-    // it — the only evidence the tab has.
+    // it — the only evidence the tab has. It is down first: a reason needs a red row.
     assert!(tab.lane_model(2).is_none());
     assert_eq!(
         tab.lane_down_reason(2),
         None,
         "the coordinator has said nothing about lane 2"
     );
-    tab.on_event(COORDINATOR, 3, "output", &json!({
+    tab.on_event(COORDINATOR, 5, "output", &json!({
         "style": "error",
         "text": "[lane 2] is down: its process exited. restart_lane brings it back."
+    }));
+    assert_eq!(
+        tab.lane_down_reason(2),
+        None,
+        "lane 2 is not down: nothing is shown for a lane that is up"
+    );
+    tab.on_event(COORDINATOR, 6, "lane-state", &json!({
+        "lane": 2, "state": "down", "task": null, "goal": null, "restarts": 0, "pid": null
     }));
     assert_eq!(
         tab.lane_down_reason(2).as_deref(),
@@ -336,19 +379,74 @@ fn lane_down_reason_comes_from_the_lanes_own_output_rows() {
     assert_eq!(tab.lane_down_reason(3), None);
 
     // `[lane 1]` is not `[lane 10]`: the match is the whole bracket token.
-    tab.on_event(COORDINATOR, 4, "output", &json!({
+    tab.on_event(COORDINATOR, 7, "output", &json!({
         "style": "error",
         "text": "[lane 10] is down: its process exited. restart_lane brings it back."
     }));
+    assert!(
+        tab.lane_down_reason(1).is_none(),
+        "lane 10's line is not lane 1's, and lane 1 is up"
+    );
+    assert_eq!(
+        tab.lane_down_reason(10),
+        None,
+        "lane 10 is not down either: the line alone does not make a red row"
+    );
+}
+
+/// A lane that failed to start is announced by the swarm as such, and that line is
+/// the reason — `swarm/lanes.lisp`'s bring-up failure.
+#[test]
+fn a_lane_that_failed_to_start_says_so() {
+    let mut tab = TabModel::new();
+    let changes = tab.on_event(COORDINATOR, 1, "lane-state", &json!({
+        "lane": 1, "state": "down", "task": null, "goal": null, "restarts": 0, "pid": null
+    }));
+    assert!(changes.lanes);
+    assert_eq!(tab.lane_down_reason(1), None, "nothing has been said yet");
+    tab.on_event(COORDINATOR, 2, "output", &json!({
+        "style": "error",
+        "text": "[lane 1] failed to start — see /tmp/swarm/lane-1/lane.log"
+    }));
     assert_eq!(
         tab.lane_down_reason(1).as_deref(),
-        Some("✗ lane 1: second failure"),
-        "lane 10's line is not lane 1's"
+        Some("[lane 1] failed to start — see /tmp/swarm/lane-1/lane.log")
     );
+}
+
+/// The reason outlives a resync. `settled` refetches and rebuilds the coordinator's
+/// rows from `/transcript`, which carries no `output` lines: a reason read only out of
+/// those rows would leave the red row mute from the first resync on — and a lane
+/// crash is *always* followed by one, because the swarm wakes the coordinator with it.
+#[test]
+fn a_down_reason_survives_a_resync() {
+    let mut tab = TabModel::new();
+    tab.on_event(COORDINATOR, 1, "lane-state", &json!({
+        "lane": 1, "state": "down", "task": null, "goal": null, "restarts": 0, "pid": null
+    }));
+    tab.on_event(COORDINATOR, 2, "output", &json!({
+        "style": "error",
+        "text": "[lane 1] crashed and was restarted by its supervisor (pid 1 → 2); its session was resumed and it was re-initialized."
+    }));
+    let reason = tab.lane_down_reason(1).expect("the swarm's account");
+
+    // The resync: the rows are rebuilt from a transcript, and the `output` line is not
+    // in it (`Dim` rows are events, not messages).
+    tab.on_transcript(COORDINATOR, 1, &json!({"messages": [
+        { "role": "user", "content": [ { "type": "text", "text": "delegate this" } ] },
+    ]}));
+    assert!(tab.coordinator().rows().iter().all(|row| !matches!(row.kind, RowKind::Dim { .. })));
     assert_eq!(
-        tab.lane_down_reason(10).as_deref(),
-        Some("[lane 10] is down: its process exited. restart_lane brings it back.")
+        tab.lane_down_reason(1).as_deref(),
+        Some(reason.as_str()),
+        "the red row keeps what the swarm said"
     );
+
+    // The lane comes up: the row is not red, and the reason goes with it.
+    tab.on_event(COORDINATOR, 3, "lane-state", &json!({
+        "lane": 1, "state": "idle", "task": null, "goal": null, "restarts": 1, "pid": 2
+    }));
+    assert_eq!(tab.lane_down_reason(1), None);
 }
 
 #[test]

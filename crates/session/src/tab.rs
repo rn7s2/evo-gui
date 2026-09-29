@@ -38,8 +38,8 @@ use serde_json::Value;
 
 use crate::cache::cache_totals_from_seed;
 use crate::{
-    Activity, AgentModel, DimStyle, LaneList, LaneRow, Readout, Row, RowChanges, RowKind, StepClock,
-    Todo,
+    Activity, AgentModel, DimStyle, LaneList, LaneRow, LaneStatus, Readout, Row, RowChanges,
+    RowKind, StepClock, Todo,
 };
 
 /// One agent of a tab: the coordinator, or lane N.
@@ -127,6 +127,12 @@ pub struct TabModel {
     /// arrives for it (a lane's stream is only open while it is watched, so an update *is*
     /// the watch).
     lane_models: BTreeMap<u32, AgentModel>,
+    /// Lane number → the swarm's last account of it going down (`[lane N] crashed and
+    /// was restarted by its supervisor…`, `[lane N] is down: its process exited…`,
+    /// `[lane N] failed to start…`), kept here rather than read back out of the rows: a
+    /// `settled` resync rebuilds the coordinator's rows from `/transcript`, which carries
+    /// no `output` lines, and the red row's reason would be lost with them.
+    lane_announcements: BTreeMap<u32, String>,
     selected: AgentKey,
     streams: BTreeMap<AgentKey, StreamStatus>,
     /// The last transcript revision applied per agent — a late answer from an older fetch
@@ -147,6 +153,7 @@ impl TabModel {
             coordinator: AgentModel::new(),
             lanes: LaneList::new(),
             lane_models: BTreeMap::new(),
+            lane_announcements: BTreeMap::new(),
             selected: AgentKey::Coordinator,
             streams: BTreeMap::new(),
             transcript_revisions: BTreeMap::new(),
@@ -229,16 +236,35 @@ impl TabModel {
     /// Why lane N is down, for the `✗` row's tooltip — the §9.7 "reason from the
     /// transcript's `output` lines".
     ///
-    /// The lane's own transcript first: that is where the lane says what went wrong (a model
-    /// it cannot register, an internal error). When it has no error line — or was never
-    /// loaded — the coordinator's own stream is asked instead, for an error line about that
-    /// lane (`[lane N] is down: its process exited…`, `swarm/lanes.lisp`). Either way the
-    /// **most recent** line wins; `None` when neither source has one.
+    /// **Only a lane the list shows as down has a reason.** A lane that is back up
+    /// (idle, working, starting) has none: whatever it said while it was being
+    /// brought back is not current, and a tooltip over a working lane that claims it
+    /// is down would be a lie.
+    ///
+    /// The reason itself is, in order:
+    ///
+    /// 1. the swarm's own account of the lane going down — `[lane N] crashed and was
+    ///    restarted by its supervisor…`, `[lane N] is down: its process exited…`,
+    ///    `[lane N] failed to start…` (`swarm/lanes.lisp`). It is the *most recent
+    ///    such* line, because a lane that has just been re-initialized complains
+    ///    about its own fresh state (no model registered yet, an extension it has
+    ///    not loaded) and those lines are symptoms of the restart, not the reason
+    ///    for the red row;
+    /// 2. failing that, the lane's own transcript: what it said went wrong (a model
+    ///    it cannot register, an internal error);
+    /// 3. failing that, the newest error line about that lane on the coordinator's
+    ///    stream.
     pub fn lane_down_reason(&self, n: u32) -> Option<String> {
+        if self.lanes.lane(u64::from(n)).map(|row| row.status) != Some(LaneStatus::Down) {
+            return None;
+        }
+        if let Some(announcement) = self.lane_announcements.get(&n) {
+            return Some(announcement.clone());
+        }
+        let about = format!("[lane {}]", n);
         if let Some(reason) = self.lane_models.get(&n).and_then(last_error_line) {
             return Some(reason);
         }
-        let about = format!("[lane {}]", n);
         last_error_line_where(&self.coordinator, |text| text.contains(&about))
     }
 
@@ -344,8 +370,36 @@ impl TabModel {
         // already holds (§9.3).
         if agent == AgentKey::Coordinator && kind == "lane-state" {
             changes.lanes = self.lanes.apply_lane_state(data);
+            // A lane that is no longer down has nothing said about it any more.
+            if data.get("state").and_then(Value::as_str) != Some("down") {
+                if let Some(n) = data.get("lane").and_then(Value::as_u64) {
+                    self.lane_announcements.remove(&(n as u32));
+                }
+            }
+        }
+        // The swarm's own account of a lane going down is remembered when it goes by.
+        if agent == AgentKey::Coordinator && kind == "output" {
+            self.note_lane_announcement(data);
         }
         changes
+    }
+
+    /// Remember the swarm's account of a lane going down: a coordinator `output` line,
+    /// error-styled, that names a lane and says what became of it
+    /// ([`is_down_announcement`]).
+    fn note_lane_announcement(&mut self, data: &Value) {
+        if data.get("style").and_then(Value::as_str) != Some("error") {
+            return;
+        }
+        let Some(text) = data.get("text").and_then(Value::as_str) else {
+            return;
+        };
+        if !is_down_announcement(text) {
+            return;
+        }
+        if let Some(n) = lane_of_line(text) {
+            self.lane_announcements.insert(n, text.to_owned());
+        }
     }
 
     /// The journal walk's answer for the cache figure: the reply it carried, or `None` when
@@ -424,6 +478,27 @@ impl TabModel {
 /// sent it — the agent's own account of what went wrong.
 fn last_error_line(model: &AgentModel) -> Option<String> {
     last_error_line_where(model, |_| true)
+}
+
+/// The lane a `[lane N]` line is about: the swarm's own prefix for what it says on
+/// behalf of a lane (`swarm/lanes.lisp`'s `tell-coordinator`). `None` when the line
+/// names no lane.
+fn lane_of_line(text: &str) -> Option<u32> {
+    const PREFIX: &str = "[lane ";
+    let start = text.find(PREFIX)? + PREFIX.len();
+    let rest = &text[start..];
+    let end = rest.find(']')?;
+    rest[..end].trim().parse().ok()
+}
+
+/// Whether a lane's line is the swarm's own account of it going down — the two
+/// messages `swarm/lanes.lisp` sends (`crashed and was restarted by its supervisor`,
+/// `is down: its process exited`, `failed to start`) — rather than something the lane
+/// said about itself while it was being brought back.
+fn is_down_announcement(text: &str) -> bool {
+    text.contains("crashed and was restarted")
+        || text.contains("is down")
+        || text.contains("failed to start")
 }
 
 /// The newest error line of one agent's transcript whose text passes `want`.
