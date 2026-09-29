@@ -6,7 +6,7 @@ use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::Keystroke;
 use gpui_kit::{
     div, point, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, Styled as _, TestAppContext, TestSupportExt as _,
+    ParentElement as _, Render, ScrollDelta, Styled as _, TestAppContext, TestSupportExt as _,
     VisualTestContext, Window,
 };
 use session::{DimStyle, Row, RowId, RowKind, Todo, TodoStatus, ToolResult};
@@ -15,8 +15,10 @@ use gpui_kit::px;
 
 use crate::rows::{
     block_text, json_fields, looks_like_code, run_outcome_style, Field, FieldValue, BLOCK_LINES,
-    COLUMN_GAP, KEY_WIDTH, MAX_ARRAY, MAX_DEPTH, NEST_INDENT, TOOL_TEXT_LIMIT, VALUE_LIMIT,
+    COLUMN_GAP, CONTEXT_BLOCK_LINES, KEY_WIDTH, MAX_ARRAY, MAX_DEPTH, NEST_INDENT,
+    PAYLOAD_LINE_HEIGHT, TOOL_TEXT_LIMIT, VALUE_LIMIT,
 };
+use crate::style::Palette;
 use crate::style::MEASURE;
 use crate::todo::MAX_LIST_HEIGHT;
 use crate::KEPT_DOCUMENTS;
@@ -25,6 +27,11 @@ use crate::{TodoPanel, TranscriptView};
 /// The element ids of a tool row's two blocks: its arguments and its result.
 const ARGUMENTS: &str = "transcript-tool-arguments";
 const RESULT: &str = "transcript-tool-result";
+
+/// The element ids of an opened context row: the block it draws its text in, and
+/// the text itself inside it.
+const CONTEXT_TEXT: &str = "transcript-context-text";
+const CONTEXT_CONTENT: &str = "transcript-context-text-content";
 
 /// A dim row of the given style.
 fn dim(id: RowId, style: DimStyle, text: &str) -> Row {
@@ -83,6 +90,19 @@ fn assistant_with_thinking(id: RowId, markdown: &str, thinking: &str) -> Row {
             thinking: thinking.into(),
             streaming: true,
             error: None,
+        },
+    }
+}
+
+/// Content an extension injected with `evo:inject-context`, as `/transcript` carries it
+/// back: the key the extension tagged it with, and the text it injected.
+fn context(id: RowId, key: &str, text: &str) -> Row {
+    Row {
+        id,
+        version: 1,
+        kind: RowKind::Context {
+            key: key.into(),
+            text: text.into(),
         },
     }
 }
@@ -408,6 +428,192 @@ fn a_tool_row_opens_on_click(cx: &mut TestAppContext) {
                 .try_find(("transcript-tool-arguments", 1u64))
                 .is_some(),
             "clicking the header opens the row"
+        );
+    });
+}
+
+/// A message an extension injected is context, not a turn of the reader's: one quiet
+/// line naming where it came from, closed until it is asked for.
+#[gpui_kit::test]
+fn injected_context_is_one_quiet_line_that_opens_on_click(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (host, cx) = cx.add_window_view(|_window, cx| TranscriptHost::new(cx));
+
+    host.update(cx, |host, cx| {
+        host.transcript.update(cx, |view, cx| {
+            view.replace(
+                1,
+                vec![
+                    context(1, "global-memory", "<global-memory>\nthe lanes are busy"),
+                    context(
+                        2,
+                        "project-memory",
+                        "<project-memory>\nno commits, only reports",
+                    ),
+                    user(3, 1, "hello"),
+                ],
+                cx,
+            );
+        });
+    });
+
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        let header = window.find(("transcript-context", 1u64));
+        assert_eq!(header.label(), Some("Context · global memory"));
+        assert_eq!(header.expanded(), Some(false));
+        assert_eq!(
+            window.find(("transcript-context", 2u64)).label(),
+            Some("Context · project memory")
+        );
+        assert!(
+            window.try_find((CONTEXT_TEXT, 1u64)).is_none(),
+            "a context row is one line until it is opened"
+        );
+
+        window.click(("transcript-context", 1u64), cx);
+        window.render_frame(cx);
+        assert_eq!(
+            window.find(("transcript-context", 1u64)).expanded(),
+            Some(true)
+        );
+        let content = window.find((CONTEXT_CONTENT, 1u64));
+        assert!(
+            content.visible(),
+            "the text it injected is on screen once it is opened"
+        );
+        assert!(
+            window.try_find((CONTEXT_TEXT, 2u64)).is_none(),
+            "opening one context leaves its neighbours closed"
+        );
+
+        // The text is the block's own child, so it is there to be read and selected
+        // rather than flattened into the line above it.
+        let block = window.find((CONTEXT_TEXT, 1u64)).bounds();
+        assert!(
+            content.bounds().origin.y >= block.origin.y
+                && content.bounds().origin.y < block.origin.y + block.size.height,
+            "the text sits inside the block"
+        );
+
+        window.click(("transcript-context", 1u64), cx);
+        window.render_frame(cx);
+        assert_eq!(
+            window.find(("transcript-context", 1u64)).expanded(),
+            Some(false)
+        );
+        assert!(window.try_find((CONTEXT_TEXT, 1u64)).is_none());
+    });
+}
+
+/// A key is not a label: the extension's own spelling is translated into the words a
+/// reader reads, and a key nobody has translated is shown as the extension named it.
+#[test]
+fn a_context_key_is_named_in_words_where_there_are_words() {
+    assert_eq!(crate::rows::context_label("global-memory"), "global memory");
+    assert_eq!(
+        crate::rows::context_label("project-memory"),
+        "project memory"
+    );
+    assert_eq!(crate::rows::context_label("recovery"), "recovery");
+    assert_eq!(crate::rows::context_label("some-new-key"), "some-new-key");
+}
+
+/// A memory snapshot is kilobytes of the reader's own context: opened, it takes twelve
+/// lines of the transcript and the rest is a scroll inside the block.
+#[gpui_kit::test]
+fn an_opened_context_is_capped_and_scrolls_on_its_own(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (host, cx) = cx.add_window_view(|_window, cx| TranscriptHost::new(cx));
+
+    let text: String = (1..=40)
+        .map(|line| format!("memory line {line}\n"))
+        .collect();
+    host.update(cx, |host, cx| {
+        host.transcript.update(cx, |view, cx| {
+            view.replace(1, vec![context(1, "global-memory", &text)], cx);
+        });
+    });
+
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        window.click(("transcript-context", 1u64), cx);
+        window.render_frame(cx);
+
+        // Twelve lines of the payload face, plus the block's own padding; the border
+        // is drawn outside the cap.
+        let cap = Palette::from_app(cx).payload_size
+            * (PAYLOAD_LINE_HEIGHT * CONTEXT_BLOCK_LINES as f32)
+            + px(20.);
+        let block = window.find((CONTEXT_TEXT, 1u64)).bounds();
+        let content = window.find((CONTEXT_CONTENT, 1u64)).bounds();
+        assert!(
+            content.size.height > block.size.height,
+            "the text runs past the block: {} in {}",
+            content.size.height,
+            block.size.height
+        );
+        assert!(
+            block.size.height <= cap,
+            "a forty line snapshot takes twelve lines, not {}",
+            block.size.height
+        );
+
+        // The wheel over the block moves the text inside it, and the transcript
+        // underneath stays where it is.
+        window.scroll(
+            (CONTEXT_TEXT, 1u64),
+            ScrollDelta::Pixels(point(px(0.), px(-40.))),
+            cx,
+        );
+        window.render_frame(cx);
+        let scrolled = window.find((CONTEXT_CONTENT, 1u64)).bounds();
+        let moved = content.origin.y - scrolled.origin.y;
+        assert!(moved > px(0.), "the block scrolled with the wheel");
+        assert!(moved <= px(40.), "and only by the wheel's delta: {moved}");
+    });
+}
+
+/// `/transcript` rebuilds an injected message as a `user`-role message, but it did not
+/// open a turn and does not count as one.
+#[gpui_kit::test]
+fn injected_context_does_not_open_a_turn(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (host, cx) = cx.add_window_view(|_window, cx| TranscriptHost::new(cx));
+
+    host.update(cx, |host, cx| {
+        host.transcript.update(cx, |view, cx| {
+            view.replace(
+                1,
+                vec![
+                    context(1, "global-memory", "<global-memory>"),
+                    context(2, "project-memory", "<project-memory>"),
+                    user(3, 1, "first"),
+                    assistant(4, 1, "ok"),
+                    user(5, 1, "second"),
+                ],
+                cx,
+            );
+        });
+    });
+
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        // The injected rows are above the first turn's separator, not turns of their own.
+        let first = window
+            .try_find(("transcript-turn", 1usize))
+            .expect("the reader's first turn is turn 1");
+        assert!(
+            first.bounds().origin.y > window.find(("transcript-context", 2u64)).bounds().origin.y,
+            "no turn opens above the context it was injected with"
+        );
+        assert!(
+            window.try_find(("transcript-turn", 2usize)).is_some(),
+            "the second thing the reader said is turn 2"
+        );
+        assert!(
+            window.try_find(("transcript-turn", 3usize)).is_none(),
+            "two injected messages are not three turns"
         );
     });
 }
@@ -1453,6 +1659,50 @@ fn dragging_over_a_row_selects_it_and_command_c_copies_it(cx: &mut TestAppContex
     assert!(
         copied.contains("step 4"),
         "a dim line is selectable: {copied:?}"
+    );
+}
+
+/// A memory snapshot is text the reader may want back: an opened context row's
+/// block can be selected and copied like the prose of a message.
+#[gpui_kit::test]
+fn an_opened_context_is_selectable(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (host, cx) = add_root_window(cx);
+
+    host.update(cx, |host, cx| {
+        host.transcript.update(cx, |view, cx| {
+            view.replace(
+                1,
+                vec![context(
+                    1,
+                    "global-memory",
+                    "<global-memory>\nthis is a persisted global user memory snapshot",
+                )],
+                cx,
+            );
+            view.set_expanded(1, true, cx);
+        });
+    });
+
+    let handle = cx.update(|window, cx| {
+        window.render_frame(cx);
+        window.window_handle()
+    });
+    clear_clipboard(cx);
+    let text = cx.update(|window, _| window.find((CONTEXT_TEXT, 1u64)).bounds());
+    cx.update(|window, cx| {
+        window.drag(
+            text.origin + point(px(1.), px(10.)),
+            text.origin + point(px(400.), px(46.)),
+            cx,
+        );
+    });
+
+    cx.dispatch_keystroke(handle, Keystroke::parse("cmd-c").expect("a keystroke"));
+    let copied = clipboard(cx).unwrap_or_default();
+    assert!(
+        copied.contains("persisted global user memory snapshot"),
+        "an opened context is selectable: {copied:?}"
     );
 }
 

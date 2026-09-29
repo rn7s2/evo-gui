@@ -207,7 +207,17 @@ impl AgentModel {
                 Some("user") => {
                     let text = join_blocks(message.get("content"), "text", "text");
                     if !text.is_empty() {
-                        self.push_row(RowKind::User { text });
+                        // An extension's injected message is a user-role message
+                        // with a `meta.key`; the reader did not write it, so it is
+                        // context rather than a turn of theirs.
+                        match context_key(message) {
+                            Some(key) => {
+                                self.push_row(RowKind::Context { key, text });
+                            }
+                            None => {
+                                self.push_row(RowKind::User { text });
+                            }
+                        }
                     }
                 }
                 Some("assistant") => {
@@ -892,6 +902,15 @@ fn join_blocks(content: Option<&Value>, block_type: &str, key: &str) -> String {
         }
     }
     parts.join("\n")
+}
+
+/// A message's `meta.key`: the tag an extension gave the content it injected with
+/// `evo:inject-context`, or `None` for everything a person typed.
+///
+/// The key crosses the wire through serve's `keyword->json-key`, so `:meta (:key ...)`
+/// arrives as `{"meta": {"key": "<key>"}}`.
+fn context_key(message: &Value) -> Option<String> {
+    string_field(message.get("meta")?, "key").filter(|key| !key.is_empty())
 }
 
 /// `tool-call-start`'s `arguments` as display text, for a call that carried no

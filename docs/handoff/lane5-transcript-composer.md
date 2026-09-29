@@ -9,7 +9,8 @@ Owner: `crates/transcript/**`, `crates/composer/**`. Other crates belong to othe
   `set_show_thinking`/`toggle_thinking`, `empty_note`/`empty_state` (ids `transcript-empty`, `("transcript-empty-lane", n)`), `KEPT_DOCUMENTS = 128`.
 - `rows.rs` — `render_row(&mut TranscriptData, index, &WeakEntity<TranscriptView>, &mut Context<TranscriptData>)`, one
   function per `RowKind`, `waiting_dots`/`dot_ink` (pips), `json_fields`/`Field`/`FieldValue` (tool payloads),
-  `key_cell`/`value_cell`, `NEST_INDENT`/`MAX_DEPTH`/`MAX_ARRAY`, `block_text`.
+  `key_cell`/`value_cell`, `NEST_INDENT`/`MAX_DEPTH`/`MAX_ARRAY`, `block_text`, `context_row`/`context_label`/`context_text`
+  with `CONTEXT_BLOCK_LINES = 12`.
 - `link.rs` — `openable(url)` (http/https/mailto only) and `on_click()`, the handler an assistant message's links are
   opened with; `rows::assistant_row` attaches it. Tests: `a_left_click_on_a_link_opens_it`,
   `a_click_on_plain_text_opens_nothing`, `a_right_click_on_a_link_opens_nothing`,
@@ -33,6 +34,15 @@ Invariants
   (`with_animation`, so `App::reduce_motion` freezes them); the first delta retires them for the retained document.
 - Rows are selectable: a row `track_focus`es the transcript's focus handle (`tab_stop(false)`) so a drag inside a row and
   ⌘C reach the window's own copy binding; assistant rows hover-reveal a message Copy and a per-code-block Copy.
+- Injected context is a row of its own, not a turn. `evo:inject-context` journals a `:custom-message` with a `:key`; serve
+  sends it back as `{"role": "user", "meta": {"key": "global-memory"}, "content": [{"type": "text", …}]}` (keys are
+  snake_case on the wire, values keep their spelling: `global-memory`, `project-memory`, `recovery`). session's
+  `rebuild_from_transcript` turns that into `RowKind::Context { key, text }` — additive, so every exhaustive `RowKind`
+  match in the workspace has a `Context` arm — and the transcript draws it as one muted line, `Context · global memory`
+  (`context_label`: the two memory keys in words, any other key as the extension named it) with a caret, closed until
+  clicked, and never a `turn N` separator: turn numbers count `RowKind::User` only. Opened, it shows its text in a mono
+  block capped at twelve lines with a scroll of its own. Spaces as `TIGHT_GAP` against another context row, `BLOCK_GAP`
+  otherwise, plus the block's own `mb` so an opened one is not glued to the row below.
 - Tool payloads: one `key  value` row per field; a container the top level holds directly flattens (`env.RUST_LOG`,
   `args.0`), anything deeper is drawn as rows indented `NEST_INDENT` (12px) per level under their own key, up to
   `MAX_DEPTH` (4) — past that, or for an array longer than `MAX_ARRAY` (20), the container is one muted `{…3 keys}` /
@@ -48,8 +58,11 @@ Invariants
   found (`c1b901c`, `dfdb3d3`).
 
 ## Commands
-- `cargo test -p transcript` (40) and `cargo test -p composer` (21); `cargo fmt -p transcript -p composer`;
-  `cargo clippy -p transcript --all-targets` is clean.
+- `cargo test -p transcript` (45) and `cargo test -p composer` (21), plus `cargo test -p session` (the context row is
+  fixture-driven: `crates/session/tests/fixtures/context-transcript.json`, recorded by
+  `crates/session/tests/capture_context_fixture.py`); `cargo fmt -p transcript -p composer`;
+  `cargo clippy -p transcript --all-targets` is clean. Note `cargo fmt -p session` reaches `lanes.rs`/`tab.rs` through
+  `lib.rs`'s `mod` list — format those files by path, not through the crate, while other lanes are in session.
 - Captures: `cargo run -q -p transcript --example transcript_demo -- --capture crates/transcript/screenshots`, and the
   same for `-p composer`'s `composer_demo` (both dirs git-ignored). Cost harness: `cargo run -q -p transcript --example
   transcript_stress [-- rows stream delta message_chars]`.
@@ -90,5 +103,13 @@ Invariants
   the text box exactly as wide as its text and words break ("call|s"); 4px a side leaves slack and keeps columns apart.
 - **Nested ordered lists** number `1. 2. 3.` at the top level and `A. B. C.` one level in (`text/utils.rs::list_item_prefix`,
   `NUMBERED_PREFIXES_1/2`); it is the kit's own scheme, not a style hook.
+- **A block can scroll without a `ScrollHandle`**: an element with `overflow_y_scroll()` and an id keeps its offset in
+  its own element state (`elements/div.rs` prepaint, `element_state.scroll_offset`), which is what the context block uses
+  — no state to own, no `track_scroll`. A visible thumb needs the `TodoPanel` arrangement instead
+  (`Scrollbar::vertical(&handle)` in a `relative()` box beside a `track_scroll`ed list).
+- **Reading rendered words in a test**: `ElementSnapshot::label()`/`expanded()` come from the element's accesskit node, so
+  `div().aria_label(...).aria_expanded(...).test_support()` is the only way a test sees what a row *says*. `SelectableText`
+  itself is never an observed element (it inserts a hitbox, not a `Registration`), so wrap the run in an observed div and
+  find that; `find` matches on the last component of a global id.
 - **Text ranges**: `TextViewState::set_range_highlights` paints a background for a `Range<usize>` of the rendered text and
   carries no element or tooltip, so it is not a route to clickable file paths either.

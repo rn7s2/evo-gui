@@ -81,7 +81,7 @@ const CAPTION_SIZE: Pixels = px(11.);
 const NAME_SIZE: Pixels = px(13.);
 const STATUS_SIZE: Pixels = px(12.);
 /// The line height of payload text, as a multiple of its size.
-const PAYLOAD_LINE_HEIGHT: f32 = 1.45;
+pub(crate) const PAYLOAD_LINE_HEIGHT: f32 = 1.45;
 /// Width of the label column of a report row.
 const REPORT_LABEL_WIDTH: Pixels = px(66.);
 
@@ -253,6 +253,8 @@ enum Group {
     Tool,
     Report,
     Dim,
+    /// Injected context: a note about the session, not a part of it.
+    Context,
 }
 
 impl Group {
@@ -263,6 +265,7 @@ impl Group {
             RowKind::Tool { .. } => Self::Tool,
             RowKind::Report { .. } => Self::Report,
             RowKind::Dim { .. } | RowKind::RunOutcome { .. } => Self::Dim,
+            RowKind::Context { .. } => Self::Context,
         }
     }
 }
@@ -282,8 +285,7 @@ fn gap_before(previous: Option<&Row>, row: &Row) -> Pixels {
     }
     if previous == current {
         return match current {
-            Group::Tool => TIGHT_GAP,
-            Group::Dim => TIGHT_GAP,
+            Group::Tool | Group::Dim | Group::Context => TIGHT_GAP,
             Group::Assistant | Group::Report | Group::User => GROUP_GAP,
         };
     }
@@ -338,6 +340,14 @@ pub(crate) fn render_row(
 
     stack = stack.child(match &row.kind {
         RowKind::User { text, .. } => user_row(row.id, text, &palette),
+        RowKind::Context { key, text } => context_row(
+            row.id,
+            key,
+            text,
+            data.expanded.contains(&row.id),
+            view,
+            &palette,
+        ),
         RowKind::Assistant { .. } => assistant_row(row, data, cx, &palette),
         RowKind::Tool {
             name,
@@ -428,6 +438,113 @@ fn user_row(id: RowId, text: &str, palette: &Palette) -> AnyElement {
             ("transcript-user-text", id),
             text.to_string(),
         ))
+        .test_support()
+        .into_any_element()
+}
+
+/// How much of an opened context row's text is on screen at once: the rest is a
+/// scroll inside the block.
+pub(crate) const CONTEXT_BLOCK_LINES: usize = 12;
+
+/// Content an extension injected (`evo:inject-context`): one quiet line saying
+/// what it is and where it came from, which opens onto the text itself.
+///
+/// It arrives as a user-role message but the reader never wrote it — a memory
+/// snapshot is kilobytes of their own private context — so it is drawn as a
+/// note rather than as a turn, and never open by default.
+fn context_row(
+    id: RowId,
+    key: &str,
+    text: &str,
+    expanded: bool,
+    view: &WeakEntity<TranscriptView>,
+    palette: &Palette,
+) -> AnyElement {
+    let view = view.clone();
+    let label = context_label(key);
+    let header = div()
+        .id(("transcript-context", id))
+        .flex()
+        .items_center()
+        .gap_2()
+        .h(TOOL_ROW_HEIGHT)
+        .cursor_pointer()
+        // The line's own words, for a reader who cannot see them.
+        .aria_label(format!("Context · {label}"))
+        .aria_expanded(expanded)
+        .on_click(move |_, _, cx| {
+            let _ = view.update(cx, |view, cx| view.toggle_expanded(id, cx));
+        })
+        .child(caret(expanded, palette))
+        .child(
+            div()
+                .min_w_0()
+                .text_size(NAME_SIZE)
+                .text_color(palette.muted_foreground)
+                .child(format!("Context · {label}")),
+        )
+        .test_support();
+
+    let mut row = div()
+        .id(("transcript-context-row", id))
+        .w_full()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .child(header);
+
+    if expanded {
+        row = row.child(context_text(id, text, palette));
+    }
+    row.test_support().into_any_element()
+}
+
+/// What a context row calls its key: the two the memory extension injects have
+/// names a reader knows, and any other key is shown as its extension named it
+/// (`recovery`, and whatever an extension adds next).
+pub(crate) fn context_label(key: &str) -> String {
+    match key {
+        "global-memory" => "global memory".to_string(),
+        "project-memory" => "project memory".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// An opened context's text: the payload face, selectable, capped at
+/// [`CONTEXT_BLOCK_LINES`] with a scroll of its own — a memory snapshot is far
+/// longer than a row of a transcript.
+fn context_text(id: RowId, text: &str, palette: &Palette) -> AnyElement {
+    div()
+        .id(("transcript-context-text", id))
+        .w_full()
+        .min_w_0()
+        .max_h(palette.payload_size * (PAYLOAD_LINE_HEIGHT * CONTEXT_BLOCK_LINES as f32))
+        .overflow_y_scroll()
+        .rounded(palette.radius)
+        .border_1()
+        .border_color(palette.border)
+        .px_2()
+        .py_1()
+        // The block separates itself from whatever follows: the gap rules see the
+        // row, which is one line taller with the block under it.
+        .mb(GROUP_GAP)
+        .font_family(palette.mono.clone())
+        .text_size(palette.payload_size)
+        .line_height(palette.payload_size * PAYLOAD_LINE_HEIGHT)
+        .text_color(palette.foreground)
+        .child(
+            div()
+                .id(("transcript-context-text-content", id))
+                .w_full()
+                .min_w_0()
+                .test_support()
+                // A run of the block's own: selectable, and selected on its own,
+                // so a reader can copy the memory snapshot without the line above it.
+                .child(SelectableText::new(
+                    ("transcript-context-text-run", id),
+                    text.to_string(),
+                )),
+        )
         .test_support()
         .into_any_element()
 }

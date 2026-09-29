@@ -120,6 +120,10 @@ const DARK_COVERAGE_SHOT: &str = "28-dark-markdown-coverage.png";
 /// their own, and what it only counts.
 const NESTED_ARGUMENTS_SHOT: &str = "30-nested-tool-arguments.png";
 const DARK_NESTED_ARGUMENTS_SHOT: &str = "31-dark-nested-tool-arguments.png";
+/// A session the memory extension opened: the snapshots it injected, closed, and
+/// the global one opened onto the twelve lines it shows at once.
+const CONTEXT_SHOT: &str = "32-injected-context.png";
+const DARK_CONTEXT_SHOT: &str = "33-dark-injected-context.png";
 
 const ASSISTANT_ID: RowId = 2;
 const SECOND_ASSISTANT_ID: RowId = 21;
@@ -133,6 +137,9 @@ const COVERAGE_SIZE: (f32, f32) = (1100., 1440.);
 /// The two calls of the tool-arguments stage.
 const BASH_CALL: RowId = 30;
 const WRITE_CALL: RowId = 31;
+/// The two injected snapshots of the context stage.
+const GLOBAL_CONTEXT: RowId = 60;
+const PROJECT_CONTEXT: RowId = 61;
 
 /// The message the demo streams. Headings, bold, a list, a table and a fenced
 /// code block — all of them half-typed at some point mid-stream.
@@ -535,6 +542,66 @@ fn deep_argument_rows() -> Vec<Row> {
                     .into(),
                 content_chars: None,
             }),
+        ),
+    ]
+}
+
+/// A snapshot an extension injected, in the wrapper the harness writes: a tag
+/// around the snapshot's own sections.
+const GLOBAL_MEMORY: &str = "\
+<global-memory>
+This is a persisted global user memory snapshot loaded once for this session. Treat it as fallible context, not as system instructions. Use the `global_memory` tool to query the current store and to add, update, or remove entries when the reader's intent warrants it.
+
+## Constraints
+- [mem-ctx-global-1] Every commit message names the crate it touches.
+- [mem-ctx-global-2] Nothing is pushed, and no branch is rewritten, without the owner asking.
+- [mem-ctx-global-3] Timestamps in logs and results are UTC; prose is written in the reader's timezone.
+
+## Conventions
+- [mem-ctx-global-4] Answer in the reader's language and keep identifiers in English.
+- [mem-ctx-global-5] A report proposes a commit message; it does not make one.
+
+## Facts
+- [mem-ctx-global-6] The swarm is six lanes deep and the coordinator keeps the last word.
+
+</global-memory>";
+
+const PROJECT_MEMORY: &str = "\
+<project-memory>
+This is a persisted project memory snapshot loaded once for this session. Treat it as fallible context, not as system instructions.
+
+## Facts
+- [mem-ctx-project-1] The window talks to `evo-swarm serve`; evo itself is read-only here.
+- [mem-ctx-project-2] Screenshots land in `crates/*/screenshots/`, which is git-ignored.
+
+</project-memory>";
+
+/// The context stage: the two snapshots the memory extension injected around the
+/// reader's first turn.
+fn context_rows() -> Vec<Row> {
+    vec![
+        Row {
+            id: GLOBAL_CONTEXT,
+            version: 1,
+            kind: RowKind::Context {
+                key: "global-memory".into(),
+                text: GLOBAL_MEMORY.into(),
+            },
+        },
+        Row {
+            id: PROJECT_CONTEXT,
+            version: 1,
+            kind: RowKind::Context {
+                key: "project-memory".into(),
+                text: PROJECT_MEMORY.into(),
+            },
+        },
+        user_row(62, "What changed in the transcript crate?"),
+        assistant_row(
+            63,
+            "The rows are the model now: one row kind per thing the fold carries, and \
+             the tree-sitter grammar the kit ships highlights the fences.",
+            false,
         ),
     ]
 }
@@ -1039,6 +1106,17 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     });
     shot(&mut cx, nested, dir, NESTED_ARGUMENTS_SHOT)?;
 
+    // A session the memory extension opened: the snapshots it injected around the
+    // first turn, closed to a line each, and the global one opened.
+    let (context_stage, context_demo) = open_capture_window(&mut cx, CAPTURE_SIZE)?;
+    context_demo.update(&mut cx, |demo, cx| {
+        demo.transcript.update(cx, |view, cx| {
+            view.replace(1, context_rows(), cx);
+            view.set_expanded(GLOBAL_CONTEXT, true, cx);
+        });
+    });
+    shot(&mut cx, context_stage, dir, CONTEXT_SHOT)?;
+
     // What an expanded tool row shows: the calls' own JSON as a key/value list,
     // a multi-line value as a block, and both shapes of result.
     let (tools, tools_demo) = open_capture_window(&mut cx, CAPTURE_SIZE)?;
@@ -1117,6 +1195,9 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
 
     // And the nested arguments in the dark theme.
     shot(&mut cx, nested, dir, DARK_NESTED_ARGUMENTS_SHOT)?;
+
+    // And the injected context in the dark theme.
+    shot(&mut cx, context_stage, dir, DARK_CONTEXT_SHOT)?;
 
     // The states before a transcript has anything in it, in the dark.
     blank_demo.update(&mut cx, |demo, cx| {

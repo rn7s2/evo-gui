@@ -249,6 +249,69 @@ fn a_report_event_becomes_a_report_row() {
     assert_eq!(report.4, "none");
 }
 
+/// The memory extension injects a snapshot into a fresh session with
+/// `evo:inject-context`, which journals a `:custom-message` carrying a `:key`; /transcript
+/// sends it back as a user-role message with `"meta": {"key": "<key>"}`. The reader typed
+/// neither snapshot, so neither is one of their turns: both are context rows, and the
+/// turns around them are what the transcript counts.
+///
+/// The capture is `tests/fixtures/context-transcript.json`, recorded by
+/// `tests/capture_context_fixture.py` from a real server.
+#[test]
+fn an_injected_message_is_context_rather_than_a_user_turn() {
+    let mut model = AgentModel::new();
+    model.rebuild_from_transcript(&fixture("context-transcript.json"));
+
+    let rows = transcript_rows(&model);
+    assert_eq!(rows.len(), 4, "rows: {rows:#?}");
+    let (global, project, typed, assistant) = (&rows[0], &rows[1], &rows[2], &rows[3]);
+    match (global, project, typed, assistant) {
+        (
+            RowView::Context { key, text },
+            RowView::Context {
+                key: project_key,
+                text: project_text,
+            },
+            RowView::User(said),
+            RowView::Assistant { .. },
+        ) => {
+            assert_eq!(key, "global-memory");
+            assert!(text.starts_with("<global-memory>"), "{text:?}");
+            assert_eq!(project_key, "project-memory");
+            assert!(
+                project_text.starts_with("<project-memory>"),
+                "{project_text:?}"
+            );
+            assert_eq!(said, "Say hello.");
+        }
+        other => panic!("unexpected rows: {other:#?}"),
+    }
+}
+
+/// A `meta` is not enough on its own: a message with no key, or with an empty one, is
+/// anything else the fold carries and stays the reader's.
+#[test]
+fn a_message_without_a_context_key_is_still_a_user_turn() {
+    let mut model = AgentModel::new();
+    model.rebuild_from_transcript(&json!({
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "typed"}]},
+            {"role": "user", "content": [{"type": "text", "text": "tagged"}], "meta": {"key": ""}},
+            {"role": "user", "content": [{"type": "text", "text": "labelled"}], "meta": {"key": null}},
+            {"role": "user", "content": [{"type": "text", "text": "other"}], "meta": {"other": "x"}},
+        ]
+    }));
+    assert_eq!(
+        transcript_rows(&model),
+        vec![
+            RowView::User("typed".to_string()),
+            RowView::User("tagged".to_string()),
+            RowView::User("labelled".to_string()),
+            RowView::User("other".to_string()),
+        ]
+    );
+}
+
 #[test]
 fn message_start_and_deltas_build_one_streaming_row() {
     let mut model = AgentModel::new();

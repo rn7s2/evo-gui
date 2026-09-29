@@ -87,6 +87,10 @@ pub fn apply_capture(model: &mut AgentModel, name: &str) -> Effect {
 #[derive(Clone, Debug, PartialEq)]
 pub enum RowView {
     User(String),
+    Context {
+        key: String,
+        text: String,
+    },
     Assistant {
         markdown: String,
         thinking: String,
@@ -115,6 +119,10 @@ impl RowView {
     pub fn of(row: &session::Row) -> RowView {
         match &row.kind {
             session::RowKind::User { text } => RowView::User(text.clone()),
+            session::RowKind::Context { key, text } => RowView::Context {
+                key: key.clone(),
+                text: text.clone(),
+            },
             session::RowKind::Assistant {
                 markdown,
                 thinking,

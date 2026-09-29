@@ -75,7 +75,8 @@ const SETTLE: Duration = Duration::from_millis(400);
 
 /// The prompt §12's M0/M1 proof sends: the coordinator is asked to delegate, and
 /// every agent in the swarm is asked to stay short — a real run costs money.
-const PROMPT: &str = "Delegate to a lane: create hello.txt containing 'hi' in this folder, then tell \
+const PROMPT: &str =
+    "Delegate to a lane: create hello.txt containing 'hi' in this folder, then tell \
                       me when it is done. Keep every reply to one short sentence.";
 
 fn main() {
@@ -244,7 +245,10 @@ fn run(dir: &Path, scale: f32) -> Result<(), Box<dyn std::error::Error>> {
     let outcome = proof(&mut cx, window, &tab, &project, dir, screens);
 
     // The app's own quit: every tab's ladder, in that order, then `app.json`.
-    println!("[utc] {} quit: evo_desktop::begin_quit", time::now_rfc3339());
+    println!(
+        "[utc] {} quit: evo_desktop::begin_quit",
+        time::now_rfc3339()
+    );
     cx.update(|cx| evo_desktop::begin_quit(cx));
     let quiet = wait_for_quiet(&mut cx, &root, &project, Duration::from_secs(45));
     report_processes(&root, &project, quiet);
@@ -401,7 +405,10 @@ fn proof(
     );
     shot(cx, window, dir, "real-04-follow-up.png", screens)?;
 
-    println!("[utc] {} run over; reading the transcript", time::now_rfc3339());
+    println!(
+        "[utc] {} run over; reading the transcript",
+        time::now_rfc3339()
+    );
     print_readout(cx, tab, "at the end");
     select_main(cx, window, tab)?;
     println!("--- the coordinator's transcript (final state) ---");
@@ -559,6 +566,7 @@ fn first_reply_shape(cx: &HeadlessAppContext, tab: &Entity<workspace::TabContent
         for row in rows {
             match &row.kind {
                 RowKind::User { .. } => users += 1,
+                RowKind::Context { key, .. } => parts.push(format!("context {key}")),
                 RowKind::Assistant {
                     markdown,
                     streaming,
@@ -712,6 +720,7 @@ fn text_chars(cx: &HeadlessAppContext, tab: &Entity<workspace::TabContent>) -> u
 fn row_chars(row: &session::Row) -> usize {
     match &row.kind {
         RowKind::User { text } => text.chars().count(),
+        RowKind::Context { text, .. } => text.chars().count(),
         RowKind::Assistant { markdown, .. } => markdown.chars().count(),
         RowKind::Tool { name, .. } => name.chars().count(),
         RowKind::Report { done, .. } => done.chars().count(),
@@ -727,14 +736,11 @@ fn row_chars(row: &session::Row) -> usize {
 fn report_seen(cx: &HeadlessAppContext, tab: &Entity<workspace::TabContent>) -> bool {
     tab.read_with(cx, |tab, cx| {
         tab.transcript().is_some_and(|view| {
-            view.read(cx)
-                .rows(cx)
-                .iter()
-                .any(|row| match &row.kind {
-                    RowKind::Report { .. } => true,
-                    RowKind::User { text } => text.contains("[lane 1 report]"),
-                    _ => false,
-                })
+            view.read(cx).rows(cx).iter().any(|row| match &row.kind {
+                RowKind::Report { .. } => true,
+                RowKind::User { text } => text.contains("[lane 1 report]"),
+                _ => false,
+            })
         })
     })
 }
@@ -779,6 +785,7 @@ fn row_lines(cx: &HeadlessAppContext, tab: &Entity<workspace::TabContent>) -> Ve
                     .map(|row| {
                         let (kind, text): (&str, String) = match &row.kind {
                             RowKind::User { text } => ("user", text.to_string()),
+                            RowKind::Context { key, text } => ("context", format!("{key} {text}")),
                             RowKind::Assistant {
                                 markdown,
                                 streaming,
@@ -961,7 +968,10 @@ fn processes_naming(needles: &[String]) -> Vec<(u32, String)> {
         .lines()
         .filter_map(|line| {
             let (pid, command) = line.trim().split_once(' ')?;
-            if !needles.iter().any(|needle| command.contains(needle.as_str())) {
+            if !needles
+                .iter()
+                .any(|needle| command.contains(needle.as_str()))
+            {
                 return None;
             }
             Some((pid.parse().ok()?, command.trim().to_string()))
@@ -1016,9 +1026,7 @@ fn report_processes(root: &Root, project: &Path, quiet: bool) {
         // Nothing of ours may outlive the proof, so a survivor is killed and
         // reported as a finding rather than left running.
         for (pid, _) in &alive {
-            let _ = Command::new("kill")
-                .args(["-9", &pid.to_string()])
-                .status();
+            let _ = Command::new("kill").args(["-9", &pid.to_string()]).status();
         }
         std::thread::sleep(Duration::from_millis(500));
         println!(

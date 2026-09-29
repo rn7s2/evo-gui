@@ -30,8 +30,21 @@ pub struct Row {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum RowKind {
-    /// A user turn (`user-input`, `steering`, or a user message from /transcript).
+    /// A user turn (`user-input`, `steering`, or a user message from /transcript
+    /// that no extension injected — see [`RowKind::Context`]).
     User { text: String },
+    /// Content an extension injected with `evo:inject-context`, which journals a
+    /// `:custom-message` entry carrying a `:key`; the fold tags the message
+    /// `:meta (:key ...)` and /transcript sends `"meta": {"key": "<key>"}`
+    /// (`evo-agent/src/journal/journal.lisp`, captured in
+    /// `tests/fixtures/context-transcript.json`). The memory extension injects
+    /// `global-memory` and `project-memory` at the start of a fresh session, and
+    /// `recovery` carries a supervisor's account of a replaced run.
+    ///
+    /// It arrives as a user-role message, but the reader did not write it: it is
+    /// context around the conversation, so it is its own row kind rather than a
+    /// turn of theirs — and it never opens a turn.
+    Context { key: String, text: String },
     /// Assistant message. `markdown` is the whole source so far; UI calls
     /// `TextViewState::set_text(markdown)` whenever `version` changes.
     Assistant {

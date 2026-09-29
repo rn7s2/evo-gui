@@ -22,6 +22,7 @@ const REQUIRED: &[&str] = &[
     "state-with-todos.json",
     // the session's context and the model catalog
     "transcript.json",
+    "context-transcript.json",
     "transcript-limit20.json",
     "transcript-empty.json",
     "registry.json",
@@ -69,7 +70,8 @@ fn every_capture_is_present_and_parses() {
         let path = fixture_path(name);
         assert!(
             path.exists(),
-            "missing fixture {name} — regenerate: python3 crates/session/tests/capture_fixtures.py"
+            "missing fixture {name} — regenerate: python3 crates/session/tests/capture_fixtures.py \
+             (context-transcript.json comes from python3 crates/session/tests/capture_context_fixture.py)"
         );
         let text = fixture_text(name);
         assert!(
