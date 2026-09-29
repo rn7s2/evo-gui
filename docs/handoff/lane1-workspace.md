@@ -27,7 +27,7 @@ Owner: everything in `crates/workspace` except `src/empty_tab.rs`, `src/history.
   task + Show-thinking toggle; transcript; todos), composer column + §4 notice line;
   booting/stopping/failed screens; elide_middle/shorten_path.
 - tests: `workspace_ui.rs` (headless, no swarm); `tab_swarm.rs` (real evo-swarm via swarm_client
-  harness; ONE_AT_A_TIME lock). examples: `workspace_snapshot.rs --capture <dir>` (11 shots).
+  harness; ONE_AT_A_TIME lock). examples: `workspace_snapshot.rs --capture <dir>` (16 shots; 13–16 are goal + todos, Stop with a draft, swarm gone, retry resumed).
 
 ## Requirement map
 §3 boot/fail: launch.rs + tab.rs(apply) + tab_page.rs · §4 notices: tab.rs notice_tone/show_notice
