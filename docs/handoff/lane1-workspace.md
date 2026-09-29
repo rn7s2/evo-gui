@@ -45,3 +45,17 @@ fail_with_log + badges · §9.8 take_engines/stop_in_background/should_close + Q
 - `cargo test -p workspace` — lib + tab_swarm (real swarms, ~25 s) + workspace_ui
 - `cargo test -p workspace --test tab_swarm -- --nocapture` — two-tab latency numbers
 - `cargo run -p workspace --example workspace_snapshot -- --capture /tmp/shots` (SNAPSHOT_TRACE=1)
+
+## Since the first handoff (to f00e250)
+- Strip: pixel-capped from the window width each frame, scrolls the shown tab into view; `+` pinned.
+- Actions `workspace::{SelectTab(usize), SelectNextTab, SelectPreviousTab, SelectLastTab}` bound in
+  the "Workspace" context (⌘1–⌘8, ⌘9, ⌃⇥/⌃⇧⇥, ⌘⇧]/⌘⇧[); middle-click closes a tab.
+- Activity dots: 6 px success while running (`tab-running-<id>`), muted for an unseen finish
+  (`tab-finished-<id>`, cleared on select). `TabContentEvent::{RunFinished, ScreenChanged}`.
+- Focus: `TabContent::focus_primary` (Empty → Choosers::focus_primary, Running → composer, else
+  window root); every state change emits ScreenChanged and the shown tab retakes the keyboard.
+- Window title "<folder> — Evo Desktop" via `sync_window_title`; `window_title()` for tests.
+- Notices: transport failures in plain words with raw text in a tooltip (`notice_detail()`).
+- Recents recorded only once the session file exists. `TabRecord{window_id, store_id, folder,
+  session}`; `set_swarm_config` for Settings (new tabs only).
+- Store crate is also yours when a workspace test needs it (swarm.lisp block fix 678a2c0).
