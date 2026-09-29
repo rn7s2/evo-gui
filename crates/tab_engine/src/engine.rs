@@ -282,8 +282,8 @@ enum Inbound {
         /// `/journal?limit=20,100,400` found none (§7.3).
         seed: Option<Value>,
     },
-    /// A lane's two seed reads came back ([`Engine::watch_lane`]): its rows and the
-    /// replay whose cursor its stream resumes from.
+    /// A lane's rows came back ([`Engine::watch_lane`]): what its column shows, and
+    /// what says the lane's stream may open.
     LaneSeeded {
         n: u32,
         /// Which `WatchLane` asked for this: a newer one supersedes it.
@@ -291,7 +291,16 @@ enum Inbound {
         ticket: u64,
         /// `/lanes/N/transcript`, or `None` for a lane whose server did not answer.
         rows: Option<Value>,
-        replay: LaneReplay,
+    },
+    /// The bounded replay that seeds a shown lane's TODO panel came back
+    /// ([`Engine::watch_lane`]). Its own message, and *after* the stream opened: the
+    /// replay reads the lane's log while the lane may already be working, and nothing
+    /// it reads is forwarded as rows (see [`lane_todo`]).
+    LaneTodo {
+        n: u32,
+        episode: u64,
+        /// The newest `todo-changed` in the retained log, with the id it carried.
+        todo: Option<(Option<i64>, Value)>,
     },
     /// The deferred lane-list read is due ([`Engine::arm_lanes_refetch`]). It
     /// carries no state: whether it is still wanted is the engine's to decide when
@@ -384,14 +393,6 @@ impl View {
     fn came_back(&self) -> bool {
         self.transcript.is_some() || self.state.is_some()
     }
-}
-
-/// What one bounded replay of a lane's retained events gave back: the newest
-/// `todo-changed` (with the id it carried), and the cursor the live stream resumes
-/// from — resuming where the replay stopped is as much its job as the todo is.
-struct LaneReplay {
-    todo: Option<(Option<i64>, Value)>,
-    since: Option<i64>,
 }
 
 /// Which view reads are out, and which have landed: the off-loop resync's own
@@ -908,13 +909,15 @@ impl Engine {
                     episode,
                     ticket,
                     rows,
-                    replay,
                 } => {
                     let Some(server) = server.as_ref() else {
                         continue;
                     };
                     let client = server.client().clone();
-                    self.lane_seeded(&client, n, episode, ticket, rows, replay);
+                    self.lane_seeded(&client, n, episode, ticket, rows);
+                }
+                Inbound::LaneTodo { n, episode, todo } => {
+                    self.lane_todo(n, episode, todo);
                 }
                 Inbound::LanesDue => {
                     // A deferred lane-list read came due. `due` says whether it is
@@ -1093,10 +1096,13 @@ impl Engine {
     /// Watch one lane, or none: the previous lane stream is closed first, so at
     /// most one is ever open.
     ///
-    /// The two reads a lane's stream is seeded with — its rows, then the bounded
-    /// replay the stream resumes from — run on a thread of their own, and the stream
-    /// opens when they land, in the order the loop used to do them (rows first: the
-    /// lane's transcript is authoritative).
+    /// A lane's column is seeded with two reads on a thread of their own: its rows
+    /// (the lane's transcript is authoritative), and a bounded replay of its retained
+    /// events for the newest `todo-changed`. Only the rows hold the stream back
+    /// ([`Engine::lane_seeded`]); the replay is read afterwards and reported apart
+    /// ([`Engine::lane_todo`]) because it reads a *live* lane's log — a lane put to
+    /// work while the watch was still reading would have its first run swallowed by a
+    /// replay the tab never sees the events of.
     fn watch_lane(&mut self, client: &Client, lane: Option<u32>) {
         self.lane_connected = false;
         self.streams.stop_lane();
@@ -1114,20 +1120,30 @@ impl Engine {
             .name("tab-engine-lane-seed".to_owned())
             .spawn(move || {
                 let rows = client.lane_transcript(n, None).ok().map(|reply| reply.raw);
-                let replay = lane_replay(&client, n);
-                let _ = mailbox.send_blocking(Inbound::LaneSeeded {
-                    n,
-                    episode,
-                    ticket,
-                    rows,
-                    replay,
-                });
+                if mailbox
+                    .send_blocking(Inbound::LaneSeeded {
+                        n,
+                        episode,
+                        ticket,
+                        rows,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+                let todo = lane_todo(&client, n);
+                let _ = mailbox.send_blocking(Inbound::LaneTodo { n, episode, todo });
             });
     }
 
-    /// A lane's seed reads came back: its rows, then the todo event, then its stream.
-    /// A seed that arrives after a newer `WatchLane` is dropped — its stream would
-    /// belong to a lane the tab is no longer showing (§9.3).
+    /// A lane's rows came back: put them on screen, and open its stream. A seed that
+    /// arrives after a newer `WatchLane` is dropped — its stream would belong to a lane
+    /// the tab is no longer showing (§9.3).
+    ///
+    /// The stream tails from *now* rather than resuming from a cursor: the lane may have
+    /// been working all along, and an event the tab has not seen yet is worth more than
+    /// one replayed twice. Only the read above, and the moment it took, sit between the
+    /// rows and the stream.
     fn lane_seeded(
         &mut self,
         client: &Client,
@@ -1135,7 +1151,6 @@ impl Engine {
         episode: u64,
         ticket: u64,
         rows: Option<Value>,
-        replay: LaneReplay,
     ) {
         if self.watch != Some((episode, n)) {
             return;
@@ -1148,7 +1163,16 @@ impl Engine {
                 state: None,
             },
         );
-        if let Some((id, data)) = replay.todo {
+        self.streams.start_lane(client, n, None);
+    }
+
+    /// The replay that seeds a shown lane's TODO panel came back: one event, and only
+    /// if the tab is still showing that lane.
+    fn lane_todo(&mut self, n: u32, episode: u64, todo: Option<(Option<i64>, Value)>) {
+        if self.watch != Some((episode, n)) {
+            return;
+        }
+        if let Some((id, data)) = todo {
             self.send(Update::Event {
                 agent: Agent::Lane(n),
                 id,
@@ -1156,7 +1180,6 @@ impl Engine {
                 data,
             });
         }
-        self.streams.start_lane(client, n, replay.since);
     }
 
     /// Fold one stream message for one agent, resyncing where §9.1 says to.
@@ -1264,51 +1287,42 @@ fn walk_journal(client: &Client) -> Option<Value> {
     None
 }
 
-/// One bounded replay of a lane's retained events (`?since=0`) to seed the TODO
-/// panel, returning its newest `todo-changed` and the cursor the live stream should
-/// resume from.
+/// One bounded replay of a lane's retained events (`?since=0`): the newest
+/// `todo-changed` in it, with the id it carried.
 ///
-/// Only the newest `todo-changed` is forwarded. The replay is not forwarded as
-/// rows: the lane's serve keeps up to 20 000 events, so `?since=0` would re-send
-/// the lane's whole session, duplicating every row the transcript has already
-/// given. The replay is bounded by a short silence — the log replays as a burst, so
-/// a pause means the live edge — and the live stream then resumes at the last id
-/// seen, so no event between the two is lost.
-fn lane_replay(client: &Client, n: u32) -> LaneReplay {
-    let mut replay = LaneReplay {
-        todo: None,
-        since: None,
-    };
+/// Only that one event is forwarded. The replay is not forwarded as rows: the lane's
+/// serve keeps up to 20 000 events, so `?since=0` would re-send the lane's whole
+/// session, duplicating every row the transcript has already given. The replay is
+/// bounded by a short silence — the log replays as a burst, so a pause means the live
+/// edge — and whatever the lane does while it reads belongs to the lane's own stream,
+/// which is already open by then (§9.3).
+fn lane_todo(client: &Client, n: u32) -> Option<(Option<i64>, Value)> {
     let path = format!("/lanes/{n}/events?since=0");
-    let Ok(mut connection) = client.http().open_sse(&path, None) else {
-        return replay;
-    };
+    let mut connection = client.http().open_sse(&path, None).ok()?;
     if connection
         .socket()
         .set_read_timeout(Some(SEED_SILENCE))
         .is_err()
     {
-        return replay;
+        return None;
     }
     let mut parser = SseParser::new();
+    let mut todo = None;
     let mut seen = 0usize;
     while let Ok(Some(line)) = connection.read_line() {
         let Some(event) = parser.feed(&line) else {
             continue;
         };
-        if let Some(id) = event.id {
-            replay.since = Some(id);
-        }
         seen += 1;
         if event.kind.as_deref() == Some("todo-changed") {
             let data = serde_json::from_str(&event.data).unwrap_or(Value::Null);
-            replay.todo = Some((event.id, data));
+            todo = Some((event.id, data));
         }
         if seen >= SEED_CAP {
             break;
         }
     }
-    replay
+    todo
 }
 
 #[cfg(test)]

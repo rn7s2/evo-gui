@@ -424,6 +424,18 @@ fn watching_a_lane_switches_the_single_stream() {
     let deadline = Instant::now() + Duration::from_secs(240);
 
     updates.wait_connected(Agent::Coordinator, deadline);
+    // Lane 1 is `starting` until its baseline is evaluated, and `delegate` refuses a lane
+    // that is not idle — the swarm takes an idle lane, and says so (`swarm/lanes.lisp`).
+    // Wait for the read that says it is up: showing a lane no longer holds the engine's
+    // loop while it seeds, so a lane's boot no longer gets a moment of quiet for free.
+    updates.next(deadline, |u| match u {
+        Update::Lanes { raw } => raw["lanes"].as_array().is_some_and(|lanes| {
+            lanes
+                .iter()
+                .any(|lane| lane["n"] == 1 && lane["state"] == "idle")
+        }),
+        _ => false,
+    });
 
     // --- watch lane 1 --------------------------------------------------------
     assert!(handle.watch_lane(Some(1)));
@@ -529,6 +541,82 @@ fn watching_a_lane_switches_the_single_stream() {
         "a lane event arrived after unwatching"
     );
 
+    handle.join();
+}
+
+/// #3b — a lane watched while it is up and *idle* streams its own run, live.
+///
+/// Showing a lane seeds its column with two reads: the lane's rows, and a bounded replay
+/// of its log for the newest `todo-changed`. Both used to sit between the watch and the
+/// lane's stream — and the stream then *resumed past* whatever the replay had read, none
+/// of which the tab is shown (only the newest todo is forwarded from it). A lane put to
+/// work while the watch was still reading therefore had its whole first run swallowed:
+/// the work went by, the lane's column stayed empty, and the stream that opened
+/// afterwards had nothing left to deliver. The replay is read after the stream opens now,
+/// and the stream tails live from the moment the rows land (§9.3).
+#[test]
+fn a_lane_watched_while_idle_streams_its_own_run() {
+    let _guard = one_swarm();
+    let fixture = fixture(2);
+    let (handle, rx) = TabEngine::start(spec(&fixture, 2));
+    let mut updates = Updates::new(rx);
+    let deadline = Instant::now() + Duration::from_secs(240);
+
+    updates.wait_connected(Agent::Coordinator, deadline);
+    // Both lanes up and idle first — the moment the tab's rows turn clickable (§9.3).
+    updates.next(deadline, |u| match u {
+        Update::Lanes { raw } => raw["lanes"].as_array().is_some_and(|lanes| {
+            lanes.len() == 2 && lanes.iter().all(|lane| lane["state"] == "idle")
+        }),
+        _ => false,
+    });
+
+    // Show lane 1 while it is idle, and put it to work *immediately*: the run must not
+    // fall inside whatever the watch is still reading, or its events are gone.
+    assert!(handle.watch_lane(Some(1)));
+    assert!(handle.prompt(
+        1,
+        r#"CALL delegate {"lane":1,"task":"engine lane one quiet watch"}"#
+    ));
+    updates.next(deadline, |u| {
+        matches!(
+            u,
+            Update::Stream {
+                agent: Agent::Lane(1),
+                status: StreamStatus::Connected
+            }
+        )
+    });
+    updates.next(
+        deadline,
+        |u| matches!(u, Update::Event { agent: Agent::Lane(1), kind, .. } if kind == "text-delta"),
+    );
+    // …and the whole run, not just its first event.
+    updates.next(
+        deadline,
+        |u| matches!(u, Update::Event { agent: Agent::Lane(1), kind, .. } if kind == "settled"),
+    );
+
+    // Showing another lane afterwards still swaps the one open stream for it.
+    assert!(handle.watch_lane(Some(2)));
+    updates.next(deadline, |u| {
+        matches!(
+            u,
+            Update::Transcript {
+                agent: Agent::Lane(2),
+                ..
+            }
+        )
+    });
+    updates.next(deadline, |u| {
+        matches!(
+            u,
+            Update::Stream {
+                agent: Agent::Lane(2),
+                status: StreamStatus::Connected
+            }
+        )
+    });
     handle.join();
 }
 
