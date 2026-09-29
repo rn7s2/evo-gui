@@ -4,12 +4,12 @@
 //! cargo run -p workspace --example empty_tab_demo -- --capture <dir>
 //! ```
 //!
-//! Sixteen pictures: the catalog loading, the catalog loaded with a lanes model chosen
-//! (the `swarm.lisp` note under the chooser), a history list of many rows — one of them a
-//! very long path — an empty history, and the two states with no rows yet (scanning, and a
-//! scan that failed), each in the light and the dark theme; plus the three interaction
-//! states a still picture cannot show on its own — the folder card's keyboard focus ring,
-//! and the card's and a history row's hover fills.
+//! Eighteen pictures: the catalog loading, the catalog loaded with a lanes model chosen
+//! (the `swarm.lisp` note under the chooser, on one line and wrapped over two), a history
+//! list of many rows — one of them a very long path — an empty history, and the two states
+//! with no rows yet (scanning, and a scan that failed), the five states in both themes; plus
+//! the three interaction states a still picture cannot show on its own — the folder card's
+//! keyboard focus ring, and the card's and a history row's hover fills.
 //!
 //! Capture mode drives GPUI's headless renderer, so the pictures do not depend on a window
 //! being on screen (the machine may be locked).
@@ -226,6 +226,9 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     shot(&mut cx, window, dir, "13-folder-card-hover-light.png")?;
     pointer(&mut cx, window, history_row(1))?;
     shot(&mut cx, window, dir, "14-history-row-hover-light.png")?;
+    // Move the pointer off the list again: a hover fill or an open tooltip left over a row
+    // would sit in the next picture.
+    park_pointer(&mut cx, window)?;
     dark(&mut cx);
     shot(&mut cx, window, dir, "06-history-dark.png")?;
     light(&mut cx);
@@ -245,6 +248,35 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
         tab.set_folder_hint(Some(PathBuf::from("/Users/you/coding/evo-gui")), cx);
     });
     shot(&mut cx, window, dir, "11-lanes-note-folder-hint-light.png")?;
+
+    // 5b. A folder deep enough that the note needs the second line it reserves — the rows
+    // beside it stay exactly where they were.
+    tab.update(&mut cx, |tab, cx| {
+        tab.set_folder_hint(
+            Some(PathBuf::from(
+                "/Users/you/coding/experiments/evo-desktop-render-explorations",
+            )),
+            cx,
+        )
+    });
+    shot(&mut cx, window, dir, "15-lanes-note-long-folder-light.png")?;
+    // ... and a path deep enough that even two lines are not enough: the caption ellipsizes
+    // it on the second line rather than letting it spill into the Workers row, and the
+    // tooltip carries the whole note.
+    tab.update(&mut cx, |tab, cx| {
+        tab.set_folder_hint(
+            Some(PathBuf::from(
+                "/Users/you/coding/experiments/a-very-long-project-directory-name/\
+                 nested/deeper/evo-desktop-render-explorations",
+            )),
+            cx,
+        )
+    });
+    shot(&mut cx, window, dir, "16-lanes-note-clamped-light.png")?;
+    // Back to an ordinary folder for the states that follow.
+    tab.update(&mut cx, |tab, cx| {
+        tab.set_folder_hint(Some(PathBuf::from("/Users/you/coding/evo-gui")), cx)
+    });
 
     // 6. While the scan runs, and when it fails: the two states with no rows yet, in both
     // themes.
@@ -312,6 +344,27 @@ fn pointer(
         window.dispatch_event(
             gpui_kit::MouseMoveEvent {
                 position,
+                pressed_button: None,
+                modifiers: Default::default(),
+            }
+            .to_platform_input(),
+            cx,
+        );
+        window.render_frame(cx);
+    })?;
+    Ok(())
+}
+
+/// Move the pointer off everything — into the empty space under the block — so no hover
+/// fill and no tooltip is left in the frames that follow.
+fn park_pointer(
+    cx: &mut HeadlessAppContext,
+    window: AnyWindowHandle,
+) -> Result<(), Box<dyn std::error::Error>> {
+    cx.update_window(window, |_, window, cx| {
+        window.dispatch_event(
+            gpui_kit::MouseMoveEvent {
+                position: point(px(40.), px(WINDOW_SIZE.1 - 40.)),
                 pressed_button: None,
                 modifiers: Default::default(),
             }

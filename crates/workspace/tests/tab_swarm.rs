@@ -265,6 +265,41 @@ fn a_tab_boots_a_real_swarm_and_streams_a_turn(cx: &mut TestAppContext) {
             })
     });
 
+    // §7.1: the label is the folder's own name, and the tooltip carries the whole
+    // path plus what the swarm is doing.
+    cx.update(|cx| {
+        let tab = tab.read(cx);
+        assert_eq!(
+            tab.title().as_ref(),
+            "proj",
+            "the tab is named after its folder"
+        );
+        let tooltip = tab.tooltip();
+        assert!(
+            tooltip.contains(&b.fixture.project.display().to_string()),
+            "the tooltip names the whole path: {tooltip}"
+        );
+        assert!(
+            tooltip.contains("running"),
+            "and what the swarm is doing: {tooltip}"
+        );
+    });
+
+    // §9.8: the window can hand the app its tabs to persist — the folder each one
+    // runs in, and the session it writes to.
+    cx.update(|cx| {
+        let records = b.view.read(cx).tab_records(cx);
+        assert_eq!(records.len(), 1, "one tab is open");
+        let (_, folder, session) = &records[0];
+        assert_eq!(folder.as_ref(), Some(&b.fixture.project));
+        assert_eq!(
+            session.as_deref(),
+            tab.read(cx).session_path(),
+            "the record carries the session the tab is writing to"
+        );
+        assert!(session.is_some(), "/state named the session");
+    });
+
     prompt(cx, &b, &tab, "SLOW say something long");
 
     // The turn reached the swarm: the user's own row is in the transcript.

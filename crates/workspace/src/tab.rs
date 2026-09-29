@@ -28,9 +28,11 @@ use gpui_kit::{
 
 use async_channel::Receiver;
 use composer::{Composer, ComposerEvent};
-use session::{AgentKey, Changes, LaunchPlan, RowChanges, TabModel};
+use session::{Activity, AgentKey, Changes, LaunchPlan, RowChanges, TabModel};
 use tab_engine::{Agent, EngineHandle, ReqId, Update};
 use transcript::TranscriptView;
+
+use agent_list::{AgentList, AgentListEvent};
 
 use crate::chrome::LauncherData;
 use crate::empty_tab::{Choosers, HistoryList};
@@ -134,7 +136,24 @@ pub struct TabContent {
     gone: Option<SharedString>,
     /// Called with this tab's `/registry` (§9.4).
     registry_hook: Option<RegistryHook>,
+    /// The session the tab's swarm is writing to, once `/state` has said which it
+    /// is: the `--resume` argument, and what the app persists (§9.5).
+    session: Option<PathBuf>,
+    /// The left column: the agents, drawn by `agent_list`, fed from the model
+    /// (§7.3).
+    pub(crate) agents: Entity<AgentList>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// Everything the agent list draws, read off the model in one go (§7.3).
+struct AgentsSnapshot {
+    lanes: session::LaneList,
+    activity: Activity,
+    reconnecting: bool,
+    selected: AgentKey,
+    clock: Option<String>,
+    /// Why a lane is down, by lane number (§9.7).
+    down_reasons: Vec<(u32, Option<String>)>,
 }
 
 /// One tab's live swarm: the engine, the model its updates land in, and the pump
@@ -208,6 +227,15 @@ impl TabContent {
             },
         );
 
+        // The agent list selects nothing on its own: it asks, and the tab decides
+        // — the same path a click on the old placeholder took (§7.3).
+        let agents = cx.new(AgentList::new);
+        let agents_subscription =
+            cx.subscribe(&agents, |this, _list, event: &AgentListEvent, cx| {
+                let AgentListEvent::Select(agent) = event;
+                this.select_agent(*agent, cx);
+            });
+
         TabContent {
             id,
             state: TabState::Empty,
@@ -220,7 +248,13 @@ impl TabContent {
             last_launch: None,
             gone: None,
             registry_hook: None,
-            _subscriptions: vec![history_subscription, composer_subscription],
+            session: None,
+            agents,
+            _subscriptions: vec![
+                history_subscription,
+                composer_subscription,
+                agents_subscription,
+            ],
         }
     }
 
@@ -241,6 +275,11 @@ impl TabContent {
             | TabState::Failed { folder, .. }
             | TabState::Stopping { folder } => Some(folder),
         }
+    }
+
+    /// The session the tab's swarm is writing to, while `/state` has named it.
+    pub fn session_path(&self) -> Option<&Path> {
+        self.session.as_deref()
     }
 
     /// The tab's model, while it has a swarm to have one for.
@@ -377,6 +416,8 @@ impl TabContent {
             Ok(started) => {
                 self.last_launch = Some(launch);
                 self.gone = None;
+                // A new swarm writes a new session; `/state` names it when it does.
+                self.session = None;
                 self.state = TabState::Booting { folder };
                 self.attach(started, window, cx);
             }
@@ -506,7 +547,8 @@ impl TabContent {
                 // The session the swarm is writing to is what history resumes
                 // (§9.5); it is known once /state has answered.
                 if let Some(session) = raw.get("session").and_then(serde_json::Value::as_str) {
-                    self.record_recent(PathBuf::from(session), cx);
+                    self.session = Some(PathBuf::from(session));
+                    self.record_recent(cx);
                 }
             }
             Update::PostResult { req_id, result } => self.finish_post(req_id, result, window, cx),
@@ -585,7 +627,48 @@ impl TabContent {
             self.composer
                 .update(cx, |composer, cx| composer.set_activity(activity, cx));
         }
+        // The left column takes the same facts, on the same batch (§7.3).
+        self.sync_agents(cx);
         cx.notify();
+    }
+
+    /// Feed the agent list from the model: the rows, the coordinator's activity and
+    /// step clock, the selection, and why each down lane is down (§7.3, §9.7).
+    fn sync_agents(&mut self, cx: &mut Context<Self>) {
+        let Some(snapshot) = self.agents_snapshot() else {
+            return;
+        };
+        self.agents.update(cx, |list, cx| {
+            list.set_lanes(&snapshot.lanes, cx);
+            list.set_coordinator(snapshot.activity, snapshot.reconnecting, cx);
+            list.set_coordinator_clock(snapshot.clock, cx);
+            list.set_selected(snapshot.selected, cx);
+            for (lane, reason) in snapshot.down_reasons {
+                list.set_down_reason(lane, reason, cx);
+            }
+        });
+    }
+
+    /// The agent list's inputs, read off the model in one go: the list and the
+    /// model are different entities, so the model's borrow ends here.
+    fn agents_snapshot(&self) -> Option<AgentsSnapshot> {
+        let model = self.model()?;
+        let selected = model.selected();
+        Some(AgentsSnapshot {
+            lanes: model.lanes().clone(),
+            activity: model.activity(),
+            reconnecting: model.is_reconnecting(selected),
+            selected,
+            clock: model
+                .coordinator_step_started()
+                .and_then(|clock| clock.clock_label(now_millis())),
+            down_reasons: model
+                .lanes()
+                .lanes
+                .iter()
+                .map(|lane| (lane.n as u32, model.lane_down_reason(lane.n as u32)))
+                .collect(),
+        })
     }
 
     /// Start the once-a-second re-render while the coordinator has a step in
@@ -611,6 +694,8 @@ impl TabContent {
                     .model()
                     .is_some_and(|model| model.coordinator_step_started().is_some());
                 if running {
+                    // The step clock is the only thing that changed (§7.3).
+                    tab.sync_agents(cx);
                     cx.notify();
                 }
                 running
@@ -659,6 +744,7 @@ impl TabContent {
             .entry(agent)
             .or_insert_with(|| cx.new(TranscriptView::new));
         self.push(changes, cx);
+        self.sync_agents(cx);
     }
 
     /// What the composer asked for: a turn, or an interrupt (§7.3, §9.2).
@@ -756,7 +842,10 @@ impl TabContent {
     ///
     /// The write is `~/.evo/desktop/app.json`, which is file I/O: it happens on a
     /// thread of its own, like every other write the UI asks for.
-    fn record_recent(&mut self, session: PathBuf, cx: &mut Context<Self>) {
+    fn record_recent(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = self.session.clone() else {
+            return;
+        };
         if session.as_os_str().is_empty() {
             return;
         }

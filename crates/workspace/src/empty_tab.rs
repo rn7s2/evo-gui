@@ -54,10 +54,13 @@ const MENU_WIDTH: Pixels = px(460.);
 /// The gap between the chooser rows, and between them and the folder button.
 const ROW_GAP: Pixels = px(16.);
 
-/// The caption under the lanes chooser. It keeps its height whether or not it has
-/// something to say, so the three rows never shift when a lanes model is chosen — and it
-/// starts where the selects do, not under the labels.
-const CAPTION_HEIGHT: Pixels = px(20.);
+/// The caption under the lanes chooser. It reserves **two** lines whether or not it has
+/// something to say, so the three rows never shift when a lanes model is chosen and the note
+/// — a folder's path plus what it means — wraps instead of truncating. It starts where the
+/// selects do, not under the labels. A minimum rather than a fixed height, so a theme with a
+/// taller line never clips the second line.
+const CAPTION_LINES: usize = 2;
+const CAPTION_HEIGHT: Pixels = px(40.);
 /// [`LABEL_WIDTH`] plus the row's own gap: the selects' left edge.
 const CAPTION_INDENT: Pixels = px(166.);
 const CAPTION_ID: &str = "lanes-caption";
@@ -70,6 +73,10 @@ const FOLDER_ICON_SIZE: Pixels = px(28.);
 const HISTORY_ID: &str = "history";
 const HISTORY_ROW_ID: &str = "history-row";
 const HISTORY_HINT_ID: &str = "history-hint";
+/// A history row reads like a document: a small folder glyph, then the folder's own name as
+/// the title, with the path and the facts under it.
+const ROW_ICON_SIZE: Pixels = px(14.);
+const ROW_TITLE_SIZE: Pixels = px(15.);
 
 /// One option of a chooser, as the Select draws it: the label, a muted detail line under
 /// it, and — for a model a lane could not register — the reason it is greyed out.
@@ -520,9 +527,13 @@ impl EmptyTabState {
             .test_support()
             .ml(CAPTION_INDENT)
             .min_w_0()
-            .h(CAPTION_HEIGHT)
+            .min_h(CAPTION_HEIGHT)
             .flex_none()
-            .truncate()
+            // Two lines, then an ellipsis: `line_clamp` alone would simply cut the second
+            // line mid-word at the box edge, so the caption asks for the overflow ellipsis
+            // too — that is the pair GPUI renders as a clamped, ellipsized block.
+            .line_clamp(CAPTION_LINES)
+            .text_ellipsis()
             .text_xs()
             .text_color(color)
             .when_some(tooltip, |line, tooltip| {
@@ -541,10 +552,22 @@ impl EmptyTabState {
     fn render_folder_button(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let surface = theme.secondary;
-        let surface_hover = theme.secondary_hover;
+        // Hover strengthens the surface as well as the border. The light theme's
+        // `secondary_hover` is the same tone as `secondary` (both neutral-200), so the next
+        // stronger neutral is what actually moves the fill there; the dark theme's hover tone
+        // already does.
+        let surface_hover = if theme.is_dark() {
+            theme.secondary_hover
+        } else {
+            theme.secondary_active
+        };
         let border = theme.border;
         let accent = theme.primary;
         let ring = theme.ring;
+        // The icon is the one spot of colour on the screen, so it takes the theme's blue-ish
+        // info tone: a near-black or near-white `primary` would be a slab (light) or the
+        // whole card in the foreground colour (dark).
+        let icon_color = theme.info;
         Button::new(FOLDER_ID)
             .track_focus(&self.folder_focus)
             .accessibility_label("Select folder…")
@@ -561,13 +584,14 @@ impl EmptyTabState {
             .border_color(border)
             .bg(surface)
             .hover(move |style| style.bg(surface_hover).border_color(accent))
-            // Keyboard focus gets the same accent, so tabbing says what hovering says.
+            // Keyboard focus strengthens the surface the same way and takes the theme's
+            // focus ring — a tab stop should read as focus, not as a second hover.
             .focus_visible(move |style| style.border_color(ring).bg(surface_hover))
             .on_click(cx.listener(|this, _, window, cx| this.pick_folder(window, cx)))
             .child(
                 Icon::new(IconName::Folder)
                     .with_size(FOLDER_ICON_SIZE)
-                    .text_color(accent),
+                    .text_color(icon_color),
             )
             .child(div().text_sm().font_medium().child("Select folder…"))
             .child(
@@ -948,43 +972,68 @@ impl ListDelegate for HistoryList {
                 HISTORY_ROW_ID.into(),
                 ix.row as u64,
             ))
-            // An 8 px pill, like the rest of the app's rows; no separator between them.
+            // An 8 px pill, like the rest of the app's rows, with a document's own height:
+            // 8 px above and below the two lines (the list item's own padding is narrower).
             .rounded(px(8.))
+            .py_2()
             .child(
-                v_flex()
+                h_flex()
                     .w_full()
                     .min_w_0()
-                    .gap_0p5()
-                    .child(div().w_full().min_w_0().truncate().child(row.title.clone()))
+                    .gap_3()
+                    .items_center()
+                    // A small folder glyph leads the row in the muted colour, so the list
+                    // reads as a list of folders rather than of bare names.
                     .child(
-                        // The path and the facts share the second line. The path gives way
-                        // first, and the lane count and the time never do: only the model at
-                        // the end of the meta may ellipsize, which is what the row's own
-                        // `truncate` on the tail does.
-                        h_flex()
-                            .w_full()
+                        Icon::new(IconName::Folder)
+                            .with_size(ROW_ICON_SIZE)
+                            .flex_none()
+                            .text_color(muted),
+                    )
+                    .child(
+                        v_flex()
+                            .flex_1()
                             .min_w_0()
-                            .gap_2()
-                            .items_center()
+                            .gap_0p5()
                             .child(
                                 div()
-                                    // Hugs the facts beside it, and gives way first: the
-                                    // path is what a narrow row can afford to lose.
-                                    .flex_shrink(1.)
+                                    .w_full()
                                     .min_w_0()
                                     .truncate()
-                                    .text_xs()
-                                    .text_color(muted)
-                                    .child(row.subtitle.clone()),
+                                    .text_size(ROW_TITLE_SIZE)
+                                    .font_medium()
+                                    .child(row.title.clone()),
                             )
                             .child(
-                                div()
-                                    .flex_none()
-                                    .max_w(px(420.))
-                                    .truncate()
-                                    .text_xs()
-                                    .text_color(muted)
-                                    .child(format!("· {}", row.meta)),
+                                // The path and the facts share the second line. The path
+                                // gives way first: it ellipsizes and the `·` separator sits
+                                // right after it, with the same space on both sides as the
+                                // ones inside the meta. The lane count and the time never
+                                // give way — only the model at the very end may ellipsize.
+                                h_flex()
+                                    .w_full()
+                                    .min_w_0()
+                                    .gap_1()
+                                    .items_center()
+                                    .child(
+                                        div()
+                                            .flex_shrink(1.)
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_xs()
+                                            .text_color(muted)
+                                            .child(row.subtitle.clone()),
+                                    )
+                                    .child(div().flex_none().text_xs().text_color(muted).child("·"))
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .max_w(px(420.))
+                                            .truncate()
+                                            .text_xs()
+                                            .text_color(muted)
+                                            .child(row.meta.clone()),
+                                    ),
                             ),
                     ),
             )

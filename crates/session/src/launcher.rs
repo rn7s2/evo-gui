@@ -506,11 +506,12 @@ pub fn swarm_lisp_path(folder: &str) -> String {
 }
 
 /// The note shown next to the lanes chooser (§9.6), with the folder's path shortened around
-/// the home directory: `Lanes model is written to ~/coding/foo/.evo/swarm.lisp (shared by
-/// every tab in this folder)`.
+/// the home directory: `Saved to ~/coding/foo/.evo/swarm.lisp — shared by every tab`. Short
+/// enough that a folder under `~` keeps it on one line under the lanes select; a deeper path
+/// wraps to the second line the caption reserves.
 pub fn lanes_model_note(folder: &str, home: Option<&str>) -> String {
     format!(
-        "Lanes model is written to {} (shared by every tab in this folder)",
+        "Saved to {} — shared by every tab",
         home_short(&swarm_lisp_path(folder), home)
     )
 }

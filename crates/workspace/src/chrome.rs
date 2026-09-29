@@ -6,17 +6,20 @@
 //! [`TabContent`](crate::TabContent).
 
 use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, IconName, Sizable as _, TitleBar};
+use gpui_kit::component::{
+    h_flex, v_flex, ActiveTheme as _, Icon, IconName, Sizable as _, TitleBar,
+};
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    div, point, px, size, App, Bounds, Context, ElementId, Entity, IntoElement, Pixels,
-    ScrollHandle, Size, Subscription, Task, TestSupportExt as _, Window, WindowBounds,
-    WindowOptions,
+    div, point, px, size, AnyElement, App, Bounds, Context, ElementId, Entity, IntoElement, Pixels,
+    ScrollHandle, SharedString, Size, Subscription, Task, TestSupportExt as _, Window,
+    WindowBounds, WindowOptions,
 };
 
 use std::rc::Rc;
@@ -83,9 +86,13 @@ pub fn window_options(cx: &App) -> WindowOptions {
 /// What the window is closed with (§9.8).
 ///
 /// The window has already taken every tab's engine out of its tabs and hands
-/// them over: stopping them is the hook's job. Returning `true` lets the window
-/// close; `false` vetoes this close — the hook then closes the window itself
-/// (`window.remove_window()`) once it is done, and that close is allowed.
+/// them over: stopping them is the hook's job.
+///
+/// The hook answers "am I taking this quit over?". `true` vetoes this close —
+/// the app is doing the work and closes the window itself
+/// (`window.remove_window()`) when it is done, and that close is allowed.
+/// `false` lets the window close now, which is what an app that has nothing
+/// left to do returns.
 pub type QuitHook = Box<dyn Fn(QuitRequest, &mut Window, &mut App) -> bool + 'static>;
 
 /// Everything the app learns about models and past sessions, which every empty
@@ -233,6 +240,27 @@ impl WorkspaceView {
             let data = data.clone();
             tab.update(cx, |tab, cx| tab.set_launcher_data(&data, window, cx));
         }
+    }
+
+    /// The tabs as an app persists them: strip order, one
+    /// `(id, folder, session)` per tab, and `selected_index()` says which one is
+    /// showing (§9.8).
+    ///
+    /// `folder` is `None` only for a tab that has never started a swarm, and
+    /// `session` is `None` until that swarm has answered `/state` — which is the
+    /// path `Launch::Resume` takes (§9.5).
+    pub fn tab_records(&self, cx: &App) -> Vec<(TabId, Option<PathBuf>, Option<PathBuf>)> {
+        self.tabs
+            .iter()
+            .map(|tab| {
+                let tab = tab.read(cx);
+                (
+                    tab.id(),
+                    tab.folder().map(Path::to_path_buf),
+                    tab.session_path().map(Path::to_path_buf),
+                )
+            })
+            .collect()
     }
 
     /// Called with every live tab's `/registry` — the app refreshes its model
@@ -396,7 +424,7 @@ impl WorkspaceView {
     }
 
     /// One tab: the folder's name, the whole path plus the swarm's state on
-    /// hover, and — on the tab being shown — a close button (§7.1).
+    /// hover, and its close control (§7.1).
     fn render_tab(&self, tab: &Entity<TabContent>, cx: &mut Context<Self>) -> Tab {
         let content = tab.read(cx);
         let id = content.id();
@@ -406,33 +434,65 @@ impl WorkspaceView {
             .tabs
             .get(self.selected)
             .is_some_and(|shown| shown.read(cx).id() == id);
-        Tab::new()
-            .aria_label(title.clone())
-            .child(
-                div()
-                    .id(ElementId::NamedInteger("tab-label".into(), id.get()))
-                    .test_support()
-                    .min_w_0()
-                    .truncate()
-                    .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
-                    .child(title),
-            )
-            // Only the tab being shown carries its close button: an × on every
-            // tab is noise, and an invisible one would still be clickable.
-            .when(selected, |tab| {
-                tab.suffix(
-                    Button::new(ElementId::NamedInteger("tab-close".into(), id.get()))
-                        .ghost()
-                        .xsmall()
-                        .icon(IconName::CircleX)
-                        .tooltip("Close tab")
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            // The tab itself selects on click; closing must not.
-                            cx.stop_propagation();
-                            this.close_tab(id, window, cx);
-                        })),
+        // The group is the tab's own content, so a pointer anywhere on the tab
+        // brings its `×` out — and moving onto the `×` keeps it out, because the
+        // pointer is still inside the group.
+        let group = SharedString::from(format!("tab-content-{}", id.get()));
+        Tab::new().aria_label(title.clone()).child(
+            h_flex()
+                .group(group.clone())
+                .gap_1()
+                .min_w_0()
+                .items_center()
+                .child(
+                    div()
+                        .id(ElementId::NamedInteger("tab-label".into(), id.get()))
+                        .test_support()
+                        .min_w_0()
+                        .truncate()
+                        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+                        .child(title),
                 )
+                .child(self.render_tab_close(id, selected, group, cx)),
+        )
+    }
+
+    /// A tab's close control: a light `×`, muted until the pointer is on it, on
+    /// the tab being shown and on any tab the pointer is over (§7.1).
+    ///
+    /// The tab's own width never changes: an out-of-sight `×` still occupies its
+    /// box, so showing it cannot shuffle the strip — and hovering anywhere on the
+    /// tab is what shows it, because the tab's content is the group.
+    fn render_tab_close(
+        &self,
+        id: TabId,
+        selected: bool,
+        group: SharedString,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let accent = cx.theme().accent;
+        div()
+            .id(ElementId::NamedInteger("tab-close".into(), id.get()))
+            .test_support()
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .size_4()
+            .rounded(cx.theme().radius)
+            .text_color(cx.theme().muted_foreground)
+            .when(!selected, |this| {
+                this.opacity(0.)
+                    .group_hover(group, |style| style.opacity(1.))
             })
+            .hover(move |style| style.text_color(accent))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                // The tab itself selects on click; closing must not.
+                cx.stop_propagation();
+                this.close_tab(id, window, cx);
+            }))
+            .child(Icon::new(IconName::Close).xsmall())
+            .into_any_element()
     }
 
     fn render_add_tab_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -478,7 +538,10 @@ impl WorkspaceView {
 
         let engines = self.take_engines(cx);
         if let Some(hook) = self.quit_hook.as_ref() {
-            self.may_close = !hook(QuitRequest { engines }, window, cx);
+            // `true` means the app is closing the window itself, so this close is
+            // vetoed; `false` lets it through.
+            let app_took_over = hook(QuitRequest { engines }, window, cx);
+            self.may_close = !app_took_over;
             return self.may_close;
         }
 

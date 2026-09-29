@@ -379,13 +379,12 @@ fn the_note_names_the_folders_swarm_lisp() {
     );
     assert_eq!(
         lanes_model_note("/Users/me/coding/foo", Some("/Users/me")),
-        "Lanes model is written to ~/coding/foo/.evo/swarm.lisp (shared by every tab in this folder)"
+        "Saved to ~/coding/foo/.evo/swarm.lisp — shared by every tab"
     );
     // Without a home to shorten against, the path is written whole — never a wrong `~`.
     assert_eq!(
         lanes_model_note("/Users/me/coding/foo", None),
-        "Lanes model is written to /Users/me/coding/foo/.evo/swarm.lisp \
-         (shared by every tab in this folder)"
+        "Saved to /Users/me/coding/foo/.evo/swarm.lisp — shared by every tab"
     );
     let tab = Launcher::new();
     assert_eq!(

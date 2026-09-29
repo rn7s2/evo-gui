@@ -118,13 +118,17 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
             },
         },
     )?;
+    // 3. The tab while the swarm starts: what is starting, and where (§3). Taken
+    //    before the first pump, which is the only moment it is on screen.
+    shot(&mut cx, window, dir, "03-booting.png")?;
+
     wait_until(&mut cx, |cx| {
         matches!(
             tab.read_with(cx, |tab, _| tab.state().clone()),
             TabState::Running { .. }
         )
     })?;
-    shot(&mut cx, window, dir, "03-tab-page.png")?;
+    shot(&mut cx, window, dir, "04-tab-page.png")?;
 
     // 4. A turn is streaming: the assistant row is rendered markdown while it
     //    grows (§2.8). "SLOW" makes the stub send 60 deltas a tenth apart.
@@ -132,7 +136,7 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     // Wait until the assistant row is actually growing, so the picture shows
     // markdown rendered mid-stream rather than an empty page (§2.8).
     wait_until(&mut cx, |cx| text_chars(cx, &tab) > 40)?;
-    shot(&mut cx, window, dir, "04-streaming.png")?;
+    shot(&mut cx, window, dir, "05-streaming.png")?;
 
     // 5. The swarm was settled before the next turn asks it to work.
     wait_until(&mut cx, |cx| !working(cx, &tab))?;
@@ -151,12 +155,12 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     wait_until(&mut cx, |cx| {
         lane_working(cx, &tab) && text_chars(cx, &tab) > 40
     })?;
-    shot(&mut cx, window, dir, "05-lane-selected.png")?;
+    shot(&mut cx, window, dir, "06-lane-selected.png")?;
 
     // 7. Back to the coordinator, with the report the lane sent back.
     select_main(&mut cx, window, &tab)?;
     wait_until(&mut cx, |cx| rows(cx, &tab) >= 3)?;
-    shot(&mut cx, window, dir, "06-coordinator-after-delegation.png")?;
+    shot(&mut cx, window, dir, "07-coordinator-after-delegation.png")?;
 
     // 8. A swarm that cannot start: the tab shows the log tail, a Retry and a
     //    Close (§9.7). A second window with a binary that is not there.
@@ -181,7 +185,11 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
             TabState::Failed { .. }
         )
     })?;
-    shot(&mut cx, broken_window, dir, "07-boot-failed.png")?;
+    let failed = broken_tab.read_with(&cx, |tab, _| tab.state().clone());
+    if std::env::var_os("SNAPSHOT_TRACE").is_some() {
+        eprintln!("[trace] failed state: {failed:?}");
+    }
+    shot(&mut cx, broken_window, dir, "08-boot-failed.png")?;
 
     Ok(())
 }
@@ -340,6 +348,9 @@ fn shot(
     // clock, which the headless context only advances when asked.
     cx.advance_clock(SETTLE);
     std::thread::sleep(SETTLE);
+    // Two frames: the first lays out what the last update changed, the second
+    // paints it — a scroll box's content is placed on the frame after its layout.
+    cx.update_window(window, |_, window, cx| window.render_frame(cx))?;
     cx.update_window(window, |_, window, cx| window.render_frame(cx))?;
     let image = cx.capture_screenshot(window)?;
     let path = dir.join(name);

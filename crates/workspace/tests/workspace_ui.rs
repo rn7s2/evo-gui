@@ -182,7 +182,7 @@ fn closing_the_last_tab_leaves_a_fresh_empty_tab(cx: &mut TestAppContext) {
 /// Only the tab being shown carries a close button: an × on every tab is noise,
 /// and an invisible one would still be clickable (§7.1).
 #[gpui_kit::test]
-fn only_the_shown_tab_carries_a_close_button(cx: &mut TestAppContext) {
+fn a_tab_shows_its_close_button_when_the_pointer_is_on_it(cx: &mut TestAppContext) {
     let (handle, view) = open_workspace(cx);
     let first = cx.update(|cx| tab_id(&view, 0, cx));
 
@@ -191,19 +191,41 @@ fn only_the_shown_tab_carries_a_close_button(cx: &mut TestAppContext) {
         window.click("tab-add", cx);
         let second = tab_id(&view, 1, cx);
         window.render_frame(cx);
+
+        // Every tab carries its `×`, and only the tab being shown shows it while
+        // the pointer is elsewhere: a hidden one is out of sight, not absent.
         assert!(
-            window.try_find(tab_close(first)).is_none(),
-            "the tab that is not shown has no close button"
+            window.find(tab_close(second)).visible(),
+            "the tab being shown shows its close button"
         );
         assert!(
-            window.try_find(tab_close(second)).is_some(),
-            "the tab being shown has one"
+            !window.find(tab_close(first)).visible(),
+            "the tab that is not shown keeps its close button out of sight"
         );
 
+        // Hovering the other tab brings its own `×` out — the pointer never has
+        // to find a 16 px box it cannot see.
+        let label = window.find(tab_label(first)).bounds();
+        window.simulate_mouse_move(label.center(), cx);
+        window.render_frame(cx);
+        assert!(
+            window.find(tab_close(first)).visible(),
+            "hovering a tab shows its close button"
+        );
+        assert!(
+            window.find(tab_close(second)).visible(),
+            "the tab being shown keeps its own out, wherever the pointer is"
+        );
+
+        // Selecting the first tab: now *it* is the shown one with its `×` out,
+        // and the second is back to showing nothing until it is hovered.
         window.click(tab_label(first), cx);
         window.render_frame(cx);
-        assert!(window.try_find(tab_close(first)).is_some());
-        assert!(window.try_find(tab_close(second)).is_none());
+        assert!(window.find(tab_close(first)).visible());
+        assert!(
+            !window.find(tab_close(second)).visible(),
+            "a tab that is neither shown nor hovered shows no close button"
+        );
     })
     .unwrap();
 }
@@ -249,5 +271,39 @@ fn the_keyboard_shortcuts_add_and_close_tabs(cx: &mut TestAppContext) {
         let view = view.read(cx);
         assert_eq!(view.tabs().len(), 1);
         assert_eq!(view.selected_tab().read(cx).state(), &TabState::Empty);
+    });
+}
+
+/// §9.8: what the window hands the app to persist — every tab in strip order,
+/// with the folder and the session each one is running, and which one is shown.
+#[gpui_kit::test]
+fn the_window_lists_its_tabs_for_persistence(cx: &mut TestAppContext) {
+    let (handle, view) = open_workspace(cx);
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        view.update(cx, |view, cx| {
+            view.add_tab(window, cx);
+        });
+    })
+    .unwrap();
+
+    cx.update(|cx| {
+        let view = view.read(cx);
+        let records = view.tab_records(cx);
+        assert_eq!(records.len(), 2, "one record per tab, in strip order");
+        assert_eq!(records[0].0, view.tabs()[0].read(cx).id());
+        assert_eq!(records[1].0, view.tabs()[1].read(cx).id());
+        assert!(
+            records
+                .iter()
+                .all(|(_, folder, session)| folder.is_none() && session.is_none()),
+            "a tab that never started a swarm has neither a folder nor a session"
+        );
+        assert_eq!(
+            view.selected_index(),
+            1,
+            "the selected index indexes the records"
+        );
     });
 }
