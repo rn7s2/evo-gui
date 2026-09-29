@@ -258,3 +258,45 @@ fn the_coordinator_stream_drives_the_whole_lane_list() {
         assert!(row.pid.is_some());
     }
 }
+
+/// The header counts the rows under it, not the number its last snapshot came with.
+///
+/// `docs/screens/03-lane-todos-dark.png` caught the two disagreeing: `2 lanes · 1 busy`
+/// over two idle rows. The list had been read while lane 1 was working
+/// (`lanes-lane1-working.json`, whose `swarm.busy` is 1) and the lane then went idle on
+/// the stream — which carries no count at all — so between that event and the next read
+/// the header said one thing and the column under it another.
+#[test]
+fn the_header_counts_the_rows_it_labels() {
+    let mut list = LaneList::from_lanes(&fixture("lanes-lane1-working.json"));
+    assert_eq!(list.busy(), 1, "the snapshot's own count, over its one working row");
+
+    // The lane settles: the captured `lane-state` event for exactly that, task and all.
+    let idle = sse_events("events-coordinator.sse")
+        .into_iter()
+        .map(|(_, _, data)| data)
+        .find(|data| {
+            data["type"] == "lane-state" && data["lane"] == 1 && data["state"] == "idle"
+        })
+        .expect("the capture holds lane 1 going idle");
+    assert!(list.apply_lane_state(&idle), "the row changed");
+    let lane1 = list.lane(1).expect("lane 1");
+    assert_eq!(lane1.status, LaneStatus::Idle);
+    assert!(
+        lane1.task.as_deref().is_some_and(|task| task.starts_with("DELAY3 CALL todo")),
+        "the task it last ran stays on the row: {lane1:?}"
+    );
+    assert_eq!(lane1.step_clock(), None, "a lane that stopped has no step clock to show");
+
+    assert_eq!(
+        list.swarm.as_ref().unwrap().busy,
+        1,
+        "the snapshot it was built from still says one lane is busy…"
+    );
+    assert_eq!(list.busy(), 0, "…and the header says what its rows say");
+
+    // Which is what a *fresh* read of the list would have said, without waiting for one.
+    let fresh = LaneList::from_lanes(&fixture("lanes-final.json"));
+    assert_eq!(fresh.lane(1).unwrap().status, LaneStatus::Idle);
+    assert_eq!(list.busy(), fresh.busy(), "the same count, a read later");
+}

@@ -9,6 +9,7 @@
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_channel::Receiver;
@@ -47,9 +48,16 @@ pub fn fixture(workers: u16) -> Fixture {
 /// The tab spec a [`Fixture`] describes: its project, its tab directory, and the
 /// hermetic environment it sets up.
 pub fn spec(fixture: &Fixture, workers: u16) -> TabSpec {
-    let mut spec = TabSpec::new(&fixture.bins.swarm, &fixture.project, fixture.tab_dir())
-        .with_agent_bin(&fixture.bins.agent)
-        .with_workers(workers);
+    spec_at(fixture, fixture.tab_dir()).with_workers(workers)
+}
+
+/// [`spec`] with the tab's directory named, and no worker count — a proof that
+/// starts more than one swarm against one fixture (m2, whose second swarm exists
+/// to leave a newer journal) gives each its own directory, and a resumed tab is
+/// started without `--workers` on purpose (§7.2).
+pub fn spec_at(fixture: &Fixture, tab_dir: impl Into<PathBuf>) -> TabSpec {
+    let mut spec = TabSpec::new(&fixture.bins.swarm, &fixture.project, tab_dir.into())
+        .with_agent_bin(&fixture.bins.agent);
     for (key, value) in fixture.env() {
         spec = spec.with_env(key, value);
     }
@@ -87,7 +95,7 @@ pub struct Drive {
     /// server something directly, which a proof does when it needs a *fresh* answer
     /// (see [`Drive::swarm_lanes`]).
     pub port: Option<u16>,
-    pub tab_dir: std::path::PathBuf,
+    pub tab_dir: PathBuf,
     /// Lane number → the lane process's pid, as `/lanes` and `lane-state` report it.
     pub lane_pids: BTreeMap<u64, u32>,
     /// The session the swarm is writing to, as `/state` reports it (`session`).
@@ -144,11 +152,11 @@ impl Drive {
                     }
                 }
             }
-            Update::Event { data, .. } => {
-                if data.get("type").and_then(Value::as_str) == Some("lane-state") {
-                    if let (Some(n), Some(pid)) = (data["lane"].as_u64(), data["pid"].as_u64()) {
-                        self.lane_pids.insert(n, pid as u32);
-                    }
+            Update::Event { data, .. }
+                if data.get("type").and_then(Value::as_str) == Some("lane-state") =>
+            {
+                if let (Some(n), Some(pid)) = (data["lane"].as_u64(), data["pid"].as_u64()) {
+                    self.lane_pids.insert(n, pid as u32);
                 }
             }
             _ => {}
@@ -227,6 +235,31 @@ impl Drive {
                 self.log.iter().map(kind_of).collect::<Vec<_>>()
             );
             std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Pump until an update matching `pred` arrives *after* `from` (an index into
+    /// [`Drive::updates`]) — for "this has to happen again": an earlier one, already
+    /// in the log, would satisfy [`Drive::wait_for_update`] and prove nothing.
+    pub fn wait_for_update_since(
+        &mut self,
+        from: usize,
+        deadline: Instant,
+        what: &str,
+        pred: impl Fn(&Update) -> bool,
+    ) -> Update {
+        loop {
+            self.pump();
+            if let Some(found) = self.log[from.min(self.log.len())..].iter().find(|update| pred(update))
+            {
+                return found.clone();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "no {what} before the deadline; saw {:?}",
+                self.log[from.min(self.log.len())..].iter().map(kind_of).collect::<Vec<_>>()
+            );
+            std::thread::sleep(Duration::from_millis(25));
         }
     }
 

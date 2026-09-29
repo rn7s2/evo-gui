@@ -321,7 +321,10 @@ fn watching_a_lane_switches_the_single_stream() {
     // --- watch lane 1 --------------------------------------------------------
     assert!(handle.watch_lane(Some(1)));
     let transcript = updates.next(deadline, |u| matches!(u, Update::Transcript { agent: Agent::Lane(1), .. }));
-    assert!(matches!(transcript, Update::Transcript { revision: 1, .. }));
+    assert!(
+        matches!(transcript, Update::Transcript { revision: 1, .. }),
+        "a lane's first transcript is its first revision: {transcript:?}"
+    );
     updates.next(deadline, |u| matches!(u, Update::Stream { agent: Agent::Lane(1), status: StreamStatus::Connected }));
 
     // Delegate work to lane 1 and watch its events arrive.
@@ -686,6 +689,99 @@ fn a_lane_that_came_up_is_read_back_idle() {
     assert!(reads >= 2, "the lane list was read {reads} time(s)");
 
     handle.join();
+}
+
+/// #13 — a lane shown while it is *down* gets its rows when it comes back.
+///
+/// The lane rows are on screen from the lane list on, and a red one is exactly the
+/// row a reader clicks to see what happened — while the lane's own server is dead,
+/// so the fetch that showing a lane makes cannot answer. That fetch must not be the
+/// end of it: `resync` spends a revision only on a view that came back, so a lane no
+/// view was ever read for is still at revision zero, and the first connect of its
+/// stream is the moment to read it. Without that, the lane showed an empty middle
+/// column until some unrelated reconnect happened to resync it.
+#[test]
+fn a_lane_shown_while_it_is_down_fills_its_rows_when_it_returns() {
+    let _guard = one_swarm();
+    let fixture = fixture(2);
+    let (handle, rx) = TabEngine::start(spec(&fixture, 2));
+    let mut updates = Updates::new(rx);
+    let deadline = Instant::now() + Duration::from_secs(240);
+
+    updates.wait_connected(Agent::Coordinator, deadline);
+    // Both lanes up and idle before anything is delegated: `delegate` refuses a lane
+    // that is not idle, and a lane still booting is not.
+    updates.next(deadline, |u| match u {
+        Update::Lanes { raw } => raw["lanes"].as_array().is_some_and(|lanes| {
+            lanes.len() == 2 && lanes.iter().all(|lane| lane["state"] == "idle")
+        }),
+        _ => false,
+    });
+
+    // Lane 1 runs something first, so its transcript has rows to come back with —
+    // and so a transcript that arrives empty cannot pass for the real thing.
+    let t = now();
+    assert!(handle.prompt(1, r#"CALL delegate {"lane":1,"task":"engine lane one pre-crash"}"#));
+    let ran = Instant::now() + Duration::from_secs(120);
+    while fixture.stub.find("lane 1", "engine lane one pre-crash", t).is_none() {
+        assert!(Instant::now() < ran, "lane 1 never ran the delegated task");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    // Crash it the way a crash does.
+    let pid = lane_pid(&mut updates, deadline, 1);
+    let killed = unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+    assert_eq!(killed, 0, "could not kill lane 1");
+
+    // Show it now, while it is red: this is the fetch with nothing behind it.
+    let before = updates.len();
+    assert!(handle.watch_lane(Some(1)));
+    std::thread::sleep(Duration::from_millis(750));
+    updates.pump();
+    assert!(
+        !updates
+            .since(before)
+            .iter()
+            .any(|u| matches!(u, Update::Transcript { agent: Agent::Lane(1), .. })),
+        "the lane's server is down, so there are no rows to fetch yet"
+    );
+
+    // Its supervisor brings it back, its stream connects, and *that* is when the
+    // rows arrive — as the lane's first revision, since no view of it was ever read.
+    let transcript = updates.next(deadline, |u| matches!(u, Update::Transcript { agent: Agent::Lane(1), .. }));
+    match &transcript {
+        Update::Transcript { agent: Agent::Lane(1), revision, raw } => {
+            assert_eq!(*revision, 1, "a revision means a view was read: {transcript:?}");
+            let messages = raw["messages"].as_array().expect("a transcript carries messages");
+            assert!(!messages.is_empty(), "the resumed lane's own rows: {raw}");
+        }
+        other => panic!("expected lane 1's transcript, got {}", kind_of(other)),
+    }
+
+    handle.join();
+}
+
+/// The pid the lane list gives for LANE — the process to kill.
+fn lane_pid(updates: &mut Updates, deadline: Instant, lane: u64) -> u32 {
+    let found = updates.next(deadline, |u| match u {
+        Update::Lanes { raw } => raw["lanes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|row| row["n"].as_u64() == Some(lane) && row["pid"].as_u64().is_some()),
+        _ => false,
+    });
+    match found {
+        Update::Lanes { raw } => raw["lanes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|row| row["n"].as_u64() == Some(lane))
+            .and_then(|row| row["pid"].as_u64())
+            .map(|pid| pid as u32)
+            .expect("the lane list names its pid"),
+        _ => unreachable!(),
+    }
 }
 
 fn ready_pid(updates: &mut Updates, deadline: Instant) -> u32 {

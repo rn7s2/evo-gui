@@ -189,3 +189,74 @@ fn m1_delegation() {
     drive.next(deadline, "Exited", |update| matches!(update, tab_engine::Update::Exited { .. }));
     drive.join_and_assert_gone(deadline);
 }
+
+/// The left column keeps up with a lane's *work*, not only with the list it was
+/// last handed.
+///
+/// A row's glyph follows the `lane-state` events, which the coordinator's stream
+/// carries; the header's count and the row's clocks (`swarm.busy`, the step clock)
+/// are `GET /lanes`' alone, and nothing read that list when a lane's own run ended —
+/// so the header could still count a lane busy while its row said idle. That is the
+/// frame in `docs/screens/03-lane-todos-dark.png`: "2 lanes · 1 busy" over a lane
+/// whose run was over. What ends a lane's run is its own `settled` (§7.3), which the
+/// tab hears because the lane is the one it watches.
+#[test]
+fn m1_the_lane_list_follows_a_lane_to_idle() {
+    let _guard = one_swarm();
+    let fixture = fixture(2);
+    let mut drive = Drive::start(spec(&fixture, 2));
+    let deadline = Instant::now() + Duration::from_secs(240);
+
+    drive.wait_connected(Agent::Coordinator, deadline);
+    drive.select(AgentKey::Lane(1));
+    drive.wait_lanes_idle(deadline, 2);
+
+    // A lane's own turn, and a slow one: `SLOW` makes the stub stream its answer
+    // over seconds, so the row is working for a while rather than for a millisecond.
+    drive.prompt(1, r#"CALL delegate {"lane":1,"task":"SLOW write up what you changed"}"#);
+    drive.wait_for_update(deadline, "the lane streaming", |update| {
+        matches!(update, Update::Event { agent: Agent::Lane(1), kind, .. } if kind == "text-delta")
+    });
+    // While it streams, its row is the working glyph — the centre header's too.
+    drive.wait_model(deadline, "lane 1 working", |model| {
+        model.lanes().lane(1).map(|row| row.status) == Some(LaneStatus::Working)
+    });
+
+    // And the header counts it: `/lanes` is read while the lane is still working
+    // (the coordinator's run settled first — its own read-back).
+    drive.wait_model(deadline, "the header counting the busy lane", |model| {
+        model.lanes().busy() == 1
+    });
+
+    // The run ends. The lane says so on the stream being watched.
+    drive.wait_for_update(deadline, "the lane settling", |update| {
+        matches!(update, Update::Event { agent: Agent::Lane(1), kind, .. } if kind == "settled")
+    });
+    drive.wait_model(deadline, "lane 1 idle", |model| {
+        model.lanes().lane(1).map(|row| row.status) == Some(LaneStatus::Idle)
+    });
+    // The header has to agree with the rows it sits above: the lane is up and idle,
+    // so nothing is busy.
+    drive.wait_model(deadline, "the header back to nothing busy", |model| {
+        model.lanes().busy() == 0
+    });
+
+    // …and the tab asks the swarm, rather than going on looking at the list it read
+    // while the lane was working: a fresh `/lanes` arrives, with lane 1 idle and the
+    // swarm's own count at zero. (The old engine read the list at boot and on a
+    // launch announcement, so nothing it held could have moved on its own.)
+    let mark = drive.updates().len();
+    let read = drive.wait_for_update_since(mark, deadline, "a lane list read after the lane went idle", |update| {
+        matches!(update, Update::Lanes { raw }
+            if raw["swarm"]["busy"].as_u64() == Some(0)
+                && raw["lanes"].as_array().into_iter().flatten().any(|lane| {
+                    lane["n"] == 1 && lane["state"] == "idle"
+                }))
+    });
+    let Update::Lanes { raw } = read else { unreachable!() };
+    eprintln!("m1: the list came back with busy {}: {}", raw["swarm"]["busy"], raw["lanes"]);
+
+    drive.shutdown();
+    drive.next(deadline, "Exited", |update| matches!(update, Update::Exited { .. }));
+    drive.join_and_assert_gone(deadline);
+}

@@ -266,6 +266,16 @@ impl Revisions {
             }
         }
     }
+
+    /// How many views of this agent have been read: zero means none ever was, so a
+    /// fetch that failed (which spends no revision — see [`Engine::resync`]) has not
+    /// been made good yet.
+    fn get(&self, agent: Agent) -> u64 {
+        match agent {
+            Agent::Coordinator => self.coordinator,
+            Agent::Lane(n) => self.lanes.get(&n).copied().unwrap_or(0),
+        }
+    }
 }
 
 /// A live SSE stream and the thread that tags its messages with their agent.
@@ -454,8 +464,16 @@ impl Engine {
         self.lane_states.values().any(|state| state == "starting")
     }
 
-    /// A `lane-state` event's lane, remembered — and, when it says the lane is
-    /// `starting`, the deferred read of [`Engine::arm_lanes_refetch`].
+    /// A `lane-state` event's lane, remembered — and the list asked again shortly.
+    ///
+    /// Two reasons a lane's state moving means a read:
+    ///
+    /// * the header's count and the row's clocks (`swarm.busy`, `step_age`,
+    ///   `reports`) are `/lanes`' alone, so a list read before the event leaves the
+    ///   header counting a lane the row below it has already stopped counting;
+    /// * a lane that comes up `idle` is announced by nobody at all (see
+    ///   `LANES_DEBOUNCE`), so a `starting` event needs the read that says what it
+    ///   became.
     fn note_lane_state(&mut self, data: &Value) {
         let (Some(n), Some(state)) = (
             data.get("lane").and_then(Value::as_u64).map(|n| n as u32),
@@ -463,20 +481,20 @@ impl Engine {
         ) else {
             return;
         };
-        if state == "starting" {
-            // A lane is being launched: what it comes up as is a transition the
-            // swarm will not announce (see `LANES_DEBOUNCE`), so ask shortly.
-            if self.lanes_due.is_none() {
-                self.lanes_tries = 0;
-            }
-            self.arm_lanes_refetch();
+        if state == "starting" && self.lanes_due.is_none() {
+            // A lane is being launched: follow it up (see `LANES_FOLLOWUPS`) as well
+            // as asking once.
+            self.lanes_tries = 0;
         }
+        self.arm_lanes_refetch();
         self.lane_states.insert(n, state.to_owned());
     }
 
     /// Ask `/lanes` again a moment from now, unless one such read is already
-    /// pending — the debounce that keeps a boot's per-lane announcements, a watched
-    /// lane connecting, and a `settled` from becoming a burst of reads.
+    /// pending — the debounce that keeps a boot's per-lane announcements, a lane's
+    /// state moving, a watched lane connecting, and a `settled` from becoming a
+    /// burst of reads (throttle, not polling: every read here has an event behind
+    /// it, §2.5).
     fn arm_lanes_refetch(&mut self) {
         if self.lanes_due.is_some() {
             return;
@@ -656,14 +674,26 @@ impl Engine {
     /// Refetch an agent's view and emit it with a fresh revision. The coordinator
     /// gets its transcript and state; a lane gets its transcript. `lanes` also
     /// refetches the lane list (a restart can move it).
+    ///
+    /// A revision is spent only by a view that actually came back. A fetch that
+    /// failed — a row clicked before the lane behind it was up, a connection that
+    /// dropped in between — must not consume a number, or the *next* read would
+    /// arrive as revision 2 and every reader would have to wonder what revision 1
+    /// said; [`Revisions::get`] would also stop saying whether a lane's rows were
+    /// ever read, which is what tells the first connect to read them.
     fn resync(&mut self, client: &Client, agent: Agent, lanes: bool) {
         match agent {
             Agent::Coordinator => {
+                let transcript = client.transcript(None).ok();
+                let state = client.state().ok();
+                if transcript.is_none() && state.is_none() {
+                    return;
+                }
                 let revision = self.revisions.next(agent);
-                if let Ok(transcript) = client.transcript(None) {
+                if let Some(transcript) = transcript {
                     self.send(Update::Transcript { agent, revision, raw: transcript.raw });
                 }
-                if let Ok(state) = client.state() {
+                if let Some(state) = state {
                     self.send(Update::State { revision, raw: state.raw });
                 }
                 if lanes {
@@ -671,9 +701,14 @@ impl Engine {
                 }
             }
             Agent::Lane(n) => {
+                let Ok(transcript) = client.lane_transcript(n, None) else { return };
                 let revision = self.revisions.next(agent);
-                if let Ok(transcript) = client.lane_transcript(n, None) {
-                    self.send(Update::Transcript { agent, revision, raw: transcript.raw });
+                self.send(Update::Transcript { agent, revision, raw: transcript.raw });
+                if lanes {
+                    // A lane's run ending (`settled` on the lane's own stream, which
+                    // is the one the tab watches) moves what `/lanes` reports about
+                    // it: whether it is busy, and for how long it has been.
+                    self.fetch_lanes(client);
                 }
             }
         }
@@ -778,10 +813,17 @@ impl Engine {
                     // for the coordinator the lane list too.
                     self.resync(client, agent, agent == Agent::Coordinator);
                 } else if agent != Agent::Coordinator {
-                    // The lane that is being watched answered for the first time:
-                    // it is up, and the lane list was read while it was still
-                    // coming up. Ask it again (debounced, so a boot's own
+                    // The lane that is being watched answered for the first time: it
+                    // is up at last, and the lane list was read while it was still
+                    // coming up. Its rows are read here too if showing it never got
+                    // them — a row clicked while the lane was down asks the swarm for
+                    // a transcript with nothing behind it — because the stream
+                    // connecting is the first moment the lane can answer. The list is
+                    // asked again either way (debounced, so a boot's own
                     // announcements coalesce with this).
+                    if self.revisions.get(agent) == 0 {
+                        self.resync(client, agent, false);
+                    }
                     self.arm_lanes_refetch();
                 }
                 Liveness::Alive
@@ -810,9 +852,11 @@ impl Engine {
                 if agent == Agent::Coordinator && kind == "lane-state" {
                     self.note_lane_state(&data);
                 }
-                // `settled` is a run finishing, and a natural moment to re-read the
-                // lane list: `/lanes` carries what the stream does not — the task
-                // and report counts, the step clock, whether a lane is up at all.
+                // `settled` is a run finishing — the coordinator's or the watched
+                // lane's — and a natural moment to re-read the lane list: `/lanes`
+                // carries what the stream does not (the task and report counts, the
+                // step clock, whether a lane is up at all), and it is what the left
+                // column's header counts and its rows' clocks come from.
                 let resync = match kind.as_str() {
                     "hello" | "settled" => Some(true),
                     "gap" | "session-switched" => Some(false),
@@ -826,5 +870,82 @@ impl Engine {
             }
             StreamMsg::Ended => Liveness::Alive,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// An engine with nothing running behind it: enough to ask what a `lane-state`
+    /// event decides, which is all these tests are about. The deferred read the
+    /// decisions schedule finds a dropped receiver and gives up quietly.
+    fn dormant() -> Engine {
+        let (updates, _) = async_channel::unbounded();
+        let (mailbox, _inbox) = async_channel::unbounded();
+        let mut engine = Engine {
+            updates,
+            mailbox: mailbox.clone(),
+            streams: Streams::new(mailbox),
+            revisions: Revisions::default(),
+            coordinator_connected: false,
+            lane_connected: false,
+            want_shutdown: false,
+            lane_states: HashMap::new(),
+            lanes_due: None,
+            lanes_tries: 0,
+        };
+        engine.lane_states.insert(1, "idle".to_owned());
+        engine.lane_states.insert(2, "idle".to_owned());
+        engine
+    }
+
+    /// The row's glyph follows the event, but the header above it and the row's
+    /// clocks are `/lanes`' — so a lane whose state moves is a moment to read the
+    /// list, not only a lane that is still `starting`.
+    #[test]
+    fn a_lane_state_that_moves_asks_for_the_list() {
+        let mut engine = dormant();
+        engine.note_lane_state(&json!({ "lane": 1, "state": "working" }));
+        assert!(engine.lanes_due.is_some(), "a lane going working asks for the list");
+        assert_eq!(engine.lane_states.get(&1).map(String::as_str), Some("working"));
+
+        let mut engine = dormant();
+        engine.note_lane_state(&json!({ "lane": 2, "state": "idle" }));
+        assert!(engine.lanes_due.is_some(), "so does one going idle");
+    }
+
+    /// A launch announcement is what the follow-up episode exists for: the swarm
+    /// never announces the state a lane comes up *as* (`sync-lane-state :announce
+    /// nil`), so the read has to be repeated while a lane is still `starting`.
+    #[test]
+    fn a_launch_announcement_starts_the_follow_ups() {
+        let mut engine = dormant();
+        engine.lanes_tries = 7;
+        engine.note_lane_state(&json!({ "lane": 2, "state": "starting" }));
+        assert_eq!(engine.lanes_tries, 0, "a new launch is a new episode");
+        assert!(engine.lanes_due.is_some());
+        assert_eq!(engine.lane_states.get(&2).map(String::as_str), Some("starting"));
+
+        // …and the follow-ups stop once no lane is starting.
+        let mut engine = dormant();
+        engine.note_lane_state(&json!({ "lane": 2, "state": "starting" }));
+        assert!(engine.lanes_coming_up());
+        engine.note_lane_state(&json!({ "lane": 2, "state": "idle" }));
+        assert!(!engine.lanes_coming_up(), "the episode is over when the lane is up");
+    }
+
+    /// One read per debounce window: a boot's per-lane announcements — or a lane
+    /// settling and the coordinator's run ending at the same moment — must not
+    /// become a burst of reads.
+    #[test]
+    fn one_read_per_debounce_window() {
+        let mut engine = dormant();
+        engine.note_lane_state(&json!({ "lane": 1, "state": "starting" }));
+        let due = engine.lanes_due.expect("a read is pending");
+        engine.note_lane_state(&json!({ "lane": 2, "state": "starting" }));
+        engine.arm_lanes_refetch();
+        assert_eq!(engine.lanes_due, Some(due), "the pending read is the one that happens");
     }
 }

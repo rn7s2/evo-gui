@@ -19,7 +19,11 @@ pub struct SwarmInfo {
     pub dir: String,
     pub cwd: String,
     pub workers: u64,
-    /// How many lanes are working or compacting.
+    /// How many lanes are working or compacting, as `/lanes` counted them.
+    ///
+    /// Kept faithful to the payload, but not what the header shows: the count moves
+    /// on with every lane-state event, and this one is a moment. [`LaneList::busy`]
+    /// counts the rows instead.
     pub busy: u64,
     pub stopping: bool,
 }
@@ -65,8 +69,14 @@ impl LaneRow {
 
     /// The step clock the left column shows while the lane works, as the swarm's own
     /// `lane-status-line` writes it (`swarm/tools.lisp`): `45s`, `3m`, `1h2m`.
+    ///
+    /// `None` unless the lane is working or compacting: the swarm reports a step age
+    /// only for those states (`swarm/state.lisp`'s `lane-snapshot` puts
+    /// `:step-age (and … (member (lane-state lane) '(:working :compacting)) …)`), so a
+    /// row that kept one after an event said the lane went idle would be showing a
+    /// clock the swarm itself has stopped.
     pub fn step_clock(&self) -> Option<String> {
-        self.step_age.map(short_duration)
+        self.is_busy().then(|| self.step_age.map(short_duration)).flatten()
     }
 
     /// The task as the left column shows it: one line, truncated. The swarm truncates the
@@ -239,12 +249,19 @@ impl LaneList {
         self.lanes.iter().find(|row| row.n == n)
     }
 
-    /// How many lanes are working or compacting.
+    /// How many lanes are working or compacting — counted from the rows, which is
+    /// what the header sits above and labels.
+    ///
+    /// Deliberately not `swarm.busy`: that is the same fact, but as of the last
+    /// `GET /lanes`, and a lane's state moves on the stream — a `lane-state` event,
+    /// or a lane's own `settled` — with no read behind it. Counting the snapshot's
+    /// number there is what let the header outlive its lanes: the capture in
+    /// `docs/screens/03-lane-todos-dark.png` says `2 lanes · 1 busy` over two idle
+    /// rows, the count left over from a read taken while lane 1 was working. The
+    /// rows are the fresher of the two (they take the events as well as the reads),
+    /// so a header that disagrees with them can only be wrong.
     pub fn busy(&self) -> u64 {
-        match &self.swarm {
-            Some(swarm) => swarm.busy,
-            None => self.lanes.iter().filter(|row| row.is_busy()).count() as u64,
-        }
+        self.lanes.iter().filter(|row| row.is_busy()).count() as u64
     }
 }
 

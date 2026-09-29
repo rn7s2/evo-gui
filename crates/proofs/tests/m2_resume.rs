@@ -6,17 +6,22 @@
 //! coordinator model) and hands back the `--resume` argument, which a new tab
 //! starts with. What comes back is a real swarm reading its own journal.
 //!
+//! The last step is the app's own list: `app.json`'s recents are merged over the
+//! scan, and a session that was still open when the app last quit comes first even
+//! though a newer swarm's journal sits above it in the scan (§9.5).
+//!
 //! Run with `CARGO_TARGET_DIR=target/proofs cargo test -p proofs --test m2_resume`.
 
 mod common;
 
 use std::time::{Duration, Instant};
 
-use common::{fixture, one_swarm, row_summary, spec, Drive};
+use common::{fixture, one_swarm, row_summary, spec, spec_at, Drive};
 use session::RowKind;
 use store::history::{self, HistorySource, ScanBudget};
-use swarm_client::harness::STUB_MODEL;
-use tab_engine::{Agent, TabSpec, Update};
+use store::{AppState, Recent, Root};
+use swarm_client::harness::{Fixture, STUB_MODEL};
+use tab_engine::{Agent, Update};
 
 #[test]
 fn m2_resume() {
@@ -95,20 +100,86 @@ fn m2_resume() {
     );
     eprintln!("m2: history row {:?} {}", entry.folder_name(), entry.when);
 
+    // --- a second, newer swarm ----------------------------------------------
+    // So the flag has something to win against: the scan's rule is newest first,
+    // and this journal is written after the one we mean to flag.
+    run_once(&fixture, "second-swarm", 1, "m2 the newer swarm", deadline);
+    let scanned = history::scan(&sessions_dir, &ScanBudget::default());
+    assert_eq!(scanned.entries.len(), 2, "both journals: {:?}", scanned.entries);
+    let newer = scanned
+        .entries
+        .iter()
+        .find(|entry| entry.session.to_string_lossy() != session_path)
+        .expect("the second swarm's row")
+        .clone();
+    assert!(
+        newer.mtime > entry.mtime,
+        "the second swarm's journal is newer (so the scan alone would show it first): \
+         {} vs {}",
+        newer.mtime,
+        entry.mtime
+    );
+    assert_eq!(
+        scanned.entries[0].session, newer.session,
+        "newest first is what the scan does on its own"
+    );
+
+    // --- the app's recents: what was open at the last quit comes first -------
+    // The desktop's own `app.json`, in a root of its own (the fixture's temp
+    // directory), holding one recent: the session that was still open when the
+    // app last quit, as the app records it — the row as the scan described it,
+    // plus the flag only the app can set.
+    let desktop = Root::at(fixture.dir.join("desktop"));
+    let mut state = AppState::default();
+    let mut recent = Recent::new(&entry.session, &entry.folder, 2).open_at_quit();
+    recent.when = entry.when.clone();
+    state.touch_recent(recent);
+    state.save(&desktop).expect("app.json is written");
+
+    let merged = history::load_history(&desktop, &sessions_dir, &ScanBudget::default());
+    assert_eq!(merged.len(), 2, "the scan and the recents, deduped: {merged:?}");
+    assert_eq!(
+        merged[0].session,
+        std::path::PathBuf::from(&session_path),
+        "the session that was open at the last quit is first: {:?}",
+        merged.iter().map(|e| (&e.session, e.open_at_quit, e.mtime)).collect::<Vec<_>>()
+    );
+    assert!(merged[0].open_at_quit, "and it carries the flag: {:?}", merged[0]);
+    assert_eq!(
+        merged[0].source,
+        HistorySource::Scanned,
+        "the scan knew the swarm; the app only added the flag: {:?}",
+        merged[0]
+    );
+    assert_eq!(merged[0].lanes, 2, "the scan's own row, not a stub: {:?}", merged[0]);
+    assert!(
+        merged[0].mtime < merged[1].mtime,
+        "the flagged row is the *older* one — the flag is what moved it up"
+    );
+    assert_eq!(merged[1].session, newer.session);
+    assert!(!merged[1].open_at_quit, "only the tab that was open carries it");
+    // What the round trip through app.json really said.
+    let stored = AppState::load(&desktop);
+    assert!(
+        stored.recent_for(std::path::Path::new(&session_path)).is_some_and(|recent| recent.open_at_quit),
+        "the flag survived the file: {:?}",
+        stored.recents
+    );
+    eprintln!(
+        "m2: app.json puts {} first (open at last quit, mtime {}), above {} (mtime {})",
+        merged[0].session.display(),
+        merged[0].mtime,
+        merged[1].session.display(),
+        merged[1].mtime
+    );
+    let entry = &merged[0];
+
     // --- resume it, with no --workers ---------------------------------------
     // A resumed swarm keeps the lane count its record has: the tab passes
     // `--resume` alone, exactly as (§7.2) does.
     let tab_dir = fixture.dir.join("resumed-tab");
     std::fs::create_dir_all(&tab_dir).expect("the resumed tab's directory");
-    let mut resumed = TabSpec::new(&fixture.bins.swarm, &entry.folder, &tab_dir)
-        .with_agent_bin(&fixture.bins.agent)
-        .with_resume(entry.session.clone());
-    for (key, value) in fixture.env() {
-        resumed = resumed.with_env(key, value);
-    }
-    for key in fixture.env_remove() {
-        resumed = resumed.with_env_removed(key);
-    }
+    let resumed = spec_at(&fixture, &tab_dir).with_resume(entry.session.clone());
     let mut drive = Drive::start(resumed);
 
     // The earlier conversation is back: the first transcript carries the prompt.
@@ -158,6 +229,27 @@ fn m2_resume() {
     });
 
     // --- nothing left running ----------------------------------------------
+    drive.shutdown();
+    drive.next(deadline, "Exited", |update| matches!(update, Update::Exited { .. }));
+    drive.join_and_assert_gone(deadline);
+}
+
+/// One prompt in a swarm of this fixture's own, taken down again — the point is the
+/// journal it leaves behind and how new that is. No lane is waited for: the
+/// coordinator answers the prompt whether or not a lane is up, and this swarm is
+/// here to be a *newer* row in the scan.
+fn run_once(fixture: &Fixture, name: &str, workers: u16, prompt: &str, deadline: Instant) {
+    let tab_dir = fixture.dir.join(name);
+    std::fs::create_dir_all(&tab_dir).expect("the swarm's tab directory");
+    let mut drive = Drive::start(spec_at(fixture, &tab_dir).with_workers(workers));
+    drive.wait_connected(Agent::Coordinator, deadline);
+    drive.prompt(1, prompt);
+    drive.next(deadline, "the run settling", |update| {
+        matches!(update, Update::Event { agent: Agent::Coordinator, kind, .. } if kind == "settled")
+    });
+    drive.wait_model(deadline, "the coordinator idle", |model| {
+        model.activity() == session::Activity::Idle
+    });
     drive.shutdown();
     drive.next(deadline, "Exited", |update| matches!(update, Update::Exited { .. }));
     drive.join_and_assert_gone(deadline);
