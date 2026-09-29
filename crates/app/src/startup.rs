@@ -104,8 +104,10 @@ pub fn start(cx: &mut App) {
                     ""
                 }
             ));
-            let error = (!scan_sessions.is_dir())
-                .then(|| format!("{} could not be read", scan_sessions.display()));
+            // A scan of a directory that is not there yet — the first run, before
+            // evo has written a journal — is an empty history, not a failure:
+            // `store` decides which of the two this was (§9.5).
+            let error = history::unreadable(&scan_sessions);
             if let Some(error) = &error {
                 scan_log.warn(format!("history: {error}"));
             }

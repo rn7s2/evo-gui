@@ -195,6 +195,23 @@ pub fn scan_default(budget: &ScanBudget) -> ScanOutcome {
     scan(&sessions_dir(), budget)
 }
 
+/// What to tell a person about a sessions directory the scan could not walk, or
+/// `None` when there is nothing to tell.
+///
+/// `~/.evo/sessions` does not exist until evo has written its first journal, so a
+/// first run walks nothing and finds nothing — the empty state ("No resumable
+/// swarms yet"), not a read failure (§9.5). What is worth saying is a path that is
+/// there and cannot be used: a file where the directory belongs, or a directory
+/// this process may not open. The wording is the app's, so a caller that shows
+/// `Some` shows what it always showed.
+pub fn unreadable(dir: &Path) -> Option<String> {
+    match fs::read_dir(dir) {
+        Ok(_) => None,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(_) => Some(format!("{} could not be read", dir.display())),
+    }
+}
+
 /// Scan on a thread of its own and deliver the result on a channel — the UI
 /// thread never waits for this (§2 rule 6).
 pub fn scan_in_background(dir: PathBuf, budget: ScanBudget) -> Receiver<ScanOutcome> {
@@ -867,6 +884,44 @@ mod tests {
         assert_eq!(outcome.entries.len(), 0);
         assert_eq!(outcome.files_seen, 0);
         assert!(!outcome.stopped_early);
+    }
+
+    #[test]
+    fn a_sessions_directory_that_is_not_there_yet_has_nothing_to_report() {
+        let root = temp_root("first-run");
+        let dir = root.path().join("sessions");
+        assert!(!dir.exists());
+
+        // The first run of the app: no `~/.evo/sessions` until evo writes a
+        // journal. An empty scan is the answer, and there is no error to show.
+        assert_eq!(unreadable(&dir), None);
+        let outcome = scan(&dir, &ScanBudget::default());
+        assert!(outcome.entries.is_empty() && outcome.files_seen == 0);
+    }
+
+    #[test]
+    fn a_sessions_directory_that_can_be_walked_has_nothing_to_report() {
+        let root = temp_root("empty-but-there");
+        let dir = root.path().join("sessions");
+        fs::create_dir_all(dir.join("-Users-x-q")).unwrap();
+        assert_eq!(unreadable(&dir), None);
+        fs::remove_dir_all(root.path()).unwrap();
+    }
+
+    #[test]
+    fn a_file_where_the_sessions_directory_belongs_is_reported() {
+        let root = temp_root("file-not-dir");
+        let dir = root.path().join("sessions");
+        fs::create_dir_all(root.path()).unwrap();
+        fs::write(&dir, "not a directory").unwrap();
+
+        let message = unreadable(&dir).expect("a path that cannot be walked is worth saying");
+        assert!(message.contains("could not be read"), "{message}");
+        assert!(message.contains("sessions"), "{message}");
+        // And it is a real failure, not a first run: the scan finds nothing there
+        // either, but the tab has something to say this time.
+        assert_eq!(scan(&dir, &ScanBudget::default()).files_seen, 0);
+        fs::remove_dir_all(root.path()).unwrap();
     }
 
     #[test]
