@@ -1,0 +1,6 @@
+[package]
+name = "agent_list"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
