@@ -1,8 +1,8 @@
 //! The todo panel of the selected agent (§7.3, center bottom).
 
 use gpui_kit::{
-    App, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce, Styled as _,
-    TestSupportExt as _, Window, div,
+    div, App, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce, Styled as _,
+    TestSupportExt as _, Window,
 };
 use session::{Todo, TodoStatus};
 

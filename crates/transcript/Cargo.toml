@@ -9,3 +9,4 @@ session = { path = "../session" }
 
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }
+image = "0.25"

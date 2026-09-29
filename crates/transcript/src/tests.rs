@@ -4,8 +4,8 @@
 use gpui_kit::base::TextViewState;
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
-    App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, Styled as _, TestAppContext, TestSupportExt as _, Window, div,
+    div, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, Styled as _, TestAppContext, TestSupportExt as _, Window,
 };
 use session::{Row, RowId, RowKind, Todo, TodoStatus};
 
@@ -168,7 +168,10 @@ fn an_assistant_document_is_retained_across_deltas(cx: &mut TestAppContext) {
     );
     cx.read(|cx| {
         let rendered = second.read(cx).rendered_text();
-        assert!(rendered.as_str().contains("bo"), "the delta is in the document");
+        assert!(
+            rendered.as_str().contains("bo"),
+            "the delta is in the document"
+        );
         assert!(
             !rendered.as_str().contains('#'),
             "the heading is rendered, not shown as source, while the message still grows: {:?}",
@@ -184,7 +187,11 @@ fn an_assistant_document_is_retained_across_deltas(cx: &mut TestAppContext) {
     assert_eq!(first.entity_id(), third.entity_id());
     cx.read(|cx| {
         let rendered = third.read(cx).rendered_text();
-        assert!(rendered.as_str().contains("bold"), "{:?}", rendered.as_str());
+        assert!(
+            rendered.as_str().contains("bold"),
+            "{:?}",
+            rendered.as_str()
+        );
         assert!(!rendered.as_str().contains("**"), "{:?}", rendered.as_str());
     });
 
@@ -261,7 +268,10 @@ fn the_todo_panel_is_hidden_while_the_agent_has_no_todos(cx: &mut TestAppContext
 
     cx.update(|window, cx| {
         window.render_frame(cx);
-        assert!(window.try_find("todo-panel").is_some(), "todos render a panel");
+        assert!(
+            window.try_find("todo-panel").is_some(),
+            "todos render a panel"
+        );
         assert!(window.try_find(("todo-item", 0usize)).is_some());
         assert!(window.try_find(("todo-item", 2usize)).is_some());
     });
@@ -276,7 +286,11 @@ fn thinking_is_hidden_until_the_view_reveals_it(cx: &mut TestAppContext) {
         host.transcript.update(cx, |view, cx| {
             view.replace(
                 1,
-                vec![assistant_with_thinking(1, "Answer.", "Weighing the options…")],
+                vec![assistant_with_thinking(
+                    1,
+                    "Answer.",
+                    "Weighing the options…",
+                )],
                 cx,
             );
         });
@@ -317,13 +331,17 @@ fn a_tool_row_opens_on_click(cx: &mut TestAppContext) {
     cx.update(|window, cx| {
         window.render_frame(cx);
         assert!(
-            window.try_find(("transcript-tool-arguments", 1u64)).is_none(),
+            window
+                .try_find(("transcript-tool-arguments", 1u64))
+                .is_none(),
             "a tool row is a one-liner until it is opened"
         );
         window.click(("transcript-tool", 1u64), cx);
         window.render_frame(cx);
         assert!(
-            window.try_find(("transcript-tool-arguments", 1u64)).is_some(),
+            window
+                .try_find(("transcript-tool-arguments", 1u64))
+                .is_some(),
             "clicking the header opens the row"
         );
     });

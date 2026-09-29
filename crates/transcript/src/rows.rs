@@ -6,8 +6,8 @@
 use gpui_kit::base::{Easing, TextView, TextViewMotion};
 use gpui_kit::TestSupportExt as _;
 use gpui_kit::{
-    AnyElement, App, InteractiveElement as _, IntoElement, ParentElement as _,
-    StatefulInteractiveElement as _, Styled as _, WeakEntity, div,
+    div, AnyElement, App, InteractiveElement as _, IntoElement, ParentElement as _,
+    StatefulInteractiveElement as _, Styled as _, WeakEntity,
 };
 use session::{DimStyle, RowId, RowKind, ToolResult};
 
@@ -45,15 +45,18 @@ pub(crate) fn render_row(
 
     match &row.kind {
         RowKind::User { text, .. } => user_row(row.id, text, &palette),
-        RowKind::Assistant { markdown, thinking, error, .. } => assistant_row(
-            row.id,
+        RowKind::Assistant {
             markdown,
             thinking,
-            error.as_deref(),
-            data,
-            &palette,
-        ),
-        RowKind::Tool { name, arguments, result, .. } => tool_row(
+            error,
+            ..
+        } => assistant_row(row.id, markdown, thinking, error.as_deref(), data, &palette),
+        RowKind::Tool {
+            name,
+            arguments,
+            result,
+            ..
+        } => tool_row(
             row.id,
             name,
             arguments,
@@ -62,9 +65,13 @@ pub(crate) fn render_row(
             view,
             &palette,
         ),
-        RowKind::Report { done, evidence, next, blocked, requests } => report_row(
-            row.id, done, evidence, next, blocked, requests, &palette,
-        ),
+        RowKind::Report {
+            done,
+            evidence,
+            next,
+            blocked,
+            requests,
+        } => report_row(row.id, done, evidence, next, blocked, requests, &palette),
         RowKind::Dim { style, text } => dim_row(row.id, *style, text, &palette),
     }
 }
@@ -189,11 +196,7 @@ fn tool_row(
                 .child(if expanded { "▾" } else { "▸" }),
         )
         .child(div().text_color(palette.foreground).child(name.to_string()))
-        .child(
-            div()
-                .text_color(palette.muted_foreground)
-                .child("—"),
-        )
+        .child(div().text_color(palette.muted_foreground).child("—"))
         .child(div().text_color(status_color).child(status))
         .test_support();
 

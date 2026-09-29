@@ -1,21 +1,31 @@
-//! A window that streams one assistant message into a [`TranscriptView`],
-//! one small chunk every 30 ms, and then appends the rest of a turn's rows.
+//! One assistant message streams into a [`TranscriptView`], one small chunk
+//! every 30 ms, followed by the rest of a turn's rows.
 //!
 //! The markdown source deliberately contains a heading, bold runs, a list, a
 //! table and a fenced code block, and is cut into 12-character chunks so that
 //! half-typed constructs (`**bo`, an open ``` fence, a bisected table row) are
 //! on screen while the message grows.
 //!
-//! Run: `cargo run --example transcript_demo`
+//! ```sh
+//! cargo run --example transcript_demo                    # live window
+//! cargo run --example transcript_demo -- --capture <dir> # render the stream to PNGs
+//! ```
+//!
+//! Capture mode drives the same frames through GPUI's headless Metal renderer,
+//! so the pictures do not depend on a window being on screen — which is what
+//! makes them reproducible on a locked machine.
 
+use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::Sizable as _;
+use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
-    AppContext as _, Bounds, Context, Entity, IntoElement, ParentElement as _, Render, Styled as _,
-    Task, Window, WindowBounds, WindowOptions, div, point, px, size,
+    div, point, px, size, AnyWindowHandle, AppContext as _, Bounds, Context, Entity,
+    HeadlessAppContext, InputEvent as _, IntoElement, MouseMoveEvent, ParentElement as _, Render,
+    ScrollDelta, ScrollWheelEvent, Styled as _, Task, Window, WindowBounds, WindowOptions,
 };
 use session::{DimStyle, Row, RowId, RowKind, Todo, TodoStatus, ToolResult};
 
@@ -24,6 +34,33 @@ use transcript::{TodoPanel, TranscriptView};
 /// How much of the message each delta carries, and how long it waits first.
 const CHUNK_CHARS: usize = 12;
 const CHUNK_DELAY: Duration = Duration::from_millis(30);
+
+/// A live window is screen-shaped; a capture window is tall enough to show a
+/// whole turn at once.
+const WINDOW_SIZE: (f32, f32) = (1000., 760.);
+const CAPTURE_SIZE: (f32, f32) = (1100., 1500.);
+/// A window the finished turn overflows, so the reader can leave the tail.
+const SCROLL_SIZE: (f32, f32) = (1000., 560.);
+
+/// Time to let the stream fade settle before a capture, so the picture shows
+/// the text at full color rather than mid-fade.
+const FADE_SETTLE: Duration = Duration::from_millis(500);
+
+/// The stream positions worth a picture: the chunk count applied, and the file
+/// name. Each one lands while a construct is still half-typed.
+const STAGES: [(usize, &str); 6] = [
+    (6, "01-mid-stream-bold-open.png"),
+    (14, "02-mid-stream-heading-typed.png"),
+    (22, "03-mid-stream-list-partial.png"),
+    (28, "04-mid-stream-table-partial.png"),
+    (34, "05-mid-stream-open-fence.png"),
+    (38, "06-mid-stream-code-partial.png"),
+];
+const MESSAGE_END_SHOT: &str = "07-message-end.png";
+const TURN_SHOT: &str = "08-turn-tool-report-dim.png";
+const THINKING_SHOT: &str = "09-thinking-revealed.png";
+/// The scroller with the reader away from the tail.
+const JUMP_SHOT: &str = "10-scrolled-up-jump-button.png";
 
 const ASSISTANT_ID: RowId = 2;
 
@@ -95,7 +132,13 @@ fn dim_row(id: RowId, style: DimStyle, text: &str) -> Row {
     }
 }
 
-fn tool_row(id: RowId, version: u64, name: &str, arguments: &str, result: Option<ToolResult>) -> Row {
+fn tool_row(
+    id: RowId,
+    version: u64,
+    name: &str,
+    arguments: &str,
+    result: Option<ToolResult>,
+) -> Row {
     Row {
         id,
         version,
@@ -106,6 +149,75 @@ fn tool_row(id: RowId, version: u64, name: &str, arguments: &str, result: Option
             result,
         },
     }
+}
+
+/// The rows of the turn that follow the message: three tool calls (one still
+/// running, one ok, one failed), the lane's report, and the dim lines.
+fn turn_rows() -> Vec<Row> {
+    vec![
+        tool_row(
+            4,
+            1,
+            "read_file",
+            "{\"path\":\"crates/transcript/src/lib.rs\"}",
+            Some(ToolResult {
+                is_error: false,
+                content: "//! transcript — the center column of a tab.\n//!\n//! The view is fed rows from the `session` crate.".into(),
+                content_chars: Some(148),
+            }),
+        ),
+        tool_row(
+            5,
+            1,
+            "bash",
+            "{\"command\":\"cargo test -p transcript\"}",
+            Some(ToolResult {
+                is_error: true,
+                content: "error: could not compile `transcript` (lib)".into(),
+                content_chars: Some(45),
+            }),
+        ),
+        tool_row(
+            6,
+            1,
+            "write_file",
+            "{\"path\":\"crates/transcript/src/tests.rs\"}",
+            None,
+        ),
+        Row {
+            id: 7,
+            version: 1,
+            kind: RowKind::Report {
+                done: "Stood up the transcript view: rows, retained markdown documents, todo panel"
+                    .into(),
+                evidence: "cargo test -p transcript: 5 passed".into(),
+                next: "".into(),
+                blocked: "".into(),
+                requests: "".into(),
+            },
+        },
+        dim_row(8, DimStyle::Notice, "compaction finished · 12 messages → 9"),
+        dim_row(9, DimStyle::Dim, "provider-retry 1/3 in 500ms"),
+        dim_row(10, DimStyle::Error, "lane 3 exited: model not registered"),
+        dim_row(11, DimStyle::Status, "run-end · outcome ok"),
+    ]
+}
+
+fn todos() -> Vec<Todo> {
+    vec![
+        Todo {
+            text: "fold /transcript into rows".into(),
+            status: TodoStatus::Done,
+        },
+        Todo {
+            text: "stream one markdown document".into(),
+            status: TodoStatus::InProgress,
+        },
+        Todo {
+            text: "append the tool and report rows".into(),
+            status: TodoStatus::Pending,
+        },
+    ]
 }
 
 /// The markdown source cut into [`CHUNK_CHARS`] pieces, on char boundaries.
@@ -126,11 +238,20 @@ fn chunks(source: &str) -> Vec<String> {
 
 struct Demo {
     transcript: Entity<TranscriptView>,
-    _stream: Task<()>,
+    /// The streaming task, in the live window only.
+    stream: Option<Task<()>>,
 }
 
 impl Demo {
+    /// The window root, streaming the message on its own clock.
     fn new(cx: &mut Context<Self>) -> Self {
+        let mut demo = Self::staged(cx);
+        demo.stream = Some(Self::stream(demo.transcript.clone(), cx));
+        demo
+    }
+
+    /// The same root without the stream task; a capture drives the deltas.
+    fn staged(cx: &mut Context<Self>) -> Self {
         let transcript = cx.new(|cx| TranscriptView::new(cx));
 
         transcript.update(cx, |view, cx| {
@@ -142,29 +263,12 @@ impl Demo {
                 ],
                 cx,
             );
-            view.set_todos(
-                vec![
-                    Todo {
-                        text: "fold /transcript into rows".into(),
-                        status: TodoStatus::Done,
-                    },
-                    Todo {
-                        text: "stream one markdown document".into(),
-                        status: TodoStatus::InProgress,
-                    },
-                    Todo {
-                        text: "append the tool and report rows".into(),
-                        status: TodoStatus::Pending,
-                    },
-                ],
-                cx,
-            );
+            view.set_todos(todos(), cx);
         });
 
-        let stream = Self::stream(transcript.clone(), cx);
         Self {
             transcript,
-            _stream: stream,
+            stream: None,
         }
     }
 
@@ -184,8 +288,7 @@ impl Demo {
             for (index, chunk) in chunks.iter().enumerate() {
                 cx.background_executor().timer(CHUNK_DELAY).await;
                 source.push_str(chunk);
-                let version = index as u64 + 2;
-                let row = assistant_row(version, &source, true);
+                let row = assistant_row(index as u64 + 2, &source, true);
                 transcript.update(cx, |view, cx| {
                     view.upsert(1, row, cx);
                 });
@@ -199,58 +302,17 @@ impl Demo {
             }
 
             // The message ends: one more version, no longer streaming.
-            let version = chunks.len() as u64 + 2;
-            let finished = assistant_row(version, ASSISTANT_SOURCE, false);
+            let finished = assistant_row(chunks.len() as u64 + 2, ASSISTANT_SOURCE, false);
             transcript.update(cx, |view, cx| {
                 view.upsert(1, finished, cx);
             });
             println!("[demo] t+{}ms message-end", epoch_ms() - started);
 
-            cx.background_executor().timer(Duration::from_millis(500)).await;
+            cx.background_executor()
+                .timer(Duration::from_millis(500))
+                .await;
 
-            // The rest of the turn, appended row by row.
-            let rows: Vec<Row> = vec![
-                tool_row(
-                    4,
-                    1,
-                    "read_file",
-                    "{\"path\":\"crates/transcript/src/lib.rs\"}",
-                    Some(ToolResult {
-                        is_error: false,
-                        content: "//! transcript — the center column of a tab.\n//!\n//! The view is fed rows from the `session` crate.".into(),
-                        content_chars: Some(148),
-                    }),
-                ),
-                tool_row(
-                    5,
-                    1,
-                    "bash",
-                    "{\"command\":\"cargo test -p transcript\"}",
-                    Some(ToolResult {
-                        is_error: true,
-                        content: "error: could not compile `transcript` (lib)".into(),
-                        content_chars: Some(45),
-                    }),
-                ),
-                tool_row(6, 1, "write_file", "{\"path\":\"crates/transcript/src/tests.rs\"}", None),
-                Row {
-                    id: 7,
-                    version: 1,
-                    kind: RowKind::Report {
-                        done: "Stood up the transcript view: rows, retained markdown documents, todo panel".into(),
-                        evidence: "cargo test -p transcript: 5 passed".into(),
-                        next: "".into(),
-                        blocked: "".into(),
-                        requests: "".into(),
-                    },
-                },
-                dim_row(8, DimStyle::Notice, "compaction finished · 12 messages → 9"),
-                dim_row(9, DimStyle::Dim, "provider-retry 1/3 in 500ms"),
-                dim_row(10, DimStyle::Error, "lane 3 exited: model not registered"),
-                dim_row(11, DimStyle::Status, "run-end · outcome ok"),
-            ];
-
-            for (offset, row) in rows.into_iter().enumerate() {
+            for (offset, row) in turn_rows().into_iter().enumerate() {
                 transcript.update(cx, |view, cx| {
                     view.upsert(1, row, cx);
                 });
@@ -259,7 +321,9 @@ impl Demo {
                     epoch_ms() - started,
                     offset + 1
                 );
-                cx.background_executor().timer(Duration::from_millis(120)).await;
+                cx.background_executor()
+                    .timer(Duration::from_millis(120))
+                    .await;
             }
 
             // The per-view thinking toggle: dim text, hidden until asked for.
@@ -313,35 +377,224 @@ impl Render for Demo {
                             })),
                     ),
             )
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .child(self.transcript.clone()),
-            )
+            .child(div().flex_1().min_h_0().child(self.transcript.clone()))
             .child(TodoPanel::new(self.transcript.read(cx).todos()))
     }
 }
 
-fn main() {
+fn window_options(window_size: (f32, f32), show: bool) -> WindowOptions {
+    WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(Bounds {
+            origin: point(px(100.), px(100.)),
+            size: size(px(window_size.0), px(window_size.1)),
+        })),
+        titlebar: Some(gpui_kit::TitlebarOptions {
+            title: Some("evo-desktop transcript demo".into()),
+            appears_transparent: false,
+            traffic_light_position: None,
+        }),
+        focus: show,
+        show,
+        ..Default::default()
+    }
+}
+
+fn run_window() {
     gpui_kit::application()
         .with_assets(gpui_kit::assets::Assets)
         .run(|cx| {
             gpui_kit::init(cx);
-            let options = WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(Bounds {
-                    origin: point(px(100.), px(100.)),
-                    size: size(px(1000.), px(760.)),
-                })),
-                titlebar: Some(gpui_kit::TitlebarOptions {
-                    title: Some("evo-desktop transcript demo".into()),
-                    appears_transparent: false,
-                    traffic_light_position: None,
-                }),
-                focus: true,
+            gpui_kit::open_window(window_options(WINDOW_SIZE, true), cx, |_window, cx| {
+                cx.new(|cx| Demo::new(cx))
+            })
+            .expect("open the demo window");
+        });
+}
+
+/// Render the stream to one PNG per [`STAGES`] entry, then the finished turn.
+fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    std::fs::create_dir_all(dir)?;
+
+    let mut cx = HeadlessAppContext::with_platform(
+        gpui_kit::platform::current_platform(true).text_system(),
+        std::sync::Arc::new(gpui_kit::assets::Assets),
+        gpui_kit::platform::current_headless_renderer,
+    );
+    cx.update(gpui_kit::init);
+
+    let (window, demo) = open_capture_window(&mut cx, CAPTURE_SIZE)?;
+
+    let chunks = chunks(ASSISTANT_SOURCE);
+    let mut source = String::new();
+
+    for (index, chunk) in chunks.iter().enumerate() {
+        source.push_str(chunk);
+        let markdown = source.clone();
+        let version = index as u64 + 2;
+        demo.update(&mut cx, |demo, cx| {
+            demo.transcript.update(cx, |view, cx| {
+                view.upsert(1, assistant_row(version, &markdown, true), cx);
+            });
+        });
+
+        let applied = index + 1;
+        if let Some((_, name)) = STAGES.iter().find(|(at, _)| *at == applied) {
+            shot(&mut cx, window, dir, name)?;
+        }
+    }
+
+    demo.update(&mut cx, |demo, cx| {
+        demo.transcript.update(cx, |view, cx| {
+            view.upsert(
+                1,
+                assistant_row(chunks.len() as u64 + 2, ASSISTANT_SOURCE, false),
+                cx,
+            );
+        });
+    });
+    shot(&mut cx, window, dir, MESSAGE_END_SHOT)?;
+
+    for row in turn_rows() {
+        demo.update(&mut cx, |demo, cx| {
+            demo.transcript.update(cx, |view, cx| {
+                view.upsert(1, row.clone(), cx);
+            });
+        });
+    }
+    shot(&mut cx, window, dir, TURN_SHOT)?;
+
+    demo.update(&mut cx, |demo, cx| {
+        demo.transcript
+            .update(cx, |view, cx| view.set_show_thinking(true, cx));
+    });
+    shot(&mut cx, window, dir, THINKING_SHOT)?;
+
+    // The reader leaves the tail: in a window the turn overflows, the scroller
+    // offers its jump affordance.
+    let (short, short_demo) = open_capture_window(&mut cx, SCROLL_SIZE)?;
+    install_turn(&mut cx, &short_demo);
+    let mut following = wheel(&mut cx, short, &short_demo, px(240.), 8)?;
+    if following {
+        following = wheel(&mut cx, short, &short_demo, px(-240.), 8)?;
+    }
+    println!("[capture] following the tail after the wheel: {following}");
+    // The jump affordance fades in on the app clock, which the headless
+    // context only advances when asked.
+    cx.advance_clock(Duration::from_millis(400));
+    shot(&mut cx, short, dir, JUMP_SHOT)?;
+
+    Ok(())
+}
+
+fn open_capture_window(
+    cx: &mut HeadlessAppContext,
+    size: (f32, f32),
+) -> Result<(AnyWindowHandle, Entity<Demo>), Box<dyn std::error::Error>> {
+    let (handle, demo) = cx.update(|cx| {
+        gpui_kit::open_window(window_options(size, false), cx, |_window, cx| {
+            cx.new(|cx| Demo::staged(cx))
+        })
+    })?;
+    Ok((handle.into(), demo))
+}
+
+/// Replay the finished turn into a window as one rebuild, the way `/transcript`
+/// installs it.
+fn install_turn(cx: &mut HeadlessAppContext, demo: &Entity<Demo>) {
+    let mut rows = vec![
+        user_row(1, "Render my transcript: markdown live while it streams."),
+        dim_row(3, DimStyle::Status, "run-start · turn 1"),
+        assistant_row(
+            chunks(ASSISTANT_SOURCE).len() as u64 + 2,
+            ASSISTANT_SOURCE,
+            false,
+        ),
+    ];
+    rows.extend(turn_rows());
+
+    demo.update(cx, |demo, cx| {
+        demo.transcript.update(cx, |view, cx| {
+            view.replace(1, rows, cx);
+            view.set_show_thinking(true, cx);
+        });
+    });
+}
+
+/// Send `times` wheel steps of `y` px at the window's centre — moving the
+/// pointer there first, as a real scroll needs the list under the cursor — and
+/// answer whether the transcript is still following its tail.
+fn wheel(
+    cx: &mut HeadlessAppContext,
+    window: AnyWindowHandle,
+    demo: &Entity<Demo>,
+    y: gpui_kit::Pixels,
+    times: usize,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let position = cx
+        .update_window(window, |_, window, _| window.bounds())?
+        .center();
+
+    for _ in 0..times {
+        cx.update_window(window, |_, window, cx| {
+            window.dispatch_event(
+                MouseMoveEvent {
+                    position,
+                    pressed_button: None,
+                    modifiers: Default::default(),
+                }
+                .to_platform_input(),
+                cx,
+            );
+            let wheel = ScrollWheelEvent {
+                position,
+                delta: ScrollDelta::Pixels(point(px(0.), y)),
                 ..Default::default()
             };
-            gpui_kit::open_window(options, cx, |_window, cx| cx.new(|cx| Demo::new(cx)))
-                .expect("open the demo window");
-        });
+            window.dispatch_event(wheel.to_platform_input(), cx);
+            window.render_frame(cx);
+        })?;
+    }
+
+    Ok(cx.update(|cx| {
+        let transcript = demo.read(cx).transcript.clone();
+        transcript.read(cx).is_following_tail(cx)
+    }))
+}
+
+/// Let the stream fade finish, draw a frame, and save its pixels.
+fn shot(
+    cx: &mut HeadlessAppContext,
+    window: AnyWindowHandle,
+    dir: &Path,
+    name: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    std::thread::sleep(FADE_SETTLE);
+    cx.update_window(window, |_, window, cx| window.render_frame(cx))?;
+    let image = cx.capture_screenshot(window)?;
+    let path = dir.join(name);
+    image.save(&path)?;
+    println!(
+        "[capture] {}x{} -> {}",
+        image.width(),
+        image.height(),
+        path.display()
+    );
+    Ok(())
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.as_slice() {
+        [] => run_window(),
+        [flag, dir] if flag == "--capture" => {
+            if let Err(error) = capture(Path::new(dir)) {
+                eprintln!("capture failed: {error}");
+                std::process::exit(1);
+            }
+        }
+        _ => {
+            eprintln!("usage: transcript_demo [--capture <dir>]");
+            std::process::exit(2);
+        }
+    }
 }

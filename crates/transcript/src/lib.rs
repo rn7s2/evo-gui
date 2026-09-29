@@ -101,8 +101,8 @@ impl TranscriptData {
                 document.update(cx, |state, cx| state.set_text(&markdown, cx));
             }
             None => {
-                let document =
-                    cx.new(|cx| TextViewState::markdown(&markdown, cx).motion(rows::stream_motion()));
+                let document = cx
+                    .new(|cx| TextViewState::markdown(&markdown, cx).motion(rows::stream_motion()));
                 self.documents.insert(id, document);
             }
         }
@@ -285,7 +285,8 @@ impl TranscriptView {
             data.documents.clear();
             data.expanded.clear();
         });
-        self.scroller.update(cx, |scroller, cx| scroller.reset(0, cx));
+        self.scroller
+            .update(cx, |scroller, cx| scroller.reset(0, cx));
         cx.notify();
     }
 
@@ -328,7 +329,8 @@ impl TranscriptView {
             ListChange::Remove(range) => {
                 scroller.splice(range, 0, cx);
             }
-        });    }
+        });
+    }
 }
 
 impl Render for TranscriptView {
@@ -336,10 +338,14 @@ impl Render for TranscriptView {
         let data = self.data.clone();
         let view = cx.weak_entity();
 
-        MessageScroller::new("transcript", self.scroller.clone(), move |index, _window, cx| {
-            let cx: &App = &*cx;
-            rows::render_row(&data.read(cx), index, &view, cx)
-        })
+        MessageScroller::new(
+            "transcript",
+            self.scroller.clone(),
+            move |index, _window, cx| {
+                let cx: &App = &*cx;
+                rows::render_row(&data.read(cx), index, &view, cx)
+            },
+        )
         // Tighter than the chat default: a transcript row is a line of text or
         // a document, not a bubble.
         .with_list_style(StyleRefinement::default().px_4().py_3())
