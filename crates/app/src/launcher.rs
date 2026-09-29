@@ -1,37 +1,35 @@
-//! What every empty tab is shown (§9.4, §9.5), and what a tab created later is
-//! handed the moment it exists.
+//! What every empty tab is shown (§9.4, §9.5) — the catalog and the sessions the
+//! launch found — gathered in one place and handed to the window.
 //!
-//! The app learns three things at launch — the cached catalog, the catalog a
-//! probe found, the sessions the scan found — and every empty tab has to show
-//! them. That includes tabs that do not exist yet: the `+` in the strip, or a
-//! tab the user opens while the scan is still walking, must come up with the
-//! catalog and the history already in place. So the latest of everything lives in
-//! [`LauncherData`] on the [`Shell`], and two paths apply it: a push after each
-//! arrival, and the `observe_new` hook that catches a tab as it is created.
+//! The app owns the three loads; the window owns showing them. So this module
+//! keeps the latest of each ([`Launcher`] on the [`Shell`]) and [`push_launcher_data`]es it
+//! through [`WorkspaceView::set_launcher_data`], which gives it to every tab the
+//! window has *and* to every one it opens later — the `+`, or ⌘T, while the
+//! session scan is still walking.
+//!
+//! The window is not on the update stack while a launch task runs, but it may be
+//! when a menu action does, so the hand-off is deferred to the end of the effect
+//! cycle: by then the window is free to be borrowed (the same trick
+//! `Context::defer_in` uses).
 
-use gpui_kit::{App, Context, Entity, Window};
+use gpui_kit::App;
 use serde_json::Value;
 
 use session::{HistoryEntry, HistorySource, When};
 use store::history::HistorySource as StoreSource;
 use store::model_cache::ModelCache;
 use store::time;
-use swarm_client::{Payload, Registry};
-use workspace::{TabContent, TabState};
 
 use crate::Shell;
 
-/// Everything the launch has learned, in the shapes the empty tab's choosers
-/// want. Kept on the [`Shell`] so it can be applied to a tab that does not exist
-/// yet as well as to the ones that do.
+/// Everything the empty tabs show, in the shapes the window wants (§9.4, §9.5).
 #[derive(Clone, Debug, Default)]
-pub struct LauncherData {
-    /// The catalog: what the disk cache held, or what the probe found.
+pub struct Launcher {
+    /// The catalog: what the disk cache held, what a probe found, or what a live
+    /// server's `/registry` last said. It also carries the kernel api set only a
+    /// probe can learn.
     pub cache: ModelCache,
-    /// A live server's `/registry`, once one has been seen (§9.4). `None` until a
-    /// tab's own swarm has answered.
-    pub registry: Option<Payload<Registry>>,
-    /// The scan's rows, as `session` wants them.
+    /// The resumable swarms the scan found, plus the app's own recents.
     pub history: Vec<HistoryEntry>,
     /// The clock the rows' relative times are measured against.
     pub now: i64,
@@ -47,12 +45,11 @@ pub struct LauncherData {
     pub history_error: Option<String>,
 }
 
-impl LauncherData {
+impl Launcher {
     /// The state a launch starts in: the cache from disk, nothing scanned yet.
-    pub fn new(cache: ModelCache) -> LauncherData {
-        LauncherData {
+    pub fn new(cache: ModelCache) -> Launcher {
+        Launcher {
             cache,
-            registry: None,
             history: Vec::new(),
             now: time::now_epoch() as i64,
             offset_seconds: utc_offset_seconds(),
@@ -62,9 +59,28 @@ impl LauncherData {
             history_error: None,
         }
     }
+
+    /// This, as the window takes it.
+    fn data(&self) -> workspace::LauncherData {
+        // An empty catalog is the same as no catalog: leave the choosers saying
+        // they are still loading rather than claiming a registry of nothing.
+        let known = !self.cache.is_empty();
+        workspace::LauncherData {
+            registry: known.then(|| self.cache.registry.clone()),
+            model_cache: known.then(|| self.cache.clone()),
+            catalog_error: self.catalog_error.clone(),
+            scanning: self.scanning,
+            history: self.history.clone(),
+            now: self.now,
+            offset_seconds: self.offset_seconds,
+            history_error: self.history_error.clone(),
+            home: self.home.clone(),
+        }
+    }
 }
 
-/// The `~` the history paths are shortened around.
+/// The `~` the history paths are shortened around, and where the folder dialog
+/// starts.
 pub fn home_string() -> Option<String> {
     let home = store::paths::home_dir();
     (!home.as_os_str().is_empty()).then(|| home.to_string_lossy().into_owned())
@@ -117,153 +133,127 @@ pub fn history_entries(entries: &[store::history::HistoryEntry]) -> Vec<HistoryE
         .collect()
 }
 
-/// A `/registry` body as the empty tab's setter wants it.
-pub fn registry_payload(raw: Value) -> Option<Payload<Registry>> {
-    let typed = serde_json::from_value::<Registry>(raw.clone()).ok()?;
-    Some(Payload { typed, raw })
-}
+// --- handing it to the window ----------------------------------------------
 
-// --- pushing ---------------------------------------------------------------
-
-/// Give one tab everything the launch has learned. Called on the observer that
-/// catches a newly created tab, and for each tab when something arrives.
-pub fn apply_to(tab: &mut TabContent, window: &mut Window, cx: &mut Context<TabContent>) {
-    let data = cx.global::<Shell>().launcher.clone();
-    if let Some(registry) = &data.registry {
-        tab.set_registry(registry, window, cx);
-    }
-    if !data.cache.is_empty() {
-        tab.set_model_cache(&data.cache, window, cx);
-    }
-    tab.set_catalog_error(data.catalog_error.clone(), cx);
-    tab.set_scanning(data.scanning, cx);
-    tab.set_history_entries(&data.history, data.now, data.offset_seconds, data.home.as_deref(), cx);
-    tab.set_history_error(data.history_error.clone(), cx);
-}
-
-/// Give it to every tab that is still empty.
-pub fn apply_all(cx: &mut App) {
-    for_each_empty_tab(cx, |tab, window, cx| apply_to(tab, window, cx));
-}
-
-/// Run `f` for every tab that has not started a swarm, with the window they live
-/// in. A tab that is already running a swarm has no empty state left to fill.
-fn for_each_empty_tab(cx: &mut App, f: impl Fn(&mut TabContent, &mut Window, &mut Context<TabContent>)) {
-    let Some(view) = crate::quit::view(cx) else {
+/// Give the window everything the launch has learned. This is the only way the
+/// empty tabs are fed, so every arrival ends here.
+pub fn push_launcher_data(cx: &mut App) {
+    let (Some(view), Some(window)) = (crate::quit::view(cx), window_of(cx)) else {
+        log_warn(cx, "launcher: no window to show the catalog and history in");
         return;
     };
-    let Some(window) = window_of(cx) else {
-        return;
-    };
-    let tabs: Vec<Entity<TabContent>> = view.read(cx).tabs().to_vec();
-    for tab in tabs {
-        if !is_empty(&tab, cx) {
-            continue;
-        }
-        let _ = window.update(cx, |_view, window, cx| {
-            tab.update(cx, |tab, cx| f(tab, window, cx));
+    let data = cx.global::<Shell>().launcher.data();
+    // Deferred: the caller may be running *inside* a window update (a menu action
+    // is), and a window on the stack cannot be borrowed again. The end of the
+    // effect cycle gives it back.
+    cx.defer(move |cx| {
+        let shown = window.update(cx, |_root, window, cx| {
+            view.update(cx, |view, cx| view.set_launcher_data(data, window, cx));
         });
-    }
+        if let Err(error) = shown {
+            log_warn(cx, format!("launcher: the window could not be updated: {error}"));
+        }
+    });
 }
 
-/// Whether a tab still has nothing chosen.
-fn is_empty(tab: &Entity<TabContent>, cx: &App) -> bool {
-    matches!(tab.read(cx).state(), TabState::Empty)
-}
-
-/// The window the tabs are in. The app has exactly one (§7.1).
+/// The window the tabs live in. The app has exactly one (§7.1).
 pub fn window_of(cx: &App) -> Option<gpui_kit::AnyWindowHandle> {
     cx.windows().into_iter().next()
 }
 
-/// The window's tabs.
-fn tabs_of(cx: &App) -> Vec<Entity<TabContent>> {
+/// How many tabs the window has, for a log line or a diagnostic.
+pub fn tab_count(cx: &App) -> usize {
     match crate::quit::view(cx) {
-        Some(view) => view.read(cx).tabs().to_vec(),
-        None => Vec::new(),
+        Some(view) => view.read(cx).open_tab_count(),
+        None => 0,
     }
-}
-
-/// The empty tabs, for a test or a diagnostic.
-pub fn empty_tab_count(cx: &App) -> usize {
-    tabs_of(cx).iter().filter(|tab| is_empty(tab, cx)).count()
 }
 
 // --- what the background work reports --------------------------------------
 
 /// The catalog is known: the disk cache at launch, or a probe's answer.
 pub fn set_catalog(cx: &mut App, cache: ModelCache, error: Option<String>) {
-    cx.global_mut::<Shell>().launcher.cache = cache;
-    cx.global_mut::<Shell>().launcher.catalog_error = error;
-    apply_all(cx);
+    {
+        let launch = &mut cx.global_mut::<Shell>().launcher;
+        launch.cache = cache;
+        launch.catalog_error = error;
+    }
+    push_launcher_data(cx);
 }
 
 /// A live server answered `/registry` (§9.4): keep it for the empty tabs and for
-/// the next launch.
-///
-/// **Waiting on lane 1.** Nothing calls this yet: a tab's engine is the
-/// workspace's, and the hook that would report its `Update::Registry` is not
-/// there. Wiring it is one call.
+/// the next launch. Registered as the window's registry hook.
 pub fn on_live_registry(cx: &mut App, raw: Value) {
-    let Some(payload) = registry_payload(raw.clone()) else {
-        return;
-    };
     let (root, log) = {
         let shell = cx.global::<Shell>();
         (shell.root.clone(), shell.log.clone())
     };
-    // The catalog moves forward; the kernel api set only a probe can tell us is
+    // The catalog moves forward; the kernel api set only a probe can learn is
     // kept (§9.4).
-    let cache = {
-        let shell = cx.global::<Shell>();
-        shell.launcher.cache.with_live_registry(raw)
-    };
+    let cache = cx.global::<Shell>().launcher.cache.with_live_registry(raw);
     if let Err(error) = cache.save(&root) {
-        log.error(format!("could not save {}: {error}", root.model_cache().display()));
+        log.error(format!(
+            "could not save {}: {error}",
+            root.model_cache().display()
+        ));
     }
     {
-        let launcher = &mut cx.global_mut::<Shell>().launcher;
-        launcher.cache = cache;
-        launcher.registry = Some(payload);
-        launcher.catalog_error = None;
+        let launch = &mut cx.global_mut::<Shell>().launcher;
+        launch.cache = cache;
+        launch.catalog_error = None;
     }
-    apply_all(cx);
+    push_launcher_data(cx);
+}
+
+/// Register [`on_live_registry`] with the window, so a tab's own swarm refreshes
+/// the catalog (§9.4).
+pub fn hook_live_registry(cx: &mut App) {
+    let Some(view) = crate::quit::view(cx) else {
+        return;
+    };
+    view.update(cx, |view, cx| {
+        view.on_registry(|raw, cx| on_live_registry(cx, raw.clone()), cx);
+    });
 }
 
 /// The scan found what it found. `error` is set when the sessions directory
 /// could not be read at all.
 pub fn set_history(cx: &mut App, entries: Vec<store::history::HistoryEntry>, error: Option<String>) {
-    let entries = history_entries(&entries);
     {
-        let launcher = &mut cx.global_mut::<Shell>().launcher;
-        launcher.history = entries;
-        launcher.now = time::now_epoch() as i64;
-        launcher.offset_seconds = utc_offset_seconds();
-        launcher.home = home_string();
-        launcher.scanning = false;
-        launcher.history_error = error;
+        let launch = &mut cx.global_mut::<Shell>().launcher;
+        launch.history = history_entries(&entries);
+        launch.now = time::now_epoch() as i64;
+        launch.offset_seconds = utc_offset_seconds();
+        launch.home = home_string();
+        launch.scanning = false;
+        launch.history_error = error;
     }
-    apply_all(cx);
+    push_launcher_data(cx);
 }
 
 /// The scan started (`true`) or finished (`false`).
 pub fn set_scanning(cx: &mut App, scanning: bool) {
     cx.global_mut::<Shell>().launcher.scanning = scanning;
-    apply_all(cx);
+    push_launcher_data(cx);
 }
 
 /// The catalog could not be learned: the tabs say so where the loading hint was.
 pub fn set_catalog_error(cx: &mut App, message: Option<String>) {
     cx.global_mut::<Shell>().launcher.catalog_error = message;
-    apply_all(cx);
+    push_launcher_data(cx);
+}
+
+fn log_warn(cx: &App, message: impl AsRef<str>) {
+    cx.global::<Shell>().log.warn(message);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
     use store::history::HistoryEntry as StoreEntry;
     use store::tab::TabModels;
-    use std::path::PathBuf;
 
     fn store_entry(source: StoreSource, when_epoch: Option<u64>, lanes: u32) -> StoreEntry {
         StoreEntry {
@@ -322,12 +312,41 @@ mod tests {
     }
 
     #[test]
-    fn a_registry_body_becomes_the_payload_the_tab_wants() {
-        let raw = serde_json::json!({ "models": [{ "id": "m" }], "apis": ["anthropic-messages"] });
-        let payload = registry_payload(raw.clone()).expect("a registry");
-        assert_eq!(payload.raw, raw);
-        assert_eq!(payload.typed.models.len(), 1);
-        assert!(payload.typed.apis.contains(&"anthropic-messages".to_owned()));
-        assert!(registry_payload(serde_json::json!("not a registry")).is_none());
+    fn an_empty_catalog_is_handed_over_as_nothing_rather_than_an_empty_registry() {
+        let launch = Launcher::new(ModelCache::default());
+        let data = launch.data();
+        assert!(data.registry.is_none(), "the choosers stay on their loading hint");
+        assert!(data.model_cache.is_none());
+        assert!(!data.scanning);
+    }
+
+    #[test]
+    fn a_catalog_is_handed_over_as_both_shapes_the_tabs_take() {
+        let cache = ModelCache {
+            version: 1,
+            fetched_at: "2026-09-29T00:00:00Z".to_owned(),
+            kernel_apis: vec!["anthropic-messages".to_owned()],
+            registry: serde_json::json!({ "models": [{ "id": "m" }], "apis": [] }),
+        };
+        let data = Launcher::new(cache.clone()).data();
+        assert_eq!(data.registry, Some(cache.registry.clone()));
+        assert_eq!(data.model_cache.map(|c| c.kernel_apis), Some(cache.kernel_apis));
+    }
+
+    #[test]
+    fn the_history_and_its_errors_are_carried_through() {
+        let mut launch = Launcher::new(ModelCache::default());
+        launch.history = history_entries(&[store_entry(StoreSource::Scanned, Some(5), 3)]);
+        launch.scanning = false;
+        launch.history_error = Some("no such directory".to_owned());
+        launch.home = Some("/Users/x".to_owned());
+        launch.offset_seconds = 8 * 3600;
+        launch.now = 42;
+        let data = launch.data();
+        assert_eq!(data.history.len(), 1);
+        assert_eq!(data.history_error.as_deref(), Some("no such directory"));
+        assert_eq!(data.home.as_deref(), Some("/Users/x"));
+        assert_eq!(data.offset_seconds, 8 * 3600);
+        assert_eq!(data.now, 42);
     }
 }

@@ -1739,7 +1739,6 @@ dependencies = [
  "serde_json",
  "session",
  "store",
- "swarm_client",
  "tab_engine",
  "workspace",
 ]

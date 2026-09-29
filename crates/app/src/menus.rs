@@ -13,6 +13,12 @@
 //! Registering a *global* handler for an editing action would be wrong: the
 //! handler runs after the focused view's, so it would only ever see the ones the
 //! text field did not want.
+//!
+//! One thing to know about those global handlers: they run while the window is
+//! still on the update stack, so a handler cannot borrow it again — `handle.update`
+//! answers "window not found". The work that needs the window is therefore handed
+//! to [`in_window_later`], which runs at the end of the effect cycle, when it is
+//! free again.
 
 use gpui_kit::component::dialog::AlertDialog;
 use gpui_kit::component::WindowExt as _;
@@ -75,9 +81,9 @@ pub fn install(cx: &mut App) {
         let Some(view) = quit::view(cx) else {
             return;
         };
-        in_window(cx, |window, cx| {
+        in_window_later(cx, move |window, cx| {
             view.update(cx, |view, cx| {
-                view.open_empty_tab(window, cx);
+                view.add_tab(window, cx);
             });
         });
     });
@@ -85,16 +91,15 @@ pub fn install(cx: &mut App) {
         let Some(view) = quit::view(cx) else {
             return;
         };
-        let id = view.read(cx).selected_tab().read(cx).id();
-        in_window(cx, move |window, cx| {
-            view.update(cx, |view, cx| view.close_tab(id, window, cx));
+        in_window_later(cx, move |window, cx| {
+            view.update(cx, |view, cx| view.close_selected_tab(window, cx));
         });
     });
     cx.on_action(|_: &MinimizeWindow, cx: &mut App| {
-        in_window(cx, |window, _cx| window.minimize_window());
+        in_window_later(cx, |window, _cx| window.minimize_window());
     });
     cx.on_action(|_: &ZoomWindow, cx: &mut App| {
-        in_window(cx, |window, _cx| window.zoom_window());
+        in_window_later(cx, |window, _cx| window.zoom_window());
     });
 
     cx.set_menus(menus());
@@ -148,7 +153,7 @@ fn about(cx: &mut App) {
     };
     let version = env!("CARGO_PKG_VERSION");
     log.info(format!("about: evo-desktop {version}"));
-    in_window(cx, move |window, cx| {
+    in_window_later(cx, move |window, cx| {
         window.open_alert_dialog(cx, move |alert: AlertDialog, _window, _cx| {
             alert
                 .title(format!("Evo Desktop {version}"))
@@ -164,13 +169,22 @@ fn about(cx: &mut App) {
     });
 }
 
-/// Run `f` with the app's window: the one window the app opens (§7.1).
-fn in_window(cx: &mut App, f: impl FnOnce(&mut Window, &mut App)) {
+/// Run `f` with the app's window — the one window the app opens (§7.1) — at the
+/// end of this effect cycle.
+///
+/// An action arrives while the window is still on the update stack, so borrowing
+/// it now answers "window not found"; `App::defer` is the way back to it (the
+/// same one `Context::defer_in` takes).
+fn in_window_later(cx: &mut App, f: impl FnOnce(&mut Window, &mut App) + 'static) {
     let Some(handle) = launcher::window_of(cx) else {
         log(cx, "no window to run a menu action in");
         return;
     };
-    let _ = handle.update(cx, |_view, window, cx| f(window, cx));
+    cx.defer(move |cx| {
+        if let Err(error) = handle.update(cx, |_root, window, cx| f(window, cx)) {
+            log(cx, &format!("the window could not be updated: {error}"));
+        }
+    });
 }
 
 fn log(cx: &App, what: &str) {
@@ -226,7 +240,10 @@ mod tests {
             .iter()
             .filter_map(|item| match item {
                 MenuItem::Action { action, os_action, .. } => {
-                    Some(format!("{}:{:?}", action.name(), os_action.is_some()))
+                    // The names are namespaced (`input::SelectAll`); the menu
+                    // cares only which action it is.
+                    let name = action.name().rsplit("::").next().unwrap_or_default();
+                    Some(format!("{name}:{}", os_action.is_some()))
                 }
                 _ => None,
             })

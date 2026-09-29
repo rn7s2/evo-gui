@@ -27,8 +27,8 @@ mod startup;
 
 pub use bounds::{Tracker, window_bounds, window_options};
 pub use launcher::{
-    LauncherData, empty_tab_count, history_entries, on_live_registry, registry_payload,
-    utc_offset_seconds,
+    Launcher, history_entries, hook_live_registry, on_live_registry, push_launcher_data,
+    tab_count, utc_offset_seconds,
 };
 pub use logging::{AppLog, Level, LOG_NAME};
 pub use menus::{CloseTab, NewTab, QuitApp};
@@ -42,7 +42,7 @@ use store::app_state::{AppState, Binaries, Recent};
 use store::model_cache::ModelCache;
 use store::paths::Root;
 use store::single::{Activation, SingleInstance};
-use workspace::{TabContent, WorkspaceView};
+use workspace::WorkspaceView;
 
 /// Everything the app's threads share: where its files are, what the launch
 /// loaded, and the window it is driving.
@@ -59,7 +59,7 @@ pub struct Shell {
     pub tracker: Option<Entity<Tracker>>,
     /// What every empty tab is shown (§9.4, §9.5): the catalog, the history,
     /// and the errors when either could not be learned.
-    pub launcher: LauncherData,
+    pub launcher: Launcher,
     /// The binaries this launch spawns.
     pub binaries: Binaries,
     /// The recents `app.json` held at launch; the session scan merges with them
@@ -88,7 +88,7 @@ impl Shell {
             log,
             binaries,
             recents,
-            launcher: LauncherData::new(cache),
+            launcher: Launcher::new(cache),
             view: None,
             tracker: None,
             quitting: false,
@@ -167,16 +167,6 @@ pub fn run() {
             // The menu bar, its shortcuts, and the app's action handlers.
             menus::install(cx);
 
-            // A tab created later — the `+`, or one opened while the scan is
-            // still walking — starts with what the launch already knows.
-            let observing = cx.observe_new::<TabContent>(|tab, window, cx| {
-                let Some(window) = window else {
-                    return;
-                };
-                launcher::apply_to(tab, window, cx);
-            });
-            cx.update_global::<Shell, _>(|shell, _| shell.subscriptions.push(observing));
-
             let options = bounds::window_options(cx, stored_bounds);
             let opened = gpui_kit::open_window(options, cx, |window, cx: &mut App| {
                 let tracker = cx.new(|cx| Tracker::new(window, cx));
@@ -204,6 +194,9 @@ pub fn run() {
                     false
                 }));
             });
+            // A tab's own swarm answering `/registry` refreshes the catalog
+            // (§9.4); the window passes every live tab's through this.
+            launcher::hook_live_registry(cx);
             let closing = cx.on_window_closed(|cx: &mut App, _id| quit::begin(cx));
             cx.update_global::<Shell, _>(|shell, _| {
                 shell.view = Some(view.downgrade());

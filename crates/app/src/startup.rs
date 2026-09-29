@@ -58,8 +58,8 @@ pub fn start(cx: &mut App) {
     // 1. The cache we already have goes out first.
     launcher::set_catalog(cx, cache.clone(), None);
     log.info(format!(
-        "startup: {} empty tab(s) will show it",
-        launcher::empty_tab_count(cx)
+        "startup: {} tab(s) will show it",
+        launcher::tab_count(cx)
     ));
 
     // 2. The session scan, on the store's own thread, bridged onto an
