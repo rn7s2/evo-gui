@@ -118,7 +118,7 @@ fn boot_reads_and_the_shutdown_ladder() {
         .expect("both lanes should come up idle");
     assert_eq!(lanes.swarm.workers, 2, "{:?}", lanes.raw);
     assert!(!lanes.swarm.id.is_empty());
-    assert_eq!(lanes.swarm.cwd.trim_end_matches('/').len() > 0, true);
+    assert!(!lanes.swarm.cwd.trim_end_matches('/').is_empty());
     assert!(!lanes.swarm.is_stopping());
     assert_eq!(lanes.lanes.len(), 2, "{:?}", lanes.raw);
     let numbers: Vec<u32> = lanes.lanes.iter().map(|lane| lane.n).collect();

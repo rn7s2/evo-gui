@@ -10,6 +10,8 @@ use std::io::{Read, Seek, SeekFrom};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::api::{Client, Health};
@@ -75,6 +77,39 @@ impl Readiness {
             }
         }
         self.features.iter().all(|feature| health.has_feature(feature))
+    }
+}
+
+/// How patiently a cancellation waits for the process to leave on its own,
+/// before `SIGTERM`, and then `SIGKILL` — a boot a caller aborted has to be
+/// over in about a second (§3, and the app's quit path).
+const CANCEL_SHUTDOWN_GRACE: Duration = Duration::from_millis(400);
+const CANCEL_TERM_GRACE: Duration = Duration::from_millis(200);
+/// How long one readiness probe may take. A server that has written its token is
+/// listening, so `/health` answers at once; a short patience keeps an abort from
+/// waiting out a wedged probe.
+const PROBE_TIMEOUT: Duration = Duration::from_millis(400);
+
+/// A flag a caller raises to abort a boot in progress.
+///
+/// [`Server::start_cancellable`] checks it once per poll, so a cancelled boot is
+/// over within about a second: it runs the same shutdown ladder as a normal
+/// stop, only with the short graces above.
+#[derive(Clone, Debug, Default)]
+pub struct BootCancel(Arc<AtomicBool>);
+
+impl BootCancel {
+    pub fn new() -> BootCancel {
+        BootCancel::default()
+    }
+
+    /// Raise it. The boot in progress stops within one poll interval.
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
     }
 }
 
@@ -281,6 +316,19 @@ impl Server {
     /// non-empty and `/health` answers 200 naming what
     /// [`Readiness`](ServerConfig::readiness) expects.
     pub fn start(cfg: &ServerConfig) -> Result<Server> {
+        Server::start_cancellable(cfg, &BootCancel::new())
+    }
+
+    /// Start a server, with a flag a caller can raise to abort the wait for
+    /// readiness — the app's quit path, which must not sit out a slow boot.
+    ///
+    /// A cancelled boot is stopped the ladder's way, only faster: `POST
+    /// /shutdown` when a token and a port are known, then `SIGTERM` after
+    /// [`CANCEL_SHUTDOWN_GRACE`], then `SIGKILL` after [`CANCEL_TERM_GRACE`]. With
+    /// no token or port yet the server is not serving, so there is nothing to
+    /// ask over HTTP — but `SIGTERM` is still an ask, and `SIGKILL` only follows
+    /// if the process ignores it. Nothing is "killed first".
+    pub fn start_cancellable(cfg: &ServerConfig, cancel: &BootCancel) -> Result<Server> {
         let port = match cfg.port {
             Some(port) => port,
             None => free_port()?,
@@ -298,6 +346,17 @@ impl Server {
         let mut client: Option<Client> = None;
 
         loop {
+            if cancel.is_cancelled() {
+                let mut child = child;
+                // Nothing to ask over HTTP until the server has written its token
+                // and we know its port; then `SIGTERM` is the first thing, and
+                // `SIGKILL` only follows if it is ignored.
+                let impatient = client.as_ref().map(|c| c.with_timeout(CANCEL_SHUTDOWN_GRACE));
+                let grace = if impatient.is_some() { CANCEL_SHUTDOWN_GRACE } else { Duration::ZERO };
+                let outcome =
+                    ladder(impatient.as_ref(), &mut child, grace, CANCEL_TERM_GRACE);
+                return Err(Error::Cancelled(outcome.outcome));
+            }
             match child.try_wait() {
                 Ok(Some(status)) => {
                     let tail = log_tail(&cfg.log_path, 40);
@@ -322,10 +381,10 @@ impl Server {
                 port = port_from_log(&log_tail(&cfg.log_path, 400));
             }
             if let (Some(token), Some(port)) = (token.clone(), port) {
-                let probe = client.get_or_insert_with(|| {
-                    Client::loopback(port, token.clone()).with_timeout(Duration::from_secs(5))
-                });
-                if let Ok(health) = probe.health() {
+                let probe = client.get_or_insert_with(|| Client::loopback(port, token.clone()));
+                // A short patience for the probe alone: the client kept for the
+                // app answers with its normal timeout.
+                if let Ok(health) = probe.with_timeout(PROBE_TIMEOUT).health() {
                     if cfg.readiness.matches(&health.typed) {
                         return Ok(Server {
                             child,
@@ -572,9 +631,9 @@ fn spawn(cfg: &ServerConfig, port: u16) -> Result<Child> {
         // Its own process group: one signal reaches the supervisor and the lanes.
         command.process_group(0);
     }
-    Ok(command.spawn().map_err(|e| {
-        Error::Config(format!("cannot run {}: {e}", cfg.bin.display()))
-    })?)
+    command
+        .spawn()
+        .map_err(|e| Error::Config(format!("cannot run {}: {e}", cfg.bin.display())))
 }
 
 /// `evo-swarm serve: listening on http://127.0.0.1:56750/ (token in …)` — the

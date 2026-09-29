@@ -56,8 +56,8 @@ pub use error::{BootFailure, Error, RequestError, Result, StatusError};
 pub use http::{HttpClient, HttpResponse, SseConnection, Token, is_loopback};
 pub use probe::{learn_registry, learn_registry_with};
 pub use server::{
-    Readiness, Resume, SCRUB_ENV, Server, ServerConfig, Shutdown, ShutdownOutcome, log_tail,
-    process_alive,
+    BootCancel, Readiness, Resume, SCRUB_ENV, Server, ServerConfig, Shutdown, ShutdownOutcome,
+    log_tail, process_alive,
 };
 pub use sse::{SseEvent, SseParser};
 pub use stream::{

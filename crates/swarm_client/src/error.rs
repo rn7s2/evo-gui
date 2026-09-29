@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use serde_json::Value;
 
 use crate::api::Envelope;
+use crate::server::ShutdownOutcome;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -25,6 +26,8 @@ pub enum Error {
     Timeout(String),
     /// A server that never became ready, with the tail of its log.
     Boot(Box<BootFailure>),
+    /// A boot a caller aborted, and how the process was stopped.
+    Cancelled(ShutdownOutcome),
     /// The thing we were talking to went away.
     Closed,
     /// Our own call, with something wrong in it.
@@ -36,6 +39,15 @@ impl Error {
     pub fn status(&self) -> Option<&StatusError> {
         match self {
             Error::Status(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// Whether a caller's own [`BootCancel`](crate::server::BootCancel) stopped
+    /// this boot, and how the process went.
+    pub fn cancelled(&self) -> Option<ShutdownOutcome> {
+        match self {
+            Error::Cancelled(outcome) => Some(*outcome),
             _ => None,
         }
     }
@@ -73,6 +85,7 @@ impl fmt::Display for Error {
             Error::Status(s) => write!(f, "{s}"),
             Error::Timeout(m) => write!(f, "timeout: {m}"),
             Error::Boot(b) => write!(f, "boot failed: {}", b.message),
+            Error::Cancelled(outcome) => write!(f, "boot cancelled ({outcome:?})"),
             Error::Closed => write!(f, "connection closed"),
             Error::Config(m) => write!(f, "config: {m}"),
         }
@@ -127,24 +140,27 @@ pub struct RequestError {
 }
 
 /// The statuses of docs/serve.md, one variant each.
+///
+/// The payload is boxed: a `RequestError` carries the whole reply, and an
+/// unboxed one makes every `Result<_, Error>` in the crate 300+ bytes wide.
 #[derive(Clone, Debug)]
 pub enum StatusError {
     /// 400 — bad request: malformed JSON, a missing field, a bad argument.
-    BadRequest(RequestError),
+    BadRequest(Box<RequestError>),
     /// 401 — missing or wrong bearer token.
-    Unauthorized(RequestError),
+    Unauthorized(Box<RequestError>),
     /// 404 — no such endpoint, command, session or entry.
-    NotFound(RequestError),
+    NotFound(Box<RequestError>),
     /// 409 — **not now**: the session is busy; nothing happened.
-    NotNow(RequestError),
+    NotNow(Box<RequestError>),
     /// 405 — the path exists, the method is wrong.
-    MethodNotAllowed(RequestError),
+    MethodNotAllowed(Box<RequestError>),
     /// 422 — the command ran and failed.
-    Unprocessable(RequestError),
+    Unprocessable(Box<RequestError>),
     /// 503 — the server is shutting down.
-    ShuttingDown(RequestError),
+    ShuttingDown(Box<RequestError>),
     /// Anything else, the status kept.
-    Other(RequestError),
+    Other(Box<RequestError>),
 }
 
 impl StatusError {
@@ -156,7 +172,7 @@ impl StatusError {
             .map(str::to_owned)
             .unwrap_or_else(|| text.trim().chars().take(400).collect());
         let envelope = serde_json::from_value::<Envelope>(raw.clone()).ok();
-        let reply = RequestError { status, message, envelope, raw };
+        let reply = Box::new(RequestError { status, message, envelope, raw });
         match status {
             400 => StatusError::BadRequest(reply),
             401 => StatusError::Unauthorized(reply),
@@ -203,3 +219,42 @@ impl fmt::Display for StatusError {
 }
 
 impl std::error::Error for StatusError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every `Result<_, Error>` in the crate is this wide, so the refusal
+    /// payload is boxed: clippy's `result_large_err` thresholds at 128 bytes.
+    #[test]
+    fn the_error_stays_small() {
+        assert!(
+            std::mem::size_of::<Error>() <= 128,
+            "Error is {} bytes",
+            std::mem::size_of::<Error>()
+        );
+        assert!(std::mem::size_of::<StatusError>() <= 64, "{}", std::mem::size_of::<StatusError>());
+    }
+
+    #[test]
+    fn a_reply_is_typed_by_its_status() {
+        let raw = serde_json::json!({ "ok": false, "error": "no run to steer" });
+        let not_now = StatusError::from_reply(409, raw.clone(), "no run to steer");
+        assert!(not_now.is_not_now());
+        assert_eq!(not_now.status(), 409);
+        assert_eq!(not_now.message(), "no run to steer");
+        assert_eq!(not_now.request().status, 409);
+
+        let missing = StatusError::from_reply(404, raw, "no run to steer");
+        assert!(!missing.is_not_now());
+        assert_eq!(missing.status(), 404);
+    }
+
+    #[test]
+    fn a_cancelled_boot_says_how_it_went() {
+        let error = Error::Cancelled(ShutdownOutcome::Terminated);
+        assert_eq!(error.cancelled(), Some(ShutdownOutcome::Terminated));
+        assert_eq!(Error::Closed.cancelled(), None);
+        assert!(error.to_string().contains("cancelled"));
+    }
+}

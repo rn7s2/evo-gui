@@ -678,7 +678,7 @@ impl Client {
         if !reply.is_success() {
             return Err(Error::Status(reply.error()));
         }
-        Ok(reply.json()?)
+        reply.json()
     }
 
     /// `POST /prompt {"text": …}` — the user's turn. It starts a run, or lands
