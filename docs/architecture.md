@@ -28,3 +28,15 @@ a title-only message is not acceptable.
 Every message ends with the trailer `Co-authored-by: EvoAgent <evo@ruiqilei.com>`.
 Lanes do not commit; they end each report with a proposed message in this format, and the coordinator
 commits by explicit paths.
+
+## Verified platform facts (§11)
+
+- **`cx.http_client()`**: gpui-pre 0.3.7 exposes `App::http_client()` (`src/app.rs:1743`, not
+  feature-gated), but every non-test app built through `gpui_kit::application()` gets a
+  `NullHttpClient` (`src/app.rs:182`) whose `send` fails with "No HttpClient available"
+  (`src/app.rs:3226`); test contexts get a `FakeHttpClient`. Nothing in gpui-kit installs a real
+  client. So all I/O uses `swarm_client`'s own blocking HTTP/1.1 client on std threads.
+- **Threading bridge**: GPUI's executor is not tokio's. Worker threads send over `async-channel`;
+  a `cx.spawn` task awaits and applies results through `WeakEntity::update` with a revision check
+  (`crates/workspace/src/bridge.rs`, tests prove the cross-thread transfer and stale-drop). Two tabs
+  streaming at once keep the UI responsive (`crates/workspace/tests/tab_swarm.rs`).
