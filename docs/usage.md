@@ -356,7 +356,9 @@ following; `app.json`'s `theme` field is what is stored (`system`, `light`,
   at all) gets a plain sentence with the raw error on hover. Notices clear
   themselves after a few seconds.
 - **A run ends badly.** The transcript says so in its own rows — compaction,
-  provider retries, and the last word (`Run failed: …`).
+  provider retries, and the failure itself, once: the failing message carries it
+  (`error: …`), and only a failure no message holds is said by the run's own
+  outcome row (`Run failed: …`).
 
 ## Where things are written
 

@@ -1276,24 +1276,32 @@ fn a_run_that_ended_badly_gets_an_outcome_row() {
         other => panic!("unexpected row: {other:?}"),
     }
 
-    // A failed run names what it failed with: the failing assistant message's error, which
-    // is the message whose stop reason *is* the outcome.
+    // A failed run says what it failed with — the failing assistant message's error, which
+    // is the message whose stop reason *is* the outcome. It is the message row that says
+    // it (the row draws it as `error: …`), so the run's outcome adds no row of its own:
+    // the two would be the same sentence twice (`a_failed_run_says_it_once`).
     let mut model = AgentModel::new();
     model.apply_event(
         1,
         "message-end",
         &json!({"stop_reason": "error", "usage": null, "error": "HTTP 529: overloaded"}),
     );
-    model.apply_event(2, "run-end", &json!({"outcome": "error"}));
+    let effect = model.apply_event(2, "run-end", &json!({"outcome": "error"}));
     assert!(
-        model.rows().iter().any(|row| matches!(
-            &row.kind,
-            RowKind::RunOutcome { outcome, text }
-                if outcome == "error" && text == "Run failed: HTTP 529: overloaded"
-        )),
-        "rows: {:?}",
+        !effect.contains(Effect::ROWS),
+        "nothing was added: {effect:?} {:?}",
         model.rows()
     );
+    assert_eq!(
+        mentions(&model, "HTTP 529: overloaded"),
+        1,
+        "{:?}",
+        model.rows()
+    );
+    assert!(model
+        .rows()
+        .iter()
+        .all(|row| !matches!(row.kind, RowKind::RunOutcome { .. })));
 
     // ..., and a run that failed with nothing to quote still says it failed.
     let mut model = AgentModel::new();
@@ -1496,104 +1504,137 @@ fn a_todo_change_replaces_the_whole_list() {
     assert!(model.todos().is_empty());
 }
 
-/// A failed run is published twice — the kernel's own error line, then the run's
+/// A failed run is published twice — the failing message's own error, then the run's
 /// outcome — and the tab says it once.
 ///
-/// `docs/screens/09-bad-run-light.png`: the error-styled `output` row
-/// "error: Provider request failed after 4 attempts: …" and, immediately under it,
-/// the outcome row "Run failed: Provider request failed after 4 attempts: …". The row
-/// that goes is the output one; the outcome stays, because it says the same thing and
-/// says what it was (a run that ended badly).
+/// The events, their order and their shape are a real swarm's, captured from a stub whose
+/// model dies mid-stream (`crates/swarm_client/tests/failed_run_rows.rs` takes that capture
+/// live): `message-end` carrying the error, then `run-end` carrying the outcome. The kernel
+/// emits them in that order — `src/kernel/loop.lisp`'s `(emit-event agent :type
+/// :message-end …)` then `(emit-event agent :type :run-end …)` — and a run's outcome is
+/// `:error` exactly when that message's stop reason is. The failure then reaches the screen
+/// twice over, because the message's row draws its error as `error: M` and the outcome row
+/// would read `Run failed: M`; `docs/screens/09-bad-run.png` caught the pair, one failed run
+/// after another. The message row is the one that stays: it is the message, and it is what a
+/// resync rebuilds rows from (a transcript's failed message carries its `error_message`), so
+/// the outcome adds no row beside it.
 #[test]
 fn a_failed_run_says_it_once() {
-    const FAILURE: &str =
-        "Provider request failed after 4 attempts: Stream ended without a terminal event";
+    const FAILURE: &str = "Provider request failed after 4 attempts: \
+                           Stream ended without a terminal event (truncated response)";
 
+    // One failed run, event for event as the server sent them.
     let mut model = AgentModel::new();
-    model.apply_event(
-        1,
-        "message-end",
-        &json!({ "stop_reason": "error", "usage": null, "error": FAILURE }),
-    );
+    model.apply_event(1, "message-start", &json!({ "run_id": "r", "turn": 0 }));
     model.apply_event(
         2,
-        "output",
-        &json!({ "style": "error", "text": format!("error: {FAILURE}") }),
+        "text-delta",
+        &json!({ "run_id": "r", "turn": 0, "text": "half a sentence " }),
     );
-    let effect = model.apply_event(3, "run-end", &json!({ "outcome": "error" }));
-    assert!(effect.contains(Effect::ROWS), "the row is news: {effect:?}");
-
-    let says: Vec<&RowKind> = kinds(&model)
-        .into_iter()
-        .filter(|kind| match kind {
-            RowKind::Dim { text, .. } => text.contains(FAILURE),
-            RowKind::RunOutcome { text, .. } => text.contains(FAILURE),
-            _ => false,
-        })
-        .collect();
-    assert_eq!(says.len(), 1, "one row, not two: {:?}", model.rows());
+    model.apply_event(
+        3,
+        "message-end",
+        &json!({ "run_id": "r", "turn": 0, "stop_reason": "error", "usage": null,
+                 "error": FAILURE }),
+    );
+    let effect = model.apply_event(
+        4,
+        "run-end",
+        &json!({ "run_id": "r", "turn": 1, "outcome": "error" }),
+    );
+    assert_eq!(
+        mentions(&model, FAILURE),
+        1,
+        "one row, not two: {:?}",
+        model.rows()
+    );
     assert!(
-        matches!(says[0], RowKind::RunOutcome { outcome, text }
-            if outcome == "error" && text == &format!("Run failed: {FAILURE}")),
-        "the outcome row is the one left: {:?}",
-        says[0]
+        model
+            .rows()
+            .iter()
+            .all(|row| !matches!(row.kind, RowKind::RunOutcome { .. })),
+        "the message's own row says it: {:?}",
+        model.rows()
+    );
+    assert!(
+        !effect.contains(Effect::ROWS),
+        "and it added none: {effect:?}"
     );
 
-    // A different failure is a different sentence: both rows stay where they are.
+    // A resync rebuilds the rows from `/transcript`, where the failed message carries it as
+    // `error_message`: the same one line, and still no outcome row to disagree with it.
+    let transcript = json!({ "messages": [
+        { "role": "user", "content": [{ "type": "text", "text": "FAIL: the provider is down" }] },
+        { "role": "assistant", "content": [{ "type": "text", "text": "half a sentence " }],
+          "stop_reason": "error", "error_message": FAILURE },
+    ]});
+    let mut rebuilt = AgentModel::new();
+    rebuilt.rebuild_from_transcript(&transcript);
+    assert_eq!(mentions(&rebuilt, FAILURE), 1, "{:?}", rebuilt.rows());
+    assert!(
+        rebuilt
+            .rows()
+            .iter()
+            .all(|row| !matches!(row.kind, RowKind::RunOutcome { .. })),
+        "{:?}",
+        rebuilt.rows()
+    );
+
+    // Whitespace is not a difference: the same failure with a newline on the end of it is
+    // the same sentence.
     let mut model = AgentModel::new();
     model.apply_event(
         1,
         "message-end",
-        &json!({ "stop_reason": "error", "usage": null, "error": "the second failure" }),
+        &json!({ "stop_reason": "error", "usage": null, "error": format!("{FAILURE}\n") }),
     );
+    model.apply_event(2, "run-end", &json!({ "outcome": "error" }));
+    assert_eq!(mentions(&model, FAILURE), 1, "{:?}", model.rows());
+
+    // A failure with nothing to quote — no message this stream saw — still says it failed.
+    let mut model = AgentModel::new();
     model.apply_event(
-        2,
+        1,
         "output",
-        &json!({ "style": "error", "text": "error: the first failure" }),
+        &json!({ "style": "error", "text": "the provider is down" }),
     );
-    model.apply_event(3, "run-end", &json!({ "outcome": "error" }));
-    assert_eq!(
-        mentions(&model, "the first failure"),
-        1,
-        "{:?}",
-        model.rows()
-    );
-    assert_eq!(
-        mentions(&model, "the second failure"),
-        1,
+    model.apply_event(2, "run-end", &json!({ "outcome": "error" }));
+    assert_eq!(mentions(&model, "Run failed"), 1, "{:?}", model.rows());
+    assert!(
+        model.rows().iter().any(
+            |row| matches!(&row.kind, RowKind::RunOutcome { outcome, .. } if outcome == "error")
+        ),
         "{:?}",
         model.rows()
     );
 
-    // And a line that is not the *error* kind of output is not the same publication.
+    // A *later* failure of the same run's shape is still its own line: two failed runs are
+    // two failures, and each says so once.
     let mut model = AgentModel::new();
-    model.apply_event(
-        1,
-        "message-end",
-        &json!({ "stop_reason": "error", "usage": null, "error": "M" }),
-    );
-    model.apply_event(
-        2,
-        "output",
-        &json!({ "style": "notice", "text": "error: M" }),
-    );
-    model.apply_event(3, "run-end", &json!({ "outcome": "error" }));
-    assert_eq!(
-        mentions(&model, "M"),
-        2,
-        "a notice is not the run's own error line: {:?}",
-        model.rows()
-    );
+    for (at, error) in [(1u64, "the first failure"), (4, "the second failure")] {
+        model.apply_event(
+            at,
+            "message-end",
+            &json!({ "stop_reason": "error", "usage": null, "error": error }),
+        );
+        model.apply_event(at + 1, "run-end", &json!({ "outcome": "error" }));
+        model.apply_event(at + 2, "run-start", &json!({ "turn": at }));
+        assert_eq!(mentions(&model, error), 1, "{error}: {:?}", model.rows());
+    }
 }
 
-/// How many rows say NEEDLE, counting only the two kinds that can: an output line
-/// and a run's outcome.
+/// How many rows say NEEDLE, counting every kind of row that draws words: the message
+/// rows (their markdown and their own error line, which is rendered `error: …`) and the
+/// quiet lines.
 fn mentions(model: &AgentModel, needle: &str) -> usize {
     model
         .rows()
         .iter()
         .filter(|row| match &row.kind {
             RowKind::Dim { text, .. } | RowKind::RunOutcome { text, .. } => text.contains(needle),
+            RowKind::Assistant {
+                markdown, error, ..
+            } => markdown.contains(needle) || error.as_deref().is_some_and(|e| e.contains(needle)),
             _ => false,
         })
         .count()

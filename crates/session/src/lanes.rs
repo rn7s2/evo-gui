@@ -349,11 +349,10 @@ impl LaneList {
     /// Deliberately not `swarm.busy`: that is the same fact, but as of the last
     /// `GET /lanes`, and a lane's state moves on the stream — a `lane-state` event,
     /// or a lane's own `settled` — with no read behind it. Counting the snapshot's
-    /// number there is what let the header outlive its lanes: the capture in
-    /// `docs/screens/03-lane-todos-dark.png` says `2 lanes · 1 busy` over two idle
-    /// rows, the count left over from a read taken while lane 1 was working. The
-    /// rows are the fresher of the two (they take the events as well as the reads),
-    /// so a header that disagrees with them can only be wrong.
+    /// number there is what let the header outlive its lanes: an earlier capture showed
+    /// `2 lanes · 1 busy` over two idle rows, the count left over from a read taken while
+    /// lane 1 was working. The rows are the fresher of the two (they take the events as
+    /// well as the reads), so a header that disagrees with them can only be wrong.
     pub fn busy(&self) -> u64 {
         self.lanes.iter().filter(|row| row.is_busy()).count() as u64
     }

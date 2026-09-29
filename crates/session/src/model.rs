@@ -467,8 +467,9 @@ impl AgentModel {
                 let mut effect = self.set_activity(Activity::Idle) | Effect::STEP;
                 let outcome = string_field(data, "outcome").unwrap_or_default();
                 if let Some(text) = self.run_outcome_text(&outcome) {
-                    self.push_run_outcome(outcome, text);
-                    effect |= Effect::ROWS;
+                    if self.push_run_outcome(outcome, text) {
+                        effect |= Effect::ROWS;
+                    }
                 }
                 effect
             }
@@ -560,38 +561,44 @@ impl AgentModel {
         });
     }
 
+    /// The row a run's outcome gets — the outcome line, unless the failure is already
+    /// on screen.
+    ///
+    /// `docs/screens/09-bad-run-dark.png` caught the tab saying a failed run twice. The
+    /// failure reaches it twice: `message-end`'s own `error` (which the failing message's
+    /// row draws as `error: …`, and which is what a resync rebuilds rows from) and then
+    /// `run-end`'s outcome (`Run failed: …`) — the kernel emits them in that order, one
+    /// run: `(emit-event agent :type :message-end …)` then `(emit-event agent :type
+    /// :run-end :outcome outcome)` in `src/kernel/loop.lisp`, and a run's outcome is
+    /// `:error` exactly when that message's stop reason is `(:error (return :error))`.
+    /// The message row is the one that stays — it is the transcript, so the live view and
+    /// a rebuilt one have to agree — and the outcome row is not added beside it. A run
+    /// that failed with nothing to quote (`Run failed`) still gets its row, and so do the
+    /// outcomes no message carries (`aborted`, `length`, whatever the swarm adds next).
+    fn push_run_outcome(&mut self, outcome: String, text: String) -> bool {
+        if self.outcome_already_said(&text) {
+            return false;
+        }
+        self.push_row(RowKind::RunOutcome { outcome, text });
+        true
+    }
+
+    /// Whether the failure an outcome line would carry is already on screen — because the
+    /// run's own failing message is. `run-end`'s `:error` is that message's stop reason
+    /// (`src/kernel/loop.lisp`), so the message's row already draws the error (`error: M`,
+    /// [`RowKind::Assistant`]), and the outcome line ("Run failed: M") would be the same
+    /// sentence twice. Compared on the words, trimmed, so a newline on the end of one is
+    /// not a difference.
+    fn outcome_already_said(&self, text: &str) -> bool {
+        let message = text.strip_prefix("Run failed: ").unwrap_or(text).trim();
+        self.last_error().map(str::trim) == Some(message)
+    }
+
     /// The words a run that ended badly gets, or `None` for the ones that need no line.
     /// `stop` finishes a run as asked — and a `run-end` that carries no outcome at all, or
     /// the older `ok` spelling, is the same thing — so the turn boundary already says it.
     /// An `error` is told with the error itself, which is the failing assistant message's
     /// ([`AgentModel::last_error`]).
-    /// The row a run's outcome gets — the outcome line, unless the row right before
-    /// it already says the same thing.
-    ///
-    /// A run that fails is published twice: the kernel's own `output` line ("error: …",
-    /// error-styled) and then the run's outcome ("Run failed: …"), and a reader does
-    /// not need the sentence twice — `docs/screens/09-bad-run-light.png` caught the tab
-    /// saying it twice. The output row is the one that goes, and the outcome is what is
-    /// left: it says the same thing *and* says what it was (a run that ended badly), so
-    /// the row becomes the outcome row rather than gaining a second one beside it.
-    fn push_run_outcome(&mut self, outcome: String, text: String) {
-        if let Some(row) = self.rows.last_mut() {
-            if let RowKind::Dim {
-                style: DimStyle::Error,
-                text: previous,
-            } = &row.kind
-            {
-                if Self::repeats_failure(previous, &text) {
-                    let id = row.id;
-                    row.kind = RowKind::RunOutcome { outcome, text };
-                    self.touch(id);
-                    return;
-                }
-            }
-        }
-        self.push_row(RowKind::RunOutcome { outcome, text });
-    }
-
     fn run_outcome_text(&self, outcome: &str) -> Option<String> {
         match outcome {
             "" | "ok" | "stop" => None,
@@ -603,15 +610,6 @@ impl AgentModel {
             "length" => Some("Run stopped at the length limit".to_string()),
             other => Some(format!("Run ended: {other}")),
         }
-    }
-
-    /// Whether a run's outcome line is the same failure as the error-styled output row
-    /// just before it: `Run failed: M` against `error: M`, the two prefixes the kernel
-    /// writes. Exact, after those prefixes, so an unrelated error line is left alone.
-    fn repeats_failure(output: &str, outcome: &str) -> bool {
-        let message = outcome.strip_prefix("Run failed: ").unwrap_or(outcome);
-        let shown = output.strip_prefix("error: ").unwrap_or(output);
-        !message.is_empty() && message == shown
     }
 
     /// The error the most recent assistant message carries — what a run that ended `:error`

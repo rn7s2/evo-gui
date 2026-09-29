@@ -240,8 +240,8 @@ fn m1_delegation() {
 /// A row's glyph follows the `lane-state` events, which the coordinator's stream
 /// carries; the header's count and the row's clocks (`swarm.busy`, the step clock)
 /// are `GET /lanes`' alone, and nothing read that list when a lane's own run ended —
-/// so the header could still count a lane busy while its row said idle. That is the
-/// frame in `docs/screens/03-lane-todos-dark.png`: "2 lanes · 1 busy" over a lane
+/// so the header could still count a lane busy while its row said idle. An earlier
+/// capture showed that frame: "2 lanes · 1 busy" over a lane
 /// whose run was over. What ends a lane's run is its own `settled` (§7.3), which the
 /// tab hears because the lane is the one it watches.
 #[test]

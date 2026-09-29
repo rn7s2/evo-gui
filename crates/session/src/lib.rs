@@ -141,8 +141,10 @@ pub enum RowKind {
     Dim { style: DimStyle, text: String },
     /// A run that ended badly: `run-end` with an outcome that is not a clean stop
     /// (`error`, `aborted`, `length`). `text` is the line to show. A run that stopped as
-    /// asked emits no row — the turn boundary already says it finished — and `run-start`
-    /// never emits one at all.
+    /// asked emits no row — the turn boundary already says it finished — `run-start`
+    /// never emits one at all, and neither does a failure the failing message already
+    /// carries: `message-end`'s own `error` is that message's row, and the tab would
+    /// otherwise say the same sentence twice.
     RunOutcome { outcome: String, text: String },
 }
 

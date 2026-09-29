@@ -37,8 +37,9 @@ Tests: `CARGO_TARGET_DIR=target/tab_engine cargo test -p tab_engine` (real swarm
 Pure model (`TabModel`/`AgentModel`/`LaneList`), no I/O. `lane_down_reason` says nothing unless the
 lane is Down and prefers the swarm's own account (kept in `lane_announcements`, since a settled
 resync rebuilds rows without output lines); `LaneList::busy()` counts rows; `step_clock()` only for
-working/compacting, `step_clock_at(now)` for the ticking one; a run outcome folds the identical error
-output row before it.
+working/compacting, `step_clock_at(now)` for the ticking one; a run that failed is said once — the
+failing message's own error is the row (`error: M`), and the run's outcome row is only for a failure
+no message carries (`Run failed`, `aborted`, `length`).
 The lane step clock: `/lanes` reports a step *age*, not a step start, so `apply_lanes_at(body, now)` /
 `apply_lane_state_at(data, now)` stamp when the age was seen (`LaneRow::step_age_at_millis`) and
 `LaneRow::step_clock_at(now_millis)` counts on from there (a `lane-state` that moves a lane *into*

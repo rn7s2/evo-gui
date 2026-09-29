@@ -390,7 +390,7 @@ fn the_coordinator_stream_drives_the_whole_lane_list() {
 
 /// The header counts the rows under it, not the number its last snapshot came with.
 ///
-/// `docs/screens/03-lane-todos-dark.png` caught the two disagreeing: `2 lanes · 1 busy`
+/// An earlier capture caught the two disagreeing: `2 lanes · 1 busy`
 /// over two idle rows. The list had been read while lane 1 was working
 /// (`lanes-lane1-working.json`, whose `swarm.busy` is 1) and the lane then went idle on
 /// the stream — which carries no count at all — so between that event and the next read
