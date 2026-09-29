@@ -38,6 +38,7 @@ fn merge(a: Changes, b: Changes) -> Changes {
         activity: a.activity || b.activity,
         stream: a.stream.union(&b.stream).copied().collect(),
         selection: a.selection || b.selection,
+        step: a.step.union(&b.step).copied().collect(),
         needs_resync: a.needs_resync.union(&b.needs_resync).copied().collect(),
     }
 }
@@ -464,6 +465,39 @@ fn a_tui_internal_event_is_not_a_server_event() {
         _ => None,
     });
     assert!(error.is_some_and(|text| text.starts_with("✗ compact:")), "rows: {:?}", tab.coordinator().rows());
+}
+
+/// The step clock the tab hands to a frontend: `on_event_at` carries the arrival time in,
+/// `on_event` leaves it unset, and `Changes::step` says when to restart a clock of one's own.
+#[test]
+fn the_step_clock_is_stamped_by_the_caller() {
+    let mut tab = TabModel::new();
+    assert_eq!(tab.coordinator_step_started(), None);
+
+    let changes = tab.on_event_at(COORDINATOR, 1, "run-start", &json!({"run_id": "r", "turn": 2}), 5_000);
+    assert!(changes.step.contains(&COORDINATOR));
+    let clock = tab.coordinator_step_started().expect("a step");
+    assert_eq!(clock.turn, 2);
+    assert_eq!(clock.event_id, 1);
+    assert_eq!(clock.started_at_millis, Some(5_000));
+
+    // A lane's step is its own: the coordinator's clock is untouched by the lane's events.
+    let changes = tab.on_event_at(lane(1), 1, "turn-start", &json!({"turn": 0}), 6_000);
+    assert_eq!(changes.step, std::collections::BTreeSet::from([lane(1)]));
+    assert_eq!(tab.coordinator_step_started().unwrap().event_id, 1);
+    assert_eq!(tab.lane_model(1).unwrap().step_started().unwrap().started_at_millis, Some(6_000));
+
+    // Without a stamp the step is still announced and recorded — the frontend starts its own
+    // clock when this arrives.
+    let changes = tab.on_event(COORDINATOR, 2, "turn-start", &json!({"turn": 3}));
+    assert!(changes.step.contains(&COORDINATOR));
+    let clock = tab.coordinator_step_started().unwrap();
+    assert_eq!((clock.turn, clock.event_id, clock.started_at_millis), (3, 2, None));
+
+    // The run ending ends the clock.
+    let changes = tab.on_event(COORDINATOR, 3, "task-end", &json!({"task_id": "t", "kind": "run"}));
+    assert!(changes.step.contains(&COORDINATOR));
+    assert_eq!(tab.coordinator_step_started(), None);
 }
 
 /// The lane row's two formatters, against the swarm's own (`short-duration` and the

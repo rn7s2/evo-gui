@@ -81,6 +81,70 @@ fn an_id_under_two_providers_names_its_provider() {
     assert_ne!(chooser.options[1].key, chooser.options[2].key);
 }
 
+/// F4 of `docs/review-1.md`: the coordinator's model reaches the swarm as `--model <id>`,
+/// which is a bare id, so only the registration a bare id resolves to is a real choice.
+///
+/// The order evidence: evo's `*models*` is documented "in registration order"
+/// (`src/provider/registry.lisp`), `/registry.models` is that list walked in order
+/// (`src/serve/routes.lisp`), and `find-model` for a bare id takes the **first** entry
+/// (`src/provider/registry.lisp`) — which is why the capture, whose two providers registered
+/// `stub` then `stub2`, resolves `stub-a` to `stub`.
+#[test]
+fn the_coordinator_offers_only_the_registration_a_bare_id_reaches() {
+    let registry = fixture("registry-two-providers.json");
+    assert_eq!(
+        registry["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|model| model["provider"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>(),
+        vec!["stub", "stub2"],
+        "the capture lists the two registrations in registration order"
+    );
+
+    let chooser = coordinator_chooser(&registry);
+    assert_eq!(labels(&chooser), vec!["Default", "stub-a (stub)", "stub-a (stub2)"]);
+    let reached = chooser.option("stub-a@stub").expect("the first registration");
+    assert!(reached.available && reached.unavailable_reason.is_none());
+    assert_eq!(reached.model(), Some(("stub-a".to_string(), "stub".to_string())));
+
+    let other = chooser.option("stub-a@stub2").expect("the second registration is still listed");
+    assert!(!other.available, "a bare id never reaches it");
+    assert_eq!(
+        other.unavailable_reason.as_deref(),
+        Some("evo-swarm --model resolves this id to stub")
+    );
+
+    // The rule follows the registry's order, not the alphabet: register stub2 first and the
+    // other registration is the reachable one.
+    let reversed = json!({ "models": [
+        { "id": "stub-a", "provider": "stub2", "api": "anthropic-messages", "context_window": 200000 },
+        { "id": "stub-a", "provider": "stub", "api": "anthropic-messages", "context_window": 200000 },
+    ]});
+    let chooser = coordinator_chooser(&reversed);
+    assert!(chooser.option("stub-a@stub2").unwrap().available);
+    let stub = chooser.option("stub-a@stub").unwrap();
+    assert!(!stub.available);
+    assert_eq!(
+        stub.unavailable_reason.as_deref(),
+        Some("evo-swarm --model resolves this id to stub2")
+    );
+
+    // Nothing else is affected: an unambiguous id, and the one-provider capture, stay whole.
+    assert!(coordinator_chooser(&fixture("registry.json")).models().all(|option| option.available));
+
+    // The lanes chooser is untouched (§9.6 writes the provider into swarm.lisp, so every
+    // registration is its own choice there), and the labels keep naming the provider.
+    let lanes = lanes_chooser(&registry, Some(&kernel_apis(&registry)));
+    assert_eq!(labels(&lanes), vec!["Default", "stub-a (stub)", "stub-a (stub2)"]);
+    assert!(
+        lanes.models().all(|option| option.available && option.unavailable_reason.is_none()),
+        "lanes: {:?}",
+        lanes.options
+    );
+}
+
 #[test]
 fn the_lanes_chooser_measures_models_against_the_kernel_api_set() {
     let registry = fixture("registry.json");

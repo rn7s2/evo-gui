@@ -14,7 +14,9 @@
 //! on_state(&state)            → readout / activity / todos of the coordinator
 //! on_registry(&registry)      → readout (the model label)
 //! on_transcript(agent, rev, &transcript) → rebuilt rows of that agent
-//! on_event(agent, id, kind, &data)       → rows / todos / lanes / needs_resync
+//! on_event(agent, id, kind, &data)       → rows / todos / lanes / step / needs_resync
+//! on_event_at(agent, id, kind, &data, now_millis)  → the same, with the arrival time the
+//!                                                    step clock counts from
 //! on_lanes(&lanes)            → the lane list
 //! on_cache_seed(Option<&seed>)→ readout
 //! on_stream(agent, status)    → the stream badge
@@ -36,7 +38,8 @@ use serde_json::Value;
 
 use crate::cache::cache_totals_from_seed;
 use crate::{
-    Activity, AgentModel, DimStyle, LaneList, LaneRow, Readout, Row, RowChanges, RowKind, Todo,
+    Activity, AgentModel, DimStyle, LaneList, LaneRow, Readout, Row, RowChanges, RowKind, StepClock,
+    Todo,
 };
 
 /// One agent of a tab: the coordinator, or lane N.
@@ -92,6 +95,9 @@ pub struct Changes {
     pub activity: bool,
     /// These agents' stream badges changed.
     pub stream: BTreeSet<AgentKey>,
+    /// These agents' step clock changed: a step began, or the run ended (read
+    /// [`TabModel::coordinator_step_started`] for the coordinator's).
+    pub step: BTreeSet<AgentKey>,
     /// The selection changed: the center column shows a different agent.
     pub selection: bool,
     /// These agents must be refetched (`/state` + `/transcript`, or the lane's transcript):
@@ -213,6 +219,13 @@ impl TabModel {
         self.stream_status(agent).is_reconnecting()
     }
 
+    /// The coordinator's step in flight, for a live step clock: the turn, the event that
+    /// began it, and the arrival time when the caller stamped one
+    /// ([`TabModel::on_event_at`]). `None` while nothing runs.
+    pub fn coordinator_step_started(&self) -> Option<StepClock> {
+        self.coordinator.step_started()
+    }
+
     /// Why lane N is down, for the `✗` row's tooltip — the §9.7 "reason from the
     /// transcript's `output` lines".
     ///
@@ -289,8 +302,36 @@ impl TabModel {
     }
 
     /// One SSE event of AGENT's stream.
+    ///
+    /// [`TabModel::on_event_at`] is the same with the time the I/O layer saw the event,
+    /// which is what the step clock counts from; without it the step carries no arrival time
+    /// and the frontend can start its own clock when [`Changes::step`] says one began.
     pub fn on_event(&mut self, agent: AgentKey, id: u64, kind: &str, data: &Value) -> Changes {
-        let effect = self.model_mut(agent).apply_event(id, kind, data);
+        self.on_event_inner(agent, id, kind, data, None)
+    }
+
+    /// [`TabModel::on_event`] with the arrival time of the event, in epoch milliseconds:
+    /// the step a `run-start`/`turn-start`/`compaction-*` begins then knows when it began.
+    pub fn on_event_at(
+        &mut self,
+        agent: AgentKey,
+        id: u64,
+        kind: &str,
+        data: &Value,
+        now_millis: u64,
+    ) -> Changes {
+        self.on_event_inner(agent, id, kind, data, Some(now_millis))
+    }
+
+    fn on_event_inner(
+        &mut self,
+        agent: AgentKey,
+        id: u64,
+        kind: &str,
+        data: &Value,
+        arrival: Option<u64>,
+    ) -> Changes {
+        let effect = self.model_mut(agent).apply_event_with(id, kind, data, arrival);
         // The restarted server is a new event log whose ids start again at 1 (§3): the
         // transcript revision this agent last accepted belongs to the old numbering, so
         // drop it rather than refuse the fresh transcript as stale.
@@ -362,6 +403,9 @@ impl TabModel {
         }
         if effect.contains(crate::Effect::TODOS) {
             changes.todos.insert(agent);
+        }
+        if effect.contains(crate::Effect::STEP) {
+            changes.step.insert(agent);
         }
         if effect.contains(crate::Effect::RESYNC) {
             changes.needs_resync.insert(agent);

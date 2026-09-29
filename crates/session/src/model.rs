@@ -27,6 +27,28 @@ use serde_json::Value;
 use crate::readout::{string_field, u64_field, CacheTotals, Readout};
 use crate::{todos_from_json, Activity, DimStyle, Effect, Row, RowChanges, RowId, RowKind, Todo, ToolResult};
 
+/// When the agent's current step began: one turn of its loop, or one compaction, which the
+/// TUI counts as a step of its own (`src/tui/tui.lisp`'s `begin-step` — called at a turn
+/// opening and at both ends of a compaction, so the interrupted turn "gets a fresh clock
+/// back").
+///
+/// The model never reads a clock: it records the event and its turn, plus the arrival time
+/// when the caller stamps one ([`AgentModel::apply_event_at`]). A frontend that did not stamp
+/// can still count from its own clock, starting it when [`Effect::STEP`] says the step
+/// changed.
+///
+/// [`Effect::STEP`]: crate::Effect::STEP
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StepClock {
+    /// The turn the step belongs to, as `run-start`/`turn-start`/`compaction-*` report it.
+    pub turn: u64,
+    /// The event that began the step.
+    pub event_id: u64,
+    /// The epoch milliseconds the tab's I/O layer saw that event at, when it passed them;
+    /// `None` when the step was applied without a stamp.
+    pub started_at_millis: Option<u64>,
+}
+
 /// One agent's view model: its transcript rows, its checklist, its activity and the
 /// §7.3 readout. One instance per agent (the coordinator, and one per watched lane).
 #[derive(Clone, Debug)]
@@ -50,6 +72,8 @@ pub struct AgentModel {
     /// drained by [`AgentModel::take_row_changes`] so the UI re-sets only what changed.
     dirty_rows: Vec<RowId>,
     rebuilt: bool,
+    /// The step in flight, cleared when the run ends ([`AgentModel::step_started`]).
+    step: Option<StepClock>,
 }
 
 impl Default for AgentModel {
@@ -72,6 +96,7 @@ impl AgentModel {
             last_event_id: None,
             dirty_rows: Vec::new(),
             rebuilt: false,
+            step: None,
         }
     }
 
@@ -121,6 +146,12 @@ impl AgentModel {
     /// The id of the assistant row currently streaming, if any.
     pub fn streaming_row(&self) -> Option<RowId> {
         self.open_assistant
+    }
+
+    /// The step in flight, or `None` while the agent is between runs. The elapsed time is
+    /// the frontend's arithmetic: `now_millis - started_at_millis`.
+    pub fn step_started(&self) -> Option<StepClock> {
+        self.step
     }
 
     // --- seeding from the API --------------------------------------------
@@ -224,6 +255,30 @@ impl AgentModel {
     /// when a crashed coordinator is restarted — `hello` says so, and the row ids stay
     /// this model's own). `kind` is the SSE event name, `data` its JSON payload.
     pub fn apply_event(&mut self, id: u64, kind: &str, data: &Value) -> Effect {
+        self.apply_event_with(id, kind, data, None)
+    }
+
+    /// [`AgentModel::apply_event`] with the time the tab's I/O layer saw the event, which is
+    /// what a step clock counts from.
+    pub fn apply_event_at(
+        &mut self,
+        id: u64,
+        kind: &str,
+        data: &Value,
+        now_millis: u64,
+    ) -> Effect {
+        self.apply_event_with(id, kind, data, Some(now_millis))
+    }
+
+    /// The one body both entry points share; the tab calls it with the arrival time its
+    /// caller passed.
+    pub(crate) fn apply_event_with(
+        &mut self,
+        id: u64,
+        kind: &str,
+        data: &Value,
+        arrival: Option<u64>,
+    ) -> Effect {
         self.last_event_id = Some(id);
         match kind {
             "message-start" => {
@@ -294,17 +349,20 @@ impl AgentModel {
                 Effect::ROWS
             }
             // Compaction and provider retries are the TUI's activity line; here they are
-            // dim status rows (§5), so a run that stalls or re-sends says so in place.
+            // dim status rows (§5), so a run that stalls or re-sends says so in place. Both
+            // ends of a compaction are step boundaries, as the TUI has them.
             "compaction-start" => {
+                self.begin_step(id, data, arrival);
                 self.push_row(RowKind::Dim { style: DimStyle::Status, text: "compacting...".into() });
-                Effect::ROWS
+                Effect::ROWS | Effect::STEP
             }
             "compaction-end" => {
+                self.begin_step(id, data, arrival);
                 self.push_row(RowKind::Dim {
                     style: DimStyle::Status,
                     text: "compaction finished".into(),
                 });
-                Effect::ROWS
+                Effect::ROWS | Effect::STEP
             }
             "provider-retry" => {
                 let attempt = u64_field(data, "attempt");
@@ -328,21 +386,34 @@ impl AgentModel {
                     Activity::Running
                 })
             }
-            "task-end" | "run-end" => self.set_activity(Activity::Idle),
-            "run-start" => {
+            "task-end" | "run-end" => {
+                self.step = None;
+                self.set_activity(Activity::Idle) | Effect::STEP
+            }
+            "run-start" | "turn-start" => {
+                self.begin_step(id, data, arrival);
+                let mut effect = Effect::STEP;
                 if self.activity == Activity::Idle {
-                    self.set_activity(Activity::Running)
-                } else {
-                    Effect::NONE
+                    // A turn is opening: a session we joined mid-run is running.
+                    effect |= self.set_activity(Activity::Running);
                 }
+                effect
             }
             // `settled` means the session is idle again *and* that the run is over, so the
             // transcript is the truth once more: refetch and rebuild (§5, §9.1).
-            "settled" => self.set_activity(Activity::Idle) | Effect::RESYNC,
+            "settled" => {
+                self.step = None;
+                self.set_activity(Activity::Idle) | Effect::RESYNC | Effect::STEP
+            }
             // `hello` (a restarted coordinator, whose event ids start again at 1), `gap`
             // (events this stream missed) and `session-switched` (`/new`, `/fork`,
-            // `/resume`) all mean the view has to be refetched.
-            "hello" | "gap" | "session-switched" => Effect::RESYNC,
+            // `/resume`) all mean the view has to be refetched — and after a restart or a
+            // session switch the step that was running belongs to the old one.
+            "hello" | "session-switched" => {
+                self.step = None;
+                Effect::RESYNC | Effect::STEP
+            }
+            "gap" => Effect::RESYNC,
             // A `lane-state` event is the left column's, not this agent's; the tab feeds
             // it to its LaneList.
             "lane-state" => Effect::LANES,
@@ -385,6 +456,16 @@ impl AgentModel {
             row.version += 1;
             self.dirty_rows.push(id);
         }
+    }
+
+    /// A step begins: the turn is opening, or a compaction took over or handed back (the
+    /// TUI's `begin-step` fires at all three).
+    fn begin_step(&mut self, event_id: u64, data: &Value, arrival: Option<u64>) {
+        self.step = Some(StepClock {
+            turn: u64_field(data, "turn"),
+            event_id,
+            started_at_millis: arrival,
+        });
     }
 
     /// The rows touched since the last call, drained: the UI re-sets only those, and a

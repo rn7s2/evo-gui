@@ -36,6 +36,10 @@ impl Effect {
     /// The event log or the session changed underneath us (`hello`, `gap`,
     /// `session-switched`, `settled`): refetch `/state` + `/transcript` and rebuild.
     pub const RESYNC: Effect = Effect(64);
+    /// The agent's step changed: one began (`run-start`, `turn-start`, a compaction
+    /// boundary) or the run ended. A frontend showing a live step clock restarts it from
+    /// [`StepClock`](crate::StepClock).
+    pub const STEP: Effect = Effect(128);
 
     /// Whether every flag of `other` is set in `self`.
     pub const fn contains(self, other: Effect) -> bool {

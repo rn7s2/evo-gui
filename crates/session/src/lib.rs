@@ -81,7 +81,7 @@ pub use launcher::{
     HistoryEntry, HistoryRow, HistorySource, LaunchPlan, Launcher, When, DEFAULT_KEY,
     NEEDS_EXTENSION_API, WORKERS_MAX,
 };
-pub use model::AgentModel;
+pub use model::{AgentModel, StepClock};
 pub use readout::{k_tokens, round_div_half_even, CacheTotals, GoalState, Readout};
 pub use tab::{AgentKey, Changes, StreamStatus, TabModel};
 pub use todos::{todos_from_json, todo_status_from_str};

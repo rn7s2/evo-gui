@@ -218,8 +218,17 @@ pub struct HistoryRow {
 
 /// The coordinator's model chooser: every model the registry knows, sorted by provider then
 /// id, with the ambiguity rule of §7.3 for the label.
+///
+/// An id registered under more than one provider can only be reached as
+/// `--model <id>`, and a bare id resolves **first-wins** (`find-model`,
+/// `src/provider/registry.lisp`: "A bare id resolves to the FIRST registration of that id"),
+/// so exactly one of those registrations is offered and the others are listed disabled,
+/// saying which one the flag would pick. See [`Reach::ById`].
 pub fn coordinator_chooser(registry: &Value) -> Chooser {
-    Chooser { options: model_options(registry, None, COORDINATOR_DEFAULT), uncertain: false }
+    Chooser {
+        options: model_options(registry, None, COORDINATOR_DEFAULT, Reach::ById),
+        uncertain: false,
+    }
 }
 
 /// The lanes' model chooser: the same models, but a model is available only when a lane
@@ -228,11 +237,31 @@ pub fn coordinator_chooser(registry: &Value) -> Chooser {
 /// probe has said yet, and the chooser is then [`Chooser::uncertain`].
 pub fn lanes_chooser(registry: &Value, kernel_apis: Option<&Value>) -> Chooser {
     match kernel_apis.filter(|apis| apis.is_array()) {
-        Some(apis) => {
-            Chooser { options: model_options(registry, Some(apis), LANES_DEFAULT), uncertain: false }
-        }
-        None => Chooser { options: model_options(registry, None, LANES_DEFAULT), uncertain: true },
+        Some(apis) => Chooser {
+            options: model_options(registry, Some(apis), LANES_DEFAULT, Reach::ByProvider),
+            uncertain: false,
+        },
+        None => Chooser {
+            options: model_options(registry, None, LANES_DEFAULT, Reach::ByProvider),
+            uncertain: true,
+        },
     }
+}
+
+/// How a chosen model reaches the swarm — which decides whether *every* registration of a
+/// model id is a real choice.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reach {
+    /// The coordinator's `--model <id>`: the model is named by its bare id, so only the
+    /// registration a bare id resolves to can be reached. evo's registries keep
+    /// registration order (`*models*` is documented "in registration order",
+    /// `src/provider/registry.lisp`, and `/registry.models` is that list walked in order,
+    /// `src/serve/routes.lisp`), and `find-model` takes the **first** entry for a bare id —
+    /// so the first registration in the registry is the one `--model` runs.
+    ById,
+    /// A lane's model, written into the project's `swarm.lisp` with its provider: every
+    /// registration of an id is its own choice, exactly as §9.6 writes it.
+    ByProvider,
 }
 
 /// The worker-count chooser (§7.2 row 3): Default, then 1…64. `swarm_workers` is the
@@ -288,28 +317,37 @@ fn model_options(
     registry: &Value,
     kernel_apis: Option<&Value>,
     default_detail: &str,
+    reach: Reach,
 ) -> Vec<ChooserOption> {
     let models = registry.get("models").and_then(Value::as_array);
     let Some(models) = models else {
         return vec![default_option(default_detail)];
     };
 
-    // An id under more than one provider cannot be named by its id alone (§7.3).
-    let mut provider_counts: Vec<(String, Vec<String>)> = Vec::new();
+    // An id under more than one provider cannot be named by its id alone (§7.3), and the
+    // first registration of an id is the one a bare id means. Both are read in registry
+    // order, which is registration order.
+    let mut by_id: Vec<(String, Vec<String>)> = Vec::new();
     for model in models {
         let (Some(id), Some(provider)) = (string_field(model, "id"), string_field(model, "provider"))
         else {
             continue;
         };
-        match provider_counts.iter_mut().find(|(known, _)| *known == id) {
+        match by_id.iter_mut().find(|(known, _)| *known == id) {
             Some((_, providers)) => providers.push(provider),
-            None => provider_counts.push((id, vec![provider])),
+            None => by_id.push((id, vec![provider])),
         }
     }
     let ambiguous = |id: &str| {
-        provider_counts
+        by_id
             .iter()
             .any(|(known, providers)| known == id && providers.len() > 1)
+    };
+    let bare_id_means = |id: &str| -> Option<String> {
+        by_id
+            .iter()
+            .find(|(known, _)| known == id)
+            .and_then(|(_, providers)| providers.first().cloned())
     };
 
     let apis: Option<Vec<String>> = kernel_apis.map(|apis| {
@@ -330,7 +368,16 @@ fn model_options(
         } else {
             id.clone()
         };
-        let (available, unavailable_reason) = match &apis {
+        // A bare id reaches only the registration it resolves to; every other registration
+        // of an ambiguous id is visible but not choosable, and says why.
+        let unreachable = match reach {
+            Reach::ByProvider => None,
+            Reach::ById if ambiguous(&id) => bare_id_means(&id)
+                .filter(|winner| *winner != provider)
+                .map(|winner| format!("evo-swarm --model resolves this id to {}", winner)),
+            Reach::ById => None,
+        };
+        let (api_ok, api_reason) = match &apis {
             // No probe: nothing is claimed to be unavailable, and the chooser says so.
             None => (true, None),
             Some(apis) => {
@@ -342,6 +389,8 @@ fn model_options(
                 }
             }
         };
+        let unavailable_reason = unreachable.clone().or(api_reason);
+        let available = api_ok && unreachable.is_none();
         options.push(ChooserOption {
             key: format!("{}@{}", id, provider),
             label,

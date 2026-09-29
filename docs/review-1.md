@@ -203,6 +203,26 @@ formatted by `session::short_duration`. Recorded as a deliberate reading, not a 
 | §9.7 failure surfaces | partly | boot failure log tail + Retry is built (`tab_page.rs:59-100`); lane-down reason and the reconnecting badge exist in `session`/`agent_list` (`set_down_reason`) and `tab_engine` (`StreamStatus::Reconnecting`) but are unwired (F1) |
 | §9.8 quit | **gap (F3)** | `tab_engine::shutdown_all` exists and is tested; nothing calls it at quit |
 
+## Fixes landed since this review (`crates/session`)
+
+- **F4** — `session::launcher`'s **coordinator** chooser now offers exactly the registration
+  `--model <id>` reaches and lists the other registrations of that id disabled with the reason
+  "evo-swarm --model resolves this id to <provider>". The order evidence is in the code:
+  `*models*` is "in registration order" (`src/provider/registry.lisp`), `/registry.models` is
+  that list walked in order (`src/serve/routes.lisp`), and `find-model` for a bare id takes the
+  first entry — which is why the two-provider capture resolves `stub-a` to `stub`. The lanes
+  chooser is unaffected (§9.6 writes the provider). Tests:
+  `crates/session/tests/launcher.rs::the_coordinator_offers_only_the_registration_a_bare_id_reaches`
+  (capture order, a reversed registry, the one-provider capture, and the lanes chooser).
+- **F6** — `session` now tracks the step: `StepClock { turn, event_id, started_at_millis }`,
+  begun at `run-start`/`turn-start`/`compaction-start`/`compaction-end` (the TUI's own
+  `begin-step` boundaries) and ended by `run-end`/`task-end`/`settled`/`hello`/
+  `session-switched`. `Effect::STEP` and `Changes::step` say when it changed;
+  `AgentModel::step_started()` and `TabModel::coordinator_step_started()` read it;
+  `on_event_at(…, now_millis)` is how a frontend stamps the arrival time, while `on_event`
+  leaves it unset for a frontend that counts on its own clock.
+- **F1/F2/F3/F5** are not mine: F5 is directed to the workspace lane, F1–F3 remain open.
+
 ## What is verified, and how
 
 Read-only checks run for this review (all from `/Users/bytedance/coding/evo-gui`):

@@ -8,7 +8,7 @@ mod common;
 
 use common::{apply_capture, fixture, sse_events, transcript_rows, RowView};
 use serde_json::json;
-use session::{Activity, AgentModel, DimStyle, Effect, RowKind, TodoStatus};
+use session::{Activity, AgentModel, DimStyle, Effect, RowKind, StepClock, TodoStatus};
 
 fn kinds(model: &AgentModel) -> Vec<&RowKind> {
     model.rows().iter().map(|row| &row.kind).collect()
@@ -198,7 +198,11 @@ fn message_start_and_deltas_build_one_streaming_row() {
     // Seed the readout with a context window, so the usage that ends the message moves
     // the rendered line (that is what the UI has to hear about).
     model.readout_mut().apply_state(&json!({"context_tokens": 48000, "context_window": 200000}));
-    assert_eq!(model.apply_event(1, "turn-start", &json!({"run_id": "r", "turn": 0})), Effect::NONE);
+    // A turn opening is a step boundary: the clock starts, and this model joined mid-run.
+    assert_eq!(
+        model.apply_event(1, "turn-start", &json!({"run_id": "r", "turn": 0})),
+        Effect::STEP | Effect::ACTIVITY
+    );
     assert_eq!(model.apply_event(2, "message-start", &json!({"run_id": "r", "turn": 0})), Effect::ROWS);
     let id = model.streaming_row().expect("a streaming row");
 
@@ -309,6 +313,66 @@ fn a_failed_message_keeps_its_error_on_the_row() {
     }
 }
 
+/// The step clock (§5's "activity state, step clock" for `run-start`/`turn-start`, and the
+/// TUI's own `begin-step`, which fires at a turn opening and at both ends of a compaction).
+/// The model holds no clock: the arrival time is the caller's, and it is optional.
+#[test]
+fn the_step_clock_follows_the_step_boundaries() {
+    let mut model = AgentModel::new();
+    assert_eq!(model.step_started(), None, "nothing runs yet");
+
+    assert!(model.apply_event_at(1, "run-start", &json!({"run_id": "r", "turn": 3}), 1_000).contains(Effect::STEP));
+    assert_eq!(
+        model.step_started(),
+        Some(StepClock { turn: 3, event_id: 1, started_at_millis: Some(1_000) })
+    );
+
+    // A turn opening restarts it, and keeps the turn the event carries.
+    model.apply_event_at(2, "turn-start", &json!({"run_id": "r", "turn": 4}), 2_000);
+    assert_eq!(
+        model.step_started(),
+        Some(StepClock { turn: 4, event_id: 2, started_at_millis: Some(2_000) })
+    );
+
+    // A message ending inside the step is not a boundary.
+    model.apply_event_at(3, "message-end", &json!({"usage": null, "error": null}), 2_500);
+    assert_eq!(model.step_started().unwrap().event_id, 2);
+
+    // A compaction is its own step, and handing the turn back starts the clock again — the
+    // TUI calls `begin-step` at both ends for exactly this reason.
+    model.apply_event_at(4, "compaction-start", &json!({"run_id": "r", "turn": 4}), 3_000);
+    assert_eq!(model.step_started().unwrap().event_id, 4);
+    model.apply_event_at(5, "compaction-end", &json!({"run_id": "r", "turn": 4}), 4_000);
+    assert_eq!(model.step_started().unwrap().started_at_millis, Some(4_000));
+
+    // The run ending ends the step.
+    assert!(model.apply_event(6, "run-end", &json!({"outcome": "stop"})).contains(Effect::STEP));
+    assert_eq!(model.step_started(), None);
+
+    // Unstamped: the step is still recorded, without a time for the frontend to count from.
+    let mut model = AgentModel::new();
+    model.apply_event(1, "turn-start", &json!({"turn": 7}));
+    assert_eq!(
+        model.step_started(),
+        Some(StepClock { turn: 7, event_id: 1, started_at_millis: None })
+    );
+
+    // A restarted server has no step running, and neither does a switched session.
+    let mut model = AgentModel::new();
+    model.apply_event_at(1, "turn-start", &json!({"turn": 0}), 10);
+    assert!(model.apply_event(2, "hello", &json!({"pid": 9})).contains(Effect::STEP));
+    assert_eq!(model.step_started(), None, "the old process's step is not ours");
+    let mut model = AgentModel::new();
+    model.apply_event_at(1, "turn-start", &json!({"turn": 0}), 10);
+    model.apply_event(2, "session-switched", &json!({"session": "/x.sexp"}));
+    assert_eq!(model.step_started(), None);
+    // ...but a `gap` is this session's own missed events: the step stands.
+    let mut model = AgentModel::new();
+    model.apply_event_at(1, "turn-start", &json!({"turn": 0}), 10);
+    model.apply_event(2, "gap", &json!({}));
+    assert!(model.step_started().is_some());
+}
+
 #[test]
 fn a_manual_compaction_drives_activity_and_dim_rows() {
     let mut model = AgentModel::new();
@@ -321,7 +385,8 @@ fn a_manual_compaction_drives_activity_and_dim_rows() {
             assert_eq!(model.activity(), Activity::Compacting, "a compact task is compacting");
         }
         if kind == "task-end" {
-            assert_eq!(effect, Effect::ACTIVITY);
+            // The run is over: idle, and the step it was in is gone.
+            assert_eq!(effect, Effect::ACTIVITY | Effect::STEP);
             assert_eq!(model.activity(), Activity::Idle);
         }
         if kind == "settled" {
@@ -349,16 +414,23 @@ fn a_coordinator_run_start_stops_compacting() {
     let mut model = AgentModel::new();
     model.apply_event(1, "task-start", &json!({"task_id": "t", "kind": "compact"}));
     assert_eq!(model.activity(), Activity::Compacting);
-    // A run's turn boundary starts inside the compaction of the same run: the task is
-    // still the compaction.
-    assert_eq!(model.apply_event(2, "run-start", &json!({"run_id": "r", "turn": 0})), Effect::NONE);
+    // A run's turn boundary starts inside the compaction of the same run: the step clock
+    // restarts, but the task is still the compaction.
+    assert_eq!(
+        model.apply_event(2, "run-start", &json!({"run_id": "r", "turn": 0})),
+        Effect::STEP
+    );
     assert_eq!(model.activity(), Activity::Compacting);
 
     let mut model = AgentModel::new();
     assert_eq!(model.apply_event(1, "task-start", &json!({"task_id": "t", "kind": "run"})), Effect::ACTIVITY);
     assert_eq!(model.activity(), Activity::Running);
-    assert_eq!(model.apply_event(2, "run-start", &json!({"run_id": "r", "turn": 0})), Effect::NONE);
-    assert_eq!(model.apply_event(3, "task-end", &json!({"task_id": "t", "kind": "run", "outcome": "stop"})), Effect::ACTIVITY);
+    assert_eq!(
+        model.apply_event(2, "run-start", &json!({"run_id": "r", "turn": 0})),
+        Effect::STEP,
+        "the activity was already running; the step is what changed"
+    );
+    assert_eq!(model.apply_event(3, "task-end", &json!({"task_id": "t", "kind": "run", "outcome": "stop"})), Effect::ACTIVITY | Effect::STEP);
     assert_eq!(model.activity(), Activity::Idle);
 }
 
