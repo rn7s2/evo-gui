@@ -67,9 +67,26 @@ Invariants
   reads it on both paths — the rows are the additive `RowKind::GoalNudge { kind: Continue|Wrapup, objective, budget, text }`
   (`text` is the whole message) and they open no turn. The transcript draws one quiet line: `Goal · continue — <objective>
   · <budget>` (the objective gives way first, the budget stays readable at the measure's right edge) and `Goal · budget
-  exhausted — wrap up`, opened onto the same capped mono block a context row uses (`quiet_block`). `budget` is evo's own
-  words without the sentence's punctuation: `15 tokens used of 50,000 (49,985 remaining)`, `0 tokens used (no limit)`,
-  `45,001 used of 45,000`.
+  exhausted — wrap up`, opened onto the same capped mono block a context row uses. A third kind, `Updated`, follows
+  `/goal <new objective>` while a run is in flight (`src/command/command.lisp:227`): `Goal · objective updated —
+  <objective>`. `budget` is evo's own words without the sentence's punctuation: `15 tokens used of 50,000 (49,985
+  remaining)`, `0 tokens used (no limit)`, `45,001 used of 45,000` — and it sits right after the objective as a cell that
+  never shrinks, while the objective is the cell that gives way (`flex_shrink(1.)` + `truncate()`), so a long objective
+  is ellipsized and the budget is still on the line.
+- A command the reader ran, answered with instructions for the agent, is one more quiet line: `Command · /global-memory`.
+  Three formats exist in evo today — `scoped-memory-command` (`src/core-ext/memory.lisp:242`, "The user invoked
+  `/<command>` …"), `/lore` (`src/command/command.lisp:397`, "The user added <label> (durable guidance, applies from now
+  on): …") and any extension that hands work over the same way (`extensions/360-baby-evo.lisp:844`'s `/notify doctor`,
+  "The user just ran `/<command>`") — and session's `command_note_row` claims exactly those phrasings, the whole of each,
+  so a reader writing "The user added a column to the table" keeps their turn. The `command` in the row is the backticked
+  token, or the lore label spelt as the command it was (`global-lore` → `/global-lore`). Every other place evo steers
+  text at an agent is the reader's own words: `host-submit`/`POST /steer`/`POST /follow-up`/the TUI and CLI prompts
+  (`:from-user t`), and a lane's own `/prompt` from `delegate`. The one unhandled case is
+  `extensions/360-baby-evo.lisp:428`, where the idle-notification helper's own prose is steered in — arbitrary model
+  text with no format to key on, and genuinely a message *to* the agent.
+- The three "quiet line that opens onto the capped block" rows (context, goal nudge, command note) share `quiet_row`/
+  `QuietRow` and `quiet_block`: `header` and `block` name the elements a test addresses, `head`/`trailing` are the line,
+  and the header carries the whole line as its accessible name plus `aria_expanded`.
 - Tool payloads: one `key  value` row per field; a container the top level holds directly flattens (`env.RUST_LOG`,
   `args.0`), anything deeper is drawn as rows indented `NEST_INDENT` (12px) per level under their own key, up to
   `MAX_DEPTH` (4) — past that, or for an array longer than `MAX_ARRAY` (20), the container is one muted `{…3 keys}` /
@@ -85,7 +102,7 @@ Invariants
   found (`c1b901c`, `dfdb3d3`).
 
 ## Commands
-- `cargo test -p transcript` (51) and `cargo test -p composer` (21), plus `cargo test -p session` (the context row is
+- `cargo test -p transcript` (52) and `cargo test -p composer` (21), plus `cargo test -p session` (the context row is
   fixture-driven: `crates/session/tests/fixtures/context-transcript.json`, recorded by
   `crates/session/tests/capture_context_fixture.py`); `cargo fmt -p transcript -p composer`;
   `cargo clippy -p transcript --all-targets` is clean. Note `cargo fmt -p session` reaches `lanes.rs`/`tab.rs` through
@@ -94,7 +111,9 @@ Invariants
   same for `-p composer`'s `composer_demo` (both dirs git-ignored). `34-lane-report-and-run-end.png` /
   `35-dark-lane-report-and-run-end.png` are the turn the swarm talks in (delegation, lane report, run end, the
   coordinator's answer), and `36-goal-nudges.png` / `37-dark-goal-nudges.png` the goal evo keeps going by itself (a
-  continuation opened onto its message, and the wrap-up). Cost harness: `cargo run -q -p transcript --example
+  continuation opened onto its message, and the wrap-up), and `38-command-notes.png` / `39-dark-command-notes.png` the
+  commands the reader ran while the agent worked (`Command · /global-memory` closed, `/notify doctor` opened onto its
+  capped block). Cost harness: `cargo run -q -p transcript --example
   transcript_stress [-- rows stream delta message_chars]`.
 
 ## Kit facts worth not re-deriving (gpui-kit 0.7.0 / gpui-base 0.7.0)

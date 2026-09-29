@@ -135,6 +135,10 @@ const DARK_FOLLOW_UP_SHOT: &str = "35-dark-lane-report-and-run-end.png";
 /// budget runs out.
 const GOAL_NUDGE_SHOT: &str = "36-goal-nudges.png";
 const DARK_GOAL_NUDGE_SHOT: &str = "37-dark-goal-nudges.png";
+/// A command the reader ran while the agent was working: the agent gets instructions
+/// about it, and the reader gets one line naming the command.
+const COMMAND_NOTE_SHOT: &str = "38-command-notes.png";
+const DARK_COMMAND_NOTE_SHOT: &str = "39-dark-command-notes.png";
 
 const ASSISTANT_ID: RowId = 2;
 const SECOND_ASSISTANT_ID: RowId = 21;
@@ -161,6 +165,9 @@ const FOLLOW_UP_SIZE: (f32, f32) = (1000., 620.);
 /// The rows of the goal-nudge stage.
 const CONTINUATION: RowId = 81;
 const WRAPUP: RowId = 83;
+/// The rows of the command-note stage.
+const MEMORY_REQUEST: RowId = 91;
+const DOCTOR_REQUEST: RowId = 94;
 
 /// The message the demo streams. Headings, bold, a list, a table and a fenced
 /// code block — all of them half-typed at some point mid-stream.
@@ -643,6 +650,66 @@ fn continuation_text() -> String {
 /// The sentence a continuation opens with (`src/kernel/goal.lisp:71`).
 const CONTINUATION_OPENING: &str =
     "You are idle but your goal is still active. Continue working toward it now.";
+
+/// What `/global-memory <query>` puts in front of the agent, verbatim from
+/// `scoped-memory-command` (`src/core-ext/memory.lisp:243-248`), and what `/notify doctor`
+/// puts there (`extensions/360-baby-evo.lisp:739-746`).
+const MEMORY_REQUEST_TEXT: &str = "\
+The user invoked `/global-memory` with an intention or query about global memory. Use the `global_memory` tool to inspect the current store. Answer queries, and add, update, or remove entries only when the user's intent warrants it; keep memory current rather than preserving history.
+
+<memory-request>
+what is on floor 3?
+</memory-request>";
+
+/// The doctor prompt is long — about a kilobyte of steps — which is exactly why the row
+/// shows one line of it.
+fn doctor_request_text() -> String {
+    let mut text = String::from(
+        "The user just ran `/notify doctor`. Walk them through getting Baby Evo's idle \
+         notifications working — ideally WITH the reply field — interactively, one step at \
+         a time: ask, act, check, adapt to what they say. Do not dump all of this on them \
+         at once. What follows is the diagnosis the user cannot be expected to know:",
+    );
+    for step in 1..=30 {
+        text.push_str(&format!(
+            "\n{step}. Check the {step}th thing a notification needs: the banner, the reply \
+             field, the alert style, the bundle identifier, the signing identity, the \
+             running process, and the terminal it was started from."
+        ));
+    }
+    text
+}
+
+/// The command-note stage: the reader's own commands, and what the extensions answered
+/// them with — one line each, named by the command, with the whole of the doctor
+/// instructions behind one click.
+fn command_note_rows() -> Vec<Row> {
+    vec![
+        user_row(90, "/global-memory what is on floor 3?"),
+        Row {
+            id: MEMORY_REQUEST,
+            version: 1,
+            kind: RowKind::CommandNote {
+                command: "/global-memory".into(),
+                text: MEMORY_REQUEST_TEXT.into(),
+            },
+        },
+        assistant_row(
+            92,
+            "One entry mentions floor 3: the coffee machine there is broken.",
+            false,
+        ),
+        user_row(93, "/notify doctor"),
+        Row {
+            id: DOCTOR_REQUEST,
+            version: 1,
+            kind: RowKind::CommandNote {
+                command: "/notify doctor".into(),
+                text: doctor_request_text(),
+            },
+        },
+    ]
+}
 
 /// The goal-nudge stage: the reader's goal, the continuation evo steered to keep it
 /// going (opened, so the twelve lines it shows are visible), the agent's reply, and the
@@ -1281,6 +1348,17 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     });
     shot(&mut cx, context_stage, dir, CONTEXT_SHOT)?;
 
+    // The commands the reader ran while the agent worked: one quiet line each, named by
+    // the command, the doctor's instructions behind one click.
+    let (notes, notes_demo) = open_capture_window(&mut cx, (1000., 780.))?;
+    notes_demo.update(&mut cx, |demo, cx| {
+        demo.transcript.update(cx, |view, cx| {
+            view.replace(1, command_note_rows(), cx);
+            view.set_expanded(DOCTOR_REQUEST, true, cx);
+        });
+    });
+    shot(&mut cx, notes, dir, COMMAND_NOTE_SHOT)?;
+
     // The goal evo keeps going: the continuation it steered into its own agent, opened
     // onto the message it sent, and the wrap-up that followed a spent budget.
     let (nudges, nudges_demo) = open_capture_window(&mut cx, (1000., 700.))?;
@@ -1380,6 +1458,9 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
 
     // And the nested arguments in the dark theme.
     shot(&mut cx, nested, dir, DARK_NESTED_ARGUMENTS_SHOT)?;
+
+    // The command notes in the dark theme.
+    shot(&mut cx, notes, dir, DARK_COMMAND_NOTE_SHOT)?;
 
     // The goal nudges in the dark theme.
     shot(&mut cx, nudges, dir, DARK_GOAL_NUDGE_SHOT)?;

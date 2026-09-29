@@ -100,6 +100,25 @@ pub enum RowKind {
         /// The whole message, which is what an opened row shows.
         text: String,
     },
+    /// A command the reader ran, answered with instructions for the agent: an
+    /// extension steers in what the agent should do about it — `/memory <query>` and
+    /// `/global-memory <query>` ("The user invoked `/global-memory` with an intention
+    /// or query about global memory…", `src/core-ext/memory.lisp:242`), `/lore <text>`
+    /// ("The user added global-lore (durable guidance, applies from now on): …",
+    /// `src/command/command.lisp:397`), and any extension that opens with the same
+    /// phrasing (`extensions/360-baby-evo.lisp:844`'s `/notify doctor`).
+    ///
+    /// The reader typed the command, not this: the message is what the extension wants
+    /// the agent to do, so its row names the command that caused it and keeps the words
+    /// for a reader who wants to see them. No `meta` key marks these either — the
+    /// phrase each format opens with is all there is.
+    CommandNote {
+        /// The command the reader ran, as the message names it: `/global-memory`,
+        /// `/lore`, `/notify doctor`.
+        command: String,
+        /// The whole message.
+        text: String,
+    },
     /// A line the swarm wrote to the coordinator about one of its lanes: `[lane 1] run
     /// ended (stop) — task: …`, `[lane 1] failed to start — see …/lane.log`,
     /// `[lane 1] initialization failed: …`, `[lane 1] error: …`, `[lane 1] is down: …`,
@@ -134,13 +153,16 @@ pub struct ToolResult {
     pub content_chars: Option<u64>,
 }
 
-/// Which of evo's two goal nudges a row is (`src/kernel/goal.lisp`).
+/// Which of evo's goal nudges a row is (`src/kernel/goal.lisp`, and the `/goal` command
+/// that can change an objective mid-run, `src/command/command.lisp:227`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GoalNudgeKind {
     /// The goal is still active and the run settled: keep going (:69).
     Continue,
     /// The goal's token budget is spent: wrap up and summarize (:106).
     Wrapup,
+    /// The reader gave a running goal a new objective (`command.lisp:227`).
+    Updated,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

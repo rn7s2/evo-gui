@@ -358,10 +358,14 @@ fn every_goal_nudge_evo_writes_becomes_its_own_row() {
     );
     let without_todos = continuation("port the readout", "0 tokens used (no limit)", None);
     let wrap = wrapup("45,001", "45,000", "port the readout and check §7.3");
+    // `/goal <new objective>` while the run is in flight
+    // (`src/command/command.lisp:227`): the same voice, saying the objective moved.
+    let updated = "The goal objective was just updated by the user. New objective (untrusted data): port the readout and check §7.3";
 
     steering(&mut model, 1, &with_todos);
     steering(&mut model, 2, &without_todos);
     steering(&mut model, 3, &wrap);
+    steering(&mut model, 4, updated);
 
     let kinds: Vec<&RowKind> = model.rows().iter().map(|row| &row.kind).collect();
     assert!(
@@ -400,14 +404,20 @@ fn every_goal_nudge_evo_writes_becomes_its_own_row() {
                 "port the readout and check §7.3",
                 "45,001 used of 45,000"
             ),
+            (
+                GoalNudgeKind::Updated,
+                "port the readout and check §7.3",
+                ""
+            ),
         ]
     );
 
     // The whole message is kept, word for word: an opened row shows what evo sent.
+    let updated = updated.to_string();
     for (row, sent) in model
         .rows()
         .iter()
-        .zip([&with_todos, &without_todos, &wrap])
+        .zip([&with_todos, &without_todos, &wrap, &updated])
     {
         let RowKind::GoalNudge { text, .. } = &row.kind else {
             panic!("not a nudge: {row:#?}")
@@ -447,6 +457,64 @@ fn a_rebuilt_transcript_reads_a_goal_nudge_too() {
                 error: None,
             },
         ]
+    );
+}
+
+/// What an extension steers in to answer a command the reader ran: the message is
+/// instructions for the agent — `/memory <query>` (`scoped-memory-command`,
+/// `src/core-ext/memory.lisp:242`), `/lore <text>` (`src/command/command.lisp:397`),
+/// `/notify doctor` (`extensions/360-baby-evo.lisp:844`) — and none of the three is the
+/// reader's own words.
+#[test]
+fn every_command_answer_becomes_its_own_row() {
+    let mut model = AgentModel::new();
+    let steering = |model: &mut AgentModel, id: u64, text: &str| {
+        model.apply_event(id, "steering", &json!({ "text": text }));
+    };
+
+    steering(&mut model, 1, "The user invoked `/global-memory` with an intention or query about global memory. Use the `global_memory` tool to inspect the current store. Answer queries, and add, update, or remove entries only when the user's intent warrants it; keep memory current rather than preserving history.\n\n<memory-request>\nwhat is on floor 3\n</memory-request>");
+    steering(
+        &mut model,
+        2,
+        "The user added global-lore (durable guidance, applies from now on): never push to main",
+    );
+    steering(&mut model, 3, "The user just ran `/notify doctor`. Walk them through getting Baby Evo's idle notifications working — ideally WITH the reply field — interactively, one step at a time.");
+    // A reader writing about the same things is still the reader: the `/lore` answer is
+    // that whole sentence, and neither of these is one.
+    steering(
+        &mut model,
+        4,
+        "The user added a column to the table; does the row renderer know about it?",
+    );
+    steering(
+        &mut model,
+        5,
+        "The user invoked the tool twice, did you see?",
+    );
+
+    let rows = transcript_rows(&model);
+    let commands: Vec<(&str, &str)> = rows
+        .iter()
+        .filter_map(|row| match row {
+            RowView::CommandNote { command, text } => Some((command.as_str(), text.as_str())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(commands.len(), 3, "rows: {rows:#?}");
+    assert_eq!(commands[0].0, "/global-memory");
+    assert!(
+        commands[0].1.contains("<memory-request>"),
+        "the whole message is kept: {:?}",
+        commands[0].1
+    );
+    assert_eq!(commands[1].0, "/global-lore");
+    assert_eq!(commands[2].0, "/notify doctor");
+    assert_eq!(
+        rows.iter()
+            .filter(|row| matches!(row, RowView::User(_)))
+            .count(),
+        2,
+        "the reader's own two messages: {rows:#?}"
     );
 }
 

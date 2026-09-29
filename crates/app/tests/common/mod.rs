@@ -161,6 +161,7 @@ pub fn transcript(cx: &mut TestAppContext, tab: &Entity<TabContent>) -> String {
                 } => {
                     format!("goal {kind:?}: {objective}")
                 }
+                RowKind::CommandNote { command, .. } => format!("command {command}"),
                 RowKind::Assistant { markdown, .. } => markdown.clone(),
                 RowKind::Report {
                     done,

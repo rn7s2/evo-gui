@@ -133,12 +133,10 @@ impl Screens {
 
     /// The pixel size a `--scale` run resamples that to.
     fn saved(&self) -> Option<(u32, u32)> {
-        (self.scale != RENDER_SCALE).then(|| {
-            (
-                (self.width * self.scale) as u32,
-                (self.height * self.scale) as u32,
-            )
-        })
+        (self.scale != RENDER_SCALE).then_some((
+            (self.width * self.scale) as u32,
+            (self.height * self.scale) as u32,
+        ))
     }
 }
 
@@ -249,7 +247,7 @@ fn run(dir: &Path, scale: f32) -> Result<(), Box<dyn std::error::Error>> {
         "[utc] {} quit: evo_desktop::begin_quit",
         time::now_rfc3339()
     );
-    cx.update(|cx| evo_desktop::begin_quit(cx));
+    cx.update(evo_desktop::begin_quit);
     let quiet = wait_for_quiet(&mut cx, &root, &project, Duration::from_secs(45));
     report_processes(&root, &project, quiet);
     print_app_log(&root);
@@ -449,7 +447,7 @@ fn open_workspace(
             cx.new(|cx| WorkspaceView::with_config(config, window, cx))
         })
     })?;
-    Ok((window.into(), view))
+    Ok((window, view))
 }
 
 /// Launch through the **empty tab's own event**: the tab emits
@@ -569,6 +567,7 @@ fn first_reply_shape(cx: &HeadlessAppContext, tab: &Entity<workspace::TabContent
                 RowKind::Context { key, .. } => parts.push(format!("context {key}")),
                 RowKind::LaneNotice { lane, .. } => parts.push(format!("lane {lane} notice")),
                 RowKind::GoalNudge { kind, .. } => parts.push(format!("goal {kind:?}")),
+                RowKind::CommandNote { command, .. } => parts.push(format!("command {command}")),
                 RowKind::Assistant {
                     markdown,
                     streaming,
@@ -725,6 +724,7 @@ fn row_chars(row: &session::Row) -> usize {
         RowKind::Context { text, .. } => text.chars().count(),
         RowKind::LaneNotice { text, .. } => text.chars().count(),
         RowKind::GoalNudge { text, .. } => text.chars().count(),
+        RowKind::CommandNote { text, .. } => text.chars().count(),
         RowKind::Assistant { markdown, .. } => markdown.chars().count(),
         RowKind::Tool { name, .. } => name.chars().count(),
         RowKind::Report { done, .. } => done.chars().count(),
@@ -795,6 +795,9 @@ fn row_lines(cx: &HeadlessAppContext, tab: &Entity<workspace::TabContent>) -> Ve
                             }
                             RowKind::GoalNudge { kind, text, .. } => {
                                 ("goal", format!("{kind:?} {text}"))
+                            }
+                            RowKind::CommandNote { command, text } => {
+                                ("command", format!("{command} {text}"))
                             }
                             RowKind::Assistant {
                                 markdown,

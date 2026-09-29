@@ -578,6 +578,7 @@ pub fn signature(row: &session::Row) -> String {
         session::RowKind::Context { key, text } => format!("context:{key}:{text}"),
         session::RowKind::LaneNotice { lane, text, .. } => format!("lane{lane}:{text}"),
         session::RowKind::GoalNudge { kind, .. } => format!("goal:{kind:?}"),
+        session::RowKind::CommandNote { command, .. } => format!("command:{command}"),
         session::RowKind::Assistant {
             markdown,
             thinking,
@@ -616,6 +617,7 @@ pub fn row_summary(model: &session::AgentModel) -> Vec<String> {
             } => {
                 format!("goal:{kind:?}:{}", clip(objective, 60))
             }
+            session::RowKind::CommandNote { command, .. } => format!("command:{command}"),
             session::RowKind::Assistant { markdown, .. } => {
                 format!("assistant:{}", clip(markdown, 60))
             }

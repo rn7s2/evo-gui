@@ -270,7 +270,8 @@ impl Group {
             RowKind::Dim { .. }
             | RowKind::RunOutcome { .. }
             | RowKind::LaneNotice { .. }
-            | RowKind::GoalNudge { .. } => Self::Dim,
+            | RowKind::GoalNudge { .. }
+            | RowKind::CommandNote { .. } => Self::Dim,
             RowKind::Context { .. } => Self::Context,
         }
     }
@@ -376,6 +377,14 @@ pub(crate) fn render_row(
         RowKind::GoalNudge { .. } => {
             goal_nudge_row(row, data.expanded.contains(&row.id), view, &palette)
         }
+        RowKind::CommandNote { command, text } => command_note_row(
+            row.id,
+            command,
+            text,
+            data.expanded.contains(&row.id),
+            view,
+            &palette,
+        ),
         RowKind::Dim { style, text } => dim_row(row.id, *style, text, &palette),
         RowKind::RunOutcome { outcome, text } => run_outcome_row(row.id, outcome, text, &palette),
     });
@@ -456,12 +465,92 @@ pub(crate) const CONTEXT_BLOCK_LINES: usize = 12;
 /// the reading measure they were cut to but not the full length of a task path.
 const NOTICE_TOOLTIP_WIDTH: Pixels = px(520.);
 
-/// Content an extension injected (`evo:inject-context`): one quiet line saying
-/// what it is and where it came from, which opens onto the text itself.
+/// A row that is one quiet line until it is opened: something evo, the swarm or an
+/// extension steered in, named by the line and kept whole in a block under it.
 ///
-/// It arrives as a user-role message but the reader never wrote it — a memory
-/// snapshot is kilobytes of their own private context — so it is drawn as a
-/// note rather than as a turn, and never open by default.
+/// `header` and `block` are the element names the row owns — a test reaches the line by
+/// the first and the text by the second — and `head`/`trailing` are the line itself:
+/// the part that gives way when it is longer than the measure, and a second cell that
+/// never does (a budget, say, which a reader wants whether or not the objective fits).
+struct QuietRow<'a> {
+    id: RowId,
+    header: &'static str,
+    head: String,
+    trailing: Option<String>,
+    text: &'a str,
+    block: &'static str,
+}
+
+/// Draw a quiet row: one line, muted, closed until the reader asks for it.
+fn quiet_row(
+    row: QuietRow<'_>,
+    expanded: bool,
+    view: &WeakEntity<TranscriptView>,
+    palette: &Palette,
+) -> AnyElement {
+    let QuietRow {
+        id,
+        header: name,
+        head,
+        trailing,
+        text,
+        block,
+    } = row;
+    let view = view.clone();
+    // The whole line, cut or not, for a reader who cannot see it.
+    let aria = match &trailing {
+        Some(trailing) => format!("{head} {trailing}"),
+        None => head.clone(),
+    };
+
+    let header = div()
+        .id((name, id))
+        .flex()
+        .items_center()
+        .gap_2()
+        .h(TOOL_ROW_HEIGHT)
+        .cursor_pointer()
+        .aria_label(aria)
+        .aria_expanded(expanded)
+        .on_click(move |_, _, cx| {
+            let _ = view.update(cx, |view, cx| view.toggle_expanded(id, cx));
+        })
+        .child(caret(expanded, palette))
+        .child(
+            // Content-sized, and only that: a longer line takes the room it needs from
+            // nothing, so whatever follows follows it.
+            div()
+                .min_w_0()
+                .flex_shrink(1.)
+                .truncate()
+                .text_size(NAME_SIZE)
+                .text_color(palette.muted_foreground)
+                .child(head),
+        )
+        .children(trailing.map(|trailing| {
+            div()
+                .id((SharedString::from(format!("{name}-trailing")), id as usize))
+                .flex_none()
+                .text_size(NAME_SIZE)
+                .text_color(palette.muted_foreground)
+                .child(trailing)
+                .test_support()
+        }))
+        .test_support();
+
+    let mut row = div().w_full().min_w_0().flex().flex_col().child(header);
+    if expanded {
+        row = row.child(quiet_block(block, id, text, palette));
+    }
+    row.into_any_element()
+}
+
+/// Content an extension injected (`evo:inject-context`): one quiet line saying what it
+/// is and where it came from, which opens onto the text itself.
+///
+/// It arrives as a user-role message but the reader never wrote it — a memory snapshot
+/// is kilobytes of their own private context — so it is drawn as a note rather than as a
+/// turn, and never open by default.
 fn context_row(
     id: RowId,
     key: &str,
@@ -470,43 +559,49 @@ fn context_row(
     view: &WeakEntity<TranscriptView>,
     palette: &Palette,
 ) -> AnyElement {
-    let view = view.clone();
-    let label = context_label(key);
-    let header = div()
-        .id(("transcript-context", id))
-        .flex()
-        .items_center()
-        .gap_2()
-        .h(TOOL_ROW_HEIGHT)
-        .cursor_pointer()
-        // The line's own words, for a reader who cannot see them.
-        .aria_label(format!("Context · {label}"))
-        .aria_expanded(expanded)
-        .on_click(move |_, _, cx| {
-            let _ = view.update(cx, |view, cx| view.toggle_expanded(id, cx));
-        })
-        .child(caret(expanded, palette))
-        .child(
-            div()
-                .min_w_0()
-                .text_size(NAME_SIZE)
-                .text_color(palette.muted_foreground)
-                .child(format!("Context · {label}")),
-        )
-        .test_support();
+    quiet_row(
+        QuietRow {
+            id,
+            header: "transcript-context",
+            head: format!("Context · {}", context_label(key)),
+            trailing: None,
+            text,
+            block: "transcript-context-text",
+        },
+        expanded,
+        view,
+        palette,
+    )
+}
 
-    let mut row = div()
-        .id(("transcript-context-row", id))
-        .w_full()
-        .min_w_0()
-        .flex()
-        .flex_col()
-        .child(header);
-
-    if expanded {
-        row = row.child(context_text(id, text, palette));
-    }
-    row.test_support().into_any_element()
+/// A command the reader ran, answered with instructions for the agent: one quiet line
+/// naming the command, opening onto the whole of what the extension said.
+///
+/// The reader typed `/global-memory <query>`, not this — what they gave the agent was
+/// the query, and evo wrapped it in instructions for the agent's own use
+/// (`scoped-memory-command`, `src/core-ext/memory.lisp:242`). Naming the command is what
+/// tells a reader why the line is there.
+fn command_note_row(
+    id: RowId,
+    command: &str,
+    text: &str,
+    expanded: bool,
+    view: &WeakEntity<TranscriptView>,
+    palette: &Palette,
+) -> AnyElement {
+    quiet_row(
+        QuietRow {
+            id,
+            header: "transcript-command",
+            head: format!("Command · {command}"),
+            trailing: None,
+            text,
+            block: "transcript-command-text",
+        },
+        expanded,
+        view,
+        palette,
+    )
 }
 
 /// What a context row calls its key: the two the memory extension injects have
@@ -520,15 +615,15 @@ pub(crate) fn context_label(key: &str) -> String {
     }
 }
 
-/// A goal nudge evo steered into its own agent: one quiet line saying which nudge it
-/// is, which goal it is about and what the budget stands at, which opens onto the whole
+/// A goal nudge evo steered into its own agent: one quiet line saying which nudge it is,
+/// which goal it is about and what the budget stands at, which opens onto the whole
 /// message.
 ///
-/// It arrives as a user-role message because `queue-steering` puts it in the input
-/// queue (`src/kernel/goal.lisp:149`, :153), but the reader did not write it and it is
-/// not part of the conversation: it is evo keeping its own goal going, so it is drawn
-/// as a note — closed, one line — rather than as a turn. The whole of it is a click
-/// away; the rules it carries are for the agent, not for the reader.
+/// It arrives as a user-role message because `queue-steering` puts it in the input queue
+/// (`src/kernel/goal.lisp:149`, :153), but the reader did not write it and it is not part
+/// of the conversation: it is evo keeping its own goal going, so it is drawn as a note —
+/// closed, one line — rather than as a turn. The whole of it is a click away; the rules
+/// it carries are for the agent, not for the reader.
 fn goal_nudge_row(
     row: &Row,
     expanded: bool,
@@ -544,76 +639,40 @@ fn goal_nudge_row(
     else {
         unreachable!("goal_nudge_row draws a goal nudge")
     };
-    let id = row.id;
-    let view = view.clone();
 
-    // Which nudge, and for a continuation which goal — the objective is the part that
-    // gives way when the line is longer than the measure, so the budget stays readable.
-    let head = match kind {
-        GoalNudgeKind::Continue if !objective.is_empty() => {
-            format!("Goal · continue — {objective}")
+    // Which nudge, and for a continuation which goal: the objective is the part that
+    // gives way when the line is longer than the measure. The budget follows it and
+    // never gives way — a reader wants to know what is left of it either way.
+    let (head, spent) = match kind {
+        GoalNudgeKind::Continue if !objective.is_empty() => (
+            format!("Goal · continue — {objective}"),
+            (!budget.is_empty()).then(|| format!("· {budget}")),
+        ),
+        GoalNudgeKind::Continue => (
+            "Goal · continue".to_string(),
+            (!budget.is_empty()).then(|| format!("· {budget}")),
+        ),
+        // A wrap-up says in its own words that the budget is what ran out.
+        GoalNudgeKind::Wrapup => ("Goal · budget exhausted — wrap up".to_string(), None),
+        GoalNudgeKind::Updated if !objective.is_empty() => {
+            (format!("Goal · objective updated — {objective}"), None)
         }
-        GoalNudgeKind::Continue => "Goal · continue".to_string(),
-        GoalNudgeKind::Wrapup => "Goal · budget exhausted — wrap up".to_string(),
-    };
-    // The budget is named on the line for a continuation only: a wrap-up says in its
-    // own words that the budget is what ran out.
-    let spent = match kind {
-        GoalNudgeKind::Continue => (!budget.is_empty()).then(|| format!("· {budget}")),
-        GoalNudgeKind::Wrapup => None,
+        GoalNudgeKind::Updated => ("Goal · objective updated".to_string(), None),
     };
 
-    let header = div()
-        .id(("transcript-goal", id))
-        .flex()
-        .items_center()
-        .gap_2()
-        .h(TOOL_ROW_HEIGHT)
-        .cursor_pointer()
-        // The whole line, cut or not, for a reader who cannot see it.
-        .aria_label(match &spent {
-            Some(spent) => format!("{head} {spent}"),
-            None => head.clone(),
-        })
-        .aria_expanded(expanded)
-        .on_click(move |_, _, cx| {
-            let _ = view.update(cx, |view, cx| view.toggle_expanded(id, cx));
-        })
-        .child(caret(expanded, palette))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .truncate()
-                .text_size(NAME_SIZE)
-                .text_color(palette.muted_foreground)
-                .child(head),
-        )
-        .children(spent.map(|spent| {
-            div()
-                .flex_none()
-                .text_size(NAME_SIZE)
-                .text_color(palette.muted_foreground)
-                .child(spent)
-        }))
-        .test_support();
-
-    let mut nudge = div()
-        .id(("transcript-goal-row", id))
-        .w_full()
-        .min_w_0()
-        .flex()
-        .flex_col()
-        .child(header);
-    if expanded {
-        nudge = nudge.child(quiet_block("transcript-goal-text", id, text, palette));
-    }
-    nudge.test_support().into_any_element()
-}
-
-/// An opened context's text.
-fn context_text(id: RowId, text: &str, palette: &Palette) -> AnyElement {
-    quiet_block("transcript-context-text", id, text, palette)
+    quiet_row(
+        QuietRow {
+            id: row.id,
+            header: "transcript-goal",
+            head,
+            trailing: spent,
+            text,
+            block: "transcript-goal-text",
+        },
+        expanded,
+        view,
+        palette,
+    )
 }
 
 /// The text of an opened quiet row: the payload face, selectable, capped at

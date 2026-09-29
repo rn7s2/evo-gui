@@ -121,6 +121,10 @@ pub enum RowView {
         budget: String,
         text: String,
     },
+    CommandNote {
+        command: String,
+        text: String,
+    },
     Dim(String),
     RunOutcome {
         outcome: String,
@@ -187,6 +191,10 @@ impl RowView {
                 kind: *kind,
                 objective: objective.clone(),
                 budget: budget.clone(),
+                text: text.clone(),
+            },
+            session::RowKind::CommandNote { command, text } => RowView::CommandNote {
+                command: command.clone(),
                 text: text.clone(),
             },
             session::RowKind::Dim { text, .. } => RowView::Dim(text.clone()),

@@ -930,6 +930,7 @@ fn join_blocks(content: Option<&Value>, block_type: &str, key: &str) -> String {
 fn steered_row(message: Option<&Value>, text: &str) -> Option<RowKind> {
     lane_row(text)
         .or_else(|| goal_nudge_row(text))
+        .or_else(|| command_note_row(text))
         .or_else(|| {
             message.and_then(context_key).map(|key| RowKind::Context {
                 key,
@@ -941,17 +942,20 @@ fn steered_row(message: Option<&Value>, text: &str) -> Option<RowKind> {
 /// The row for a goal nudge evo steered into its own agent, or `None` when the text is
 /// something else.
 ///
-/// Both nudges are evo's own: `goal-continuation-message` (`src/kernel/goal.lisp:69`)
-/// opens "You are idle but your goal is still active. Continue working toward it now."
-/// and `goal-wrapup-message` (:106) opens "Your goal's token budget is exhausted (",
-/// and `queue-steering` (:149, :153) queues them as ordinary input — no `meta` key, no
-/// event of their own. The opening sentence is the contract, and a reader never types
-/// it.
+/// All of them are evo's own: `goal-continuation-message` (`src/kernel/goal.lisp:69`)
+/// opens "You are idle but your goal is still active. Continue working toward it now.",
+/// `goal-wrapup-message` (:106) opens "Your goal's token budget is exhausted (", and
+/// the `/goal` command tells a running goal its objective changed
+/// (`src/command/command.lisp:227`). `queue-steering` (:149, :153) queues them as
+/// ordinary input — no `meta` key, no event of their own. The opening sentence is the
+/// contract, and a reader never types it.
 fn goal_nudge_row(text: &str) -> Option<RowKind> {
     let kind = if text.starts_with(CONTINUE_OPENING) {
         GoalNudgeKind::Continue
     } else if text.starts_with(WRAPUP_OPENING) {
         GoalNudgeKind::Wrapup
+    } else if text.starts_with(UPDATED_OPENING) {
+        GoalNudgeKind::Updated
     } else {
         return None;
     };
@@ -963,11 +967,56 @@ fn goal_nudge_row(text: &str) -> Option<RowKind> {
     })
 }
 
+/// The row for a message an extension steered in to answer a command the reader ran, or
+/// `None` when the text is something else.
+///
+/// Three shapes exist, and each says in its first sentence what the reader did:
+/// `scoped-memory-command` (`src/core-ext/memory.lisp:242`) opens "The user invoked
+/// `/<command>` …", `/lore` (`src/command/command.lisp:397`) opens "The user added
+/// <label> (durable guidance, applies from now on): ", and an extension that hands the
+/// agent work the same way — `/notify doctor`
+/// (`extensions/360-baby-evo.lisp:844`) — opens "The user just ran `/<command>`". An
+/// extension may steer anything at all, so only these phrases are claimed, and each
+/// needs the whole of its phrasing, not just its first two words.
+fn command_note_row(text: &str) -> Option<RowKind> {
+    let command = if let Some(quoted) = text
+        .strip_prefix(INVOKED_OPENING)
+        .or_else(|| text.strip_prefix(RAN_OPENING))
+    {
+        // The command is the backticked token: "The user invoked `/global-memory` …".
+        format!("/{}", quoted[..quoted.find('`')?].trim_start_matches('/'))
+    } else {
+        // `/lore` names what it added rather than the command it was: "The user added
+        // global-lore (durable guidance, applies from now on): …".
+        let (label, _) = text
+            .strip_prefix(ADDED_OPENING)?
+            .split_once(ADDED_GUIDANCE)?;
+        format!("/{}", label.trim())
+    };
+    Some(RowKind::CommandNote {
+        command,
+        text: text.to_string(),
+    })
+}
+
+/// What a command's answer opens with: the reader's command quoted
+/// (`src/core-ext/memory.lisp:243`), the same told to a helper
+/// (`extensions/360-baby-evo.lisp:741`), and what `/lore` did
+/// (`src/command/command.lisp:397`).
+const INVOKED_OPENING: &str = "The user invoked `";
+const RAN_OPENING: &str = "The user just ran `";
+const ADDED_OPENING: &str = "The user added ";
+const ADDED_GUIDANCE: &str = " (durable guidance, applies from now on): ";
+
 /// A continuation's first sentence (`goal.lisp:71`).
 const CONTINUE_OPENING: &str =
     "You are idle but your goal is still active. Continue working toward it now.";
 /// A wrap-up's first words (`goal.lisp:108`); the budget reads on from there.
 const WRAPUP_OPENING: &str = "Your goal's token budget is exhausted (";
+/// What the `/goal` command tells a running goal, before the new objective
+/// (`src/command/command.lisp:227`).
+const UPDATED_OPENING: &str =
+    "The goal objective was just updated by the user. New objective (untrusted data): ";
 
 /// The objective a nudge carries: the body of the continuation's `<goal objective=…>`
 /// block (`goal.lisp:73`), or what follows the wrap-up's "Goal objective: " (:111).
@@ -982,6 +1031,7 @@ fn goal_nudge_objective(kind: GoalNudgeKind, text: &str) -> Option<String> {
             rest[..rest.find("</goal>")?].trim()
         }
         GoalNudgeKind::Wrapup => text.split_once("Goal objective: ")?.1.trim(),
+        GoalNudgeKind::Updated => text.strip_prefix(UPDATED_OPENING)?.trim(),
     };
     (!objective.is_empty()).then(|| objective.to_string())
 }
@@ -999,6 +1049,9 @@ fn goal_nudge_budget(kind: GoalNudgeKind, text: &str) -> Option<String> {
             let opening = text.find('(')? + 1;
             &text[opening..opening + text[opening..].find(')')?]
         }
+        // A new objective is not a budget: the goal keeps whatever limit it had, and
+        // this message says nothing about it.
+        GoalNudgeKind::Updated => "",
     };
     let budget = budget.trim();
     (!budget.is_empty()).then(|| budget.to_string())

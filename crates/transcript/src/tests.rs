@@ -107,6 +107,102 @@ fn context(id: RowId, key: &str, text: &str) -> Row {
     }
 }
 
+/// A command's answer is one quiet line naming the command the reader ran — and the
+/// whole of what the extension said is a click away, in the same capped block every
+/// quiet row opens onto.
+#[gpui_kit::test]
+fn a_command_note_is_one_quiet_line_that_opens(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (host, cx) = cx.add_window_view(|_window, cx| TranscriptHost::new(cx));
+
+    let request = "The user invoked `/global-memory` with an intention or query about global \
+                  memory. Use the `global_memory` tool to inspect the current store.\n\n\
+                  <memory-request>\nwhat is on floor 3\n</memory-request>";
+    let doctor: String = (1..=40)
+        .map(|line| format!("step {line}: check, then adapt\n"))
+        .collect();
+    host.update(cx, |host, cx| {
+        host.transcript.update(cx, |view, cx| {
+            view.replace(
+                1,
+                vec![
+                    command_note(1, "/global-memory", request),
+                    user(2, 1, "What is on floor 3?"),
+                    command_note(3, "/notify doctor", &doctor),
+                ],
+                cx,
+            );
+        });
+    });
+
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        let note = window.find(("transcript-command", 1u64));
+        assert_eq!(note.label(), Some("Command · /global-memory"));
+        assert_eq!(
+            window.find(("transcript-command", 3u64)).label(),
+            Some("Command · /notify doctor")
+        );
+        assert_eq!(note.expanded(), Some(false));
+        assert!(
+            window.try_find(("transcript-command-text", 1u64)).is_none(),
+            "a command's answer is one line until it is opened"
+        );
+        assert_eq!(
+            note.bounds().size.height,
+            TOOL_ROW_HEIGHT,
+            "the note wrapped: {:?}",
+            note.bounds()
+        );
+        for id in [1u64, 3] {
+            assert_eq!(
+                window.find(("transcript-measure", id)).bounds().size.width,
+                px(MEASURE),
+                "row {id} keeps the measure"
+            );
+        }
+
+        // The reader's own message is still the only turn.
+        let first = window
+            .try_find(("transcript-turn", 1usize))
+            .expect("the reader's turn is turn 1");
+        assert!(
+            first.bounds().origin.y > note.bounds().origin.y,
+            "no turn opens above the note"
+        );
+        assert!(
+            window.try_find(("transcript-turn", 2usize)).is_none(),
+            "a command's answer is not a turn"
+        );
+
+        // Opened: the whole message, capped the way every quiet row's block is.
+        window.click(("transcript-command", 3u64), cx);
+        window.render_frame(cx);
+        assert_eq!(
+            window.find(("transcript-command", 3u64)).expanded(),
+            Some(true)
+        );
+        let block = window.find(("transcript-command-text", 3u64)).bounds();
+        let content = window
+            .find(("transcript-command-text-content", 3u64))
+            .bounds();
+        assert!(
+            content.size.height > block.size.height,
+            "forty steps run past the block: {} in {}",
+            content.size.height,
+            block.size.height
+        );
+        let cap = Palette::from_app(cx).payload_size
+            * (PAYLOAD_LINE_HEIGHT * CONTEXT_BLOCK_LINES as f32)
+            + px(20.);
+        assert!(
+            block.size.height <= cap,
+            "the block grew to {}",
+            block.size.height
+        );
+    });
+}
+
 /// A goal nudge is one quiet line naming the goal and its budget, closed until it is
 /// asked for — not the walls of text evo sent.
 #[gpui_kit::test]
@@ -168,6 +264,15 @@ fn a_goal_nudge_is_one_quiet_line(cx: &mut TestAppContext) {
             nudge.bounds().size.height,
             TOOL_ROW_HEIGHT,
             "the nudge wrapped: {:?}",
+            nudge.bounds()
+        );
+        // The objective is what gives way: the budget stays on the line, at its end,
+        // even though the objective above is longer than the measure.
+        let budget = window.find(("transcript-goal-trailing", 1u64));
+        assert!(
+            budget.visible() && budget.bounds().right() <= nudge.bounds().right(),
+            "the budget left the line: {:?} in {:?}",
+            budget.bounds(),
             nudge.bounds()
         );
         for id in [1u64, 2] {
@@ -300,6 +405,19 @@ fn lane_report(id: RowId, lane: u32, done: &str) -> Row {
             requests: "none".into(),
             goal: None,
             lane: Some(lane),
+        },
+    }
+}
+
+/// A command the reader ran, answered with instructions for the agent: what the session
+/// reads out of that message (`scoped-memory-command`, `src/core-ext/memory.lisp:242`).
+fn command_note(id: RowId, command: &str, text: &str) -> Row {
+    Row {
+        id,
+        version: 1,
+        kind: RowKind::CommandNote {
+            command: command.into(),
+            text: text.into(),
         },
     }
 }

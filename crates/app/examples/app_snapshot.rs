@@ -78,12 +78,10 @@ impl Screens {
 
     /// The pixel size a `--scale` run resamples that to.
     fn saved(&self) -> Option<(u32, u32)> {
-        (self.scale != RENDER_SCALE).then(|| {
-            (
-                (self.width * self.scale) as u32,
-                (self.height * self.scale) as u32,
-            )
-        })
+        (self.scale != RENDER_SCALE).then_some((
+            (self.width * self.scale) as u32,
+            (self.height * self.scale) as u32,
+        ))
     }
 }
 
@@ -529,10 +527,12 @@ fn capture(dir: &Path, scale: f32, only: &[String]) -> Result<(), Box<dyn std::e
     cx.update(|cx| {
         let log = AppLog::open(&root);
         log.info("app_snapshot: building the app's shell");
-        let mut state = AppState::default();
-        state.binaries = Binaries {
-            evo_swarm: fixture.swarm_bin.clone(),
-            evo_agent: fixture.agent_bin.clone(),
+        let state = AppState {
+            binaries: Binaries {
+                evo_swarm: fixture.swarm_bin.clone(),
+                evo_agent: fixture.agent_bin.clone(),
+            },
+            ..AppState::default()
         };
         Shell::new(root.clone(), log, state, catalog.clone()).install(cx);
     });
@@ -920,7 +920,7 @@ fn open_workspace(
             cx.new(|cx| WorkspaceView::with_config(config, window, cx))
         })
     })?;
-    Ok((window.into(), view))
+    Ok((window, view))
 }
 
 fn launch(
@@ -943,9 +943,11 @@ fn launch_with(
     workers: u16,
     model: Option<(&str, &str)>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut plan = session::LaunchPlan::default();
-    plan.workers = Some(workers);
-    plan.model = model.map(|(id, provider)| (id.to_string(), provider.to_string()));
+    let plan = session::LaunchPlan {
+        workers: Some(workers),
+        model: model.map(|(id, provider)| (id.to_string(), provider.to_string())),
+        ..session::LaunchPlan::default()
+    };
     let launch = Launch::New {
         folder: folder.to_path_buf(),
         plan,
@@ -1140,13 +1142,10 @@ fn resample(path: &Path, screens: Screens) -> Result<bool, Box<dyn std::error::E
     let Some((w, h)) = screens.saved() else {
         return Ok(false);
     };
-    let widest = w.max(h);
+    let widest = w.max(h).to_string();
+    let path_text = path.to_string_lossy();
     let status = Command::new("sips")
-        .args([
-            "-Z",
-            &widest.to_string(),
-            &path.to_string_lossy().into_owned(),
-        ])
+        .args(["-Z", &widest, &path_text])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
@@ -1250,6 +1249,9 @@ fn row_dump(cx: &HeadlessAppContext, tab: &Entity<workspace::TabContent>) -> Vec
                             }
                             RowKind::GoalNudge { kind, text, .. } => {
                                 ("goal", format!("{kind:?} {text}"))
+                            }
+                            RowKind::CommandNote { command, text } => {
+                                ("command", format!("{command} {text}"))
                             }
                             RowKind::Assistant {
                                 markdown,
@@ -1368,6 +1370,7 @@ fn row_chars(row: &session::Row) -> usize {
         RowKind::Context { text, .. } => text.chars().count(),
         RowKind::LaneNotice { text, .. } => text.chars().count(),
         RowKind::GoalNudge { text, .. } => text.chars().count(),
+        RowKind::CommandNote { text, .. } => text.chars().count(),
         RowKind::Assistant { markdown, .. } => markdown.chars().count(),
         RowKind::Tool { name, .. } => name.chars().count(),
         RowKind::Report { done, .. } => done.chars().count(),
