@@ -224,6 +224,84 @@ impl Default for HarnessConfig {
     }
 }
 
+/// The environment a swarm needs, without the swarm: a temp `HOME` whose
+/// `init.lisp` registers the stub provider, a temp project, and the installed
+/// binaries. What a crate that starts a server itself (tab_engine) needs, so it
+/// does not have to re-derive the hermetic setup.
+///
+/// `dir` is declared last so it is dropped last: the stub is stopped before the
+/// directory it logs into disappears.
+pub struct Fixture {
+    pub bins: Bins,
+    pub stub: StubProvider,
+    pub home: PathBuf,
+    pub project: PathBuf,
+    /// The model `init.lisp` registers and sets.
+    pub model: String,
+    pub dir: TempDir,
+}
+
+impl Fixture {
+    pub fn new(config: HarnessConfig) -> Result<Fixture> {
+        let bins = Bins::installed();
+        if !bins.available() {
+            return Err(Error::Config(format!(
+                "no binaries to test against: {} / {}",
+                bins.swarm.display(),
+                bins.agent.display()
+            )));
+        }
+        let dir = TempDir::new("swarm-client-fixture")?;
+        let home = dir.join("home");
+        let project = dir.join("proj");
+        fs::create_dir_all(&home)?;
+        fs::create_dir_all(&project)?;
+        let stub = StubProvider::start()?;
+        let mut init = stub_init_lisp(stub.port(), &config.model);
+        init.push_str(&config.init_extra);
+        fs::write(home.join("init.lisp"), init)?;
+        Ok(Fixture { bins, stub, home, project, model: config.model, dir })
+    }
+
+    /// The tab directory the server is told to keep its token and log in.
+    pub fn tab_dir(&self) -> &Path {
+        self.dir.path()
+    }
+
+    /// The environment a hermetic server needs: `EVO_HOME` at the temp home, the
+    /// agent binary for the lanes, and no real provider key.
+    pub fn env(&self) -> Vec<(String, String)> {
+        vec![
+            ("EVO_HOME".to_owned(), self.home.to_string_lossy().into_owned()),
+            ("EVO_BINARY".to_owned(), self.bins.agent.to_string_lossy().into_owned()),
+            ("TERM".to_owned(), "xterm-256color".to_owned()),
+        ]
+    }
+
+    /// The environment variables to drop, so no real provider key leaks in.
+    pub fn env_remove(&self) -> Vec<String> {
+        vec!["ANTHROPIC_API_KEY".to_owned()]
+    }
+
+    /// The config a caller hands to [`Server::start`]: the fixture's project as
+    /// cwd, its directory as the tab directory, `--evo` pointed at the installed
+    /// agent, the stub model, and the hermetic environment above.
+    pub fn server_config(&self, workers: u16, no_userspace: bool) -> ServerConfig {
+        let mut config = ServerConfig::swarm(&self.bins.swarm, &self.project, self.dir.path())
+            .with_workers(workers)
+            .with_evo(&self.bins.agent)
+            .with_no_userspace(no_userspace);
+        for (key, value) in self.env() {
+            config = config.with_env(key, value);
+        }
+        for key in self.env_remove() {
+            config = config.with_env_removed(key);
+        }
+        config.ready_timeout = Duration::from_secs(120);
+        config
+    }
+}
+
 /// A live swarm, its stub model and its temp `HOME`.
 ///
 /// `dir` is declared last so it is dropped last: the server and the stub are
@@ -242,37 +320,12 @@ pub struct Harness {
 impl Harness {
     /// Start a stub provider, write the temp `HOME`, and start the swarm.
     pub fn start(config: HarnessConfig) -> Result<Harness> {
-        let bins = Bins::installed();
-        if !bins.available() {
-            return Err(Error::Config(format!(
-                "no binaries to test against: {} / {}",
-                bins.swarm.display(),
-                bins.agent.display()
-            )));
-        }
-        let dir = TempDir::new("swarm-client-harness")?;
-        let home = dir.join("home");
-        let project = dir.join("proj");
-        fs::create_dir_all(&home)?;
-        fs::create_dir_all(&project)?;
-        let stub = StubProvider::start()?;
-        let mut init = stub_init_lisp(stub.port(), &config.model);
-        init.push_str(&config.init_extra);
-        fs::write(home.join("init.lisp"), init)?;
-
-        let mut server_config = ServerConfig::swarm(&bins.swarm, &project, dir.path())
-            .with_workers(config.workers)
-            .with_evo(&bins.agent)
-            .with_no_userspace(config.no_userspace)
-            .with_env("EVO_HOME", home.to_string_lossy().into_owned())
-            .with_env("EVO_BINARY", bins.agent.to_string_lossy().into_owned())
-            .with_env("TERM", "xterm-256color")
-            // Hermetic: no real provider key is inherited into the test swarm.
-            .with_env_removed("ANTHROPIC_API_KEY");
-        server_config.ready_timeout = Duration::from_secs(120);
+        let fixture = Fixture::new(config.clone())?;
+        let server_config = fixture.server_config(config.workers, config.no_userspace);
         let token_file = server_config.token_file.clone();
         let log_path = server_config.log_path.clone();
         let server = Server::start(&server_config)?;
+        let Fixture { bins, stub, home, project, dir, .. } = fixture;
         Ok(Harness {
             token_file,
             log_path,

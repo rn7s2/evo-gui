@@ -4,11 +4,12 @@ version.workspace = true
 edition.workspace = true
 
 [features]
-default = ["test-harness"]
+default = []
 # The reusable real-server test harness (`harness`): a temp HOME whose init.lisp
 # registers a stub provider, plus a live `evo-swarm serve` with scripted lanes.
-# On by default so `cargo test -p swarm_client` runs the end-to-end tests;
-# other crates enable it in dev-dependencies.
+# Off by default so a production consumer never compiles it; this crate's own
+# tests turn it on through the self dev-dependency below, so
+# `cargo test -p swarm_client` still runs the end-to-end tests.
 test-harness = []
 
 [dependencies]
@@ -16,6 +17,13 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 async-channel = "2"
 libc = "0.2"
+
+[dev-dependencies]
+# Features are unified for the test build, which turns `test-harness` on for
+# `cargo test -p swarm_client` without a plain dependent (`default-features`
+# on, feature off) ever compiling the harness.
+swarm_client = { path = ".", features = ["test-harness"] }
+serde_json = { workspace = true }
 
 [[test]]
 name = "swarm_e2e"

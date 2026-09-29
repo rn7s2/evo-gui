@@ -94,7 +94,10 @@ impl Default for StreamConfig {
 pub enum ResetReason {
     /// The server announced `hello`: a new process, its ids start again at 1.
     Hello,
-    /// An id went backwards: same thing, seen from the numbers.
+    /// `/health` named a different process than the one the cursor belonged to:
+    /// the server restarted, and its ids begin again at 1.
+    Restarted,
+    /// An id went backwards: the same thing, seen from the numbers.
     IdRegression,
 }
 
@@ -208,21 +211,34 @@ fn run(
 ) {
     let mut cursor = target.since;
     let mut backoff = cfg.initial_backoff;
-    let mut first = true;
     // The first connection names its cursor in the query (`?since=N`, §5); a
     // reconnect sends the standard `Last-Event-ID` header (docs/serve.md §Events).
     let mut reconnected = false;
+    // The pid `/health` last named. A different one means the process behind the
+    // events was restarted, and its ids begin again at 1.
+    let mut server_pid: Option<u32> = None;
 
     'outer: loop {
         if stop.load(Ordering::SeqCst) {
             break;
         }
-        if !first && target.probe == CursorProbe::Health {
-            match probe_cursor(&target.http) {
-                Ok(Some(server_cursor)) => {
-                    // A cursor ahead of the server's own log means the process
-                    // we were reading restarted (its ids begin again at 1).
-                    if let Some(ours) = cursor {
+        if target.probe == CursorProbe::Health {
+            match probe_health(&target.http) {
+                Ok(probe) => {
+                    match server_pid {
+                        Some(known) if known != probe.pid => {
+                            server_pid = Some(probe.pid);
+                            cursor = Some(0);
+                            if !send(&tx, StreamMsg::Reset { reason: ResetReason::Restarted }) {
+                                break;
+                            }
+                        }
+                        None => server_pid = Some(probe.pid),
+                        _ => {}
+                    }
+                    // A cursor ahead of the server's own log means the process we
+                    // were reading restarted (its ids begin again at 1).
+                    if let (Some(ours), Some(server_cursor)) = (cursor, probe.cursor) {
                         if server_cursor < ours {
                             cursor = Some(0);
                             if !send(&tx, StreamMsg::Reset { reason: ResetReason::IdRegression }) {
@@ -231,7 +247,6 @@ fn run(
                         }
                     }
                 }
-                Ok(None) => {}
                 Err(error) => {
                     if !send(
                         &tx,
@@ -247,7 +262,6 @@ fn run(
                 }
             }
         }
-        first = false;
 
         let (path, last_event_id) = if reconnected {
             (target.path.clone(), cursor)
@@ -348,12 +362,23 @@ fn send(tx: &Sender<StreamMsg>, message: StreamMsg) -> bool {
     tx.send_blocking(message).is_ok()
 }
 
-fn probe_cursor(http: &HttpClient) -> Result<Option<i64>> {
-    let reply = http.get("/health")?;
+struct Probe {
+    cursor: Option<i64>,
+    pid: u32,
+}
+
+fn probe_health(http: &HttpClient) -> Result<Probe> {
+    // A short patience: the probe is loopback, and a stop must not wait out the
+    // normal request timeout.
+    let reply = http.with_timeout(Duration::from_secs(5)).get("/health")?;
     if !reply.is_success() {
         return Err(Error::Status(reply.error()));
     }
-    Ok(reply.json()?.get("cursor").and_then(Value::as_i64))
+    let raw = reply.json()?;
+    Ok(Probe {
+        cursor: raw.get("cursor").and_then(Value::as_i64),
+        pid: raw.get("pid").and_then(Value::as_u64).unwrap_or(0) as u32,
+    })
 }
 
 fn bump(backoff: Duration, max: Duration) -> Duration {
