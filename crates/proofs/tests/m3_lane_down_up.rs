@@ -26,20 +26,19 @@ fn m3_lane_down_up() {
     let deadline = Instant::now() + Duration::from_secs(240);
 
     drive.wait_connected(Agent::Coordinator, deadline);
-    drive.wait_for_lane_rows(deadline, 2);
     drive.wait_lanes_idle(deadline, 2);
     // The coordinator says who its lanes are; one of them is watched here so its
     // own model is loaded (the reason a down row shows prefers the lane's account).
     drive.select(AgentKey::Lane(1));
 
-    // The pid the swarm itself reports for lane 1: `GET /lanes`'s `pid`, the
-    // supervised child under evo's in-binary supervisor — the process whose death
-    // the supervisor notices and the lane watcher follows.
-    let lanes = drive.swarm_lanes().expect("the swarm answers /lanes");
-    let lane_pid = lanes["lanes"]
-        .as_array()
-        .and_then(|lanes| lanes.iter().find(|lane| lane["n"] == 1))
-        .and_then(|lane| lane["pid"].as_u64())
+    // The pid the swarm reports for lane 1 — the supervised child under evo's
+    // in-binary supervisor, the process whose death the supervisor notices and the
+    // lane watcher follows. It arrives in the lane list the left column folded.
+    let lane_pid = drive
+        .model
+        .lanes()
+        .lane(1)
+        .and_then(|row| row.pid)
         .expect("lane 1 has a pid") as i32;
     let coordinator_pid = drive.coordinator_pid.expect("/health named the coordinator") as i32;
     assert_ne!(lane_pid, coordinator_pid, "the lane is its own process");
@@ -52,12 +51,15 @@ fn m3_lane_down_up() {
     assert_eq!(killed, 0, "could not kill lane 1 (pid {lane_pid})");
 
     // --- the left column shows it down --------------------------------------
-    drive.wait_model(deadline, "lane 1 down", |model| {
-        model.lanes().lane(1).map(|row| row.status) == Some(LaneStatus::Down)
-    });
+    // The swarm publishes the state as its lane watcher sees the stream end
+    // (`swarm/lanes.lisp`'s `recover-lane`) — the row is red from here until the
+    // lane is up again.
     drive.wait_for_update(deadline, "a lane-state event saying lane 1 is down", |update| {
         matches!(update, tab_engine::Update::Event { agent: Agent::Coordinator, kind, data, .. }
             if kind == "lane-state" && data["lane"] == 1 && data["state"] == "down")
+    });
+    drive.wait_model(deadline, "lane 1 down", |model| {
+        model.lanes().lane(1).map(|row| row.status) == Some(LaneStatus::Down)
     });
 
     // --- the swarm brings it back -------------------------------------------
@@ -88,37 +90,56 @@ fn m3_lane_down_up() {
             row.status == LaneStatus::Idle && row.restarts >= 1 && row.pid.is_some()
         })
     });
-    assert_eq!(
-        drive.model.lanes().lane(1).map(|row| row.status),
-        Some(LaneStatus::Idle),
-        "lane 1 is idle again"
-    );
 
-    // --- and the tab can say why it went down -------------------------------
-    // The coordinator's own stream carries the reason: the swarm's lane watcher
-    // reports what it saw. The restart is a new pid, so the swarm's own account is
-    // the crash announcement (`swarm/lanes.lisp`'s `recover-lane`).
-    let notice = drive
-        .events(Agent::Coordinator, "output")
-        .into_iter()
-        .find(|data| {
+    // --- what the tab says about it -----------------------------------------
+    // The swarm's own account of the lane going down is on the coordinator's
+    // stream, error-styled, and it is what a red row shows — see m3's note in
+    // docs/proofs.md for why the row itself is back to `idle` by the time the
+    // line lands (the swarm announces the crash *after* it has already
+    // re-initialized the lane).
+    let outputs = drive.events(Agent::Coordinator, "output");
+    let announcement = outputs
+        .iter()
+        .position(|data| {
             data["style"].as_str() == Some("error")
                 && data["text"]
                     .as_str()
                     .is_some_and(|text| text.contains("[lane 1] crashed and was restarted"))
         })
-        .unwrap_or_else(|| panic!("no restart announcement on the coordinator's stream"));
-    eprintln!("m3: the swarm said {}", notice["text"]);
-    let reason = drive
-        .model
-        .lane_down_reason(1)
-        .unwrap_or_else(|| panic!("no reason for lane 1's down row; updates: {}", drive.updates().len()));
-    assert!(reason.contains("[lane 1]"), "the reason names the lane: {reason:?}");
-    eprintln!("m3: the down row's reason: {reason:?}");
+        .unwrap_or_else(|| panic!("no restart announcement among {} output lines", outputs.len()));
+    eprintln!("m3: the swarm said {}", outputs[announcement]["text"]);
+    // ...and the restarted lane's own complaint about its fresh state ("no model is
+    // configured yet", until the swarm re-runs its baseline) comes *after* it:
+    // that ordering is what `session::TabModel::lane_down_reason` prefers the
+    // announcement for.
+    let complaint = outputs.iter().position(|data| {
+        data["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("[lane 1]") && text.contains("No model is configured"))
+    });
+    assert!(
+        complaint.is_none_or(|complaint| announcement < complaint),
+        "the swarm's account comes before what the lane says about itself: {outputs:#?}"
+    );
+
+    // A lane that is up claims nothing: the red row's reason lives only while the
+    // row is red (§9.7 as the coordinator decided it).
+    assert_eq!(
+        drive.model.lane_down_reason(1),
+        None,
+        "a lane that is back up has no reason"
+    );
+
     // A restarted lane is told apart from a lane that was never up: `restarts` is
     // the counter the left column's tooltip shows.
     let tooltip = drive.model.lanes().lane(1).expect("lane 1").tooltip();
     assert!(tooltip.contains("restart"), "the row says it restarted: {tooltip:?}");
+    // ...and the row is no longer red, so nothing is claimed about it any more.
+    assert_eq!(
+        drive.model.lane_down_reason(1),
+        None,
+        "a lane that is up has no reason"
+    );
 
     // --- work still reaches it ----------------------------------------------
     // The lane is re-initialized, so it can be given work again: the coordinator

@@ -28,7 +28,6 @@ fn m2_resume() {
     let first = {
         let mut drive = Drive::start(spec(&fixture, 2));
         drive.wait_connected(Agent::Coordinator, deadline);
-        drive.wait_for_lane_rows(deadline, 2);
         drive.wait_lanes_idle(deadline, 2);
         drive.prompt(1, "m2 resume works");
         drive.next(deadline, "the run settling", |update| {
@@ -125,7 +124,6 @@ fn m2_resume() {
     );
 
     // Its lanes came back with it, and its own session is the one resumed.
-    drive.wait_for_lane_rows(deadline, 2);
     drive.wait_lanes_idle(deadline, 2);
     assert_eq!(
         drive.session.as_deref(),

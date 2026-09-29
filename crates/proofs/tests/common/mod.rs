@@ -251,6 +251,28 @@ impl Drive {
             .collect()
     }
 
+    /// Pump until `pred` holds on the model *and* `take` has something to give back.
+    /// For the values a row shows only while it is in the state being waited for —
+    /// a down lane's reason, which is gone the moment the lane is up again.
+    pub fn wait_for_value<T>(
+        &mut self,
+        deadline: Instant,
+        what: &str,
+        pred: impl Fn(&TabModel) -> bool,
+        take: impl Fn(&TabModel) -> Option<T>,
+    ) -> T {
+        loop {
+            self.pump();
+            if pred(&self.model) {
+                if let Some(value) = take(&self.model) {
+                    return value;
+                }
+            }
+            assert!(Instant::now() < deadline, "no {what} before the deadline");
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+
     /// Wait for the model itself to say something — a lane that went down, a row
     /// that arrived — rather than for one update. `what` is the failure message.
     pub fn wait_model(
@@ -349,52 +371,17 @@ impl Drive {
         self.model.lanes().lane(n).map(|row| row.state.clone())
     }
 
-    /// The swarm's own `GET /lanes`, asked directly — the answer a client gets when
-    /// it wants the *current* truth rather than the next announcement.
-    ///
-    /// It has to be asked, because the event stream only carries the lane-state
-    /// transitions the swarm chooses to publish: `swarm/lanes.lisp`'s
-    /// `sync-lane-state :announce nil` deliberately does not announce a lane going
-    /// idle when it has never been given work ("so the machine-readable stream tells
-    /// a lane's work cycle, rather than an idle event for a lane never given work").
-    /// A client that only folds events therefore keeps the `starting` of a lane's
-    /// boot announcement until something publishes a change.
-    pub fn swarm_lanes(&self) -> Option<Value> {
-        let port = self.port?;
-        let token = std::fs::read_to_string(self.tab_dir.join("token")).ok()?;
-        let client = swarm_client::HttpClient::loopback(port, swarm_client::Token::new(token.trim()))
-            .with_timeout(Duration::from_secs(10));
-        Some(client.get("/lanes").ok()?.json().ok()?)
-    }
-
-    /// Wait until the swarm itself says every lane is up and idle — the state a
-    /// delegation needs, and the one the event stream does not announce at boot.
+    /// The left column has one row per lane, all of them up and idle — what a
+    /// delegation needs, and the state the engine now reads back on its own when a
+    /// lane's launch announcement says it is still `starting` (`tab_engine`'s
+    /// deferred lane-list refetch: the swarm never announces a lane coming up).
     pub fn wait_lanes_idle(&mut self, deadline: Instant, lanes: usize) {
-        loop {
-            self.pump();
-            if let Some(body) = self.swarm_lanes() {
-                let rows = body["lanes"].as_array().cloned().unwrap_or_default();
-                if rows.len() == lanes
-                    && rows.iter().all(|lane| lane["state"].as_str() == Some("idle"))
-                {
-                    return;
-                }
-            }
-            assert!(
-                Instant::now() < deadline,
-                "the swarm never had {lanes} idle lanes: {:?}",
-                self.swarm_lanes().map(|body| body["lanes"].clone())
-            );
-            std::thread::sleep(Duration::from_millis(100));
-        }
+        self.wait_model(deadline, "the lanes up and idle", |model| {
+            model.lanes().lanes.len() == lanes
+                && model.lanes().lanes.iter().all(|row| row.status == session::LaneStatus::Idle)
+        });
     }
 
-    /// The left column has one row per lane. Their *states* are whatever the last
-    /// `GET /lanes` or `lane-state` event said, which at boot is `starting` (see
-    /// [`Drive::swarm_lanes`]) — so this is the check to wait on, not "idle".
-    pub fn wait_for_lane_rows(&mut self, deadline: Instant, lanes: usize) {
-        self.wait_model(deadline, "a row per lane", |model| model.lanes().lanes.len() == lanes);
-    }
 
     pub fn updates(&self) -> &[Update] {
         &self.log

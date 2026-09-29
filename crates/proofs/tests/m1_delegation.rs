@@ -24,13 +24,12 @@ fn m1_delegation() {
     let mut drive = Drive::start(spec(&fixture, 2));
     let deadline = Instant::now() + Duration::from_secs(240);
 
-    // --- the tab is up, and its lanes are really up ------------------------
+    // --- the tab is up, and its lanes are up ---------------------------------
     drive.wait_connected(Agent::Coordinator, deadline);
-    drive.wait_for_lane_rows(deadline, 2);
-    // The event stream never announces a lane going idle before it was ever given
-    // work (`swarm/lanes.lisp`'s `sync-lane-state :announce nil`), so the swarm is
-    // asked: a delegation needs its lane genuinely idle, and this is how a client
-    // learns that.
+    // The left column's own model says so: the engine reads the lane list back when
+    // a launch announcement says a lane is still `starting`, because the swarm
+    // never announces a lane coming up idle after that (`swarm/lanes.lisp`'s
+    // `sync-lane-state :announce nil`).
     drive.wait_lanes_idle(deadline, 2);
 
     // --- watch lane 1, as showing it does ------------------------------------
