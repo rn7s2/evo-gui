@@ -9,11 +9,24 @@
 use std::sync::Arc;
 
 use gpui_kit::component::WindowExt as _;
-use gpui_kit::{px, App, AppContext as _, DismissEvent, Entity, ParentElement as _, Window};
+use gpui_kit::{
+    div, px, App, AppContext as _, DismissEvent, Entity, InteractiveElement as _,
+    ParentElement as _, Styled as _, TestSupportExt as _, Window,
+};
 use settings::{SettingsEvent, SettingsPanel, SettingsValues, PANEL_SIZE};
 use store::app_state::AppState;
 
 use crate::Shell;
+
+/// The kit `Dialog`'s own content padding, each side: `gpui-component`'s `dialog.rs`
+/// puts 16 pt between its border and the view it is given, and the dialog's width has
+/// to leave room for it around the panel.
+const DIALOG_PADDING: f32 = 16.;
+
+/// The element the panel is drawn in: the dialog's content box, inside its padding and
+/// border. Its id is the app's, so a test can assert the panel — and the controls on its
+/// right edge — are inside the box they are drawn in rather than clipped by it.
+pub const DIALOG_CONTENT_ID: &str = "settings-dialog-content";
 
 /// Open the panel over the app's window — the Settings… menu item's half.
 ///
@@ -28,7 +41,12 @@ pub fn open(window: &mut Window, cx: &mut App) -> Entity<SettingsPanel> {
     };
     log.info(format!("settings: {}", opened(&values)));
 
-    let panel = cx.new(|cx| SettingsPanel::new(values, window, cx));
+    // `embedded`: the dialog draws the frame — the border, the fill and the padding —
+    // and the panel takes the width it is given. So the dialog has to have room for the
+    // panel's own 560 pt: the kit pads its content by [`DIALOG_PADDING`] on each side
+    // (`gpui-component`'s `dialog.rs`), and `PANEL_SIZE.0` alone left the panel 32 pt
+    // wider than the box it was drawn in — the right-hand controls clipped.
+    let panel = cx.new(|cx| SettingsPanel::new(values, window, cx).embedded(true));
     // Save persists what it hands over; Cancel (and Escape) emit nothing but their
     // own dismissal, so the app has nothing to undo.
     let saved = cx.subscribe(&panel, |_, event: &SettingsEvent, cx| match event {
@@ -54,11 +72,22 @@ pub fn open(window: &mut Window, cx: &mut App) -> Entity<SettingsPanel> {
     window.open_dialog(cx, move |dialog, _window, _cx| {
         let panel = framed.clone();
         dialog
-            // The panel is its own chrome — a border, a background, its own Save and
-            // Cancel — so the dialog contributes the overlay and nothing else.
+            // The frame is the dialog's: the panel is embedded, and this is the room
+            // around it — `PANEL_SIZE.0` of content plus [`DIALOG_PADDING`] each side,
+            // which is what the kit leaves between its border and the view it is
+            // given. A dialog only `PANEL_SIZE.0` wide left the panel wider than its
+            // box, and the right-hand controls were clipped by the edge.
             .close_button(false)
-            .w(px(PANEL_SIZE.0))
-            .content(move |content, _window, _cx| content.child(panel.clone()))
+            .w(px(PANEL_SIZE.0 + 2. * DIALOG_PADDING))
+            .content(move |content, _window, _cx| {
+                content.child(
+                    div()
+                        .id(DIALOG_CONTENT_ID)
+                        .test_support()
+                        .w_full()
+                        .child(panel.clone()),
+                )
+            })
     });
     panel
 }

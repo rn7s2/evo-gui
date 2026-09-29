@@ -43,7 +43,7 @@ pub use quit::{
     begin as begin_quit, is_quitting, open_tabs, remember_tab_set, take_engines, TabRecord,
     SHUTDOWN_DEADLINE,
 };
-pub use settings::{apply as apply_settings, open as open_settings_panel};
+pub use settings::{apply as apply_settings, open as open_settings_panel, DIALOG_CONTENT_ID};
 pub use startup::{cache_is_stale, CACHE_MAX_AGE};
 pub use theme::{follow_appearance, mode_for};
 

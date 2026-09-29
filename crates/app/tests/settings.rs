@@ -18,7 +18,9 @@ use gpui_kit::{
     WindowBounds, WindowOptions,
 };
 use session::LaunchPlan;
-use settings::{SettingsPanel, AGENT_PATH_ID, SAVE_ID, SWARM_PATH_ID, THEME_ID};
+use settings::{
+    SettingsPanel, AGENT_PATH_ID, PANEL_ID, SAVE_ID, SWARM_CHOOSE_ID, SWARM_PATH_ID, THEME_ID,
+};
 use store::app_state::{AppState, Binaries, Theme};
 use store::model_cache::ModelCache;
 use store::paths::Root as AppRoot;
@@ -152,6 +154,39 @@ fn saving_settings_persists_them_and_the_next_tab_spawns_with_them(cx: &mut Test
         cx.update_window(window, |_, window, cx| window.has_active_dialog(cx))
             .unwrap(),
         "the panel is up, over the app's window"
+    );
+
+    // The panel fits the dialog it is drawn in. The kit's dialog pads its content by
+    // 16 pt on each side: left in place, the 560 pt panel was 32 pt wider than the box
+    // it was drawn in, and the right-hand controls — `Choose…`, `Save` — were clipped
+    // at the dialog's edge. The dialog's own bounds are its surface, which the kit
+    // gives the layer's index as an element id.
+    let (slot, save, choose, panel) = cx
+        .update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            (
+                window.find(evo_desktop::DIALOG_CONTENT_ID).bounds(),
+                window.find(SAVE_ID).bounds(),
+                window.find(SWARM_CHOOSE_ID).bounds(),
+                window.find(PANEL_ID).bounds(),
+            )
+        })
+        .expect("the dialog is drawn");
+    assert!(
+        save.left() >= slot.left() && save.right() <= slot.right(),
+        "Save is inside the dialog's content box, not clipped by it: {save:?} in {slot:?}"
+    );
+    assert!(
+        choose.left() >= slot.left() && choose.right() <= slot.right(),
+        "and so is a row's Choose… button: {choose:?} in {slot:?}"
+    );
+    assert!(
+        panel.left() >= slot.left() && panel.right() <= slot.right(),
+        "the panel is inside it too, rather than 32 pt wider: {panel:?} in {slot:?}"
+    );
+    assert_eq!(
+        panel.size.width, slot.size.width,
+        "the embedded panel takes the whole box the dialog gives it"
     );
 
     // A person's edits: two paths typed over, and Dark clicked.
