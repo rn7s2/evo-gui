@@ -1,18 +1,19 @@
 //! The tab page (§7.3) and the two screens around it: a swarm starting, and one
 //! that never came up.
 //!
-//! The page is the layout the transcript, todo and composer crates will fill:
-//! the lane column on the left, the selected agent's transcript and todos in
-//! the middle, the coordinator's composer on the right. Everything here is a
-//! placeholder with the region's real geometry, so the crates that land later
-//! drop into slots rather than rearranging the window.
+//! The page is the layout its parts fill: the agent column on the left, the
+//! selected agent's transcript and todos in the middle, the coordinator's
+//! composer on the right. The transcript and the composer are the real ones from
+//! their crates; the agent column is still a placeholder, because the lane list
+//! it draws is not wired to `GET /lanes` yet (§7.3).
 
 use std::path::Path;
 
 use gpui_kit::component::button::Button;
-use gpui_kit::component::{ActiveTheme as _, Sizable as _};
+use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, StyledExt as _};
 use gpui_kit::prelude::*;
-use gpui_kit::{div, px, Context, IntoElement, SharedString};
+use gpui_kit::{div, px, AnyElement, App, Context, IntoElement, SharedString, TestSupportExt as _};
+use transcript::TodoPanel;
 
 use crate::tab::{TabContent, TabContentEvent, TabState};
 
@@ -30,26 +31,24 @@ const PLACEHOLDER_AGENTS: [(&str, &str); 4] = [
     ("✗", "Lane 3"),
 ];
 
-/// One placeholder todo item, in the shapes the panel will carry (§7.3).
-const PLACEHOLDER_TODOS: [(&str, &str); 2] = [("◐", "wire the transcript"), ("☐", "then the todos")];
-
 impl TabContent {
     /// The content for the tab's current state.
     pub(crate) fn render_for_state(&self, cx: &mut Context<Self>) -> AnyElement {
         match &self.state {
             TabState::Empty => self.render_empty(cx),
-            TabState::Booting { folder } => self.render_booting(folder),
+            TabState::Booting { folder } => self.render_booting(folder, cx),
             TabState::Running { folder } => self.render_page(folder, cx),
             TabState::Failed { folder, log_tail } => self.render_failed(folder, log_tail, cx),
         }
     }
 
     /// While the swarm starts: what is starting, and where (§3).
-    fn render_booting(&self, folder: &Path) -> AnyElement {
+    fn render_booting(&self, folder: &Path, cx: &App) -> AnyElement {
         centered_region(
             "Starting evo-swarm…",
-            &format!("{}", folder.display()),
+            &folder.display().to_string(),
             "the swarm's log tail appears here if it fails to come up",
+            cx,
         )
     }
 
@@ -58,6 +57,8 @@ impl TabContent {
     fn render_failed(&self, folder: &Path, log_tail: &str, cx: &mut Context<Self>) -> AnyElement {
         let folder = folder.to_path_buf();
         v_flex()
+            .id("boot-failure")
+            .test_support()
             .size_full()
             .p_6()
             .gap_3()
@@ -67,18 +68,14 @@ impl TabContent {
                     .items_center()
                     .child(
                         div()
-                            .font_weight_semibold()
+                            .font_semibold()
                             .child(format!("Could not start a swarm in {}", folder.display())),
                     )
-                    .child(
-                        Button::new("tab-retry")
-                            .label("Retry")
-                            .outline()
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                cx.emit(TabContentEvent::RetryRequested(folder.clone()));
-                                let _ = this;
-                            })),
-                    ),
+                    .child(Button::new("tab-retry").label("Retry").outline().on_click(
+                        cx.listener(move |_this, _, _, cx| {
+                            cx.emit(TabContentEvent::RetryRequested(folder.clone()))
+                        }),
+                    )),
             )
             .child(
                 div()
@@ -100,6 +97,8 @@ impl TabContent {
     /// The tab page: agents, transcript and todos, composer (§7.3).
     fn render_page(&self, folder: &Path, cx: &mut Context<Self>) -> AnyElement {
         h_flex()
+            .id("tab-page")
+            .test_support()
             .items_stretch()
             .size_full()
             .child(self.render_agent_column(folder, cx))
@@ -150,53 +149,27 @@ impl TabContent {
             .gap_2()
             .rounded(cx.theme().radius)
             .when(selected, |row| row.bg(cx.theme().secondary))
-            .child(
-                div()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(glyph),
-            )
+            .child(div().text_color(cx.theme().muted_foreground).child(glyph))
             .child(div().truncate().child(name))
     }
 
-    /// The selected agent's transcript, with its todos above the composer
-    /// (§7.3).
-    fn render_transcript_column(&self, cx: &App) -> impl IntoElement {
+    /// The selected agent's transcript, with its todos along the bottom (§7.3).
+    fn render_transcript_column(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let todos = self.transcript.read(cx).todos().to_vec();
         v_flex()
             .id("transcript-column")
             .test_support()
             .flex_1()
             .min_w_0()
             .h_full()
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .p_6()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("transcript of the selected agent, rendered as it streams"),
-            )
-            .child(
-                v_flex()
-                    .id("todo-panel")
-                    .test_support()
-                    .flex_shrink_0()
-                    .border_t_1()
-                    .border_color(cx.theme().border)
-                    .px_6()
-                    .py_3()
-                    .gap_1()
-                    .children(PLACEHOLDER_TODOS.iter().map(|(glyph, text)| {
-                        h_flex()
-                            .gap_2()
-                            .text_sm()
-                            .child(div().child(*glyph))
-                            .child(div().text_color(cx.theme().muted_foreground).child(*text))
-                    })),
-            )
+            .child(div().flex_1().min_h_0().child(self.transcript.clone()))
+            // The panel renders nothing while the agent has no todos, so this
+            // row disappears rather than leaving a gap (§7.3).
+            .child(TodoPanel::new(&todos))
     }
 
-    /// The coordinator's composer: the input, then the readout and the single
-    /// action button on one line (§7.3).
+    /// The coordinator's composer: the input, and the readout and the single
+    /// action button on one line beneath it (§7.3).
     fn render_composer_column(&self, cx: &App) -> impl IntoElement {
         v_flex()
             .id("composer-column")
@@ -207,51 +180,34 @@ impl TabContent {
             .border_l_1()
             .border_color(cx.theme().border)
             .p_4()
-            .gap_3()
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .p_2()
-                    .rounded(cx.theme().radius)
-                    .border_1()
-                    .border_color(cx.theme().input)
-                    .text_color(cx.theme().muted_foreground)
-                    .child("Message the coordinator…"),
-            )
-            .child(
-                h_flex()
-                    .justify_between()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("model · effort · ctx · goal"),
-                    )
-                    .child(
-                        Button::new("composer-action")
-                            .label("Send")
-                            .primary()
-                            .small()
-                            .disabled(true),
-                    ),
-            )
+            .child(self.composer.clone())
     }
 }
 
 /// A centered message region, used while a tab has nothing to show yet.
-fn centered_region(headline: &str, detail: &str, note: &str) -> AnyElement {
+fn centered_region(headline: &str, detail: &str, note: &str, cx: &App) -> AnyElement {
     v_flex()
+        .id("booting")
+        .test_support()
         .size_full()
         .items_center()
         .justify_center()
         .gap_2()
-        .child(div().font_weight_semibold().child(SharedString::from(headline.to_string())))
-        .child(div().text_color(gpui_kit::hsla(0., 0., 0.6, 1.)).child(SharedString::from(detail.to_string())))
-        .child(div().text_xs().text_color(gpui_kit::hsla(0., 0., 0.5, 1.)).child(SharedString::from(note.to_string())))
+        .child(
+            div()
+                .font_semibold()
+                .child(SharedString::from(headline.to_string())),
+        )
+        .child(
+            div()
+                .text_color(cx.theme().muted_foreground)
+                .child(SharedString::from(detail.to_string())),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(SharedString::from(note.to_string())),
+        )
         .into_any_element()
 }

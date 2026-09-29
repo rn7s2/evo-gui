@@ -10,7 +10,12 @@ use std::path::{Path, PathBuf};
 
 use gpui_kit::component::list::{ListEvent, ListState};
 use gpui_kit::prelude::*;
-use gpui_kit::{App, Context, Entity, EventEmitter, IntoElement, Render, SharedString, Subscription, Window};
+use gpui_kit::{
+    App, Context, Entity, EventEmitter, IntoElement, Render, SharedString, Subscription, Window,
+};
+
+use composer::Composer;
+use transcript::TranscriptView;
 
 use crate::empty_tab::{Choosers, HistoryList};
 use crate::history::{folder_name, placeholder_history, HistoryRow};
@@ -23,6 +28,11 @@ use crate::history::{folder_name, placeholder_history, HistoryRow};
 pub struct TabId(u64);
 
 impl TabId {
+    /// The window hands out ids in the order tabs are opened.
+    pub(crate) fn new(value: u64) -> Self {
+        TabId(value)
+    }
+
     pub fn get(self) -> u64 {
         self.0
     }
@@ -56,11 +66,18 @@ pub enum TabContentEvent {
 }
 
 /// The retained view behind one tab.
+///
+/// A tab holds both of its screens at once: the empty tab's choosers and history,
+/// and the tab page's transcript and composer. Which one is drawn follows
+/// [`TabState`], and because these are entities, moving between them keeps what
+/// they hold.
 pub struct TabContent {
     pub(crate) id: TabId,
     pub(crate) state: TabState,
     pub(crate) choosers: Choosers,
     pub(crate) history: Entity<ListState<HistoryList>>,
+    pub(crate) transcript: Entity<TranscriptView>,
+    pub(crate) composer: Entity<Composer>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -68,11 +85,12 @@ impl TabContent {
     /// A fresh tab: nothing chosen yet (§7.2). The choosers need the window they
     /// will be rendered in.
     pub fn new(id: TabId, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let history = cx.new(|cx| ListState::new(HistoryList::new(placeholder_history()), window, cx));
+        let history =
+            cx.new(|cx| ListState::new(HistoryList::new(placeholder_history()), window, cx));
         let subscription = cx.subscribe_in(
             &history,
             window,
-            |this, history, event: &ListEvent, _window, cx| {
+            |_this, history, event: &ListEvent, _window, cx| {
                 let ListEvent::Confirm(ix) = event else {
                     return;
                 };
@@ -80,7 +98,6 @@ impl TabContent {
                 if let Some(row) = row {
                     cx.emit(TabContentEvent::HistoryRowActivated(row));
                 }
-                let _ = this;
             },
         );
 
@@ -89,6 +106,8 @@ impl TabContent {
             state: TabState::Empty,
             choosers: Choosers::new(window, cx),
             history,
+            transcript: cx.new(TranscriptView::new),
+            composer: cx.new(|cx| Composer::new(window, cx)),
             _subscriptions: vec![subscription],
         }
     }
@@ -120,7 +139,7 @@ impl TabContent {
     }
 
     /// The tab's tooltip: the whole path plus what the tab is doing (§7.1).
-    pub fn tooltip(&self, cx: &App) -> SharedString {
+    pub fn tooltip(&self) -> SharedString {
         let state = match &self.state {
             TabState::Empty => SharedString::from("no folder chosen"),
             TabState::Booting { .. } => SharedString::from("starting the swarm…"),
@@ -133,9 +152,37 @@ impl TabContent {
         }
     }
 
+    /// The selected agent's transcript: the coordinator's until lanes exist
+    /// (§7.3).
+    pub fn transcript(&self) -> &Entity<TranscriptView> {
+        &self.transcript
+    }
+
+    /// The coordinator's composer: the input, the readout and the one action
+    /// button (§7.3).
+    pub fn composer(&self) -> &Entity<Composer> {
+        &self.composer
+    }
+
     /// The rows the history region currently lists.
     pub fn history_rows<'a>(&self, cx: &'a App) -> &'a [HistoryRow] {
         self.history.read(cx).delegate().rows()
+    }
+
+    /// The coordinator model (`--model`) this tab starts its swarm with (§3,
+    /// §7.2).
+    pub fn coordinator_model(&self, cx: &App) -> SharedString {
+        self.choosers.coordinator_model(cx)
+    }
+
+    /// The lanes' default model, recorded in the folder's `swarm.lisp` (§9.6).
+    pub fn lanes_model(&self, cx: &App) -> SharedString {
+        self.choosers.lanes_model(cx)
+    }
+
+    /// The worker count (`--workers`), or `Default` for evo's own (§7.2).
+    pub fn workers(&self, cx: &App) -> SharedString {
+        self.choosers.workers(cx)
     }
 
     /// Move into [`TabState::Booting`] for `folder` (§7.2).
@@ -180,7 +227,7 @@ impl TabContent {
 impl EventEmitter<TabContentEvent> for TabContent {}
 
 impl Render for TabContent {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.render_for_state(window, cx)
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.render_for_state(cx)
     }
 }

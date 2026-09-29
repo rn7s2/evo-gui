@@ -80,7 +80,7 @@ impl<T> BridgeSender<T> {
     ///
     /// Returns `Err` when the UI side is gone — the receiver was dropped or its
     /// task ended — which is the worker's signal to stop.
-    pub fn send(&self, payload: T) -> Result<(), SendError<T>> {
+    pub fn send(&self, payload: T) -> Result<(), SendError<Tagged<T>>> {
         self.sender
             .send_blocking(Tagged::new(self.revision, payload))
     }
@@ -199,12 +199,33 @@ mod tests {
     use std::thread::ThreadId;
     use std::time::Duration;
 
-    use gpui_kit::{AppContext as _, TestAppContext};
+    use gpui_kit::{AppContext as _, Entity, TestAppContext};
 
-    /// A stand-in for the views the app will drive from worker results.
+    /// A stand-in for the views the app drives from worker results.
     struct Sink {
         revision: Revision,
         applied: Vec<i32>,
+    }
+
+    /// Starts `bridge` driving `sink`, and reports which thread each value was
+    /// applied on. The task is dropped at the end of the test.
+    fn drive(
+        sink: &Entity<Sink>,
+        bridge: Bridge<i32>,
+        cx: &mut TestAppContext,
+        applied_on: Arc<Mutex<Option<ThreadId>>>,
+    ) -> gpui_kit::Task<()> {
+        sink.update(cx, move |_sink, cx| {
+            bridge.drive_into(
+                cx,
+                |sink: &Sink| sink.revision,
+                move |sink, value, cx| {
+                    *applied_on.lock().unwrap() = Some(thread::current().id());
+                    sink.applied.push(value);
+                    cx.notify();
+                },
+            )
+        })
     }
 
     /// Values cross a real thread boundary and land on the UI thread with their
@@ -219,31 +240,23 @@ mod tests {
                 assert!(tx.send(value).is_ok());
             }
         });
-        let sink = cx.new(|_| Sink {
-            revision: Revision::new(7),
-            applied: Vec::new(),
+        let sink = cx.update(|cx| {
+            cx.new(|_| Sink {
+                revision: Revision::new(7),
+                applied: Vec::new(),
+            })
         });
-
         let applied_thread: Arc<Mutex<Option<ThreadId>>> = Arc::new(Mutex::new(None));
-        let seen = applied_thread.clone();
-        let task = bridge.drive_into(
-            cx,
-            |sink: &Sink| sink.revision,
-            move |sink, value, cx| {
-                *seen.lock().unwrap() = Some(thread::current().id());
-                sink.applied.push(value);
-                cx.notify();
-            },
-        );
+        let task = drive(&sink, bridge, cx, applied_thread.clone());
 
         worker.join();
         cx.run_until_parked();
 
-        assert_eq!(sink.read(cx).applied, vec![0, 1, 2, 3, 4]);
+        cx.update(|cx| assert_eq!(sink.read(cx).applied, vec![0, 1, 2, 3, 4]));
         assert!(task.is_ready());
         assert_ne!(
-            worker_thread.lock().unwrap().unwrap(),
-            applied_thread.lock().unwrap().unwrap(),
+            *worker_thread.lock().unwrap(),
+            *applied_thread.lock().unwrap(),
             "the values must have crossed a thread boundary"
         );
     }
@@ -259,59 +272,63 @@ mod tests {
                 }
             }
         });
-        let sink = cx.new(|_| Sink {
-            revision: Revision::new(2), // the view has moved on
-            applied: Vec::new(),
+        // The view has moved on to the next generation of work.
+        let sink = cx.update(|cx| {
+            cx.new(|_| Sink {
+                revision: Revision::new(2),
+                applied: Vec::new(),
+            })
         });
-
-        let task = bridge.drive_into(
-            cx,
-            |sink: &Sink| sink.revision,
-            |sink, value, cx| {
-                sink.applied.push(value);
-                cx.notify();
-            },
-        );
+        let task = drive(&sink, bridge, cx, Arc::new(Mutex::new(None)));
 
         worker.join();
         cx.run_until_parked();
 
-        assert!(sink.read(cx).applied.is_empty(), "stale values are dropped");
+        cx.update(|cx| {
+            assert!(
+                sink.read(cx).applied.is_empty(),
+                "stale values are dropped instead of applied"
+            )
+        });
         // The task ends only after the receiver saw every value and the worker
         // hung up, so nothing was left sitting in the channel.
         assert!(task.is_ready());
     }
 
-    /// Awaiting the bridge parks the GPUI task rather than occupying the UI
-    /// thread: the value arrives only once its producer sends it.
+    /// Awaiting the bridge parks the GPUI task instead of occupying the UI
+    /// thread: the frame loop keeps draining while the worker is still working,
+    /// and the value lands only once the worker sends it from its own thread.
     #[gpui_kit::test]
     fn awaiting_the_bridge_parks_the_ui_task(cx: &mut TestAppContext) {
+        // A parked GPUI task woken by a real thread is exactly what the
+        // deterministic test scheduler rejects, so let this test's scheduler
+        // accept external activity — the supported switch for a test that talks
+        // to real I/O.
+        cx.dispatcher.allow_parking();
+
         let (bridge, worker) = Bridge::spawn(Revision::new(1), |tx| {
             thread::sleep(Duration::from_millis(50));
             assert!(tx.send(1).is_ok());
         });
-        let sink = cx.new(|_| Sink {
-            revision: Revision::new(1),
-            applied: Vec::new(),
+        let sink = cx.update(|cx| {
+            cx.new(|_| Sink {
+                revision: Revision::new(1),
+                applied: Vec::new(),
+            })
         });
+        let task = drive(&sink, bridge, cx, Arc::new(Mutex::new(None)));
 
-        let task = bridge.drive_into(
-            cx,
-            |sink: &Sink| sink.revision,
-            |sink, value, cx| {
-                sink.applied.push(value);
-                cx.notify();
-            },
-        );
-
-        // The UI task is pending while the worker is still working.
+        // The UI side drains every ready task and returns while the worker is
+        // still sleeping: awaiting the bridge blocked nobody.
+        cx.run_until_parked();
+        assert!(!worker.is_finished(), "the worker is still working");
         assert!(!task.is_ready());
-        assert!(sink.read(cx).applied.is_empty());
+        cx.update(|cx| assert!(sink.read(cx).applied.is_empty()));
 
         worker.join();
         cx.run_until_parked();
 
-        assert_eq!(sink.read(cx).applied, vec![1]);
+        cx.update(|cx| assert_eq!(sink.read(cx).applied, vec![1]));
     }
 
     /// `send` reports a closed bridge, and `rebind` retags a worker that

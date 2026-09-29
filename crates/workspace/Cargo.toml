@@ -8,6 +8,9 @@ gpui-kit = { workspace = true }
 anyhow = { workspace = true }
 async-channel = "2"
 rfd = "0.17"
+transcript = { path = "../transcript" }
+composer = { path = "../composer" }
 
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }
+image = "0.25"

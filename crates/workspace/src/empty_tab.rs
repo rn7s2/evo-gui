@@ -9,9 +9,15 @@ use std::path::PathBuf;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::list::{List, ListDelegate, ListItem, ListState};
 use gpui_kit::component::select::{Select, SelectState};
-use gpui_kit::component::{ActiveTheme as _, IndexPath, Separator, Sizable as _};
+use gpui_kit::component::separator::Separator;
+use gpui_kit::component::{
+    h_flex, v_flex, ActiveTheme as _, IndexPath, Sizable as _, StyledExt as _,
+};
 use gpui_kit::prelude::*;
-use gpui_kit::{div, px, App, Context, Entity, IntoElement, SharedString, Window};
+use gpui_kit::{
+    div, px, AnyElement, App, Context, ElementId, Entity, IntoElement, SharedString,
+    TestSupportExt as _, Window,
+};
 
 use crate::history::HistoryRow;
 use crate::tab::{TabContent, TabContentEvent};
@@ -75,7 +81,9 @@ impl TabContent {
                         Button::new("select-folder")
                             .label("Select folder…")
                             .outline()
-                            .on_click(cx.listener(|this, _, window, cx| this.pick_folder(window, cx))),
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.pick_folder(window, cx)),
+                            ),
                     ),
             )
             .child(Separator::horizontal())
@@ -85,7 +93,7 @@ impl TabContent {
 
     /// Coordinator model, lanes model and worker count, each starting at
     /// `Default` (§7.2).
-    fn render_choosers(&self, cx: &App) -> impl IntoElement {
+    fn render_choosers(&self, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .gap_3()
             .child(self.render_chooser(
@@ -105,12 +113,7 @@ impl TabContent {
                     ))
                     .child(self.render_swarm_config_note(cx)),
             )
-            .child(self.render_chooser(
-                "Workers",
-                "workers",
-                &self.choosers.workers,
-                cx,
-            ))
+            .child(self.render_chooser("Workers", "workers", &self.choosers.workers, cx))
     }
 
     fn render_chooser(
@@ -129,13 +132,7 @@ impl TabContent {
                     .text_color(cx.theme().muted_foreground)
                     .child(label),
             )
-            .child(
-                Select::new(state)
-                    .id(id)
-                    .small()
-                    .w(px(280.))
-                    .accessibility_label(label),
-            )
+            .child(Select::new(state).id(id).small().w(px(280.)))
     }
 
     /// Where the lanes model is recorded: the chosen folder's managed
@@ -162,12 +159,7 @@ impl TabContent {
             .min_h_0()
             .gap_2()
             .text_color(cx.theme().foreground)
-            .child(
-                div()
-                    .text_sm()
-                    .font_weight_semibold()
-                    .child("History"),
-            )
+            .child(div().text_sm().font_semibold().child("History"))
             .child(
                 div()
                     .id("history")
@@ -181,8 +173,8 @@ impl TabContent {
     /// Ask the platform for a folder and hand the answer to the workspace
     /// (§7.2).
     ///
-    /// The dialog is `rfd`'s async one: it neither blocks the UI thread nor
-    /// hops onto one, resolves through the GPUI foreground executor, and
+    /// The dialog is `rfd`'s async one: the UI thread neither blocks on it nor
+    /// waits for it, its answer arrives on the GPUI foreground executor, and
     /// cancelling it leaves the tab empty.
     pub(crate) fn pick_folder(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let starting_folder = std::env::var_os("HOME").map(PathBuf::from);
@@ -271,8 +263,9 @@ impl ListDelegate for HistoryList {
         cx: &mut Context<ListState<Self>>,
     ) -> Option<Self::Item> {
         let row = self.rows.get(ix.row)?;
+        let selected = Some(ix) == self.selected;
         Some(
-            ListItem::new(ix)
+            ListItem::new(ElementId::NamedInteger("history-row".into(), ix.row as u64))
                 .child(
                     v_flex()
                         .gap_0p5()
@@ -284,7 +277,7 @@ impl ListDelegate for HistoryList {
                                 .child(row.summary()),
                         ),
                 )
-                .selected(Some(ix) == self.selected),
+                .selected(selected),
         )
     }
 

@@ -8628,7 +8628,6 @@ dependencies = [
  "gpui-kit",
  "image",
  "rfd",
- "session",
  "transcript",
 ]
 
