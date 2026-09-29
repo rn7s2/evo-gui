@@ -86,6 +86,9 @@ fi
 failures=0
 note() { printf '%s\n' "$*"; }
 ok() { printf '  ok   %s\n' "$*"; }
+# The one place a failure is counted: a caller reports one by calling this, and never
+# increments `failures` itself (counting in both places is what once made one rustfmt
+# failure read as two).
 bad() {
     printf '  FAIL %s\n' "$*" >&2
     failures=$((failures + 1))
@@ -147,6 +150,11 @@ fi
 clippy_secs=$(( $(date -u +%s) - started ))
 clippy_warnings=$(grep -c '^warning' "$clippy_log" || true)
 clippy_warnings=$(( clippy_warnings - $(grep -c 'generated .* warning' "$clippy_log" || true) ))
+# Cargo's own note about *other people's* crates — "the following packages contain code
+# that will be rejected by a future version of Rust" — is a `warning:` line with no file
+# and no `-->` behind it. It is not a lint of this tree, so it is a note, never a red row.
+clippy_future=$(grep -c '^warning: the following packages contain code that will be rejected' "$clippy_log" || true)
+clippy_warnings=$(( clippy_warnings - clippy_future ))
 if [ "$clippy_errors" -eq 0 ] && [ "$clippy_warnings" -eq 0 ]; then
     clippy_status=ok
     ok "no warnings (${clippy_secs}s)"
@@ -161,6 +169,9 @@ else
     grep -E '^(warning|error)' "$clippy_log" | grep -v 'generated ' | sort | uniq -c | sort -rn | head -15 | sed 's/^/       /'
     grep -E '^ +--> ' "$clippy_log" | head -15 | sed 's/^/       /'
 fi
+if [ "$clippy_future" -gt 0 ]; then
+    note "  note $clippy_future third-party package block(s) behind a future Rust version, not a lint of this tree — cargo's own words in $clippy_log"
+fi
 
 # --- 3. every crate's tests -------------------------------------------------
 note "== tests =="
@@ -171,8 +182,11 @@ for crate in "${CRATES[@]}"; do
         crate_fmt=ok
     else
         crate_hunks=$(grep -c '^Diff in ' "$fmt_log" || true)
-        crate_fmt="$(grep -o '^Diff in [^:]*' "$fmt_log" | sort -u | wc -l | tr -d ' ') files"
-        failures=$((failures + 1))
+        # `|| true` because `grep -o` finds nothing (and exits 1) when cargo fmt failed
+        # without a `Diff in` line at all — a file that does not parse, say — and
+        # `pipefail` would then take the whole script down here instead of reporting it.
+        crate_files=$(grep -o '^Diff in [^:]*' "$fmt_log" | sort -u | wc -l | tr -d ' ' || true)
+        crate_fmt="$crate_files files"
         bad "$crate: rustfmt would rewrite $crate_hunks hunk(s) in $crate_fmt — see $fmt_log"
     fi
 
@@ -193,7 +207,6 @@ for crate in "${CRATES[@]}"; do
         ok "$crate: tests $passed passed, $failed failed (${secs}s)"
     else
         bad "$crate: $passed passed, $failed failed (${secs}s) — see $log"
-        failures=$((failures + 1))
         grep -E '^(error|---- .* stdout|test .* FAILED|failures:)' "$log" | head -8 | sed 's/^/       /'
     fi
 done
@@ -217,7 +230,7 @@ if (cd "$ROOT" && cargo fmt --all -- --check) >"$fmt_log" 2>&1; then
     note ""
     note "the whole workspace is rustfmt-clean"
 else
-    fmt_files=$(grep -o '^Diff in [^:]*' "$fmt_log" | sort -u | wc -l | tr -d ' ')
+    fmt_files=$(grep -o '^Diff in [^:]*' "$fmt_log" | sort -u | wc -l | tr -d ' ' || true)
     note ""
     note "the whole workspace: rustfmt would rewrite $fmt_files file(s) — see $fmt_log"
 fi
