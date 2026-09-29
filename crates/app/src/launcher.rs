@@ -272,6 +272,9 @@ mod tests {
                 lanes: Some("lane-1".to_owned()),
             },
             source,
+            // Only the app's own recents can say this (§9.5); the app hands the
+            // rows on without it — `session`'s row has no such field yet.
+            open_at_quit: false,
         }
     }
 

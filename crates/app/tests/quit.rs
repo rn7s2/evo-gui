@@ -74,10 +74,26 @@ fn quitting_starts_once_and_runs_to_the_end(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn the_sequence_survives_being_started_without_a_window(cx: &mut TestAppContext) {
     let root = temp_root("quit-nowindow");
-    let root_for_install = root.clone();
-    cx.update(move |cx| install(cx, &root_for_install));
+    let log = {
+        let root = root.clone();
+        cx.update(move |cx| install(cx, &root))
+    };
     cx.update(begin_quit);
-    cx.run_until_parked();
+
+    // `save_state` asks the window for its tabs, and there is none here: the
+    // sequence still has to run to its end. Waiting for it also keeps the test
+    // deterministic — the shutdown thread must be finished before the app the
+    // test owns goes away.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline && !log_text(&log).contains("stopped; exiting") {
+        cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        log_text(&log).contains("stopped; exiting"),
+        "the sequence ran to its end without a window:\n{}",
+        log_text(&log)
+    );
     cx.update(|cx| assert!(is_quitting(cx)));
     let _ = std::fs::remove_dir_all(root.path());
 }

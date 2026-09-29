@@ -93,6 +93,13 @@ pub struct Recent {
     pub models: TabModels,
     /// Lane count, as the swarm was started.
     pub lanes: u32,
+    /// The tab was still open when the app last quit (§6, §9.5).
+    ///
+    /// The session scan cannot know this: a swarm that is still up has not
+    /// written its journal again. The app sets it for every tab that had a
+    /// session at quit, and clears it on the others, so the history list can put
+    /// "open at last quit" first.
+    pub open_at_quit: bool,
 }
 
 impl Default for Recent {
@@ -103,6 +110,7 @@ impl Default for Recent {
             when: crate::time::now_rfc3339(),
             models: TabModels::default(),
             lanes: 0,
+            open_at_quit: false,
         }
     }
 }
@@ -115,7 +123,14 @@ impl Recent {
             when: crate::time::now_rfc3339(),
             models: TabModels::default(),
             lanes,
+            open_at_quit: false,
         }
+    }
+
+    /// The same recent, marked as open when the app last quit (§9.5).
+    pub fn open_at_quit(mut self) -> Recent {
+        self.open_at_quit = true;
+        self
     }
 
     /// The folder's last path component, for a history row.

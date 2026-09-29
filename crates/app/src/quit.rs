@@ -15,9 +15,13 @@
 
 use std::time::Duration;
 
+use std::path::{Path, PathBuf};
+
 use gpui_kit::{App, WeakEntity};
 
-use store::app_state::AppState;
+use store::app_state::{AppState, Recent};
+use store::paths::TabId as StoredTabId;
+use store::time;
 use tab_engine::{EngineHandle, shutdown_all};
 use workspace::WorkspaceView;
 
@@ -90,6 +94,101 @@ pub fn begin_with(cx: &mut App, engines: Vec<EngineHandle>) {
 
 /// The snapshot the quit sequence persists: the window's last bounds and the
 /// recents `app.json` already knew.
+/// One open tab, as `app.json` records it (§6).
+#[derive(Clone, Debug, PartialEq)]
+pub struct TabRecord {
+    /// The window's handle for this tab (`workspace::TabId`), as a number: the
+    /// app never mints one, it only records what the window handed out.
+    pub id: u64,
+    /// Where it runs, once a folder was chosen.
+    pub folder: Option<PathBuf>,
+    /// The session it resumed, when it has one — what makes a tab resumable.
+    pub session: Option<PathBuf>,
+}
+
+impl TabRecord {
+    /// The id `app.json` stores for this tab.
+    ///
+    /// **TODO(lane 1):** `WorkspaceView::tab_records` is asked for the tab's own
+    /// `tabs/<id>/` id, which is what this should be; today the window's handle
+    /// is the only id a tab has, and it is a per-run counter. The list is a
+    /// record of the strip — nothing restores from it yet — so the difference
+    /// only matters when a relaunch starts reading tab descriptors again.
+    pub fn stored_id(&self) -> StoredTabId {
+        StoredTabId::parse(&format!("tab-{}", self.id)).expect("`tab-<n>` is safe as a path segment")
+    }
+}
+
+/// The window's open tabs in strip order, and which one is shown (§6, §7.1).
+///
+/// **TODO(lane 1):** this is `WorkspaceView::tab_records(&self, cx)` plus
+/// `selected_index()`; until that lands, the same three fields come off the tab
+/// entities directly.
+pub fn open_tabs(cx: &App) -> (Vec<TabRecord>, Option<usize>) {
+    let Some(view) = view(cx) else {
+        return (Vec::new(), None);
+    };
+    let view = view.read(cx);
+    let records = view
+        .tabs()
+        .iter()
+        .map(|tab| {
+            let tab = tab.read(cx);
+            TabRecord {
+                id: tab.id().get(),
+                folder: tab.folder().map(Path::to_path_buf),
+                session: tab.session_path().map(Path::to_path_buf),
+            }
+        })
+        .collect();
+    (records, Some(view.selected_index()))
+}
+
+/// Record the tab set (§6) and touch a recent for every tab that had a session
+/// (§9.5), so the next launch's history puts what was open first.
+///
+/// Pure over `AppState`, so the quit path's only interesting decision is
+/// testable without a window.
+pub fn remember_tab_set(state: &mut AppState, records: &[TabRecord], selected: Option<usize>) {
+    state.tabs.clear();
+    state.selected = None;
+    for record in records {
+        // `add_tab` also selects; the strip's own selection is set below.
+        state.add_tab(record.stored_id());
+    }
+    state.selected = None;
+    if let Some(record) = selected.and_then(|index| records.get(index)) {
+        state.select(&record.stored_id());
+    }
+
+    // The flag means "open at the *last* quit": clear it everywhere first, so a
+    // tab closed since then stops claiming to be.
+    for recent in &mut state.recents {
+        recent.open_at_quit = false;
+    }
+
+    let when = time::now_rfc3339();
+    for record in records {
+        let Some(session) = record.session.clone() else {
+            continue;
+        };
+        // What the app already knew about this session (its lanes model, its lane
+        // count) outlives this quit: the entry is refreshed, not replaced.
+        let known = state.recent_for(&session).cloned();
+        let mut recent = Recent::new(
+            session,
+            record.folder.clone().unwrap_or_default(),
+            known.as_ref().map_or(0, |recent| recent.lanes),
+        )
+        .open_at_quit();
+        recent.when = when.clone();
+        if let Some(known) = known {
+            recent.models = known.models;
+        }
+        state.touch_recent(recent);
+    }
+}
+
 fn save_state(cx: &mut App) {
     let (root, log, bounds) = {
         let shell = cx.global::<Shell>();
@@ -100,8 +199,15 @@ fn save_state(cx: &mut App) {
     if let Some(bounds) = bounds {
         state.window = bounds;
     }
+    let (records, selected) = open_tabs(cx);
+    let open_with_session = records.iter().filter(|record| record.session.is_some()).count();
+    remember_tab_set(&mut state, &records, selected);
     match state.save(&root) {
-        Ok(()) => log.info(format!("saved {}", root.app_json().display())),
+        Ok(()) => log.info(format!(
+            "saved {}: {} tab(s), {open_with_session} of them resumable",
+            root.app_json().display(),
+            state.tabs.len()
+        )),
         Err(error) => log.error(format!("could not save {}: {error}", root.app_json().display())),
     }
 }
@@ -125,4 +231,130 @@ pub fn view(cx: &App) -> Option<gpui_kit::Entity<WorkspaceView>> {
 
 fn view_handle(cx: &App) -> Option<&WeakEntity<WorkspaceView>> {
     cx.global::<Shell>().view.as_ref()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record(id: u64, folder: Option<&str>, session: Option<&str>) -> TabRecord {
+        TabRecord {
+            id,
+            folder: folder.map(PathBuf::from),
+            session: session.map(PathBuf::from),
+        }
+    }
+
+    fn sessions(state: &AppState) -> Vec<(String, bool)> {
+        state
+            .recents
+            .iter()
+            .map(|recent| (recent.session.display().to_string(), recent.open_at_quit))
+            .collect()
+    }
+
+    #[test]
+    fn the_tab_set_is_written_in_strip_order_with_the_selection() {
+        let mut state = AppState::default();
+        state.tabs.push(StoredTabId::parse("stale").unwrap());
+        state.selected = Some(StoredTabId::parse("stale").unwrap());
+
+        let records = [
+            record(7, Some("/coding/a"), None),
+            record(9, None, None),
+            record(12, Some("/coding/c"), None),
+        ];
+        remember_tab_set(&mut state, &records, Some(2));
+
+        let ids: Vec<&str> = state.tabs.iter().map(StoredTabId::as_str).collect();
+        assert_eq!(ids, ["tab-7", "tab-9", "tab-12"], "in strip order, and the old set gone");
+        assert_eq!(state.selected.as_ref().map(StoredTabId::as_str), Some("tab-12"));
+    }
+
+    #[test]
+    fn a_selection_the_strip_no_longer_has_selects_nothing() {
+        let mut state = AppState::default();
+        remember_tab_set(&mut state, &[record(1, None, None)], None);
+        assert_eq!(state.tabs.len(), 1);
+        assert!(state.selected.is_none());
+
+        remember_tab_set(&mut state, &[], Some(3));
+        assert!(state.tabs.is_empty());
+        assert!(state.selected.is_none(), "an index past the strip is not a selection");
+    }
+
+    #[test]
+    fn only_a_tab_with_a_session_becomes_a_recent() {
+        let mut state = AppState::default();
+        let records = [
+            record(1, Some("/coding/a"), Some("/sessions/one.sexp")),
+            record(2, Some("/coding/b"), None),
+            record(3, Some("/coding/c"), Some("/sessions/three.sexp")),
+        ];
+        remember_tab_set(&mut state, &records, Some(0));
+
+        assert_eq!(
+            sessions(&state),
+            [
+                ("/sessions/three.sexp".to_owned(), true),
+                ("/sessions/one.sexp".to_owned(), true),
+            ],
+            "newest first, and only the tabs that had a session"
+        );
+        let one = state.recent_for(Path::new("/sessions/one.sexp")).expect("a recent");
+        assert_eq!(one.folder, PathBuf::from("/coding/a"));
+        assert!(one.open_at_quit, "it was open when the app quit");
+        assert!(!one.when.is_empty(), "the tab's use is stamped");
+    }
+
+    #[test]
+    fn the_flag_means_open_at_the_last_quit() {
+        let mut state = AppState::default();
+        state.touch_recent(Recent::new("/sessions/old.sexp", "/coding/old", 4).open_at_quit());
+        state.touch_recent(Recent::new("/sessions/other.sexp", "/coding/other", 2));
+
+        // This quit: only `other` is open and it has no session, so nothing is
+        // open any more and the stale flag has to go.
+        remember_tab_set(&mut state, &[record(1, Some("/coding/other"), None)], Some(0));
+        assert!(
+            state.recents.iter().all(|recent| !recent.open_at_quit),
+            "a flag from an earlier quit must not survive: {:?}",
+            sessions(&state)
+        );
+        assert_eq!(state.recents.len(), 2, "the recents themselves are kept");
+    }
+
+    #[test]
+    fn an_existing_recent_keeps_what_the_app_knew_and_moves_to_the_top() {
+        let mut state = AppState::default();
+        let mut known = Recent::new("/sessions/a.sexp", "/coding/a", 4);
+        known.models.coordinator = Some("coord-model".to_owned());
+        known.models.lanes = Some("lanes-model".to_owned());
+        known.when = "2026-01-01T00:00:00Z".to_owned();
+        state.touch_recent(known);
+        state.touch_recent(Recent::new("/sessions/b.sexp", "/coding/b", 2));
+
+        remember_tab_set(&mut state, &[record(1, Some("/coding/a"), Some("/sessions/a.sexp"))], Some(0));
+
+        let refreshed = state.recent_for(Path::new("/sessions/a.sexp")).expect("still there");
+        assert!(refreshed.open_at_quit);
+        assert_eq!(refreshed.models.lanes.as_deref(), Some("lanes-model"));
+        assert_eq!(refreshed.lanes, 4, "the lane count it was started with");
+        assert_eq!(refreshed.folder, PathBuf::from("/coding/a"));
+        assert_ne!(refreshed.when, "2026-01-01T00:00:00Z", "stamped with this quit");
+        assert_eq!(
+            sessions(&state).first().map(|(path, _)| path.as_str()),
+            Some("/sessions/a.sexp"),
+            "and it is the most recent now"
+        );
+        assert_eq!(state.recents.len(), 2, "no duplicate row for the same session");
+    }
+
+    #[test]
+    fn a_tab_that_never_chose_a_folder_is_still_in_the_set() {
+        let mut state = AppState::default();
+        remember_tab_set(&mut state, &[record(4, None, None)], Some(0));
+        let ids: Vec<&str> = state.tabs.iter().map(StoredTabId::as_str).collect();
+        assert_eq!(ids, ["tab-4"], "an empty tab is an open tab");
+    }
 }

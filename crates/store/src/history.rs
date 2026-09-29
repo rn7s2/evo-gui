@@ -81,6 +81,12 @@ pub struct HistoryEntry {
     /// `:model-change`; the lanes model only the app remembers.
     pub models: TabModels,
     pub source: HistorySource,
+    /// The session was still open as a tab when the app last quit (§9.5).
+    ///
+    /// Only the app's own recents can say this (the scan sees the journal, and a
+    /// running swarm has not written one again), so it is `false` for a row the
+    /// scan alone found.
+    pub open_at_quit: bool,
 }
 
 impl HistoryEntry {
@@ -114,12 +120,32 @@ pub struct ScanOutcome {
     pub stopped_early: bool,
 }
 
-/// `~/.evo/sessions`, or `$EVO_SESSIONS_DIR` when a process overrides it.
+/// `<evo home>/sessions` — where evo writes its journals (§9.5).
+///
+/// The evo home is `$EVO_HOME` when a process sets one (a caller that keeps its
+/// evo data somewhere else) and `~/.evo` otherwise. Joining is path-aware, so an
+/// `EVO_HOME` written without a trailing separator is fine *here*; a caller that
+/// hands `EVO_HOME` to a child as a string must add one, because evo's own
+/// extensions merge paths textually (docs/proofs-real.md R2).
+///
+/// `EVO_SESSIONS_DIR` is deliberately **not** consulted. It names one *agent's*
+/// own sessions directory — inside a swarm lane it is the lane's, as in
+/// `~/.evo/swarm/<id>/lane-3/sessions/` — while this scan lists the swarms in
+/// the evo home. The semantics line up because the servers we spawn get that
+/// variable scrubbed (swarm_client's `SCRUB_ENV`), so a swarm we started
+/// journals to the evo home too.
 pub fn sessions_dir() -> PathBuf {
-    match std::env::var_os("EVO_SESSIONS_DIR") {
-        Some(dir) if !dir.is_empty() => PathBuf::from(dir),
-        _ => paths::evo_dir().join("sessions"),
-    }
+    sessions_dir_in(std::env::var_os("EVO_HOME"))
+}
+
+/// [`sessions_dir`] with the evo home handed in, so the rule is testable
+/// without touching the process environment.
+fn sessions_dir_in(evo_home: Option<std::ffi::OsString>) -> PathBuf {
+    let home = match evo_home {
+        Some(home) if !home.is_empty() => PathBuf::from(home),
+        _ => paths::evo_dir(),
+    };
+    home.join("sessions")
 }
 
 /// Walk `dir` newest first and return every resumable swarm within `budget`.
@@ -197,8 +223,14 @@ pub fn merge(scanned: Vec<HistoryEntry>, recents: &[Recent]) -> Vec<HistoryEntry
         }
         entries.push(from_recent(recent));
     }
+    // Sessions that were still open at the last quit come first: they are what
+    // the user was working on, and the scan's mtime cannot say so — a swarm that
+    // never came down had no reason to write its journal again.
     entries.sort_by(|a, b| {
-        b.mtime.cmp(&a.mtime).then_with(|| a.session.cmp(&b.session))
+        b.open_at_quit
+            .cmp(&a.open_at_quit)
+            .then_with(|| b.mtime.cmp(&a.mtime))
+            .then_with(|| a.session.cmp(&b.session))
     });
     entries
 }
@@ -225,6 +257,7 @@ fn from_recent(recent: &Recent) -> HistoryEntry {
         lane_cwds: Vec::new(),
         models: recent.models.clone(),
         source: HistorySource::Recent,
+        open_at_quit: recent.open_at_quit,
     }
 }
 
@@ -239,6 +272,8 @@ fn fill_from_recent(entry: &mut HistoryEntry, recent: &Recent) {
     if entry.lanes == 0 {
         entry.lanes = recent.lanes;
     }
+    // The scan can never say this: the app is the only one that knows.
+    entry.open_at_quit |= recent.open_at_quit;
     if entry.folder.as_os_str().is_empty() {
         entry.folder = recent.folder.clone();
     }
@@ -440,6 +475,7 @@ fn read_history(path: &Path, mtime: u64, max_bytes: u64) -> io::Result<(Option<H
             lane_cwds,
             models: TabModels { coordinator: model_change.or(first_message_model), lanes: None },
             source: HistorySource::Scanned,
+            open_at_quit: false,
         }),
         truncated,
     ))
@@ -823,6 +859,40 @@ mod tests {
     }
 
     #[test]
+    fn a_session_open_at_the_last_quit_is_flagged_and_comes_first() {
+        let (root, dir) = fixture("open-at-quit");
+        let scanned = scan(&dir, &ScanBudget::default()).entries;
+        assert_eq!(scanned.len(), 2, "the fixture's two resumable swarms");
+        // The *oldest* scanned session is the one the app still had open.
+        let open = scanned.last().unwrap().session.clone();
+
+        let mut recent = Recent::new(&open, "/Users/x/foo", 4).open_at_quit();
+        // Older than both journals, so nothing but the flag can order it first.
+        recent.when = "2026-01-01T00:00:00Z".into();
+
+        let merged = merge(scanned.clone(), &[recent]);
+        assert_eq!(merged.len(), scanned.len());
+        assert_eq!(merged[0].session, open, "open at the last quit, so it is first");
+        assert!(merged[0].open_at_quit);
+        // The scan found it too, so the swarm facts survive the merge.
+        assert_eq!(merged[0].source, HistorySource::Scanned);
+        assert_eq!(merged[0].lanes, 3);
+        assert!(merged[1..].iter().all(|entry| !entry.open_at_quit));
+
+        // Without the flag: the scan's own order, oldest-data last.
+        let plain = merge(scanned.clone(), &[]);
+        assert_eq!(plain[0].session, scanned[0].session);
+        assert!(plain.iter().all(|entry| !entry.open_at_quit), "the scan cannot know");
+
+        // A row only the app remembers carries the flag through as well.
+        let orphan = Recent::new("/Users/x/gone/9.sexp", "/Users/x/gone", 2).open_at_quit();
+        let merged = merge(Vec::new(), &[orphan]);
+        assert_eq!(merged[0].source, HistorySource::Recent);
+        assert!(merged[0].open_at_quit);
+        fs::remove_dir_all(root.path()).unwrap();
+    }
+
+    #[test]
     fn balance_detection() {
         assert!(balanced("(:a 1)"));
         assert!(!balanced("(:a 1"));
@@ -845,5 +915,38 @@ mod tests {
     fn session_ids_come_from_the_filename() {
         assert_eq!(session_id_of(Path::new("/a/20260929T090956Z_ed99c60d1dee3c3f.sexp")), "ed99c60d1dee3c3f");
         assert_eq!(session_id_of(Path::new("/a/odd.sexp")), "odd");
+    }
+
+    #[test]
+    fn the_scan_looks_in_the_evo_home() {
+        // No `EVO_HOME`: the user's own `~/.evo`.
+        assert_eq!(sessions_dir_in(None), paths::evo_dir().join("sessions"));
+        // An empty value is not a home (the variable is set and useless).
+        assert_eq!(sessions_dir_in(Some("".into())), paths::evo_dir().join("sessions"));
+        // `EVO_HOME`, with or without the separator — joining is path-aware,
+        // unlike evo's own textual `merge-pathnames` (docs/proofs-real.md R2).
+        assert_eq!(
+            sessions_dir_in(Some("/tmp/evo-home".into())),
+            PathBuf::from("/tmp/evo-home/sessions")
+        );
+        assert_eq!(
+            sessions_dir_in(Some("/tmp/evo-home/".into())),
+            PathBuf::from("/tmp/evo-home/sessions")
+        );
+    }
+
+    #[test]
+    fn a_lanes_own_sessions_dir_is_ignored() {
+        // `EVO_SESSIONS_DIR` is what a swarm lane runs with; the list is the
+        // swarms in the evo home, so the variable must not steer the scan.
+        let previous = std::env::var_os("EVO_SESSIONS_DIR");
+        std::env::set_var("EVO_SESSIONS_DIR", "/tmp/one-lane/sessions");
+        let dir = sessions_dir();
+        match previous {
+            Some(value) => std::env::set_var("EVO_SESSIONS_DIR", value),
+            None => std::env::remove_var("EVO_SESSIONS_DIR"),
+        }
+        assert!(!dir.starts_with("/tmp/one-lane"));
+        assert_eq!(dir, sessions_dir_in(std::env::var_os("EVO_HOME")));
     }
 }

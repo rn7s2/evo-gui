@@ -32,7 +32,10 @@ pub use launcher::{
 };
 pub use logging::{AppLog, Level, LOG_NAME};
 pub use menus::{CloseTab, NewTab, QuitApp};
-pub use quit::{SHUTDOWN_DEADLINE, begin as begin_quit, is_quitting, take_engines};
+pub use quit::{
+    SHUTDOWN_DEADLINE, TabRecord, begin as begin_quit, is_quitting, open_tabs, remember_tab_set,
+    take_engines,
+};
 pub use startup::{CACHE_MAX_AGE, cache_is_stale};
 
 use gpui_kit::prelude::*;
@@ -99,6 +102,23 @@ impl Shell {
     /// Put it where the callbacks look for it.
     pub fn install(self, cx: &mut App) {
         cx.set_global(self);
+    }
+}
+
+/// What this launch's tabs start their swarms with (§3): the binaries `app.json`
+/// names and this app's own root.
+///
+/// The binary paths are in `app.json` so they can be pointed elsewhere (§9.1);
+/// without passing them on, a window would run whatever the defaults happen to
+/// be and the file would be a lie.
+pub fn swarm_config(cx: &App) -> workspace::SwarmConfig {
+    let shell = cx.global::<Shell>();
+    workspace::SwarmConfig {
+        swarm_bin: shell.binaries.evo_swarm.clone(),
+        agent_bin: shell.binaries.evo_agent.clone(),
+        root: shell.root.clone(),
+        env: Vec::new(),
+        env_remove: Vec::new(),
     }
 }
 
@@ -170,7 +190,10 @@ pub fn run() {
             let options = bounds::window_options(cx, stored_bounds);
             let opened = gpui_kit::open_window(options, cx, |window, cx: &mut App| {
                 let tracker = cx.new(|cx| Tracker::new(window, cx));
-                let view = cx.new(|cx| WorkspaceView::new(window, cx));
+                // The window's tabs start swarms with the binaries `app.json`
+                // names, out of this app's own root.
+                let config = std::sync::Arc::new(swarm_config(cx));
+                let view = cx.new(|cx| WorkspaceView::with_config(config, window, cx));
                 cx.update_global::<Shell, _>(|shell, _| shell.tracker = Some(tracker));
                 view
             });
