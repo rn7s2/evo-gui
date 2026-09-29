@@ -14,13 +14,18 @@
 //! cannot duplicate a row. A rebuild starts a fresh id space and bumps
 //! [`AgentModel::revision`], which is what tells the UI that every row view it holds is
 //! stale.
+//!
+//! Every field is read in the spelling the wire actually uses: serve maps a plist key with
+//! `keyword->json-key` (`src/serve/json.lisp`), which lower-cases it and turns each hyphen
+//! into an underscore — `:is-error` arrives as `is_error`, `:content-chars` as
+//! `content_chars`, `:arguments-json` as `arguments_json`.
 
 use std::collections::HashMap;
 
 use serde_json::Value;
 
 use crate::readout::{string_field, u64_field, CacheTotals, Readout};
-use crate::{todos_from_json, Activity, DimStyle, Effect, Row, RowId, RowKind, Todo, ToolResult};
+use crate::{todos_from_json, Activity, DimStyle, Effect, Row, RowChanges, RowId, RowKind, Todo, ToolResult};
 
 /// One agent's view model: its transcript rows, its checklist, its activity and the
 /// §7.3 readout. One instance per agent (the coordinator, and one per watched lane).
@@ -41,6 +46,10 @@ pub struct AgentModel {
     /// The last event id seen. Ids are per server process and restart at 1 with `hello`;
     /// the model never uses them as row ids and never drops an event for going backwards.
     last_event_id: Option<u64>,
+    /// Rows touched since the UI last looked, and whether the whole row set was rebuilt —
+    /// drained by [`AgentModel::take_row_changes`] so the UI re-sets only what changed.
+    dirty_rows: Vec<RowId>,
+    rebuilt: bool,
 }
 
 impl Default for AgentModel {
@@ -61,6 +70,8 @@ impl AgentModel {
             activity: Activity::Idle,
             readout: Readout::new(),
             last_event_id: None,
+            dirty_rows: Vec::new(),
+            rebuilt: false,
         }
     }
 
@@ -124,6 +135,8 @@ impl AgentModel {
         self.open_assistant = None;
         self.next_id = 1;
         self.revision += 1;
+        self.rebuilt = true;
+        self.dirty_rows.clear();
 
         let messages = transcript
             .get("messages")
@@ -239,9 +252,9 @@ impl AgentModel {
             }
             "tool-result" => {
                 let result = ToolResult {
-                    is_error: data.get("is-error").and_then(Value::as_bool).unwrap_or(false),
+                    is_error: data.get("is_error").and_then(Value::as_bool).unwrap_or(false),
                     content: string_field(data, "content").unwrap_or_default(),
-                    content_chars: data.get("content-chars").and_then(Value::as_u64),
+                    content_chars: data.get("content_chars").and_then(Value::as_u64),
                 };
                 let call_id = string_field(data, "id").unwrap_or_default();
                 let name = string_field(data, "name").unwrap_or_default();
@@ -359,6 +372,7 @@ impl AgentModel {
         let id = self.next_id;
         self.next_id += 1;
         self.rows.push(Row { id, version: 1, kind });
+        self.dirty_rows.push(id);
         id
     }
 
@@ -369,7 +383,25 @@ impl AgentModel {
     fn touch(&mut self, id: RowId) {
         if let Some(row) = self.row_mut(id) {
             row.version += 1;
+            self.dirty_rows.push(id);
         }
+    }
+
+    /// The rows touched since the last call, drained: the UI re-sets only those, and a
+    /// rebuild says every row view it holds is stale. See [`RowChanges`].
+    pub fn take_row_changes(&mut self) -> RowChanges {
+        if self.rebuilt {
+            self.rebuilt = false;
+            self.dirty_rows.clear();
+            return RowChanges::Rebuilt;
+        }
+        if self.dirty_rows.is_empty() {
+            return RowChanges::Unchanged;
+        }
+        let mut ids = std::mem::take(&mut self.dirty_rows);
+        ids.sort_unstable();
+        ids.dedup();
+        RowChanges::Changed(ids)
     }
 
     /// A new assistant message begins. Any row still open (a `message-end` the stream
@@ -554,6 +586,9 @@ impl AgentModel {
             if self.open_assistant == Some(id) {
                 self.open_assistant = None;
             }
+            // A removed row is a `RowId` the UI must forget: it is in the change list and
+            // no longer in `rows`.
+            self.dirty_rows.push(id);
         }
     }
 

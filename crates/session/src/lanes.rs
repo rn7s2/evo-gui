@@ -62,6 +62,47 @@ impl LaneRow {
     pub fn is_busy(&self) -> bool {
         matches!(self.status, LaneStatus::Working | LaneStatus::Compacting)
     }
+
+    /// The step clock the left column shows while the lane works, as the swarm's own
+    /// `lane-status-line` writes it (`swarm/tools.lisp`): `45s`, `3m`, `1h2m`.
+    pub fn step_clock(&self) -> Option<String> {
+        self.step_age.map(short_duration)
+    }
+
+    /// The task as the left column shows it: one line, truncated. The swarm truncates the
+    /// same way in `lane-status-line` (`swarm/tools.lisp`).
+    pub fn task_label(&self) -> Option<String> {
+        self.task.as_deref().map(lane_task_label)
+    }
+}
+
+/// A compact elapsed clock: `45s`, `3m`, `1h2m` — `evo.tui:short-duration`
+/// (`src/tui/tui.lisp`), which the swarm reuses for a lane's step age
+/// (`swarm/tools.lisp`'s `lane-status-line`).
+pub fn short_duration(seconds: u64) -> String {
+    if seconds < 60 {
+        format!("{}s", seconds)
+    } else if seconds < 3600 {
+        format!("{}m", seconds / 60)
+    } else {
+        format!("{}h{}m", seconds / 3600, (seconds % 3600) / 60)
+    }
+}
+
+/// A lane's task on one line, at most 60 characters: `(truncate-string (substitute #\Space
+/// #\Newline task) 60 "…")`, exactly what `lane-status-line` puts in a lane row
+/// (`swarm/tools.lisp`). A longer task keeps its first 60 characters and gains the
+/// ellipsis. Only `\n` becomes a space — `substitute` replaces that one character and
+/// leaves a `\r` alone, and this follows it rather than quietly differing.
+pub fn lane_task_label(task: &str) -> String {
+    const CHARS: usize = 60;
+    let one_line: String = task.chars().map(|c| if c == '\n' { ' ' } else { c }).collect();
+    if one_line.chars().count() <= CHARS {
+        return one_line;
+    }
+    let mut label: String = one_line.chars().take(CHARS).collect();
+    label.push('…');
+    label
 }
 
 /// The tab's lane list: `main` (the coordinator) is not in it — the tab draws that row

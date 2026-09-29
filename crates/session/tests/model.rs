@@ -400,10 +400,12 @@ fn resync_events_and_lifecycle() {
 
 #[test]
 fn an_orphan_tool_result_still_gets_a_row() {
-    // A stream that joined after the call (a resync, a `?since=` inside a turn).
+    // A stream that joined after the call (a resync, a `?since=` inside a turn). The
+    // field spellings are the wire's (`src/serve/json.lisp`'s `keyword->json-key` turns
+    // `:is-error` into `is_error`), taken from a captured `tool-result` event.
     let mut model = AgentModel::new();
     assert_eq!(
-        model.apply_event(1, "tool-result", &json!({"name": "bash", "id": "toolu_9", "is-error": true, "content-chars": 12, "content": "no such file"})),
+        model.apply_event(1, "tool-result", &json!({"name": "bash", "id": "toolu_9", "is_error": true, "content_chars": 12, "content": "no such file"})),
         Effect::ROWS
     );
     match &model.rows()[0].kind {

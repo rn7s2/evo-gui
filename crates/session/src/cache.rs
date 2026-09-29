@@ -22,6 +22,10 @@ const SEED_LIMITS: [u64; 3] = [20, 100, 400];
 /// The `:custom` key the cache totals persist under (`340-cache-stats.lisp`).
 const CACHE_STATS_KEY: &str = "cache-stats";
 
+/// The fields a totals object carries (normalized usage names), used to tell a totals
+/// object from some other JSON object.
+const CACHE_TOTAL_KEYS: [&str; 3] = ["input", "cache_read", "cache_write"];
+
 /// The limits to ask for, in order: `20`, `100`, `400`.
 pub fn cache_seed_limits() -> &'static [u64] {
     &SEED_LIMITS
@@ -57,5 +61,31 @@ pub fn cache_stats_from_journal(journal: &Value) -> Option<CacheTotals> {
     }
     let mut totals = CacheTotals::default();
     totals.fold(&data);
+    Some(totals)
+}
+
+/// The seed as the tab's I/O layer delivers it: the whole `GET /journal` body, the
+/// `cache-stats` entry itself, or the totals object alone — whatever shape came back, the
+/// totals it carries, or `None` when this reply has no usable seed (grow the limit, ask
+/// again; the segment stays hidden until one arrives).
+pub fn cache_totals_from_seed(seed: &Value) -> Option<CacheTotals> {
+    if !seed.is_object() {
+        return None;
+    }
+    // A `GET /journal` body: nil when the entry is not in the reply — that is the answer
+    // that makes the walk grow the limit, not a zero seed.
+    if seed.get("entries").is_some_and(Value::is_array) {
+        return cache_stats_from_journal(seed);
+    }
+    // One journal entry: `{type: custom, key: cache-stats, data: {...}}`.
+    let data = match seed.get("data") {
+        Some(data) if seed.get("key").and_then(Value::as_str) == Some(CACHE_STATS_KEY) => data,
+        _ => seed,
+    };
+    if !CACHE_TOTAL_KEYS.iter().any(|key| !data[key].is_null()) {
+        return None;
+    }
+    let mut totals = CacheTotals::default();
+    totals.fold(data);
     Some(totals)
 }

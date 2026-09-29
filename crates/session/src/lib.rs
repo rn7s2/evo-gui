@@ -68,13 +68,15 @@ mod effect;
 mod lanes;
 mod model;
 mod readout;
+mod tab;
 mod todos;
 
-pub use cache::{cache_seed_limits, cache_seed_next_limit, cache_stats_from_journal};
-pub use effect::Effect;
-pub use lanes::{LaneList, LaneRow, SwarmInfo};
+pub use cache::{cache_seed_limits, cache_seed_next_limit, cache_stats_from_journal, cache_totals_from_seed};
+pub use effect::{Effect, RowChanges};
+pub use lanes::{lane_task_label, short_duration, LaneList, LaneRow, SwarmInfo};
 pub use model::AgentModel;
 pub use readout::{k_tokens, round_div_half_even, CacheTotals, GoalState, Readout};
+pub use tab::{AgentKey, Changes, StreamStatus, TabModel};
 pub use todos::{todos_from_json, todo_status_from_str};
 
 impl LaneStatus {

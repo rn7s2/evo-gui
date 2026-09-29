@@ -216,6 +216,21 @@ impl Readout {
         self.context_window
     }
 
+    /// The model id as `/state` reports it (bare, without the provider), for a tooltip.
+    pub fn model_id(&self) -> Option<&str> {
+        self.model.as_deref()
+    }
+
+    /// The provider the session is running on, as `/state` reports it, for a tooltip.
+    pub fn provider(&self) -> Option<&str> {
+        self.provider.as_deref()
+    }
+
+    /// The effort level as `/state` reports it (not lower-cased; the segment is).
+    pub fn thinking(&self) -> Option<&str> {
+        self.thinking.as_deref()
+    }
+
     /// `tui-model-label`: the bare id, or `id (provider)` when that id is registered
     /// under more than one provider — the bare id no longer names an endpoint.
     pub fn model_label(&self) -> Option<String> {
