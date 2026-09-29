@@ -40,3 +40,16 @@ commits by explicit paths.
   a `cx.spawn` task awaits and applies results through `WeakEntity::update` with a revision check
   (`crates/workspace/src/bridge.rs`, tests prove the cross-thread transfer and stale-drop). Two tabs
   streaming at once keep the UI responsive (`crates/workspace/tests/tab_swarm.rs`).
+
+## Deviations from docs/PROMPT.md decided by the user
+
+- **Status readout placement (§7.3):** the readout line sits at the bottom of the centre pane,
+  below the todo panel, not in the composer's row; the composer keeps its input and the one
+  Send/Stop button. It shows the selected agent's line: the coordinator's for `main`, a lane's own
+  (model, context and cache from its transcript and `/registry`) for a lane, or "no metrics yet".
+- **Resizable columns (§7.3):** the left and right columns are resizable by dragging the splits
+  (defaults 260 / 360 px), widths shared by all tabs and kept in `app.json`.
+- **Tool rows:** expanded captions are lower case ("arguments", "command", "result"); shown content
+  is capped at 1024 / 1024 / 2048 characters.
+- **Scope:** no workarounds for evo's current API shapes; an evo refactor is planned separately.
+  Gaps are recorded in `docs/api-gaps.md`.

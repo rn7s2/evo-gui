@@ -48,6 +48,16 @@ working starts the clock at 0 from that stamp); the un-stamped `apply_lanes`/`ap
 `on_event_at` (the lane-state branch) are the stamped paths.
 `CARGO_TARGET_DIR=target/session cargo test -p session`.
 
+The §7.3 status line is the *selected* agent's (`TabModel::selected_readout_text`) — the
+coordinator's on `main`, the lane's own when a lane is selected, `None` while nothing about
+that agent is known (the UI writes its own "no metrics yet"). A lane's readout has no
+`/state` behind it, so `TabModel::on_transcript` seeds it from the lane's transcript (the
+model and provider its assistant messages name, the usage they report) — fill-only, and
+only while nothing has been folded, so the coordinator's `/state`+journal seed and a lane's
+live stream are both left alone. The window comes from `/registry` by `(id, provider)`
+(`Readout::context_window`), which is why every model is given the newest catalog: the
+coordinator on `on_registry`, a lane as its model is born.
+
 ## swarm_client
 Process/HTTP/SSE client; patience from `ServerConfig`/`TabSpec` (request 30 s, stream 45 s);
 `Server::start_cancellable` + `BootCancel`; a cancelled boot gives a reachable supervisor 5 s to take
