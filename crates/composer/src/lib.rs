@@ -8,17 +8,16 @@
 //! disabled only while its own request is in flight.
 
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{InputEvent, Textarea, TextareaState},
     tooltip::Tooltip,
-    v_flex,
+    v_flex, ActiveTheme as _, Disableable as _,
 };
 use gpui_kit::{
-    App, AppContext as _, Context, Entity, EventEmitter, Global, InteractiveElement as _,
-    IntoElement, KeyBinding, ParentElement as _, Render, SharedString, Styled as _, Subscription,
-    StatefulInteractiveElement as _, Window, div,
+    div, App, AppContext as _, Context, Entity, EventEmitter, Global, InteractiveElement as _,
+    IntoElement, KeyBinding, ParentElement as _, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, TestSupportExt as _, Window,
 };
 use session::Activity;
 
@@ -210,6 +209,7 @@ impl Composer {
         let tooltip = full.clone();
         div()
             .id(READOUT_ID)
+            .test_support()
             .flex_1()
             .min_w_0()
             .truncate()
@@ -269,8 +269,7 @@ mod tests {
     use super::*;
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{
-        AnyWindowHandle, Bounds, EntityId, TestAppContext, WindowBounds, WindowOptions, point,
-        px, size,
+        point, px, AnyWindowHandle, Bounds, EntityId, TestAppContext, WindowBounds, WindowOptions,
     };
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -285,6 +284,8 @@ mod tests {
         window: AnyWindowHandle,
         composer: Entity<Composer>,
         events: Rc<RefCell<Vec<ComposerEvent>>>,
+        /// Kept alive: dropping it would stop the recording.
+        _subscription: Subscription,
     }
 
     impl Fixture {
@@ -296,11 +297,15 @@ mod tests {
             self.composer.read(cx).input.read(cx).value().to_string()
         }
 
+        fn draft_now(&self, cx: &TestAppContext) -> String {
+            cx.read(|cx| self.draft(cx))
+        }
+
         fn input_frame(&self, cx: &App) -> (&'static str, EntityId) {
             ("input", self.composer.read(cx).input.entity_id())
         }
 
-        fn set_activity(&self, activity: Activity, cx: &mut App) {
+        fn activity(&self, activity: Activity, cx: &mut App) {
             self.composer
                 .update(cx, |composer, cx| composer.set_activity(activity, cx));
         }
@@ -309,6 +314,24 @@ mod tests {
         fn type_draft(&self, text: &str, window: &mut Window, cx: &mut App) {
             window.click(self.input_frame(cx), cx);
             window.input(text, cx);
+        }
+
+        /// Replace the whole draft, as pasting over a selected draft does.
+        fn set_draft(&self, text: &str, window: &mut Window, cx: &mut App) {
+            self.composer.update(cx, |composer, cx| {
+                composer
+                    .input
+                    .update(cx, |input, cx| input.set_value(text, window, cx));
+            });
+        }
+
+        /// Run `f` against the composer's window.
+        ///
+        /// Entity events reach subscribers when the app update returns, so
+        /// assertions on [`Fixture::events`] belong *after* this call.
+        fn act<R>(&self, cx: &mut TestAppContext, f: impl FnOnce(&mut Window, &mut App) -> R) -> R {
+            cx.update_window(self.window, |_, window, cx| f(window, cx))
+                .expect("composer window")
         }
     }
 
@@ -330,44 +353,56 @@ mod tests {
 
         let events = Rc::new(RefCell::new(Vec::new()));
         let recorded = events.clone();
-        cx.update(|cx| {
+        let subscription = cx.update(|cx| {
             cx.subscribe(&composer, move |_, event: &ComposerEvent, _| {
                 recorded.borrow_mut().push(event.clone());
-            });
+            })
         });
 
         Fixture {
             window,
             composer,
             events,
+            _subscription: subscription,
         }
     }
 
     #[gpui_kit::test]
     fn enter_sends_the_draft_and_the_owner_clears_it_only_on_ok(cx: &mut TestAppContext) {
         let f = open(cx);
-        cx.update_window(f.window, |_, window, cx| {
+        f.act(cx, |window, cx| {
             window.render_frame(cx);
             f.type_draft("hello", window, cx);
             assert_eq!(f.draft(cx), "hello");
             window.press("enter", cx);
+        });
 
-            // The composer never clears itself on send.
-            assert_eq!(f.draft(cx), "hello");
-            assert_eq!(f.events(), vec![ComposerEvent::Send("hello".into())]);
+        // The composer never clears itself on send.
+        assert_eq!(f.events(), vec![ComposerEvent::Send("hello".into())]);
+        assert_eq!(f.draft_now(cx), "hello");
 
-            // A failed request keeps the draft, so the text is not lost.
-            f.composer
-                .update(cx, |composer, cx| composer.request_finished(false, window, cx));
-            assert_eq!(f.draft(cx), "hello");
+        // A failed request keeps the draft, so the prompt is not lost.
+        f.act(cx, |window, cx| {
+            f.composer.update(cx, |composer, cx| {
+                composer.request_finished(false, window, cx)
+            })
+        });
+        assert_eq!(f.draft_now(cx), "hello");
 
-            window.press("enter", cx);
-            f.composer
-                .update(cx, |composer, cx| composer.request_finished(true, window, cx));
-            assert_eq!(f.draft(cx), "");
-        })
-        .unwrap();
+        // The retry sends again; this time the server takes the text.
+        f.act(cx, |window, cx| window.press("enter", cx));
+        assert_eq!(f.events().len(), 2, "the retry sends the kept draft again");
 
+        f.act(cx, |window, cx| {
+            f.composer.update(cx, |composer, cx| {
+                composer.request_finished(true, window, cx)
+            })
+        });
+        assert_eq!(
+            f.draft_now(cx),
+            "",
+            "an accepted send is what clears the input"
+        );
         assert_eq!(
             f.events(),
             vec![
@@ -377,46 +412,50 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_stop_face_carries_its_square_glyph() {
+        assert_eq!(ActionFace::Send.label(), "Send");
+        assert_eq!(ActionFace::Stop.label(), "\u{25a0} Stop");
+    }
+
     #[gpui_kit::test]
     fn shift_enter_inserts_a_newline_instead_of_sending(cx: &mut TestAppContext) {
         let f = open(cx);
-        cx.update_window(f.window, |_, window, cx| {
+        f.act(cx, |window, cx| {
             window.render_frame(cx);
             f.type_draft("first", window, cx);
             window.press("shift-enter", cx);
-            assert!(f.events().is_empty(), "Shift+Enter must not send");
             assert_eq!(f.draft(cx), "first\n");
-        })
-        .unwrap();
+        });
+
+        assert!(f.events().is_empty(), "Shift+Enter must not send");
     }
 
     #[gpui_kit::test]
     fn escape_interrupts_and_leaves_the_draft_alone(cx: &mut TestAppContext) {
         let f = open(cx);
-        cx.update_window(f.window, |_, window, cx| {
+        f.act(cx, |window, cx| {
             window.render_frame(cx);
             f.type_draft("half a prompt", window, cx);
-            f.set_activity(Activity::Running, cx);
+            f.activity(Activity::Running, cx);
             window.press("escape", cx);
+        });
 
-            assert_eq!(f.events(), vec![ComposerEvent::Interrupt]);
-            // `Esc` interrupts; it is not the input's "clear" escape.
-            assert_eq!(f.draft(cx), "half a prompt");
-        })
-        .unwrap();
+        assert_eq!(f.events(), vec![ComposerEvent::Interrupt]);
+        // `Esc` interrupts; it is not the input's "clear" escape.
+        assert_eq!(f.draft_now(cx), "half a prompt");
     }
 
     #[gpui_kit::test]
     fn enter_sends_while_running_so_text_can_be_queued(cx: &mut TestAppContext) {
         let f = open(cx);
-        cx.update_window(f.window, |_, window, cx| {
+        f.act(cx, |window, cx| {
             window.render_frame(cx);
             f.type_draft("queued", window, cx);
-            f.set_activity(Activity::Running, cx);
+            f.activity(Activity::Running, cx);
             window.render_frame(cx);
             window.press("enter", cx);
-        })
-        .unwrap();
+        });
 
         assert_eq!(f.events(), vec![ComposerEvent::Send("queued".into())]);
     }
@@ -424,42 +463,50 @@ mod tests {
     #[gpui_kit::test]
     fn the_one_button_follows_the_activity_and_is_never_send_and_stop(cx: &mut TestAppContext) {
         let f = open(cx);
-        cx.update_window(f.window, |_, window, cx| {
+        f.act(cx, |window, cx| {
             window.render_frame(cx);
             assert_eq!(window.find(BUTTON_ID).label(), Some("Send"));
 
-            f.set_activity(Activity::Running, cx);
+            f.activity(Activity::Running, cx);
             window.render_frame(cx);
             assert_eq!(window.find(BUTTON_ID).label(), Some("Stop"));
 
-            f.set_activity(Activity::Compacting, cx);
+            f.activity(Activity::Compacting, cx);
             window.render_frame(cx);
             assert_eq!(window.find(BUTTON_ID).label(), Some("Stop"));
 
-            f.set_activity(Activity::Idle, cx);
+            f.activity(Activity::Idle, cx);
             window.render_frame(cx);
             assert_eq!(window.find(BUTTON_ID).label(), Some("Send"));
-        })
-        .unwrap();
+        });
     }
 
     #[gpui_kit::test]
     fn send_is_enabled_by_a_non_blank_draft_and_by_nothing_else(cx: &mut TestAppContext) {
         let f = open(cx);
-        cx.update_window(f.window, |_, window, cx| {
+        f.act(cx, |window, cx| {
             window.render_frame(cx);
+            assert_eq!(window.find(BUTTON_ID).label(), Some("Send"));
 
-            // Blank: the click is inert, because the button is disabled.
+            // Nothing typed: nothing to send, so the click is inert.
+            assert!(!f.composer.read(cx).is_action_enabled(cx));
             window.click(BUTTON_ID, cx);
-            // Whitespace-only is blank too.
-            f.type_draft("   ", window, cx);
-            window.click(BUTTON_ID, cx);
-            assert!(f.events().is_empty());
 
-            f.type_draft("real", window, cx);
+            // Whitespace only is blank too.
+            f.set_draft("   ", window, cx);
+            window.render_frame(cx);
+            assert!(!f.composer.read(cx).is_action_enabled(cx));
             window.click(BUTTON_ID, cx);
-        })
-        .unwrap();
+        });
+
+        assert!(f.events().is_empty(), "a blank draft has nothing to send");
+
+        f.act(cx, |window, cx| {
+            f.set_draft("real", window, cx);
+            window.render_frame(cx);
+            assert!(f.composer.read(cx).is_action_enabled(cx));
+            window.click(BUTTON_ID, cx);
+        });
 
         assert_eq!(f.events(), vec![ComposerEvent::Send("real".into())]);
     }
@@ -467,26 +514,31 @@ mod tests {
     #[gpui_kit::test]
     fn the_button_is_disabled_only_while_its_own_request_is_in_flight(cx: &mut TestAppContext) {
         let f = open(cx);
-        cx.update_window(f.window, |_, window, cx| {
+        f.act(cx, |window, cx| {
             window.render_frame(cx);
-            f.type_draft("one", window, cx);
-            window.click(BUTTON_ID, cx);
-            assert_eq!(f.events().len(), 1, "the first click sends");
-
-            // In flight: the second click does nothing at all.
-            window.click(BUTTON_ID, cx);
+            f.set_draft("one", window, cx);
             window.render_frame(cx);
-            assert_eq!(f.events().len(), 1);
-
-            f.composer
-                .update(cx, |composer, cx| composer.request_finished(true, window, cx));
-            window.render_frame(cx);
-
-            // The request is over, so the button works again.
-            f.type_draft("two", window, cx);
             window.click(BUTTON_ID, cx);
-        })
-        .unwrap();
+        });
+        assert_eq!(f.events().len(), 1, "the first click sends");
+
+        // In flight: the click does nothing at all.
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            assert!(!f.composer.read(cx).is_action_enabled(cx));
+            window.click(BUTTON_ID, cx);
+        });
+        assert_eq!(f.events().len(), 1);
+
+        // The request is over, so the button works again.
+        f.act(cx, |window, cx| {
+            f.composer.update(cx, |composer, cx| {
+                composer.request_finished(true, window, cx)
+            });
+            f.set_draft("two", window, cx);
+            window.render_frame(cx);
+            window.click(BUTTON_ID, cx);
+        });
 
         assert_eq!(
             f.events(),
@@ -500,31 +552,35 @@ mod tests {
     #[gpui_kit::test]
     fn stop_interrupts_and_never_sends_or_clears(cx: &mut TestAppContext) {
         let f = open(cx);
-        cx.update_window(f.window, |_, window, cx| {
+        f.act(cx, |window, cx| {
             window.render_frame(cx);
             f.type_draft("still working", window, cx);
-            f.set_activity(Activity::Compacting, cx);
+            f.activity(Activity::Compacting, cx);
             window.render_frame(cx);
 
+            assert_eq!(window.find(BUTTON_ID).label(), Some("Stop"));
             window.click(BUTTON_ID, cx);
-            assert_eq!(f.events(), vec![ComposerEvent::Interrupt]);
-            assert_eq!(f.draft(cx), "still working");
+        });
 
-            // The interrupt's reply keeps the draft: it was an interrupt, not a send.
-            f.composer
-                .update(cx, |composer, cx| composer.request_finished(false, window, cx));
-            assert_eq!(f.draft(cx), "still working");
-        })
-        .unwrap();
+        assert_eq!(f.events(), vec![ComposerEvent::Interrupt]);
+        assert_eq!(f.draft_now(cx), "still working");
+
+        // The interrupt's reply keeps the draft: it was an interrupt, not a send.
+        f.act(cx, |window, cx| {
+            f.composer.update(cx, |composer, cx| {
+                composer.request_finished(false, window, cx)
+            })
+        });
+        assert_eq!(f.draft_now(cx), "still working");
     }
 
     #[gpui_kit::test]
     fn a_long_readout_is_ellipsized_and_keeps_the_button_on_its_line(cx: &mut TestAppContext) {
         let f = open(cx);
-        cx.update_window(f.window, |_, window, cx| {
+        f.act(cx, |window, cx| {
             window.render_frame(cx);
-            let line = "ark-deepseek-v4.1-flash · max · ctx 48k/936k (5%) · 97% cached · \
-                        goal a1b2c3d4 (active) 12k/50k · \
+            let line = "ark-deepseek-v4.1-flash \u{b7} max \u{b7} ctx 48k/936k (5%) \u{b7} 97% cached \u{b7} \
+                        goal a1b2c3d4 (active) 12k/50k \u{b7} \
                         0123456789 0123456789 0123456789 0123456789 0123456789";
             f.composer
                 .update(cx, |composer, cx| composer.set_readout(line, cx));
@@ -536,13 +592,13 @@ mod tests {
 
             // One line high and on the same row: readout left, button right.
             assert!(
-                readout.bounds().height() <= px(24.),
+                readout.bounds().size.height <= px(24.),
                 "the readout wrapped: {:?}",
                 readout.bounds()
             );
             assert!(
-                readout.bounds().top() < button.bounds().bottom()
-                    && button.bounds().top() < readout.bounds().bottom(),
+                readout.bounds().origin.y < button.bounds().bottom()
+                    && button.bounds().origin.y < readout.bounds().bottom(),
                 "the button left the readout's line: readout {:?}, button {:?}",
                 readout.bounds(),
                 button.bounds()
@@ -553,7 +609,6 @@ mod tests {
                 readout.bounds(),
                 button.bounds()
             );
-        })
-        .unwrap();
+        });
     }
 }

@@ -13,11 +13,11 @@
 use std::time::Duration;
 
 use composer::{Composer, ComposerEvent};
-use gpui_kit::component::{ActiveTheme as _, h_flex};
+use gpui_kit::component::{h_flex, ActiveTheme as _};
 use gpui_kit::{
-    App, AppContext as _, Bounds, Context, Entity, IntoElement, ParentElement as _, Render,
-    Styled as _, Subscription, Task, WeakEntity, Window, WindowBounds, WindowOptions, div, point,
-    px, size,
+    div, point, px, size, App, AppContext as _, Bounds, Context, Entity, IntoElement,
+    ParentElement as _, Render, Styled as _, Subscription, Task, WeakEntity, Window, WindowBounds,
+    WindowOptions,
 };
 use session::Activity;
 
