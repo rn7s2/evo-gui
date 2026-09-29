@@ -1733,7 +1733,11 @@ name = "evo-desktop"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-channel",
  "gpui-kit",
+ "serde_json",
+ "store",
+ "tab_engine",
  "workspace",
 ]
 
@@ -8628,6 +8632,11 @@ dependencies = [
  "gpui-kit",
  "image",
  "rfd",
+ "serde_json",
+ "session",
+ "store",
+ "swarm_client",
+ "tab_engine",
  "transcript",
 ]
 
