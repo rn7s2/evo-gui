@@ -32,14 +32,24 @@ fn real_journals_parse_into_resumable_swarms() {
     }
     // A bounded scan of the real tree: the same budget the app uses, but
     // smaller, so this stays a test and not a chore.
-    let budget = ScanBudget { max_files: 500, max_duration: Duration::from_secs(20), ..ScanBudget::default() };
+    let budget = ScanBudget {
+        max_files: 500,
+        max_duration: Duration::from_secs(20),
+        ..ScanBudget::default()
+    };
     let started = Instant::now();
     let outcome = scan(&dir, &budget);
     let elapsed = started.elapsed();
-    assert!(elapsed <= Duration::from_secs(25), "the scan must respect its budget: {elapsed:?}");
+    assert!(
+        elapsed <= Duration::from_secs(25),
+        "the scan must respect its budget: {elapsed:?}"
+    );
 
     if outcome.entries.is_empty() {
-        skip(&format!("no resumable swarm among {} journals", outcome.files_seen));
+        skip(&format!(
+            "no resumable swarm among {} journals",
+            outcome.files_seen
+        ));
         return;
     }
     eprintln!(
@@ -56,10 +66,28 @@ fn real_journals_parse_into_resumable_swarms() {
         assert!(entry.session.is_file(), "{:?}", entry.session);
         assert!(entry.session.extension().is_some_and(|e| e == "sexp"));
         assert!(!entry.swarm_id.is_empty(), "{:?}", entry.session);
-        assert!(entry.folder.is_absolute(), "{:?} → {:?}", entry.session, entry.folder);
-        assert!(entry.lanes >= 1, "{:?} has {} lanes", entry.session, entry.lanes);
-        assert!(entry.when_epoch.is_some(), "unparsable timestamp {:?}", entry.when);
-        assert!(entry.when.ends_with('Z'), "timestamps are UTC: {:?}", entry.when);
+        assert!(
+            entry.folder.is_absolute(),
+            "{:?} → {:?}",
+            entry.session,
+            entry.folder
+        );
+        assert!(
+            entry.lanes >= 1,
+            "{:?} has {} lanes",
+            entry.session,
+            entry.lanes
+        );
+        assert!(
+            entry.when_epoch.is_some(),
+            "unparsable timestamp {:?}",
+            entry.when
+        );
+        assert!(
+            entry.when.ends_with('Z'),
+            "timestamps are UTC: {:?}",
+            entry.when
+        );
         assert!(!entry.folder_name().is_empty());
         assert_eq!(entry.resume_args().1, entry.session);
         assert!(entry.mtime > 0);
@@ -86,7 +114,8 @@ fn real_journals_parse_into_resumable_swarms() {
             entry.session.display()
         );
         assert!(
-            text.lines().any(|l| l.starts_with("(:type :custom ") && l.contains(":key \"swarm\"")),
+            text.lines()
+                .any(|l| l.starts_with("(:type :custom ") && l.contains(":key \"swarm\"")),
             "a resumable swarm must have a swarm record: {}",
             entry.session.display()
         );
@@ -102,8 +131,16 @@ fn real_journals_parse_into_resumable_swarms() {
     }
 
     // The whole set: at least one row carries a model, and none invents one.
-    let with_model = outcome.entries.iter().filter(|e| e.models.coordinator.is_some()).count();
-    eprintln!("{} of {} rows know their coordinator model", with_model, outcome.entries.len());
+    let with_model = outcome
+        .entries
+        .iter()
+        .filter(|e| e.models.coordinator.is_some())
+        .count();
+    eprintln!(
+        "{} of {} rows know their coordinator model",
+        with_model,
+        outcome.entries.len()
+    );
     assert!(with_model > 0, "no row learned its model from the journals");
     for entry in &outcome.entries {
         // The only models we can report are ids the journal actually wrote.
@@ -120,10 +157,17 @@ fn real_journals_parse_into_resumable_swarms() {
     // Newest first, and no duplicates.
     let mut seen = std::collections::HashSet::new();
     for pair in outcome.entries.windows(2) {
-        assert!(pair[0].mtime >= pair[1].mtime, "entries are not newest-first");
+        assert!(
+            pair[0].mtime >= pair[1].mtime,
+            "entries are not newest-first"
+        );
     }
     for entry in &outcome.entries {
-        assert!(seen.insert(entry.session.clone()), "duplicate {:?}", entry.session);
+        assert!(
+            seen.insert(entry.session.clone()),
+            "duplicate {:?}",
+            entry.session
+        );
     }
 }
 
@@ -147,26 +191,46 @@ fn the_real_swarm_lisp_is_only_ever_touched_by_copy() {
 
     // A file without a trailing newline would come back with one; that is the
     // only edit the round trip may make to the user's text.
-    let expected = if original.ends_with('\n') { original.clone() } else { format!("{original}\n") };
+    let expected = if original.ends_with('\n') {
+        original.clone()
+    } else {
+        format!("{original}\n")
+    };
 
     let model = LanesModel::new("ark-deepseek-v4.1-flash", "aiden");
-    assert_eq!(swarm_config::set_lanes_model(&folder, Some(&model)).unwrap(), WriteOutcome::Written);
+    assert_eq!(
+        swarm_config::set_lanes_model(&folder, Some(&model)).unwrap(),
+        WriteOutcome::Written
+    );
     let written = fs::read_to_string(&copy).unwrap();
     // The block is at the very top, and the user's own file is intact below it.
     assert!(written.starts_with(";;; evo-desktop:begin"), "{written}");
     assert!(written.contains("(evo.swarm:in-lanes ()\n"));
     assert!(written.contains("(evo:set-setting :model \"ark-deepseek-v4.1-flash\")"));
     assert!(written.contains("(evo:set-setting :model-provider :aiden)"));
-    assert!(written.ends_with(&expected), "the file below our block must not move");
+    assert!(
+        written.ends_with(&expected),
+        "the file below our block must not move"
+    );
     assert_eq!(written.matches(";;; evo-desktop:begin").count(), 1);
-    assert_eq!(swarm_config::set_lanes_model(&folder, Some(&model)).unwrap(), WriteOutcome::Unchanged);
+    assert_eq!(
+        swarm_config::set_lanes_model(&folder, Some(&model)).unwrap(),
+        WriteOutcome::Unchanged
+    );
 
     // Default puts the file back, byte for byte.
-    assert_eq!(swarm_config::set_lanes_model(&folder, None).unwrap(), WriteOutcome::Removed);
+    assert_eq!(
+        swarm_config::set_lanes_model(&folder, None).unwrap(),
+        WriteOutcome::Removed
+    );
     assert_eq!(fs::read_to_string(&copy).unwrap(), expected);
 
     fs::remove_dir_all(&folder).unwrap();
-    assert_eq!(fs::metadata(&real).unwrap().modified().unwrap(), before, "the real file is untouched");
+    assert_eq!(
+        fs::metadata(&real).unwrap().modified().unwrap(),
+        before,
+        "the real file is untouched"
+    );
 }
 
 /// The shape of a real swarm record, as `swarm/lanes.lisp` writes it — pinned
@@ -179,7 +243,11 @@ fn the_swarm_record_fields_the_scan_depends_on() {
         skip(&format!("{} does not exist", dir.display()));
         return;
     }
-    let budget = ScanBudget { max_files: 500, max_duration: Duration::from_secs(20), ..ScanBudget::default() };
+    let budget = ScanBudget {
+        max_files: 500,
+        max_duration: Duration::from_secs(20),
+        ..ScanBudget::default()
+    };
     let outcome = scan(&dir, &budget);
     let Some(entry) = outcome.entries.first() else {
         skip("no resumable swarm on this machine");
@@ -191,7 +259,10 @@ fn the_swarm_record_fields_the_scan_depends_on() {
         .rfind(|l| l.starts_with("(:type :custom ") && l.contains(":key \"swarm\""))
         .expect("a swarm record");
     for field in [":id", ":workers", ":lanes", ":cwd"] {
-        assert!(line.contains(field), "the swarm record no longer has {field}: {line}");
+        assert!(
+            line.contains(field),
+            "the swarm record no longer has {field}: {line}"
+        );
     }
     // …and the record we parsed is the last one in the file.
     assert!(line.contains(&format!("\"{}\"", entry.swarm_id)));

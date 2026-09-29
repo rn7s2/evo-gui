@@ -9,12 +9,17 @@ const SECS_PER_DAY: u64 = 86_400;
 
 /// Seconds since the Unix epoch, UTC.
 pub fn now_epoch() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Epoch seconds of a [`SystemTime`].
 pub fn epoch_of(t: SystemTime) -> u64 {
-    t.duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    t.duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// `2026-09-29T09:09:56Z` — the shape evo itself writes in journal headers.
@@ -74,7 +79,9 @@ pub fn parse_rfc3339(s: &str) -> Option<u64> {
     rest = &rest[8..];
     // Fractional seconds: parsed and dropped, we keep whole seconds.
     if let Some(stripped) = rest.strip_prefix('.') {
-        let end = stripped.find(|c: char| !c.is_ascii_digit()).unwrap_or(stripped.len());
+        let end = stripped
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(stripped.len());
         rest = &stripped[end..];
     }
     let offset = match rest.as_bytes().first() {
@@ -131,8 +138,10 @@ mod tests {
         assert_eq!(format_rfc3339(0), "1970-01-01T00:00:00Z");
         assert_eq!(format_rfc3339(1_000_000_000), "2001-09-09T01:46:40Z");
         // The timestamp of this repo's own journal header.
-        assert_eq!(format_rfc3339(parse_rfc3339("2026-09-29T09:09:56Z").unwrap()),
-                   "2026-09-29T09:09:56Z");
+        assert_eq!(
+            format_rfc3339(parse_rfc3339("2026-09-29T09:09:56Z").unwrap()),
+            "2026-09-29T09:09:56Z"
+        );
     }
 
     #[test]
@@ -141,7 +150,10 @@ mod tests {
         assert_eq!(format_rfc3339(t), "2026-09-29T09:09:56Z");
         assert_eq!(parse_rfc3339("2026-09-29T17:09:56+08:00").unwrap(), t);
         assert_eq!(parse_rfc3339("2026-09-29T09:09:56.123Z").unwrap(), t);
-        assert_eq!(parse_rfc3339("2026-09-29T09:09:56+0800").unwrap(), t - 8 * 3600);
+        assert_eq!(
+            parse_rfc3339("2026-09-29T09:09:56+0800").unwrap(),
+            t - 8 * 3600
+        );
         assert_eq!(parse_rfc3339("2026-09-29T17:09:56+0800").unwrap(), t);
         assert!(parse_rfc3339("not a date").is_none());
         assert!(parse_rfc3339("2026-13-29T09:09:56Z").is_none());

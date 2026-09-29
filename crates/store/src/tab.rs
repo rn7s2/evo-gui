@@ -45,7 +45,10 @@ pub struct TabState {
 
 impl TabState {
     pub fn new(folder: impl Into<PathBuf>) -> TabState {
-        TabState { folder: folder.into(), ..TabState::default() }
+        TabState {
+            folder: folder.into(),
+            ..TabState::default()
+        }
     }
 
     /// The folder's name, for a tab label or a history row.
@@ -106,7 +109,10 @@ mod tests {
             folder: PathBuf::from("/Users/x/coding/foo"),
             session: Some(PathBuf::from("/Users/x/.evo/sessions/a/1.sexp")),
             swarm_id: Some("20260929T051622-d540".into()),
-            models: TabModels { coordinator: Some("m1".into()), lanes: Some("m2".into()) },
+            models: TabModels {
+                coordinator: Some("m1".into()),
+                lanes: Some("m2".into()),
+            },
             workers: Some(3),
         };
         tab.save(&root, &id).unwrap();

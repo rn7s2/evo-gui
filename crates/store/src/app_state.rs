@@ -37,17 +37,35 @@ pub struct WindowBounds {
 
 impl Default for WindowBounds {
     fn default() -> Self {
-        WindowBounds { x: None, y: None, width: DEFAULT_SIZE.0, height: DEFAULT_SIZE.1 }
+        WindowBounds {
+            x: None,
+            y: None,
+            width: DEFAULT_SIZE.0,
+            height: DEFAULT_SIZE.1,
+        }
     }
 }
 
 impl WindowBounds {
     /// Persisted bounds, clamped to something a window can actually be.
     fn sanitized(self) -> WindowBounds {
-        let w = if self.width.is_finite() && self.width >= MIN_SIZE.0 { self.width } else { DEFAULT_SIZE.0 };
-        let h = if self.height.is_finite() && self.height >= MIN_SIZE.1 { self.height } else { DEFAULT_SIZE.1 };
+        let w = if self.width.is_finite() && self.width >= MIN_SIZE.0 {
+            self.width
+        } else {
+            DEFAULT_SIZE.0
+        };
+        let h = if self.height.is_finite() && self.height >= MIN_SIZE.1 {
+            self.height
+        } else {
+            DEFAULT_SIZE.1
+        };
         let finite = |v: Option<f32>| v.filter(|x| x.is_finite());
-        WindowBounds { x: finite(self.x), y: finite(self.y), width: w, height: h }
+        WindowBounds {
+            x: finite(self.x),
+            y: finite(self.y),
+            width: w,
+            height: h,
+        }
     }
 }
 
@@ -243,7 +261,11 @@ impl AppState {
             .filter(|id| seen.insert(id.clone()))
             .collect();
         self.tabs.truncate(MAX_TABS);
-        if self.selected.as_ref().is_some_and(|s| !self.tabs.contains(s)) {
+        if self
+            .selected
+            .as_ref()
+            .is_some_and(|s| !self.tabs.contains(s))
+        {
             self.selected = None;
         }
 
@@ -274,10 +296,17 @@ impl AppState {
         let was_selected = self.selected.as_ref() == Some(id);
         self.tabs.remove(pos);
         if was_selected {
-            self.selected =
-                self.tabs.get(pos).or_else(|| self.tabs.get(pos.saturating_sub(1))).cloned();
+            self.selected = self
+                .tabs
+                .get(pos)
+                .or_else(|| self.tabs.get(pos.saturating_sub(1)))
+                .cloned();
         }
-        if self.selected.as_ref().is_some_and(|s| !self.tabs.contains(s)) {
+        if self
+            .selected
+            .as_ref()
+            .is_some_and(|s| !self.tabs.contains(s))
+        {
             self.selected = None;
         }
         self.selected.clone()
@@ -319,7 +348,12 @@ mod tests {
         let mut s = AppState::default();
         s.add_tab(TabId::new());
         s.add_tab(TabId::new());
-        s.window = WindowBounds { x: Some(10.0), y: Some(20.0), width: 1440.0, height: 900.0 };
+        s.window = WindowBounds {
+            x: Some(10.0),
+            y: Some(20.0),
+            width: 1440.0,
+            height: 900.0,
+        };
         s.theme = Theme::Dark;
         s.touch_recent(Recent::new("/s/1.sexp", "/Users/x/foo", 4));
         s
@@ -345,8 +379,14 @@ mod tests {
         let root = temp_root("missing");
         assert_eq!(AppState::load(&root), AppState::default());
         assert_eq!(AppState::default().window.width, 1600.0);
-        assert_eq!(AppState::default().binaries.evo_swarm, PathBuf::from("/usr/local/bin/evo-swarm"));
-        assert_eq!(AppState::default().binaries.evo_agent, PathBuf::from("/usr/local/bin/evo-agent"));
+        assert_eq!(
+            AppState::default().binaries.evo_swarm,
+            PathBuf::from("/usr/local/bin/evo-swarm")
+        );
+        assert_eq!(
+            AppState::default().binaries.evo_agent,
+            PathBuf::from("/usr/local/bin/evo-agent")
+        );
         let _ = fs::remove_dir_all(root.path());
     }
 
@@ -448,7 +488,15 @@ mod tests {
                 serde_json::Value::Object(map) => {
                     for (k, val) in map {
                         let lower = k.to_ascii_lowercase();
-                        for word in ["token", "secret", "password", "api_key", "apikey", "bearer", "credential"] {
+                        for word in [
+                            "token",
+                            "secret",
+                            "password",
+                            "api_key",
+                            "apikey",
+                            "bearer",
+                            "credential",
+                        ] {
                             assert!(!lower.contains(word), "secret-looking key {path}.{k}");
                         }
                         walk(val, &format!("{path}.{k}"));

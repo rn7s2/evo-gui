@@ -50,13 +50,23 @@ fn spawn_holder(root: &Path, seconds: u64) -> (Child, ChildStdout) {
 /// Read one line from the child. Blocks until it arrives — no polling.
 fn first_line(stdout: &mut ChildStdout) -> String {
     let mut line = String::new();
-    BufReader::new(stdout).read_line(&mut line).expect("read child stdout");
+    BufReader::new(stdout)
+        .read_line(&mut line)
+        .expect("read child stdout");
     line.trim().to_string()
 }
 
 fn poke(root: &Path) -> String {
-    let out = Command::new(PROBE).arg(root).arg("poke").output().expect("run poke");
-    assert!(out.status.success(), "poke failed: {}", String::from_utf8_lossy(&out.stderr));
+    let out = Command::new(PROBE)
+        .arg(root)
+        .arg("poke")
+        .output()
+        .expect("run poke");
+    assert!(
+        out.status.success(),
+        "poke failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
@@ -64,7 +74,10 @@ fn poke(root: &Path) -> String {
 fn a_second_process_activates_the_first_and_the_lock_dies_with_it() {
     let root = TempRoot::new("two");
     let (mut holder, mut stdout) = spawn_holder(root.path(), 5);
-    assert!(first_line(&mut stdout).starts_with("primary"), "the first process takes the lock");
+    assert!(
+        first_line(&mut stdout).starts_with("primary"),
+        "the first process takes the lock"
+    );
     assert!(root.path().join("lock").exists());
     assert!(root.path().join("activate.sock").exists());
     assert_eq!(
@@ -82,9 +95,15 @@ fn a_second_process_activates_the_first_and_the_lock_dies_with_it() {
     holder.wait().expect("the holder exits on its own");
     // The lock died with the process: the next launch takes it without any
     // cleanup step, even though the lock file is still on disk.
-    assert!(root.path().join("lock").exists(), "the lock file remains; the lock does not");
+    assert!(
+        root.path().join("lock").exists(),
+        "the lock file remains; the lock does not"
+    );
     let line = poke(root.path());
-    assert!(line.starts_with("primary"), "the freed lock must be taken again: {line}");
+    assert!(
+        line.starts_with("primary"),
+        "the freed lock must be taken again: {line}"
+    );
 }
 
 #[test]
@@ -107,5 +126,8 @@ fn a_killed_process_leaves_no_stale_lock() {
         .output()
         .expect("run store-lock-probe");
     let line = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    assert!(line.starts_with("primary"), "a killed holder must not block the next launch: {line}");
+    assert!(
+        line.starts_with("primary"),
+        "a killed holder must not block the next launch: {line}"
+    );
 }

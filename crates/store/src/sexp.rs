@@ -36,7 +36,11 @@ pub enum Sexp {
 impl Sexp {
     /// Read the first form in `s`, skipping whitespace and `;` comments.
     pub fn parse(s: &str) -> Result<Sexp, Error> {
-        let mut parser = Parser { bytes: s.as_bytes(), src: s, pos: 0 };
+        let mut parser = Parser {
+            bytes: s.as_bytes(),
+            src: s,
+            pos: 0,
+        };
         parser.skip_trivia();
         parser.form(0)
     }
@@ -47,7 +51,11 @@ impl Sexp {
     /// cut are still readable, one at a time, and the walk stops cleanly at the
     /// truncation instead of failing the whole thing.
     pub fn parse_prefix(s: &str) -> Result<(Sexp, usize), Error> {
-        let mut parser = Parser { bytes: s.as_bytes(), src: s, pos: 0 };
+        let mut parser = Parser {
+            bytes: s.as_bytes(),
+            src: s,
+            pos: 0,
+        };
         parser.skip_trivia();
         let form = parser.form(0)?;
         Ok((form, parser.pos))
@@ -55,7 +63,11 @@ impl Sexp {
 
     /// Read every form in `s`.
     pub fn parse_all(s: &str) -> Result<Vec<Sexp>, Error> {
-        let mut parser = Parser { bytes: s.as_bytes(), src: s, pos: 0 };
+        let mut parser = Parser {
+            bytes: s.as_bytes(),
+            src: s,
+            pos: 0,
+        };
         let mut out = Vec::new();
         loop {
             parser.skip_trivia();
@@ -152,7 +164,8 @@ impl Sexp {
     /// evo writes the value as a keyword (`:type :custom`), so a keyword is the
     /// case that matters; a string is accepted too rather than tripping over it.
     pub fn entry_type(&self) -> Option<&str> {
-        self.get("type").and_then(|v| v.as_str().or_else(|| v.as_symbol()))
+        self.get("type")
+            .and_then(|v| v.as_str().or_else(|| v.as_symbol()))
     }
 }
 
@@ -211,7 +224,10 @@ impl<'a> Parser<'a> {
     }
 
     fn err<T>(&self, message: impl Into<String>) -> Result<T, Error> {
-        Err(Error { pos: self.pos, message: message.into() })
+        Err(Error {
+            pos: self.pos,
+            message: message.into(),
+        })
     }
 
     fn skip_trivia(&mut self) {
@@ -371,7 +387,10 @@ mod tests {
         assert_eq!(form.entry_type(), Some("session"));
         assert_eq!(form.get_i64("version"), Some(1));
         assert_eq!(form.get_str("id"), Some("ed99c60d1dee3c3f"));
-        assert_eq!(form.get_str("cwd"), Some("/Users/bytedance/coding/evo-gui/"));
+        assert_eq!(
+            form.get_str("cwd"),
+            Some("/Users/bytedance/coding/evo-gui/")
+        );
         assert_eq!(form.get_str("timestamp"), Some("2026-09-29T09:09:56Z"));
     }
 
@@ -399,8 +418,10 @@ mod tests {
 
     #[test]
     fn strings_keep_newlines_and_escapes() {
-        let form = Sexp::parse(r#"(:text "one\ntwo" :q "a\"b" :bs "a\\b" :raw "x
-y")"#)
+        let form = Sexp::parse(
+            r#"(:text "one\ntwo" :q "a\"b" :bs "a\\b" :raw "x
+y")"#,
+        )
         .unwrap();
         // Common Lisp escaping: `\n` quotes the `n`, so the text keeps it —
         // and the two characters are not a newline.
@@ -439,7 +460,10 @@ y")"#)
         assert_eq!(f.get("h").unwrap().as_symbol(), Some("sym"));
         assert_eq!(f.get_str("i"), Some("s"));
         assert_eq!(Sexp::parse("nil").unwrap(), Sexp::Nil);
-        assert_eq!(Sexp::parse("#(1)").unwrap(), Sexp::Vector(vec![Sexp::Int(1)]));
+        assert_eq!(
+            Sexp::parse("#(1)").unwrap(),
+            Sexp::Vector(vec![Sexp::Int(1)])
+        );
     }
 
     #[test]
@@ -460,9 +484,22 @@ y")"#)
     #[test]
     fn unknown_atoms_are_symbols_not_panics() {
         assert_eq!(Sexp::parse("(a b c)").unwrap().items().len(), 3);
-        assert_eq!(Sexp::parse("#'x").unwrap_err().message, "unsupported # reader macro");
-        assert_eq!(Sexp::parse("(:x 1/0)").unwrap().get("x").unwrap().as_symbol(), Some("1/0"));
-        assert_eq!(Sexp::parse("(:x 1e3)").unwrap().get("x").unwrap().as_f64(), Some(1000.0));
+        assert_eq!(
+            Sexp::parse("#'x").unwrap_err().message,
+            "unsupported # reader macro"
+        );
+        assert_eq!(
+            Sexp::parse("(:x 1/0)")
+                .unwrap()
+                .get("x")
+                .unwrap()
+                .as_symbol(),
+            Some("1/0")
+        );
+        assert_eq!(
+            Sexp::parse("(:x 1e3)").unwrap().get("x").unwrap().as_f64(),
+            Some(1000.0)
+        );
     }
 
     #[test]

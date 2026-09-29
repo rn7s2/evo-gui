@@ -33,7 +33,8 @@ pub const BLOCK_BEGIN: &str = ";;; evo-desktop:begin";
 pub const BLOCK_END: &str = ";;; evo-desktop:end";
 
 /// The comment that opens the block, as §9.6 shows it.
-const BLOCK_TITLE: &str = ";;; evo-desktop:begin — the lanes' default model (managed; edit outside the markers)";
+const BLOCK_TITLE: &str =
+    ";;; evo-desktop:begin — the lanes' default model (managed; edit outside the markers)";
 
 /// `<folder>/.evo/swarm.lisp` — the file the coordinator reads for a project.
 pub fn swarm_lisp_path(folder: &Path) -> PathBuf {
@@ -50,7 +51,10 @@ pub struct LanesModel {
 
 impl LanesModel {
     pub fn new(model: impl Into<String>, provider: impl Into<String>) -> LanesModel {
-        LanesModel { model: model.into(), provider: provider.into() }
+        LanesModel {
+            model: model.into(),
+            provider: provider.into(),
+        }
     }
 }
 
@@ -247,7 +251,8 @@ mod tests {
         fs::read_to_string(swarm_lisp_path(folder)).unwrap()
     }
 
-    const BLOCK: &str = ";;; evo-desktop:begin — the lanes' default model (managed; edit outside the markers)\n\
+    const BLOCK: &str =
+        ";;; evo-desktop:begin — the lanes' default model (managed; edit outside the markers)\n\
                          (evo.swarm:in-lanes ()\n  \
                          (evo:set-setting :model \"ark-deepseek-v4.1-flash\")\n  \
                          (evo:set-setting :model-provider :aiden))\n\
@@ -268,16 +273,27 @@ mod tests {
             .split_once("(evo.swarm:in-lanes ()")
             .expect("the form")
             .1;
-        assert_eq!(body.matches('(').count(), 2, "the two settings are its body");
-        assert_eq!(body.matches(')').count(), 3, "and the form closes after them");
+        assert_eq!(
+            body.matches('(').count(),
+            2,
+            "the two settings are its body"
+        );
+        assert_eq!(
+            body.matches(')').count(),
+            3,
+            "and the form closes after them"
+        );
     }
 
     #[test]
     fn creates_the_directory_and_the_file() {
         let folder = temp_dir("create");
         assert!(!folder.join(".evo").exists());
-        let outcome = set_lanes_model(&folder, Some(&LanesModel::new("ark-deepseek-v4.1-flash", "aiden")))
-            .unwrap();
+        let outcome = set_lanes_model(
+            &folder,
+            Some(&LanesModel::new("ark-deepseek-v4.1-flash", "aiden")),
+        )
+        .unwrap();
         assert_eq!(outcome, WriteOutcome::Written);
         assert!(folder.join(".evo").exists());
         assert_eq!(read(&folder), BLOCK);
@@ -296,15 +312,30 @@ mod tests {
             WriteOutcome::Written
         );
         let once = read(&folder);
-        assert_eq!(once, format!("{}\n{user}", render_block(&LanesModel::new("m1", "ark")).unwrap()));
+        assert_eq!(
+            once,
+            format!(
+                "{}\n{user}",
+                render_block(&LanesModel::new("m1", "ark")).unwrap()
+            )
+        );
         // Twice changes nothing at all — not even the mtime.
-        let before = fs::metadata(swarm_lisp_path(&folder)).unwrap().modified().unwrap();
+        let before = fs::metadata(swarm_lisp_path(&folder))
+            .unwrap()
+            .modified()
+            .unwrap();
         assert_eq!(
             set_lanes_model(&folder, Some(&LanesModel::new("m1", "ark"))).unwrap(),
             WriteOutcome::Unchanged
         );
         assert_eq!(read(&folder), once);
-        assert_eq!(fs::metadata(swarm_lisp_path(&folder)).unwrap().modified().unwrap(), before);
+        assert_eq!(
+            fs::metadata(swarm_lisp_path(&folder))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            before
+        );
 
         // A different model replaces the block in place, still at the top.
         assert_eq!(
@@ -315,8 +346,15 @@ mod tests {
         assert!(twice.starts_with(";;; evo-desktop:begin"));
         assert!(twice.contains(":model \"m2\""));
         assert!(!twice.contains("m1"));
-        assert!(twice.ends_with(user), "the user's own lines survive:\n{twice}");
-        assert_eq!(twice.matches(BLOCK_BEGIN).count(), 1, "never duplicate markers");
+        assert!(
+            twice.ends_with(user),
+            "the user's own lines survive:\n{twice}"
+        );
+        assert_eq!(
+            twice.matches(BLOCK_BEGIN).count(),
+            1,
+            "never duplicate markers"
+        );
         assert_eq!(twice.matches(BLOCK_END).count(), 1);
         fs::remove_dir_all(&folder).unwrap();
     }
@@ -328,12 +366,27 @@ mod tests {
         fs::create_dir_all(folder.join(".evo")).unwrap();
         fs::write(swarm_lisp_path(&folder), format!("{BLOCK}\n{user}")).unwrap();
 
-        assert_eq!(set_lanes_model(&folder, None).unwrap(), WriteOutcome::Removed);
+        assert_eq!(
+            set_lanes_model(&folder, None).unwrap(),
+            WriteOutcome::Removed
+        );
         assert_eq!(read(&folder), user);
         // Again: there is no block left, and nothing is touched.
-        let before = fs::metadata(swarm_lisp_path(&folder)).unwrap().modified().unwrap();
-        assert_eq!(set_lanes_model(&folder, None).unwrap(), WriteOutcome::Unchanged);
-        assert_eq!(fs::metadata(swarm_lisp_path(&folder)).unwrap().modified().unwrap(), before);
+        let before = fs::metadata(swarm_lisp_path(&folder))
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert_eq!(
+            set_lanes_model(&folder, None).unwrap(),
+            WriteOutcome::Unchanged
+        );
+        assert_eq!(
+            fs::metadata(swarm_lisp_path(&folder))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            before
+        );
         fs::remove_dir_all(&folder).unwrap();
     }
 
@@ -342,10 +395,16 @@ mod tests {
         let folder = temp_dir("delete");
         set_lanes_model(&folder, Some(&LanesModel::new("m1", "aiden"))).unwrap();
         assert!(swarm_lisp_path(&folder).exists());
-        assert_eq!(set_lanes_model(&folder, None).unwrap(), WriteOutcome::FileDeleted);
+        assert_eq!(
+            set_lanes_model(&folder, None).unwrap(),
+            WriteOutcome::FileDeleted
+        );
         assert!(!swarm_lisp_path(&folder).exists());
         // And with nothing there at all, there is nothing to do.
-        assert_eq!(set_lanes_model(&folder, None).unwrap(), WriteOutcome::Absent);
+        assert_eq!(
+            set_lanes_model(&folder, None).unwrap(),
+            WriteOutcome::Absent
+        );
         fs::remove_dir_all(&folder).unwrap();
     }
 
@@ -355,7 +414,10 @@ mod tests {
         let model = LanesModel::new("ark-deepseek-v4.1-flash", "aiden");
         set_lanes_model(&folder, Some(&model)).unwrap();
         set_lanes_model(&folder, None).unwrap();
-        assert_eq!(set_lanes_model(&folder, Some(&model)).unwrap(), WriteOutcome::Written);
+        assert_eq!(
+            set_lanes_model(&folder, Some(&model)).unwrap(),
+            WriteOutcome::Written
+        );
         assert_eq!(read(&folder), BLOCK);
         fs::remove_dir_all(&folder).unwrap();
     }
@@ -378,8 +440,15 @@ mod tests {
         assert!(!written.contains("(stray)"));
 
         // A begin marker with no end marker is ours too: it goes to the end.
-        fs::write(swarm_lisp_path(&folder), ";;; evo-desktop:begin\n(garbage\n").unwrap();
-        assert_eq!(set_lanes_model(&folder, None).unwrap(), WriteOutcome::FileDeleted);
+        fs::write(
+            swarm_lisp_path(&folder),
+            ";;; evo-desktop:begin\n(garbage\n",
+        )
+        .unwrap();
+        assert_eq!(
+            set_lanes_model(&folder, None).unwrap(),
+            WriteOutcome::FileDeleted
+        );
         assert!(!swarm_lisp_path(&folder).exists());
         fs::remove_dir_all(&folder).unwrap();
     }
@@ -407,7 +476,10 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = fs::metadata(swarm_lisp_path(&folder)).unwrap().permissions().mode();
+            let mode = fs::metadata(swarm_lisp_path(&folder))
+                .unwrap()
+                .permissions()
+                .mode();
             assert_eq!(mode & 0o777, 0o600);
         }
         fs::remove_dir_all(&folder).unwrap();
@@ -416,7 +488,10 @@ mod tests {
     #[test]
     fn providers_are_normalized_and_bad_ones_refused() {
         assert_eq!(provider_keyword(":aiden"), Some("aiden".into()));
-        assert_eq!(provider_keyword("  Anthropic-OAuth "), Some("anthropic-oauth".into()));
+        assert_eq!(
+            provider_keyword("  Anthropic-OAuth "),
+            Some("anthropic-oauth".into())
+        );
         assert_eq!(provider_keyword(""), None);
         assert_eq!(provider_keyword(":"), None);
         assert_eq!(provider_keyword("9lives"), None);
@@ -436,13 +511,19 @@ mod tests {
     #[test]
     fn quotes_in_a_model_id_are_escaped() {
         let block = render_block(&LanesModel::new("we\"ird\\id", "aiden")).unwrap();
-        assert!(block.contains(r#"(evo:set-setting :model "we\"ird\\id")"#), "{block}");
+        assert!(
+            block.contains(r#"(evo:set-setting :model "we\"ird\\id")"#),
+            "{block}"
+        );
     }
 
     #[test]
     fn paths_and_block_detection() {
         let folder = temp_dir("detect");
-        assert_eq!(swarm_lisp_path(Path::new("/p")), PathBuf::from("/p/.evo/swarm.lisp"));
+        assert_eq!(
+            swarm_lisp_path(Path::new("/p")),
+            PathBuf::from("/p/.evo/swarm.lisp")
+        );
         assert!(!has_lanes_model_block(&folder));
         set_lanes_model(&folder, Some(&LanesModel::new("m1", "aiden"))).unwrap();
         assert!(has_lanes_model_block(&folder));
@@ -458,6 +539,9 @@ mod tests {
         // Whitespace-only content is treated as empty.
         assert_eq!(compose("\n\n  \n", BLOCK), BLOCK);
         // Leading blank lines are dropped, indentation is kept.
-        assert_eq!(compose("\n\n  (indented)\n", BLOCK), format!("{BLOCK}\n  (indented)\n"));
+        assert_eq!(
+            compose("\n\n  (indented)\n", BLOCK),
+            format!("{BLOCK}\n  (indented)\n")
+        );
     }
 }

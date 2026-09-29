@@ -117,7 +117,12 @@ fn open_lock_file(path: &Path) -> io::Result<File> {
     if let Some(parent) = path.parent() {
         paths::create_dir_private(parent)?;
     }
-    OpenOptions::new().read(true).write(true).create(true).mode(paths::FILE_MODE).open(path)
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .mode(paths::FILE_MODE)
+        .open(path)
 }
 
 /// Knocked but not let in: announce ourselves to whoever holds the lock.
@@ -184,7 +189,15 @@ impl Primary {
                 .spawn(move || accept_loop(thread_listener, tx, running))?
         };
 
-        Ok(Primary { lock, lock_path: root.lock(), listener, rx, sock_path, running, accept: Some(accept) })
+        Ok(Primary {
+            lock,
+            lock_path: root.lock(),
+            listener,
+            rx,
+            sock_path,
+            running,
+            accept: Some(accept),
+        })
     }
 
     /// This process's pid, as recorded in the lock file.
@@ -236,7 +249,10 @@ impl Drop for Primary {
 
 impl std::fmt::Debug for Primary {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Primary").field("pid", &self.pid()).field("socket", &self.sock_path).finish()
+        f.debug_struct("Primary")
+            .field("pid", &self.pid())
+            .field("socket", &self.sock_path)
+            .finish()
     }
 }
 
@@ -324,7 +340,10 @@ mod tests {
             SingleInstance::Secondary(_) => panic!("first acquire must win the lock"),
         };
         assert!(root.lock().exists());
-        assert_eq!(fs::read_to_string(root.lock()).unwrap().trim(), std::process::id().to_string());
+        assert_eq!(
+            fs::read_to_string(root.lock()).unwrap().trim(),
+            std::process::id().to_string()
+        );
         assert!(root.activate_sock().exists());
 
         let second = SingleInstance::acquire(&root).unwrap();
@@ -332,13 +351,21 @@ mod tests {
             SingleInstance::Secondary(s) => assert!(s.activated),
             SingleInstance::Primary(_) => panic!("second acquire must not win the lock"),
         }
-        let activation = primary.recv_activation(Duration::from_secs(5)).expect("knock");
+        let activation = primary
+            .recv_activation(Duration::from_secs(5))
+            .expect("knock");
         assert_eq!(activation.command, ACTIVATE);
         assert_eq!(activation.pid, Some(std::process::id()));
 
         drop(primary);
-        assert!(!root.activate_sock().exists(), "the socket goes with the primary");
-        assert!(matches!(SingleInstance::acquire(&root).unwrap(), SingleInstance::Primary(_)));
+        assert!(
+            !root.activate_sock().exists(),
+            "the socket goes with the primary"
+        );
+        assert!(matches!(
+            SingleInstance::acquire(&root).unwrap(),
+            SingleInstance::Primary(_)
+        ));
         fs::remove_dir_all(root.path()).unwrap();
     }
 
@@ -365,9 +392,15 @@ mod tests {
         {
             let first = SingleInstance::acquire(&root).unwrap();
             assert!(matches!(first, SingleInstance::Primary(_)));
-            assert!(matches!(SingleInstance::acquire(&root).unwrap(), SingleInstance::Secondary(_)));
+            assert!(matches!(
+                SingleInstance::acquire(&root).unwrap(),
+                SingleInstance::Secondary(_)
+            ));
         } // both the lock and the socket are gone here
-        assert!(matches!(SingleInstance::acquire(&root).unwrap(), SingleInstance::Primary(_)));
+        assert!(matches!(
+            SingleInstance::acquire(&root).unwrap(),
+            SingleInstance::Primary(_)
+        ));
         // The lock file itself stays behind — that is fine, and is not stale.
         assert!(root.lock().exists());
         fs::remove_dir_all(root.path()).unwrap();
@@ -395,7 +428,11 @@ mod tests {
     fn activation_parsing() {
         assert_eq!(
             Activation::parse("activate 4711\n"),
-            Activation { command: "activate".into(), pid: Some(4711), raw: "activate 4711".into() }
+            Activation {
+                command: "activate".into(),
+                pid: Some(4711),
+                raw: "activate 4711".into()
+            }
         );
         assert_eq!(Activation::parse("activate").command, "activate");
         assert_eq!(Activation::parse("bogus").command, "bogus");

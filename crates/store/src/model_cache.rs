@@ -140,14 +140,17 @@ impl ModelCache {
     /// rather than hiding the whole catalog — check [`Self::kernel_apis_known`]
     /// when the difference matters.
     pub fn lane_model_available(&self, id: &str) -> bool {
-        let registrations: Vec<ModelInfo> = self.models().into_iter().filter(|m| m.id == id).collect();
+        let registrations: Vec<ModelInfo> =
+            self.models().into_iter().filter(|m| m.id == id).collect();
         if registrations.is_empty() {
             return false;
         }
         if !self.kernel_apis_known() {
             return true;
         }
-        registrations.iter().any(|m| self.api_is_kernel(m.api.as_deref()))
+        registrations
+            .iter()
+            .any(|m| self.api_is_kernel(m.api.as_deref()))
     }
 
     /// Whether one exact registration — the (id, provider) pair evo identifies
@@ -155,7 +158,10 @@ impl ModelCache {
     /// which provider it is writing into `swarm.lisp`, since `find-model`
     /// refuses a model/provider mismatch.
     pub fn lane_model_available_for(&self, id: &str, provider: &str) -> bool {
-        let Some(m) = self.models().into_iter().find(|m| m.id == id && m.provider.as_deref() == Some(provider))
+        let Some(m) = self
+            .models()
+            .into_iter()
+            .find(|m| m.id == id && m.provider.as_deref() == Some(provider))
         else {
             return false;
         };
@@ -202,9 +208,10 @@ impl ModelCache {
 
 fn string_array(v: Option<&Value>) -> Vec<String> {
     match v {
-        Some(Value::Array(items)) => {
-            items.iter().filter_map(|i| i.as_str().map(str::to_owned)).collect()
-        }
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(|i| i.as_str().map(str::to_owned))
+            .collect(),
         Some(Value::String(s)) => vec![s.clone()],
         _ => Vec::new(),
     }
@@ -273,7 +280,8 @@ mod tests {
         assert!(cache.models().iter().any(|m| m.id == "claude-sonnet-5"));
 
         // Only the kernel's own API: the OAuth model drops out.
-        let kernel_only = ModelCache::from_probe(registry()).with_kernel_apis(vec!["anthropic-messages".into()]);
+        let kernel_only =
+            ModelCache::from_probe(registry()).with_kernel_apis(vec!["anthropic-messages".into()]);
         assert!(kernel_only.lane_model_available("claude-opus-5"));
         assert!(!kernel_only.lane_model_available("ark-deepseek-v4.1-flash"));
         assert_eq!(kernel_only.lane_models().len(), 1);
@@ -291,9 +299,14 @@ mod tests {
     #[test]
     fn a_live_refresh_keeps_the_probed_api_set() {
         let probed = ModelCache::from_probe(registry());
-        let live = probed.with_live_registry(serde_json::json!({"models": [], "apis": ["anthropic-messages", "mine"]}));
+        let live = probed.with_live_registry(
+            serde_json::json!({"models": [], "apis": ["anthropic-messages", "mine"]}),
+        );
         assert_eq!(live.kernel_apis, probed.kernel_apis);
-        assert_eq!(live.registry["apis"], serde_json::json!(["anthropic-messages", "mine"]));
+        assert_eq!(
+            live.registry["apis"],
+            serde_json::json!(["anthropic-messages", "mine"])
+        );
         assert!(live.fetched_epoch().is_some());
     }
 

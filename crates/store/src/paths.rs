@@ -64,7 +64,8 @@ impl TabId {
     pub fn parse(s: &str) -> Option<TabId> {
         let ok = !s.is_empty()
             && s.len() <= 64
-            && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
         if ok {
             Some(TabId(s.to_owned()))
         } else {
@@ -99,7 +100,9 @@ fn fill_random(buf: &mut [u8]) {
     }
     let mut seed = time::now_epoch() ^ (std::process::id() as u64) << 32;
     for b in buf.iter_mut() {
-        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         *b = (seed >> 33) as u8;
     }
 }
@@ -278,7 +281,10 @@ fn temp_sibling(path: &Path) -> PathBuf {
     // scratch file.
     static TMP_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = TMP_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     path.with_file_name(format!(".{name}.tmp-{}-{n}", std::process::id()))
 }
 
@@ -356,10 +362,16 @@ mod tests {
         let root = Root::at("/tmp/whatever");
         assert_eq!(root.app_json(), PathBuf::from("/tmp/whatever/app.json"));
         assert_eq!(root.lock(), PathBuf::from("/tmp/whatever/lock"));
-        assert_eq!(root.model_cache(), PathBuf::from("/tmp/whatever/model-cache.json"));
+        assert_eq!(
+            root.model_cache(),
+            PathBuf::from("/tmp/whatever/model-cache.json")
+        );
         assert_eq!(root.probe_dir(), PathBuf::from("/tmp/whatever/probe"));
         let id = TabId::new();
-        assert_eq!(root.tab_dir(&id), PathBuf::from(format!("/tmp/whatever/tabs/{id}")));
+        assert_eq!(
+            root.tab_dir(&id),
+            PathBuf::from(format!("/tmp/whatever/tabs/{id}"))
+        );
         assert_eq!(root.tab_token(&id), root.tab_dir(&id).join("token"));
         assert_eq!(root.tab_log(&id), root.tab_dir(&id).join("swarm.log"));
     }
@@ -371,7 +383,10 @@ mod tests {
         let root = Root::at(temp("modes"));
         let id = TabId::new();
         let dir = root.ensure_tab_dir(&id).unwrap();
-        assert_eq!(root.path().metadata().unwrap().permissions().mode() & 0o777, 0o700);
+        assert_eq!(
+            root.path().metadata().unwrap().permissions().mode() & 0o777,
+            0o700
+        );
         assert_eq!(dir.metadata().unwrap().permissions().mode() & 0o777, 0o700);
         root.remove_tab_dir(&id).unwrap();
         assert!(!dir.exists());
@@ -401,7 +416,9 @@ mod tests {
         // not share a scratch file, and the file must always be one whole write.
         let dir = temp("concurrent");
         let path = dir.join("app.json");
-        let payloads: Vec<String> = (0..8).map(|i| format!("{{\"who\":{i},\"pad\":\"{}\"}}", "x".repeat(4096))).collect();
+        let payloads: Vec<String> = (0..8)
+            .map(|i| format!("{{\"who\":{i},\"pad\":\"{}\"}}", "x".repeat(4096)))
+            .collect();
         std::thread::scope(|scope| {
             for payload in &payloads {
                 let path = path.clone();
