@@ -6,6 +6,7 @@ Spec: docs/PROMPT.md (copy of the build prompt). Section refs like §7.3 point t
 |---|---|---|
 | `swarm_client` | pure Rust, no gpui | spawning `evo-swarm serve`/`evo-agent serve` (§3), readiness, shutdown ladder, blocking HTTP (Connection: close, bearer), SSE parser + resumable reconnecting stream (§5), typed payloads for /health /state /transcript /registry /lanes /journal, POST envelope + status mapping (§4). Test harness against a real evo-swarm with stub provider. |
 | `store` | pure Rust | `~/.evo/desktop/` layout (§6): app.json, lock (flock + activation), model-cache.json, tab dirs + tab.json, history scan of `~/.evo/sessions` (§9.5), swarm.lisp managed block (§9.6). |
+| `tab_engine` | pure Rust, no gpui | one per tab: owns the `Server` + streams, runs §9.1 assembly/resync, lane watching, POSTs, cache-stats seeding, registry refresh; commands in / updates out over async-channel. The UI applies updates to `session` models. |
 | `session` | pure Rust | per-agent view model: transcript rows from /transcript + event reducer (§9.1), revision counters, status readout segments (§7.3, exact TUI format), cache-stats seeding/folding, todos, lane list model. |
 | `transcript` | gpui | transcript view: MessageScroller, streaming markdown TextView per assistant message (§2.8), tool rows, report rows, dim rows, jump-to-bottom; todo panel. |
 | `composer` | gpui | Textarea input (2→8 rows, Enter/Shift+Enter/Esc), status readout row + single Send/Stop button. |
