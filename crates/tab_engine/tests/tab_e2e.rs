@@ -121,6 +121,30 @@ impl Updates {
         &self.all[from.min(self.all.len())..]
     }
 
+    /// Wait for an update that matches *anywhere* in the log, leaving the cursor
+    /// alone. Two independent flows interleave — the stream's reader and an off-loop
+    /// resync's answer — so a wait that only looks forward from a cursor another
+    /// wait just stepped past would miss the update it is waiting for.
+    fn wait_seen(
+        &mut self,
+        deadline: Instant,
+        what: &str,
+        pred: impl Fn(&Update) -> bool,
+    ) -> Update {
+        loop {
+            self.pump();
+            if let Some(found) = self.all.iter().find(|update| pred(update)) {
+                return found.clone();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "no {what} before the deadline; saw {:?}",
+                self.all.iter().map(kind_of).collect::<Vec<_>>()
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     fn len(&self) -> usize {
         self.all.len()
     }
@@ -692,9 +716,16 @@ fn a_restarted_coordinator_resyncs() {
     assert!(matches!(resynced, Update::Transcript { .. }));
     // The restart is announced in band by `hello` (ids begin again at 1), which
     // the stream replays from the start because `/health` named a new process.
-    updates.next(deadline, |u| {
-        matches!(u, Update::Event { agent: Agent::Coordinator, kind, id: Some(1), .. } if kind == "hello")
-    });
+    //
+    // Order-blind on purpose: the replayed events come from the stream's reader and
+    // the rebuilt view from the resync's own thread, so which of the two reaches the
+    // UI first is the scheduler's business, not behaviour to pin (§9.1 makes events
+    // liveness and the transcript truth, in either order).
+    updates.wait_seen(
+        deadline,
+        "the replayed hello",
+        |u| matches!(u, Update::Event { agent: Agent::Coordinator, kind, id: Some(1), .. } if kind == "hello"),
+    );
 
     handle.join();
 }
@@ -1122,6 +1153,121 @@ fn a_silent_swarm_is_noticed_while_a_post_waits() {
 
     // Let it breathe, then leave the ladder to do its work.
     unsafe { libc::killpg(pid as libc::pid_t, libc::SIGCONT) };
+    handle.shutdown();
+    updates.next(deadline, |u| matches!(u, Update::Exited { .. }));
+    let gone = Instant::now() + Duration::from_secs(60);
+    while swarm_client::process_alive(pid) && Instant::now() < gone {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(!swarm_client::process_alive(pid), "the swarm is gone");
+    handle.join();
+}
+
+/// #14b — a resync against a silent swarm does not hold the tab either.
+///
+/// The same freeze as #14, with the *reads* outstanding this time: `Refetch` is the
+/// resync §9.1 has the tab do on `settled` (and on `hello`, on a gap, on a
+/// reconnect) — the same `/transcript` + `/state` read, issued for the same reason a
+/// `settled` issues one: a run ended and the view has to be rebuilt. `WatchLane`
+/// seeds a lane's view with two reads of its own. All of them are off the engine's
+/// loop, so while they wait out the request's patience the stream's own notice still
+/// reaches the UI at the stream's own patience — the difference between the tab
+/// saying "reconnecting" within its 45 s stream timeout and saying it half a minute
+/// later (§9.7).
+///
+/// A frozen server cannot *deliver* a `settled` from which the resync would be
+/// triggered — it answers nothing at all — so the test drives the reads from the
+/// commands the UI sends, which run the same path.
+#[test]
+fn a_resync_against_a_silent_swarm_does_not_hold_the_stream() {
+    let _guard = one_swarm();
+    let fixture = fixture(2);
+    let request = Duration::from_secs(8);
+    let spec = spec(&fixture, 2).with_http_timeouts(request, Duration::from_secs(1));
+    let (mut handle, rx) = TabEngine::start(spec);
+    let mut updates = Updates::new(rx);
+    let deadline = Instant::now() + Duration::from_secs(150);
+
+    let pid = ready_pid(&mut updates, deadline);
+    updates.wait_connected(Agent::Coordinator, deadline);
+
+    // Freeze it, then ask for both views: neither read can come back until the
+    // request's own patience runs out.
+    let stopped = unsafe { libc::killpg(pid as libc::pid_t, libc::SIGSTOP) };
+    assert_eq!(stopped, 0, "could not stop the swarm");
+    let frozen_at = Instant::now();
+    assert!(handle.refetch(Agent::Coordinator));
+    assert!(handle.watch_lane(Some(1)));
+
+    let reconnecting = updates.next(deadline, |u| {
+        matches!(
+            u,
+            Update::Stream {
+                agent: Agent::Coordinator,
+                status: StreamStatus::Reconnecting { .. }
+            }
+        )
+    });
+    let noticed = frozen_at.elapsed();
+    assert!(matches!(reconnecting, Update::Stream { .. }));
+    // The load's own slack, not a guess: the notice comes from the stream's 1 s
+    // patience, and the reads that would have held it back answer nothing before the
+    // request's 8 s. Half the request timeout is the line between the two.
+    assert!(
+        noticed < request / 2,
+        "the stream's notice took {noticed:?} — the reads held the loop, whose own \
+         patience is {request:?}"
+    );
+
+    // The reads come back as nothing at all: neither answered, so neither spent a
+    // revision and the next read of the view is still the first one that lands
+    // (§9.1 — a lane whose fetch failed is still at revision zero).
+    let dismissed = frozen_at + request + Duration::from_secs(3);
+    while Instant::now() < dismissed {
+        updates.pump();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let revisions: Vec<u64> = updates
+        .all
+        .iter()
+        .filter_map(|u| match u {
+            Update::Transcript {
+                agent: Agent::Coordinator,
+                revision,
+                ..
+            } => Some(*revision),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        revisions,
+        [1],
+        "the assembly's read is the only view there has been"
+    );
+
+    // Let it answer again: the stream reconnects, the reconnect resyncs, and the
+    // view catches up — the reads were waiting, not lost. The resync that counts is
+    // the one after the freeze, which is why the check is made on what arrives from
+    // here on rather than on what the log holds at all.
+    let quiet = updates.len();
+    unsafe { libc::killpg(pid as libc::pid_t, libc::SIGCONT) };
+    let resumed = Instant::now() + Duration::from_secs(60);
+    loop {
+        updates.pump();
+        let resynced = updates.since(quiet).iter().any(|u| {
+            matches!(u, Update::Transcript { agent: Agent::Coordinator, revision, .. } if *revision > 1)
+        });
+        if resynced {
+            break;
+        }
+        assert!(
+            Instant::now() < resumed,
+            "the view never came back after the swarm did; saw {:?}",
+            updates.all.iter().map(kind_of).collect::<Vec<_>>()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
     handle.shutdown();
     updates.next(deadline, |u| matches!(u, Update::Exited { .. }));
     let gone = Instant::now() + Duration::from_secs(60);

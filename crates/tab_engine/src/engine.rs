@@ -255,6 +255,44 @@ enum Inbound {
         agent: Agent,
         msg: StreamMsg,
     },
+    /// A view read came back — or gave up — on the thread that asked for it
+    /// ([`Engine::resync`]). Off the loop for the same reason a `POST` is: a server
+    /// that is there but silent answers nothing for a whole request timeout, and the
+    /// stream's own news (a dropped connection, a lane that moved) must reach the UI
+    /// while that is still going on.
+    Resynced {
+        agent: Agent,
+        /// The number of the read this answers ([`Reads`]).
+        ticket: u64,
+        /// Whether this read also wants the lane list asked again once it has
+        /// answered (see [`Engine::resync`]).
+        lanes: bool,
+        view: View,
+    },
+    /// §9.1's assembly read off the loop ([`Engine::assemble`]): the coordinator's
+    /// view and the cache seed, in the order the first frame wants them. The stream
+    /// opens when this lands, so the frame is still assembled whole — rows, state,
+    /// the cache figure, then the stream.
+    Assembled {
+        /// The cursor `/health` named, which the stream resumes from.
+        cursor: Option<i64>,
+        ticket: u64,
+        view: View,
+        /// The newest `cache-stats` journal entry, or `None` when the walk of
+        /// `/journal?limit=20,100,400` found none (§7.3).
+        seed: Option<Value>,
+    },
+    /// A lane's two seed reads came back ([`Engine::watch_lane`]): its rows and the
+    /// replay whose cursor its stream resumes from.
+    LaneSeeded {
+        n: u32,
+        /// Which `WatchLane` asked for this: a newer one supersedes it.
+        episode: u64,
+        ticket: u64,
+        /// `/lanes/N/transcript`, or `None` for a lane whose server did not answer.
+        rows: Option<Value>,
+        replay: LaneReplay,
+    },
     /// The deferred lane-list read is due ([`Engine::arm_lanes_refetch`]). It
     /// carries no state: whether it is still wanted is the engine's to decide when
     /// it arrives, so a timer that outlived its episode is simply ignored.
@@ -306,13 +344,87 @@ impl Revisions {
     }
 
     /// How many views of this agent have been read: zero means none ever was, so a
-    /// fetch that failed (which spends no revision — see [`Engine::resync`]) has not
-    /// been made good yet.
+    /// fetch that failed (which spends no revision — see [`Engine::apply_view`]) has
+    /// not been made good yet.
     fn get(&self, agent: Agent) -> u64 {
         match agent {
             Agent::Coordinator => self.coordinator,
             Agent::Lane(n) => self.lanes.get(&n).copied().unwrap_or(0),
         }
+    }
+}
+
+/// A whole view of one agent, as an off-loop read found it: the rows a transcript
+/// read returned, and `/state`. `None` is a read that failed — which says nothing
+/// about the view and must not be mistaken for one that did.
+#[derive(Debug, Default)]
+struct View {
+    transcript: Option<Value>,
+    /// `/state` is the coordinator's alone: a lane's state comes from its events
+    /// (§9.1).
+    state: Option<Value>,
+}
+
+impl View {
+    /// Read AGENT's view from CLIENT, the read §9.1's resync is made of.
+    fn read(client: &Client, agent: Agent) -> View {
+        match agent {
+            Agent::Coordinator => View {
+                transcript: client.transcript(None).ok().map(|reply| reply.raw),
+                state: client.state().ok().map(|reply| reply.raw),
+            },
+            Agent::Lane(n) => View {
+                transcript: client.lane_transcript(n, None).ok().map(|reply| reply.raw),
+                state: None,
+            },
+        }
+    }
+
+    /// Whether anything came back: a read that answered nothing spends no revision.
+    fn came_back(&self) -> bool {
+        self.transcript.is_some() || self.state.is_some()
+    }
+}
+
+/// What one bounded replay of a lane's retained events gave back: the newest
+/// `todo-changed` (with the id it carried), and the cursor the live stream resumes
+/// from — resuming where the replay stopped is as much its job as the todo is.
+struct LaneReplay {
+    todo: Option<(Option<i64>, Value)>,
+    since: Option<i64>,
+}
+
+/// Which view reads are out, and which have landed: the off-loop resync's own
+/// bookkeeping, for §9.1's "late results from an old revision are dropped".
+///
+/// A read takes a ticket when it is issued and carries it back. A result older than
+/// the newest one already applied is an answer that overtook a newer one, and the
+/// view on screen is the newer one's, so it is dropped. The comparison is against
+/// what *landed*, not what was issued, because a read that failed answers nothing:
+/// dropping on issue order would throw the only view there is away when the newer
+/// read is the one that failed.
+#[derive(Default)]
+struct Reads {
+    issued: HashMap<Agent, u64>,
+    landed: HashMap<Agent, u64>,
+}
+
+impl Reads {
+    /// The number of the next view read of AGENT.
+    fn issue(&mut self, agent: Agent) -> u64 {
+        let next = self.issued.entry(agent).or_insert(0);
+        *next += 1;
+        *next
+    }
+
+    /// Note that TICKET's view is about to be applied. `false` means a newer view is
+    /// already on screen, so this one is stale.
+    fn land(&mut self, agent: Agent, ticket: u64) -> bool {
+        if ticket <= self.landed.get(&agent).copied().unwrap_or(0) {
+            return false;
+        }
+        self.landed.insert(agent, ticket);
+        true
     }
 }
 
@@ -421,9 +533,18 @@ struct Engine {
     mailbox: Sender<Inbound>,
     streams: Streams,
     revisions: Revisions,
+    /// Which view reads are in flight and which have landed ([`Reads`]).
+    reads: Reads,
     coordinator_connected: bool,
     lane_connected: bool,
     want_shutdown: bool,
+    /// The lane the tab is showing, with the number of the `WatchLane` that asked
+    /// for it. The seed reads that open its stream carry that number back, and one
+    /// that comes back after a newer request is dropped: its stream would belong to
+    /// a lane the tab is no longer showing (§9.3).
+    watch: Option<(u64, u32)>,
+    /// How many `WatchLane`s this tab has taken — nothing but the next one's number.
+    watch_requests: u64,
     /// What each lane's state last was, as the UI was told it (every `/lanes`
     /// snapshot and every `lane-state` event). It is what decides whether a
     /// `lane-state` names a lane that is coming up.
@@ -443,9 +564,12 @@ fn run(spec: TabSpec, mailbox: Sender<Inbound>, inbox: Receiver<Inbound>, update
         mailbox: mailbox.clone(),
         streams: Streams::new(mailbox.clone()),
         revisions: Revisions::default(),
+        reads: Reads::default(),
         coordinator_connected: false,
         lane_connected: false,
         want_shutdown: false,
+        watch: None,
+        watch_requests: 0,
         lane_states: HashMap::new(),
         lanes_due: None,
         lanes_tries: 0,
@@ -480,6 +604,12 @@ impl Engine {
     /// §9.1's assembly, right after boot: the registry once, the lane list, the
     /// coordinator's transcript and state, the cache seed (§7.3), then the live
     /// stream from the health cursor.
+    ///
+    /// The last three are read on a thread of their own, in the order they are
+    /// emitted, and the stream opens when they land ([`Engine::assembled`]): the
+    /// loop stays free while they go — a stop during a slow journal walk is honoured
+    /// at once — and the first frame is still assembled whole, with nothing live
+    /// arriving before the rows it extends.
     fn assemble(&mut self, client: &Client, cursor: Option<i64>) {
         if let Ok(registry) = client.registry() {
             self.send(Update::Registry { raw: registry.raw });
@@ -496,8 +626,35 @@ impl Engine {
             self.lanes_tries = 1;
             self.arm_lanes_refetch();
         }
-        self.resync(client, Agent::Coordinator, false);
-        self.seed_cache(client);
+        let ticket = self.reads.issue(Agent::Coordinator);
+        let mailbox = self.mailbox.clone();
+        let client = client.clone();
+        let _ = thread::Builder::new()
+            .name("tab-engine-assemble".to_owned())
+            .spawn(move || {
+                let view = View::read(&client, Agent::Coordinator);
+                let seed = walk_journal(&client);
+                let _ = mailbox.send_blocking(Inbound::Assembled {
+                    cursor,
+                    ticket,
+                    view,
+                    seed,
+                });
+            });
+    }
+
+    /// The assembly's reads landed: emit the first frame's rows, state and cache
+    /// figure, and only then open the stream.
+    fn assembled(
+        &mut self,
+        client: &Client,
+        cursor: Option<i64>,
+        ticket: u64,
+        view: View,
+        seed: Option<Value>,
+    ) {
+        self.apply_view(Agent::Coordinator, ticket, view);
+        self.send(Update::CacheSeed { entry: seed });
         self.streams.start_coordinator(client, cursor);
     }
 
@@ -722,6 +879,43 @@ impl Engine {
                 Inbound::LanesFetched { raw } => {
                     self.lanes_fetched(raw);
                 }
+                Inbound::Resynced {
+                    agent,
+                    ticket,
+                    lanes,
+                    view,
+                } => {
+                    let Some(server) = server.as_ref() else {
+                        continue;
+                    };
+                    let client = server.client().clone();
+                    self.resynced(&client, agent, ticket, lanes, view);
+                }
+                Inbound::Assembled {
+                    cursor,
+                    ticket,
+                    view,
+                    seed,
+                } => {
+                    let Some(server) = server.as_ref() else {
+                        continue;
+                    };
+                    let client = server.client().clone();
+                    self.assembled(&client, cursor, ticket, view, seed);
+                }
+                Inbound::LaneSeeded {
+                    n,
+                    episode,
+                    ticket,
+                    rows,
+                    replay,
+                } => {
+                    let Some(server) = server.as_ref() else {
+                        continue;
+                    };
+                    let client = server.client().clone();
+                    self.lane_seeded(&client, n, episode, ticket, rows, replay);
+                }
                 Inbound::LanesDue => {
                     // A deferred lane-list read came due. `due` says whether it is
                     // still the one this episode wants; it is cleared either way.
@@ -826,135 +1020,135 @@ impl Engine {
         self.send(Update::PostResult { req_id, result });
     }
 
-    /// Refetch an agent's view and emit it with a fresh revision. The coordinator
-    /// gets its transcript and state; a lane gets its transcript. `lanes` also
-    /// refetches the lane list (a restart can move it).
+    /// Refetch an agent's view and emit it with a fresh revision — on a thread of
+    /// its own, the answer coming back as [`Inbound::Resynced`].
+    ///
+    /// A resync on the engine's own loop would hold everything else — the stream's
+    /// `Disconnected`, a lane's `settled` — for as long as the server made it wait,
+    /// and a server that has stopped answering makes it wait out the whole request
+    /// timeout. That is the difference between the tab noticing within its 45 s
+    /// stream patience and the tab noticing half a minute later (§9.7). The
+    /// coordinator's resync reads its transcript *and* its state; a lane's reads its
+    /// transcript alone. `lanes` asks the lane list again once the view has answered:
+    /// a run ending moves what `/lanes` reports — whether a lane is busy, and for how
+    /// long it has been — and the list carries what the stream does not.
+    fn resync(&mut self, client: &Client, agent: Agent, lanes: bool) {
+        let ticket = self.reads.issue(agent);
+        let mailbox = self.mailbox.clone();
+        let client = client.clone();
+        let _ = thread::Builder::new()
+            .name("tab-engine-fetch".to_owned())
+            .spawn(move || {
+                let view = View::read(&client, agent);
+                let _ = mailbox.send_blocking(Inbound::Resynced {
+                    agent,
+                    ticket,
+                    lanes,
+                    view,
+                });
+            });
+    }
+
+    /// A resync came back: emit the view it read, and ask the lane list if the read
+    /// was one that wanted it. A read that failed says nothing about the lanes, so
+    /// following it up would be reading again with nothing new to go on.
+    fn resynced(&mut self, client: &Client, agent: Agent, ticket: u64, lanes: bool, view: View) {
+        let answered = view.came_back();
+        self.apply_view(agent, ticket, view);
+        if answered && lanes {
+            self.ask_lanes(client);
+        }
+    }
+
+    /// Emit a view that came back, with a fresh revision (§9.1).
     ///
     /// A revision is spent only by a view that actually came back. A fetch that
     /// failed — a row clicked before the lane behind it was up, a connection that
     /// dropped in between — must not consume a number, or the *next* read would
     /// arrive as revision 2 and every reader would have to wonder what revision 1
     /// said; [`Revisions::get`] would also stop saying whether a lane's rows were
-    /// ever read, which is what tells the first connect to read them.
-    fn resync(&mut self, client: &Client, agent: Agent, lanes: bool) {
-        match agent {
-            Agent::Coordinator => {
-                let transcript = client.transcript(None).ok();
-                let state = client.state().ok();
-                if transcript.is_none() && state.is_none() {
-                    return;
-                }
-                let revision = self.revisions.next(agent);
-                if let Some(transcript) = transcript {
-                    self.send(Update::Transcript {
-                        agent,
-                        revision,
-                        raw: transcript.raw,
-                    });
-                }
-                if let Some(state) = state {
-                    self.send(Update::State {
-                        revision,
-                        raw: state.raw,
-                    });
-                }
-                if lanes {
-                    self.ask_lanes(client);
-                }
-            }
-            Agent::Lane(n) => {
-                let Ok(transcript) = client.lane_transcript(n, None) else {
-                    return;
-                };
-                let revision = self.revisions.next(agent);
-                self.send(Update::Transcript {
-                    agent,
-                    revision,
-                    raw: transcript.raw,
-                });
-                if lanes {
-                    // A lane's run ending (`settled` on the lane's own stream, which
-                    // is the one the tab watches) moves what `/lanes` reports about
-                    // it: whether it is busy, and for how long it has been.
-                    self.ask_lanes(client);
-                }
-            }
+    /// ever read, which is what tells the first connect to read them. And a view
+    /// older than one already applied is a read that overtook a newer one: it is
+    /// dropped rather than replacing the newer view with an older one.
+    fn apply_view(&mut self, agent: Agent, ticket: u64, view: View) {
+        if !view.came_back() || !self.reads.land(agent, ticket) {
+            return;
         }
-    }
-
-    /// §7.3's cache seed: `/journal?limit=20`, then 100, then 400 — growing only
-    /// while the newest `cache-stats` entry is missing.
-    fn seed_cache(&mut self, client: &Client) {
-        for limit in CACHE_LIMITS {
-            match client.journal(Some(limit)) {
-                Ok(journal) => {
-                    if let Some(entry) = journal.newest_custom(CACHE_STATS_KEY) {
-                        self.send(Update::CacheSeed {
-                            entry: Some(entry.clone()),
-                        });
-                        return;
-                    }
-                }
-                Err(_) => break,
-            }
+        let revision = self.revisions.next(agent);
+        if let Some(transcript) = view.transcript {
+            self.send(Update::Transcript {
+                agent,
+                revision,
+                raw: transcript,
+            });
         }
-        self.send(Update::CacheSeed { entry: None });
+        if let Some(state) = view.state {
+            self.send(Update::State {
+                revision,
+                raw: state,
+            });
+        }
     }
 
     /// Watch one lane, or none: the previous lane stream is closed first, so at
     /// most one is ever open.
+    ///
+    /// The two reads a lane's stream is seeded with — its rows, then the bounded
+    /// replay the stream resumes from — run on a thread of their own, and the stream
+    /// opens when they land, in the order the loop used to do them (rows first: the
+    /// lane's transcript is authoritative).
     fn watch_lane(&mut self, client: &Client, lane: Option<u32>) {
         self.lane_connected = false;
         self.streams.stop_lane();
-        let Some(n) = lane else { return };
-        // Rows first: the lane's transcript is authoritative.
-        self.resync(client, Agent::Lane(n), false);
-        // Then the todo seed, whose returned cursor the live stream resumes from.
-        let since = self.lane_todo_seed(client, n);
-        self.streams.start_lane(client, n, since);
+        self.watch_requests += 1;
+        let episode = self.watch_requests;
+        let Some(n) = lane else {
+            self.watch = None;
+            return;
+        };
+        self.watch = Some((episode, n));
+        let ticket = self.reads.issue(Agent::Lane(n));
+        let mailbox = self.mailbox.clone();
+        let client = client.clone();
+        let _ = thread::Builder::new()
+            .name("tab-engine-lane-seed".to_owned())
+            .spawn(move || {
+                let rows = client.lane_transcript(n, None).ok().map(|reply| reply.raw);
+                let replay = lane_replay(&client, n);
+                let _ = mailbox.send_blocking(Inbound::LaneSeeded {
+                    n,
+                    episode,
+                    ticket,
+                    rows,
+                    replay,
+                });
+            });
     }
 
-    /// One bounded replay of a lane's retained events (`?since=0`) to seed the
-    /// TODO panel, returning the cursor the live stream should resume from.
-    ///
-    /// Only the newest `todo-changed` is forwarded. The replay is not forwarded
-    /// as rows: the lane's serve keeps up to 20 000 events, so `?since=0` would
-    /// re-send the lane's whole session, duplicating every row the transcript has
-    /// already given. The replay is bounded by a short silence — the log replays
-    /// as a burst, so a pause means the live edge — and the live stream then
-    /// resumes at the last id seen, so no event between the two is lost.
-    fn lane_todo_seed(&mut self, client: &Client, n: u32) -> Option<i64> {
-        let path = format!("/lanes/{n}/events?since=0");
-        let mut connection = client.http().open_sse(&path, None).ok()?;
-        if connection
-            .socket()
-            .set_read_timeout(Some(SEED_SILENCE))
-            .is_err()
-        {
-            return None;
+    /// A lane's seed reads came back: its rows, then the todo event, then its stream.
+    /// A seed that arrives after a newer `WatchLane` is dropped — its stream would
+    /// belong to a lane the tab is no longer showing (§9.3).
+    fn lane_seeded(
+        &mut self,
+        client: &Client,
+        n: u32,
+        episode: u64,
+        ticket: u64,
+        rows: Option<Value>,
+        replay: LaneReplay,
+    ) {
+        if self.watch != Some((episode, n)) {
+            return;
         }
-        let mut parser = SseParser::new();
-        let mut last_id = None;
-        let mut todo: Option<(Option<i64>, Value)> = None;
-        let mut seen = 0usize;
-        while let Ok(Some(line)) = connection.read_line() {
-            let Some(event) = parser.feed(&line) else {
-                continue;
-            };
-            if let Some(id) = event.id {
-                last_id = Some(id);
-            }
-            seen += 1;
-            if event.kind.as_deref() == Some("todo-changed") {
-                let data = serde_json::from_str(&event.data).unwrap_or(Value::Null);
-                todo = Some((event.id, data));
-            }
-            if seen >= SEED_CAP {
-                break;
-            }
-        }
-        drop(connection);
-        if let Some((id, data)) = todo {
+        self.apply_view(
+            Agent::Lane(n),
+            ticket,
+            View {
+                transcript: rows,
+                state: None,
+            },
+        );
+        if let Some((id, data)) = replay.todo {
             self.send(Update::Event {
                 agent: Agent::Lane(n),
                 id,
@@ -962,7 +1156,7 @@ impl Engine {
                 data,
             });
         }
-        last_id
+        self.streams.start_lane(client, n, replay.since);
     }
 
     /// Fold one stream message for one agent, resyncing where §9.1 says to.
@@ -1053,6 +1247,70 @@ impl Engine {
     }
 }
 
+/// §7.3's cache seed: `GET /journal?limit=20`, then 100, then 400 — growing only
+/// while the newest `cache-stats` entry is missing, so a long session is never
+/// re-sent in full (the same walk `session::cache` reads).
+fn walk_journal(client: &Client) -> Option<Value> {
+    for limit in CACHE_LIMITS {
+        match client.journal(Some(limit)) {
+            Ok(journal) => {
+                if let Some(entry) = journal.newest_custom(CACHE_STATS_KEY) {
+                    return Some(entry.clone());
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    None
+}
+
+/// One bounded replay of a lane's retained events (`?since=0`) to seed the TODO
+/// panel, returning its newest `todo-changed` and the cursor the live stream should
+/// resume from.
+///
+/// Only the newest `todo-changed` is forwarded. The replay is not forwarded as
+/// rows: the lane's serve keeps up to 20 000 events, so `?since=0` would re-send
+/// the lane's whole session, duplicating every row the transcript has already
+/// given. The replay is bounded by a short silence — the log replays as a burst, so
+/// a pause means the live edge — and the live stream then resumes at the last id
+/// seen, so no event between the two is lost.
+fn lane_replay(client: &Client, n: u32) -> LaneReplay {
+    let mut replay = LaneReplay {
+        todo: None,
+        since: None,
+    };
+    let path = format!("/lanes/{n}/events?since=0");
+    let Ok(mut connection) = client.http().open_sse(&path, None) else {
+        return replay;
+    };
+    if connection
+        .socket()
+        .set_read_timeout(Some(SEED_SILENCE))
+        .is_err()
+    {
+        return replay;
+    }
+    let mut parser = SseParser::new();
+    let mut seen = 0usize;
+    while let Ok(Some(line)) = connection.read_line() {
+        let Some(event) = parser.feed(&line) else {
+            continue;
+        };
+        if let Some(id) = event.id {
+            replay.since = Some(id);
+        }
+        seen += 1;
+        if event.kind.as_deref() == Some("todo-changed") {
+            let data = serde_json::from_str(&event.data).unwrap_or(Value::Null);
+            replay.todo = Some((event.id, data));
+        }
+        if seen >= SEED_CAP {
+            break;
+        }
+    }
+    replay
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1062,16 +1320,25 @@ mod tests {
     /// event decides, which is all these tests are about. The deferred read the
     /// decisions schedule finds a dropped receiver and gives up quietly.
     fn dormant() -> Engine {
-        let (updates, _) = async_channel::unbounded();
+        dormant_engine().0
+    }
+
+    /// The same, with the channel its [`Update`]s land on kept, for the tests that
+    /// look at what the engine emitted.
+    fn dormant_engine() -> (Engine, Receiver<Update>) {
+        let (updates, updates_rx) = async_channel::unbounded();
         let (mailbox, _inbox) = async_channel::unbounded();
         let mut engine = Engine {
             updates,
             mailbox: mailbox.clone(),
             streams: Streams::new(mailbox),
             revisions: Revisions::default(),
+            reads: Reads::default(),
             coordinator_connected: false,
             lane_connected: false,
             want_shutdown: false,
+            watch: None,
+            watch_requests: 0,
             lane_states: HashMap::new(),
             lanes_due: None,
             lanes_tries: 0,
@@ -1079,7 +1346,7 @@ mod tests {
         };
         engine.lane_states.insert(1, "idle".to_owned());
         engine.lane_states.insert(2, "idle".to_owned());
-        engine
+        (engine, updates_rx)
     }
 
     /// The row's glyph follows the event, but the header above it and the row's
@@ -1144,5 +1411,95 @@ mod tests {
             Some(due),
             "the pending read is the one that happens"
         );
+    }
+
+    /// Everything the engine has sent so far.
+    fn drain(updates: &Receiver<Update>) -> Vec<Update> {
+        let mut all = Vec::new();
+        while let Ok(update) = updates.try_recv() {
+            all.push(update);
+        }
+        all
+    }
+
+    /// A view that came back is emitted at one fresh revision — the rows and the
+    /// state of one resync share it — and a read that answered nothing emits
+    /// nothing, because a revision means a view was read (§9.1).
+    #[test]
+    fn a_view_that_came_back_is_emitted_at_one_revision() {
+        let (mut engine, updates) = dormant_engine();
+        let ticket = engine.reads.issue(Agent::Coordinator);
+
+        engine.apply_view(Agent::Coordinator, ticket, View::default());
+        assert!(
+            updates.try_recv().is_err(),
+            "a read that answered nothing says nothing"
+        );
+        assert_eq!(engine.revisions.get(Agent::Coordinator), 0);
+
+        engine.apply_view(
+            Agent::Coordinator,
+            ticket,
+            View {
+                transcript: Some(json!({ "messages": [] })),
+                state: Some(json!({ "status": "idle" })),
+            },
+        );
+        let emitted = drain(&updates);
+        assert_eq!(emitted.len(), 2, "rows and state, or neither");
+        match (&emitted[0], &emitted[1]) {
+            (
+                Update::Transcript { revision, .. },
+                Update::State {
+                    revision: state_revision,
+                    ..
+                },
+            ) => assert_eq!(revision, state_revision, "one resync, one revision"),
+            other => panic!("expected a transcript and a state, got {other:?}"),
+        }
+    }
+
+    /// An answer that arrives after a newer one is a late result from an old
+    /// revision: the view on screen is the newer read's, so the older one is
+    /// dropped rather than replacing it (§9.1).
+    #[test]
+    fn a_late_answer_does_not_replace_a_newer_view() {
+        let (mut engine, updates) = dormant_engine();
+        let first = engine.reads.issue(Agent::Coordinator);
+        let second = engine.reads.issue(Agent::Coordinator);
+        let rows = |text: &str| View {
+            transcript: Some(json!({ "messages": [text] })),
+            state: None,
+        };
+
+        // The newer read answers first; the older one must not take it back.
+        engine.apply_view(Agent::Coordinator, second, rows("newer"));
+        engine.apply_view(Agent::Coordinator, first, rows("older"));
+        assert_eq!(engine.revisions.get(Agent::Coordinator), 1);
+
+        // A read that failed answered nothing: it cannot make an older answer stale
+        // either, or the only view there is would be thrown away when the newer read
+        // is the one that failed.
+        let third = engine.reads.issue(Agent::Coordinator);
+        engine.apply_view(Agent::Coordinator, third, View::default());
+        engine.apply_view(Agent::Coordinator, second, rows("newer"));
+        assert!(!engine.reads.land(Agent::Coordinator, second));
+        assert!(
+            engine.reads.land(Agent::Coordinator, third),
+            "the failed read is not a view, so the older one still lands after it"
+        );
+
+        // Tickets are per agent, so a busy lane does not stale the coordinator's.
+        let lane = engine.reads.issue(Agent::Lane(1));
+        assert!(engine.reads.land(Agent::Lane(1), lane));
+        let sent: Vec<&str> = drain(&updates)
+            .iter()
+            .map(|update| match update {
+                Update::Transcript { .. } => "Transcript",
+                Update::State { .. } => "State",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(sent, ["Transcript"], "only the newer view was emitted");
     }
 }
