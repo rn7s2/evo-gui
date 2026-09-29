@@ -43,6 +43,9 @@ pub struct Launcher {
     pub catalog_error: Option<String>,
     /// Why the history is empty, when the scan could not read it at all.
     pub history_error: Option<String>,
+    /// The swarm binary `app.json` names cannot be run at all (§9.7, said before a
+    /// launch instead of after one). See [`crate::about::missing_swarm`].
+    pub swarm_problem: Option<String>,
 }
 
 impl Launcher {
@@ -57,11 +60,17 @@ impl Launcher {
             scanning: false,
             catalog_error: None,
             history_error: None,
+            swarm_problem: None,
         }
     }
 
     /// This, as the window takes it.
-    fn data(&self) -> workspace::LauncherData {
+    ///
+    /// The shape the empty tabs are fed in — public because it is the app's whole
+    /// contract with the window, and what a test (or a capture) reads instead of
+    /// the widgets: `registry`/`model_cache` are `None` until a catalog is known,
+    /// which is exactly the state the choosers call "still loading".
+    pub fn data(&self) -> workspace::LauncherData {
         // An empty catalog is the same as no catalog: leave the choosers saying
         // they are still loading rather than claiming a registry of nothing.
         let known = !self.cache.is_empty();
@@ -249,6 +258,17 @@ pub fn set_scanning(cx: &mut App, scanning: bool) {
 /// The catalog could not be learned: the tabs say so where the loading hint was.
 pub fn set_catalog_error(cx: &mut App, message: Option<String>) {
     cx.global_mut::<Shell>().launcher.catalog_error = message;
+    push_launcher_data(cx);
+}
+
+/// The swarm binary `app.json` names cannot be run: the empty tabs say so next to
+/// the folder button, rather than only failing after a launch (§9.7). `None`
+/// clears the line — the path was fixed in Settings.
+pub fn set_swarm_problem(cx: &mut App, problem: Option<String>) {
+    if let Some(problem) = &problem {
+        log_warn(cx, format!("swarm binary: {problem}"));
+    }
+    cx.global_mut::<Shell>().launcher.swarm_problem = problem;
     push_launcher_data(cx);
 }
 

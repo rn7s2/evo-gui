@@ -118,6 +118,10 @@ pub fn apply(values: &SettingsValues, cx: &mut App) {
         shell.theme = values.theme;
     }
 
+    // Read the new binaries' versions again: the About dialog's second line and the
+    // empty tab's "evo-swarm not found" line both follow what was just saved (§9.4).
+    crate::about::start(cx);
+
     // The next tab this window opens starts with them. A running tab keeps the
     // binaries it started with, and the panel says so in its own note.
     if let Some(view) = crate::quit::view(cx) {

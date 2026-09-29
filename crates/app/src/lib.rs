@@ -44,7 +44,7 @@ pub use quit::{
     SHUTDOWN_DEADLINE,
 };
 pub use settings::{apply as apply_settings, open as open_settings_panel, DIALOG_CONTENT_ID};
-pub use startup::{cache_is_stale, CACHE_MAX_AGE};
+pub use startup::{cache_is_stale, start as start_background_loads, CACHE_MAX_AGE};
 pub use theme::{follow_appearance, mode_for};
 
 use gpui_kit::prelude::*;
