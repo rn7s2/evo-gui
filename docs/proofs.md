@@ -647,6 +647,75 @@ catalog probe it had spawned. One tab was open and none of them resumable, which
 is the journal rule: the tab was never spoken to, so it never wrote a journal to
 resume.
 
+### The release bundle on the finished tree — 2026-09-29 20:36–20:44 UTC
+
+The same pass as the section above with the day's later commits in: `f1448af`,
+`scripts/bundle.sh` exit 0, launched the way a user launches it — `open
+dist/evo-desktop.app`, so LaunchServices starts it, not the inner binary — with
+the **real** `$HOME` and no swarm started from the tab. The log, whole:
+
+```
+2026-09-29T20:36:26Z info  evo-desktop 0.1.0 starting (pid 15536, root /Users/bytedance/.evo/desktop)
+2026-09-29T20:36:26Z info  app.json: window 1728x992 at Some(0.0),Some(33.0), 6 recent(s), binaries /usr/local/bin/evo-swarm / /usr/local/bin/evo-agent
+2026-09-29T20:36:26Z info  window open
+2026-09-29T20:36:26Z info  window bounds 1728x992 at 0,33
+2026-09-29T20:36:26Z info  theme: dark (the system appearance)
+2026-09-29T20:36:26Z info  startup: cached catalog has 0 model(s), fetched never
+2026-09-29T20:36:26Z info  startup: 1 tab(s) will show it
+2026-09-29T20:36:26Z info  catalog: probing with /usr/local/bin/evo-agent (cache older than 86400s or missing)
+2026-09-29T20:36:26Z info  tab dirs: 11 kept, none old enough to prune
+2026-09-29T20:36:26Z info  versions: evo-swarm 0.1.0, evo-agent 0.1.0
+2026-09-29T20:36:27Z info  history: 24 row(s) (500 files read of 705 seen, stopped early)
+2026-09-29T20:36:28Z error catalog probe failed: http 500: The value
+  "Bearer <redacted>"
+is not of type
+  LIST
+2026-09-29T20:43:19Z info  menu: settings
+2026-09-29T20:43:19Z info  settings: evo-swarm /usr/local/bin/evo-swarm, evo-agent /usr/local/bin/evo-agent, theme system
+2026-09-29T20:43:43Z info  quitting: stopping every tab
+2026-09-29T20:43:44Z info  saved /Users/bytedance/.evo/desktop/app.json: 1 tab(s), 0 of them resumable
+2026-09-29T20:43:44Z info  shutdown: all 0 tab(s) exited
+2026-09-29T20:43:44Z info  stopped; exiting
+$ pgrep -f 'evo-desktop.app/Contents/MacOS/evo-desktop' | wc -l
+0
+```
+
+LaunchServices saw it the way it should: `lsappinfo list` reported
+`bundleID="com.evo.desktop"`, `type="Foreground"`, `Version="0.1.0"`, one pid, in
+front — and the Dock's own item list, read back through System Events, names the
+app where the picture shows its icon:
+
+```
+…, Warp, Terminal, Dictionary, Docker Desktop, evo-desktop, missing value, Downloads, Bin
+```
+
+**Settings…** was opened from the menu rather than by a keystroke: System Events
+clicked `Settings…` of `menu bar item "Evo Desktop"` of the foreground app, and
+the app logged the panel it built — `menu: settings`, then `settings: evo-swarm
+/usr/local/bin/evo-swarm, evo-agent /usr/local/bin/evo-agent, theme system` — with
+the panel over the window showing both paths, their versions, the theme row and
+Save/Cancel, the way `docs/screens/app/settings-light.png` and
+`docs/screens/app/settings-dark.png` render it headless.
+
+**The empty tab** drew the user's own history (24 rows, 500 of 705 files read
+inside the scan's budget) and the catalog probe's failure from
+`docs/proofs-real.md`'s finding R1, written as `Bearer <redacted>` — which the
+live screen now renders as the amber *Couldn't load the model list — Default
+models will be used.* line beside the choosers, in dark mode, because
+`app.json` says `system` and the Mac is dark.
+
+**⌘Q**, sent as a keystroke to the foreground app, walked the ladder and left
+nothing behind: no app, no catalog probe, `pgrep` at 0, and `app.json` holding
+one tab, none of them resumable (`1 tab(s), 0 of them resumable`).
+
+`docs/screens/real/bundle-launch.png` is this launch, re-taken at 1× and 192
+colours (1728×1117): the menu bar with `Evo Desktop` in front, the window under it
+with the real history, the amber R1 line and the empty tab's choosers, and the
+Dock at the bottom with the app's own icon between `Docker Desktop` and the
+`Downloads` folder. Nothing of any other window is in it — the app's window is as
+wide as the screen, so besides it the capture holds only the menu bar, the
+wallpaper and the Dock.
+
 ## M2 — relaunch, through the app
 
 The milestone's own proof, with the app's machinery rather than a model of it: two
