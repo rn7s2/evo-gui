@@ -18,8 +18,8 @@ use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{Icon, IconName};
 use gpui_kit::TestSupportExt as _;
 use gpui_kit::{
-    div, px, AnyElement, App, ElementId, InteractiveElement as _, IntoElement, ParentElement as _,
-    Pixels, StatefulInteractiveElement as _, Styled as _, WeakEntity,
+    div, px, AnyElement, App, ElementId, FontWeight, InteractiveElement as _, IntoElement,
+    ParentElement as _, Pixels, StatefulInteractiveElement as _, Styled as _, WeakEntity,
 };
 use serde_json::Value;
 use session::{DimStyle, Row, RowId, RowKind, ToolResult};
@@ -58,6 +58,10 @@ pub(crate) const COLUMN_GAP: Pixels = px(8.);
 const KEY_SIZE: Pixels = px(12.);
 /// The size a panel's caption is drawn at.
 const CAPTION_SIZE: Pixels = px(11.);
+/// The size a tool row's name is drawn at, and the size of the status word
+/// beside it: one is the row's subject, the other a short word about it.
+const NAME_SIZE: Pixels = px(13.);
+const STATUS_SIZE: Pixels = px(12.);
 /// The line height of payload text, as a multiple of its size.
 const PAYLOAD_LINE_HEIGHT: f32 = 1.45;
 /// Width of the label column of a report row.
@@ -333,10 +337,9 @@ fn tool_row(
     };
 
     let view = view.clone();
-    // One size for the whole row: the mono name, the status word and the
-    // caret, so a run of tool calls reads as one list rather than three
-    // weights of type.
-    let text_size = palette.font_size - px(1.);
+    // The header is a quiet line: the name in the mono face at its own size,
+    // the status word a point smaller in the UI font, so neither shouts over
+    // the other and a run of tool calls reads as one list.
     let header = div()
         .id(("transcript-tool", id))
         .flex()
@@ -352,7 +355,8 @@ fn tool_row(
             div()
                 .min_w_0()
                 .font_family(palette.mono.clone())
-                .text_size(text_size)
+                .font_weight(FontWeight::NORMAL)
+                .text_size(NAME_SIZE)
                 .text_color(palette.foreground)
                 .child(name.to_string()),
         )
@@ -366,7 +370,7 @@ fn tool_row(
         .child(
             div()
                 .flex_shrink_0()
-                .text_size(text_size)
+                .text_size(STATUS_SIZE)
                 .text_color(palette.muted_foreground)
                 .child(status),
         )
@@ -802,27 +806,20 @@ fn text_block(
         .px_2()
         .py_1()
         .child(caption(label, palette))
+        // A body with no keys of its own starts at the panel's own edge, under
+        // its caption: a text result is the whole width of the panel, not a
+        // column of it.
         .child(
             div()
-                .flex()
+                .id((id, "text"))
                 .w_full()
                 .min_w_0()
-                // A text body has no keys of its own, so it gets the key column
-                // as empty space: the two panels of one call then read down one
-                // left grid instead of two.
-                .child(div().w(KEY_WIDTH + COLUMN_GAP).flex_shrink_0())
-                .child(
-                    div()
-                        .id((id, "text"))
-                        .flex_1()
-                        .min_w_0()
-                        .font_family(palette.mono.clone())
-                        .text_size(palette.payload_size)
-                        .line_height(palette.payload_size * PAYLOAD_LINE_HEIGHT)
-                        .text_color(palette.foreground)
-                        .child(block_text(text, total_chars))
-                        .test_support(),
-                ),
+                .font_family(palette.mono.clone())
+                .text_size(palette.payload_size)
+                .line_height(palette.payload_size * PAYLOAD_LINE_HEIGHT)
+                .text_color(palette.foreground)
+                .child(block_text(text, total_chars))
+                .test_support(),
         )
         .test_support()
         .into_any_element()

@@ -13,7 +13,7 @@ use gpui_kit::px;
 
 use crate::rows::{
     block_text, json_fields, looks_like_code, run_outcome_style, Field, FieldValue, BLOCK_LINES,
-    COLUMN_GAP, KEY_WIDTH, TOOL_TEXT_LIMIT, VALUE_LIMIT,
+    KEY_WIDTH, TOOL_TEXT_LIMIT, VALUE_LIMIT,
 };
 use crate::style::MEASURE;
 use crate::todo::MAX_LIST_HEIGHT;
@@ -554,7 +554,7 @@ fn values_are_set_in_mono_only_when_they_read_as_code() {
 }
 
 #[gpui_kit::test]
-fn a_plain_result_starts_in_the_value_column_of_the_arguments(cx: &mut TestAppContext) {
+fn a_plain_result_starts_at_the_panels_own_edge(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     let (host, cx) = cx.add_window_view(|_window, cx| TranscriptHost::new(cx));
 
@@ -582,16 +582,22 @@ fn a_plain_result_starts_in_the_value_column_of_the_arguments(cx: &mut TestAppCo
     cx.update(|window, cx| {
         window.render_frame(cx);
 
-        // The panels of one call share one left grid: the result's text starts
-        // exactly where the arguments' values start.
-        let key = window.find(field_row_id(ARGUMENTS, 1, 0)).bounds();
-        let values = key.origin.x + KEY_WIDTH + COLUMN_GAP;
+        // A body with no keys of its own is the whole width of its panel: it
+        // starts at the panel's padding, not indented into a value column, so a
+        // long line of output is not wrapped for the sake of a grid.
         let result: gpui_kit::ElementId = ("transcript-tool-result", 1u64).into();
+        let panel = window.find(result.clone()).bounds();
         let text = window.find((result, "text")).bounds();
         assert_eq!(
-            text.origin.x, values,
-            "the result's text is in the value column, not against the panel's edge"
+            text.origin.x,
+            panel.origin.x + px(9.),
+            "the result's text starts at the panel's own edge (its 1px border and 8px padding)"
         );
+
+        // The keyed panels keep their grid: a key column, then its values.
+        let key = window.find(field_row_id(ARGUMENTS, 1, 0)).bounds();
+        assert!(text.origin.x < key.origin.x + KEY_WIDTH);
+        assert!(window.find(field_row_id(ARGUMENTS, 1, 1)).bounds().origin.x == key.origin.x);
     });
 }
 
