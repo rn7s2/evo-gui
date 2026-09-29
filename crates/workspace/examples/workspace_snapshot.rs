@@ -102,7 +102,9 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
 
     // The rest of the pictures are of the first tab, which is the one that will
     // run a swarm: select it again and type into the composer it shows.
-    view.update(&mut cx, |view, cx| view.select_tab(0, cx));
+    cx.update_window(window, |_, window, cx| {
+        view.update(cx, |view, cx| view.select_tab(0, window, cx));
+    })?;
     let tab = view.read_with(&cx, |view, _| view.tabs()[0].clone());
 
     // 3. A folder was chosen: the tab boots a real swarm in it (§3).
@@ -240,6 +242,15 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
         tab.read_with(cx, |tab, _| !tab.is_reconnecting())
     })?;
     shot(&mut cx, window, dir, "11-recovered.png")?;
+
+    // 12. §7.1 past the window's width: fourteen tabs do not fit across 1600
+    //     points. The strip scrolls the tab it is showing into view — the one just
+    //     added is the last one — and the `+` stays on the screen, at the right
+    //     edge of the strip's own width budget rather than past the window.
+    for _ in 2..14 {
+        click(&mut cx, window, "tab-add")?;
+    }
+    shot(&mut cx, window, dir, "12-strip-overflow.png")?;
 
     Ok(())
 }

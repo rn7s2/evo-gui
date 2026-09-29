@@ -265,6 +265,9 @@ struct Live {
     state_revision: u64,
     /// True once this tab's session has been recorded as a recent (§9.5).
     recorded: bool,
+    /// True while that recording is out on its thread, so the `/state` resyncs
+    /// that arrive meanwhile do not each start another one.
+    recording: bool,
     /// The swarm process's pid, from `/health` (§3).
     pid: Option<u32>,
     /// The `tabs/<id>/` directory this tab's swarm keeps its files in (§6).
@@ -376,6 +379,22 @@ impl TabContent {
     /// The session the tab's swarm is writing to, while `/state` has named it.
     pub fn session_path(&self) -> Option<&Path> {
         self.session.as_deref()
+    }
+
+    /// Put the keyboard where this tab's work starts (§7.1), and say whether
+    /// there was anywhere to put it.
+    ///
+    /// A tab that drives a swarm is a tab someone means to type into, so the caret
+    /// goes to its composer — the same thing opening a tab does. An empty tab has
+    /// nothing to type into: its first thing to choose belongs to the empty tab
+    /// (§7.2), and its focus handles are its own.
+    pub fn focus_primary(&self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if matches!(self.state, TabState::Empty) {
+            return false;
+        }
+        self.composer
+            .update(cx, |composer, cx| composer.focus_input(window, cx));
+        true
     }
 
     /// The process behind the tab: the swarm's own pid, once `/health` has
@@ -585,6 +604,7 @@ impl TabContent {
             in_flight: None,
             state_revision: 0,
             recorded: false,
+            recording: false,
             pid: None,
             store_id: started.store_id,
             ticker: None,
@@ -1009,11 +1029,15 @@ impl TabContent {
         let _ = window;
     }
 
-    /// Record the session this tab started, once, so the app's own swarms appear
-    /// in history (§9.5).
+    /// Record the session this tab started, once it is really on disk, so the
+    /// app's own swarms appear in history (§9.5).
     ///
-    /// The write is `~/.evo/desktop/app.json`, which is file I/O: it happens on a
-    /// thread of its own, like every other write the UI asks for.
+    /// `/state` names the session as soon as the swarm is up, but evo writes the
+    /// journal at the *first assistant message*: a recent recorded from the name
+    /// alone is a row `--resume` cannot open. The file is therefore the gate, and
+    /// it is re-checked on every `/state` until it is there — a `stat` in front of
+    /// a write that both happen on a thread of their own, like every other piece
+    /// of file I/O the UI asks for.
     fn record_recent(&mut self, cx: &mut Context<Self>) {
         let Some(session) = self.session.clone() else {
             return;
@@ -1028,10 +1052,10 @@ impl TabContent {
         let Some(live) = self.live.as_mut() else {
             return;
         };
-        if live.recorded {
+        if live.recorded || live.recording {
             return;
         }
-        live.recorded = true;
+        live.recording = true;
         let models = self
             .last_launch
             .as_ref()
@@ -1056,18 +1080,38 @@ impl TabContent {
             })
             .unwrap_or_default();
 
-        let mut recent = store::app_state::Recent::new(session, folder, lanes);
+        let mut recent = store::app_state::Recent::new(session.clone(), folder, lanes);
         recent.models = models;
         let root = self.config.root.clone();
-        crate::bridge::Bridge::<()>::spawn(
+        let (bridge, _worker) = crate::bridge::Bridge::<bool>::spawn(
             crate::bridge::Revision::new(0),
-            move |_updates: crate::bridge::BridgeSender<()>| {
+            move |updates: crate::bridge::BridgeSender<bool>| {
+                if !session.is_file() {
+                    // Nothing has been journalled yet, so there is nothing to
+                    // resume: the `/state` that names the session is not enough.
+                    let _ = updates.send(false);
+                    return;
+                }
                 let mut state = store::app_state::AppState::load(&root);
                 state.touch_recent(recent);
                 let _ = state.save(&root);
+                let _ = updates.send(true);
             },
         );
-        let _ = cx;
+        bridge
+            .drive_into(
+                cx,
+                |_tab: &TabContent| crate::bridge::Revision::new(0),
+                |tab, recorded: bool, _cx| {
+                    if let Some(live) = tab.live.as_mut() {
+                        live.recording = false;
+                        // Only a real record stops the next `/state` from asking
+                        // again.
+                        live.recorded |= recorded;
+                    }
+                },
+            )
+            .detach();
     }
 
     /// Show a boot-style failure for a swarm that went away after it was up.

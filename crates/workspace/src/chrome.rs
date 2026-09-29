@@ -17,9 +17,9 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    div, point, px, size, AnyElement, App, Bounds, Context, ElementId, Entity, IntoElement, Pixels,
-    ScrollHandle, SharedString, Size, Subscription, Task, TestSupportExt as _, Window,
-    WindowBounds, WindowOptions,
+    div, point, px, size, AnyElement, App, Bounds, Context, ElementId, Entity, FocusHandle, Global,
+    IntoElement, KeyBinding, MouseButton, MouseDownEvent, Pixels, ScrollHandle, SharedString, Size,
+    Subscription, Task, TestSupportExt as _, Window, WindowBounds, WindowOptions,
 };
 
 use std::rc::Rc;
@@ -42,8 +42,74 @@ pub const MIN_WINDOW_SIZE: Size<Pixels> = size(px(1000.), px(700.));
 /// How wide one tab may grow before its label is ellipsized (§7.1).
 const TAB_MAX_WIDTH: f32 = 220.;
 
+/// What the kit's title bar keeps for itself on the left before its children
+/// start: the traffic lights on macOS, a shorter inset elsewhere
+/// (`gpui_component::title_bar` keeps the number private). The strip's own width
+/// budget is the window minus this — a strip that ignores it ends up with its `+`
+/// under the window's right edge (§7.1).
+const TITLE_BAR_LEFT_INSET: f32 = if cfg!(target_os = "macos") { 80. } else { 12. };
+
 /// The `+` at the end of the strip: always present, always the last thing.
 const ADD_TAB_ID: &str = "tab-add";
+
+/// The key context the window's own shortcuts are bound in (§7.1).
+///
+/// The window root carries it, so a shortcut means the same thing wherever the
+/// keyboard happens to be inside the window — including the composer's text
+/// field, which is where the caret is most of the time.
+const WORKSPACE_CONTEXT: &str = "Workspace";
+
+gpui_kit::actions!(
+    workspace,
+    [
+        /// Show the tab to the right of this one (⌃⇥, ⌘⇧]).
+        SelectNextTab,
+        /// Show the tab to the left of this one (⌃⇧⇥, ⌘⇧[).
+        SelectPreviousTab,
+        /// Show the last tab, however many are open (⌘9).
+        SelectLastTab,
+    ]
+);
+
+/// Show the tab at this index (0-based) — what ⌘1…⌘8 are.
+///
+/// A number rather than eight near-identical actions: the eight bindings differ
+/// only in which tab they name. A menu can name it too
+/// (`workspace::SelectTab`), which is why it is an action and not a key handler.
+#[derive(Clone, PartialEq, Eq, Debug, gpui_kit::Action)]
+#[action(namespace = workspace, no_json)]
+pub struct SelectTab(pub usize);
+
+/// Set once the tab keys are in the keymap: the keymap belongs to the app, and a
+/// second window must not stack a second copy of every binding onto it.
+struct TabKeysBound;
+impl Global for TabKeysBound {}
+
+/// Bind the window's tab shortcuts (§7.1): once per app, whatever opens the
+/// first window.
+fn bind_tab_keys(cx: &mut App) {
+    if cx.has_global::<TabKeysBound>() {
+        return;
+    }
+    cx.set_global(TabKeysBound);
+    let mut keys = vec![
+        KeyBinding::new("ctrl-tab", SelectNextTab, Some(WORKSPACE_CONTEXT)),
+        KeyBinding::new("ctrl-shift-tab", SelectPreviousTab, Some(WORKSPACE_CONTEXT)),
+        KeyBinding::new("cmd-shift-]", SelectNextTab, Some(WORKSPACE_CONTEXT)),
+        KeyBinding::new("cmd-shift-[", SelectPreviousTab, Some(WORKSPACE_CONTEXT)),
+        KeyBinding::new("cmd-9", SelectLastTab, Some(WORKSPACE_CONTEXT)),
+    ];
+    // ⌘1…⌘8 is the tab with that number; with fewer tabs than the number, the
+    // shortcut does nothing rather than wrapping (§7.1).
+    keys.extend((0..8).map(|index| {
+        KeyBinding::new(
+            &format!("cmd-{}", index + 1),
+            SelectTab(index),
+            Some(WORKSPACE_CONTEXT),
+        )
+    }));
+    cx.bind_keys(keys);
+}
 
 /// The bounds the window opens at: [`DEFAULT_WINDOW_SIZE`], clamped to the
 /// display's work area — the visible area, without the dock or the menu bar —
@@ -148,6 +214,10 @@ pub struct WorkspaceView {
     tabs: Vec<Entity<TabContent>>,
     /// Index into `tabs`, always valid: there is at least one tab.
     selected: usize,
+    /// The window's own focus: what holds the keyboard when the shown tab has
+    /// nothing to type into — and what makes the point of a keystroke the window
+    /// rather than nowhere, so the shortcuts land on the tab strip (§7.1).
+    root_focus: FocusHandle,
     next_id: u64,
     strip_scroll: ScrollHandle,
     /// One subscription per tab, dropped with it so a closed tab stops sending.
@@ -186,9 +256,11 @@ impl WorkspaceView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        bind_tab_keys(cx);
         let mut view = WorkspaceView {
             tabs: Vec::new(),
             selected: 0,
+            root_focus: cx.focus_handle(),
             next_id: 0,
             strip_scroll: ScrollHandle::default(),
             subscriptions: VecDeque::new(),
@@ -201,6 +273,10 @@ impl WorkspaceView {
             may_close: false,
         };
         view.open_empty_tab(window, cx);
+        // An empty tab has nothing to type into yet, and the window is what has the
+        // keyboard until it does: without this, a shortcut pressed on a fresh
+        // window would go nowhere at all.
+        view.focus_selected(window, cx);
         view
     }
 
@@ -277,6 +353,14 @@ impl WorkspaceView {
             .collect()
     }
 
+    /// What every tab this window opens **from now on** starts its swarm with
+    /// (§13): what Settings saved. A tab that is already running keeps the binaries
+    /// it started with, which is what the panel's own note says.
+    pub fn set_swarm_config(&mut self, config: Arc<SwarmConfig>, cx: &mut Context<Self>) {
+        self.config = config;
+        cx.notify();
+    }
+
     /// Called with every live tab's `/registry` — the app refreshes its model
     /// cache from a real server with this (§9.4).
     pub fn on_registry(
@@ -326,6 +410,9 @@ impl WorkspaceView {
         self.subscriptions.push_back((id, subscription));
         self.tabs.push(tab.clone());
         self.selected = self.tabs.len() - 1;
+        // The new tab is at the far end, which is exactly where an overflowing
+        // strip has to scroll to (§7.1).
+        self.strip_scroll.scroll_to_item(self.selected);
         // A tab opened now shows what the app already learned (§9.4, §9.5).
         let launcher = self.launcher.clone();
         tab.update(cx, |tab, cx| tab.set_launcher_data(&launcher, window, cx));
@@ -335,12 +422,85 @@ impl WorkspaceView {
         tab
     }
 
-    /// Show the tab at `index` (§7.1).
-    pub fn select_tab(&mut self, index: usize, cx: &mut Context<Self>) {
-        if index < self.tabs.len() && index != self.selected {
+    /// Show the tab at `index`, and put the keyboard where that tab's work starts
+    /// (§7.1): the composer of a tab driving a swarm, so a tab picked to be typed
+    /// into takes the typing.
+    ///
+    /// Out of range does nothing, which is what a `⌘8` with three tabs open means.
+    pub fn select_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if index >= self.tabs.len() {
+            return;
+        }
+        // A strip with more tabs than fit scrolls to the one being shown, so the
+        // highlight is never off-screen (§7.1).
+        self.strip_scroll.scroll_to_item(index);
+        if index != self.selected {
             self.selected = index;
             cx.notify();
         }
+        self.focus_selected(window, cx);
+    }
+
+    /// The keyboard follows the tab: whatever is shown is where typing goes (§7.1,
+    /// §7.2).
+    ///
+    /// A tab with nothing to type into yet — an empty one, until its own first
+    /// chooser is the seam for that — hands the keyboard back to the window rather
+    /// than leaving it in a composer nobody can see: a keystroke nobody hears is
+    /// worse than one the window handles.
+    fn focus_selected(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let tab = self.tabs[self.selected].clone();
+        let taken = tab.update(cx, |tab, cx| tab.focus_primary(window, cx));
+        if !taken {
+            window.focus(&self.root_focus, cx);
+        }
+    }
+
+    /// ⌃⇥ and ⌘⇧]: the next tab, round the end (§7.1).
+    fn on_select_next_tab(
+        &mut self,
+        _: &SelectNextTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.step_tab(1, window, cx);
+    }
+
+    /// ⌃⇧⇥ and ⌘⇧[: the previous tab, round the start (§7.1).
+    fn on_select_previous_tab(
+        &mut self,
+        _: &SelectPreviousTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.step_tab(-1, window, cx);
+    }
+
+    /// ⌘9: the last tab, whatever the count (a browser's rule, and the reason ⌘9
+    /// is not `SelectTab(8)`).
+    fn on_select_last_tab(
+        &mut self,
+        _: &SelectLastTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_tab(self.tabs.len().saturating_sub(1), window, cx);
+    }
+
+    /// ⌘1…⌘8: the tab with that number.
+    fn on_select_tab(&mut self, action: &SelectTab, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_tab(action.0, window, cx);
+    }
+
+    /// One step along the strip, wrapping: with one tab open there is nowhere to
+    /// go, and the shortcut does nothing rather than reopening the same tab.
+    fn step_tab(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
+        let count = self.tabs.len();
+        if count < 2 {
+            return;
+        }
+        let next = (self.selected as isize + step).rem_euclid(count as isize) as usize;
+        self.select_tab(next, window, cx);
     }
 
     /// Close `id`: the tab goes at once, and its swarm runs §3's ladder on a
@@ -350,6 +510,7 @@ impl WorkspaceView {
         let Some(index) = self.tabs.iter().position(|tab| tab.read(cx).id() == id) else {
             return;
         };
+        let was_shown = index == self.selected;
         let tab = self.tabs.remove(index);
         self.subscriptions.retain(|(closed, _)| *closed != id);
         if let Some(engine) = tab.update(cx, |tab, cx| tab.take_engine(cx)) {
@@ -362,6 +523,11 @@ impl WorkspaceView {
         }
         // The tab that took the closed one's place, or the new last tab.
         self.selected = self.selected.min(self.tabs.len() - 1);
+        if was_shown {
+            // The keyboard does not go with the closed tab (§7.1): the tab that
+            // took its place is what is being looked at now.
+            self.focus_selected(window, cx);
+        }
         cx.notify();
     }
 
@@ -423,22 +589,36 @@ impl WorkspaceView {
         }
     }
 
-    fn render_tab_strip(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_tab_strip(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The room the strip has: the window, less the title bar's own left
+        // padding. The cap is in pixels rather than `max_w_full` because a
+        // percentage does not resolve against the kit's title bar — the bar ends
+        // up as wide as its content, `+` and all, which is what pushed the `+`
+        // off the screen — and it is measured afresh every frame, so a resized
+        // window reflows (§7.1).
+        let room = window.bounds().size.width - px(TITLE_BAR_LEFT_INSET);
         TabBar::new("tab-strip")
             // The bar takes the width its tabs need, so the `+` sits right after
-            // the last one; capped at the window, so that once the tabs overflow
-            // it is the strip that scrolls and the `+` stays visible (§7.1).
-            .max_w_full()
+            // the last one — and it stops at ROOM, so a strip with more tabs than
+            // fit scrolls them inside the bar, with the `+` — which the kit lays
+            // out after the scrolling part — still on the screen (§7.1).
+            .min_w_0()
+            .max_w(room)
             .max_width(px(TAB_MAX_WIDTH))
             .track_scroll(&self.strip_scroll)
             .selected_index(self.selected)
-            .on_click(cx.listener(|this, index: &usize, _window, cx| this.select_tab(*index, cx)))
+            .on_click(
+                cx.listener(|this, index: &usize, window, cx| this.select_tab(*index, window, cx)),
+            )
             .suffix(self.render_add_tab_button(cx))
             .children(self.tabs.iter().map(|tab| self.render_tab(tab, cx)))
     }
 
     /// One tab: the folder's name, the whole path plus the swarm's state on
     /// hover, and its close control (§7.1).
+    ///
+    /// A middle click closes it, the way a browser's tab does — the same thing the
+    /// `×` does, without having to aim at it.
     fn render_tab(&self, tab: &Entity<TabContent>, cx: &mut Context<Self>) -> Tab {
         let content = tab.read(cx);
         let id = content.id();
@@ -452,23 +632,33 @@ impl WorkspaceView {
         // brings its `×` out — and moving onto the `×` keeps it out, because the
         // pointer is still inside the group.
         let group = SharedString::from(format!("tab-content-{}", id.get()));
-        Tab::new().aria_label(title.clone()).child(
-            h_flex()
-                .group(group.clone())
-                .gap_1()
-                .min_w_0()
-                .items_center()
-                .child(
-                    div()
-                        .id(ElementId::NamedInteger("tab-label".into(), id.get()))
-                        .test_support()
-                        .min_w_0()
-                        .truncate()
-                        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
-                        .child(title),
-                )
-                .child(self.render_tab_close(id, selected, group, cx)),
-        )
+        Tab::new()
+            .aria_label(title.clone())
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                    this.close_tab(id, window, cx)
+                }),
+            )
+            .child(
+                h_flex()
+                    .group(group.clone())
+                    .gap_1()
+                    .min_w_0()
+                    .items_center()
+                    .child(
+                        div()
+                            .id(ElementId::NamedInteger("tab-label".into(), id.get()))
+                            .test_support()
+                            .min_w_0()
+                            .truncate()
+                            .tooltip(move |window, cx| {
+                                Tooltip::new(tooltip.clone()).build(window, cx)
+                            })
+                            .child(title),
+                    )
+                    .child(self.render_tab_close(id, selected, group, cx)),
+            )
     }
 
     /// A tab's close control: a light `×`, muted until the pointer is on it, on
@@ -578,10 +768,21 @@ impl Render for WorkspaceView {
         v_flex()
             .id("workspace")
             .test_support()
+            // The window's own shortcuts live here (§7.1). The root carries the
+            // context they are bound in and a focus handle of its own, so
+            // `⌘2` or `⌃⇥` reaches the tab strip whenever the keyboard is
+            // anywhere inside the window — the composer included — and still
+            // works on a fresh window, where nothing else holds it.
+            .track_focus(&self.root_focus)
+            .key_context(WORKSPACE_CONTEXT)
+            .on_action(cx.listener(Self::on_select_next_tab))
+            .on_action(cx.listener(Self::on_select_previous_tab))
+            .on_action(cx.listener(Self::on_select_last_tab))
+            .on_action(cx.listener(Self::on_select_tab))
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .child(TitleBar::new().child(self.render_tab_strip(cx)))
+            .child(TitleBar::new().child(self.render_tab_strip(window, cx)))
             .child(
                 h_flex()
                     .flex_1()
@@ -594,6 +795,86 @@ impl Render for WorkspaceView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui_kit::test::TestWindowExt as _;
+    use gpui_kit::TestAppContext;
+
+    /// §7.1: the keyboard follows the tab. A tab that drives a swarm is one
+    /// someone means to type into, so selecting it puts the caret in its
+    /// composer — and the tab shortcuts still work with the caret in that field,
+    /// which is where it will be most of the time.
+    #[gpui_kit::test]
+    fn selecting_a_tab_puts_the_caret_in_its_composer(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (window, view) = cx
+            .update(|cx| {
+                gpui_kit::open_window(
+                    WindowOptions {
+                        window_bounds: Some(WindowBounds::Windowed(Bounds {
+                            origin: point(px(0.), px(0.)),
+                            size: size(px(1280.), px(800.)),
+                        })),
+                        ..Default::default()
+                    },
+                    cx,
+                    |window, cx| {
+                        cx.new(|cx| {
+                            WorkspaceView::with_config(Arc::new(SwarmConfig::default()), window, cx)
+                        })
+                    },
+                )
+            })
+            .expect("the workspace window");
+
+        cx.update_window(window.into(), |_, window, cx| {
+            window.render_frame(cx);
+            // A second tab, driving a swarm: the state §7.1's rule is about.
+            let running = view.update(cx, |view, cx| view.add_tab(window, cx));
+            running.update(cx, |tab, _cx| {
+                tab.state = crate::TabState::Running {
+                    folder: PathBuf::from("/tmp/proj"),
+                }
+            });
+            window.render_frame(cx);
+
+            // Where the caret should end up: the composer's own input, asked for
+            // by the composer, so the assertion does not lean on the code under
+            // test.
+            let composer = running.read(cx).composer().clone();
+            composer.update(cx, |composer, cx| composer.focus_input(window, cx));
+            let caret = window.focused(cx).expect("the caret is in the composer");
+            assert_eq!(view.read(cx).selected_index(), 1);
+
+            // Away to the empty tab: nothing there types, so the window takes the
+            // keyboard back rather than leaving it in a field nobody can see.
+            view.update(cx, |view, cx| view.select_tab(0, window, cx));
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).selected_index(), 0);
+            assert_ne!(
+                window.focused(cx),
+                Some(caret.clone()),
+                "an empty tab has no composer to type into"
+            );
+            assert!(
+                window.focused(cx).is_some(),
+                "and the window itself holds the keyboard"
+            );
+
+            // Back by shortcut: ⌘2 selects the tab and hands its composer the caret.
+            window.press("cmd-2", cx);
+            assert_eq!(view.read(cx).selected_index(), 1);
+            assert_eq!(window.focused(cx), Some(caret.clone()));
+
+            // The shortcuts still work from inside that field: ⌘1 is a tab, not a
+            // character the composer swallows.
+            window.press("cmd-1", cx);
+            assert_eq!(view.read(cx).selected_index(), 0);
+
+            // ⌃⇥ too — a tab character is not what it means in this window.
+            window.press("ctrl-tab", cx);
+            assert_eq!(view.read(cx).selected_index(), 1);
+        })
+        .unwrap();
+    }
 
     #[test]
     fn a_roomy_work_area_keeps_the_default_size_centered() {

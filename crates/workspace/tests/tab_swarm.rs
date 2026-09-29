@@ -11,7 +11,7 @@
 //! rejected as non-determinism, so each test opts into parking — the supported
 //! switch for a test that talks to real I/O.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -161,6 +161,16 @@ fn launch(
         tab.update(cx, |tab, cx| {
             tab.launch(Launch::New { folder, plan }, window, cx)
         });
+    })
+    .unwrap();
+}
+
+/// Show the tab at INDEX, the way a click or a shortcut does (§7.1).
+fn show_tab(cx: &mut TestAppContext, bench: &Bench, index: usize) {
+    cx.update_window(bench.window.into(), |_, window, cx| {
+        bench
+            .view
+            .update(cx, |view, cx| view.select_tab(index, window, cx))
     })
     .unwrap();
 }
@@ -383,16 +393,29 @@ fn a_tab_boots_a_real_swarm_and_streams_a_turn(cx: &mut TestAppContext) {
 
     // §9.5: the session this tab started is recorded, so a swarm the app brought
     // up is in the history next time. The write is the app's own file, off the UI
-    // thread, so the test waits for the file rather than the frame.
+    // §9.5: `/state` names the session before the swarm has said anything, and
+    // evo writes the journal at the *first assistant message* — so a Recent made
+    // from the name alone would be a row `--resume` cannot open. The tab must
+    // wait for the file, which this run has not produced yet.
     let root = store::paths::Root::at(b.fixture.dir.join("app"));
-    wait_for(cx, "the session to be recorded as a recent", |_cx| {
-        store::app_state::AppState::load(&root)
+    let session = cx
+        .update(|cx| tab.read(cx).session_path().map(Path::to_path_buf))
+        .expect("/state named the session");
+    assert!(session.is_absolute(), "and named it in full: {session:?}");
+    assert!(!session.exists(), "nothing has been journalled yet");
+    // Give the write its chance before believing it did not happen: the tab has
+    // had the name since its first /state.
+    for _ in 0..20 {
+        cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        !store::app_state::AppState::load(&root)
             .recents
             .iter()
-            .any(|recent| {
-                recent.folder == b.fixture.project && !recent.session.as_os_str().is_empty()
-            })
-    });
+            .any(|recent| recent.session == session),
+        "a session with no journal yet is not a recent"
+    );
 
     // §7.1: the label is the folder's own name, and the tooltip carries the whole
     // path plus what the swarm is doing.
@@ -477,6 +500,21 @@ fn a_tab_boots_a_real_swarm_and_streams_a_turn(cx: &mut TestAppContext) {
         rows.iter()
             .any(|row| matches!(row.kind, session::RowKind::User { .. }))
             && assistant_chars(&rows) > 100
+    });
+
+    // §9.5: now the swarm has answered, its journal is on disk — and the same
+    // resync that rebuilt the rows records the session, so the row the history
+    // shows is one a resume can open.
+    assert!(
+        session.is_file(),
+        "the journal is on disk: {}",
+        session.display()
+    );
+    wait_for(cx, "the session to be recorded as a recent", |_cx| {
+        store::app_state::AppState::load(&root)
+            .recents
+            .iter()
+            .any(|recent| recent.folder == b.fixture.project && recent.session == session)
     });
 
     // §9.2: the button is a Send button again, disabled because the draft was
@@ -609,9 +647,9 @@ fn two_tabs_stream_at_once_and_the_ui_stays_responsive(cx: &mut TestAppContext) 
     // first tab, switches to the second and sends there — from then on both
     // swarms are streaming while the window shows one of them, which is the
     // shape that has to stay responsive.
-    cx.update(|cx| b.view.update(cx, |view, cx| view.select_tab(0, cx)));
+    show_tab(cx, &b, 0);
     prompt(cx, &b, &first, "SLOW first tab");
-    cx.update(|cx| b.view.update(cx, |view, cx| view.select_tab(1, cx)));
+    show_tab(cx, &b, 1);
     prompt(cx, &b, &second, "SLOW second tab");
 
     wait_for(cx, "both tabs to be streaming", |cx| {

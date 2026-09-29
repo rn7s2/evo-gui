@@ -15,7 +15,8 @@ mod tab_page;
 
 pub use bridge::{Bridge, BridgeSender, Revision, Tagged, Worker};
 pub use chrome::{
-    fit_to_work_area, initial_window_bounds, window_options, LauncherData, WorkspaceView,
+    fit_to_work_area, initial_window_bounds, window_options, LauncherData, SelectLastTab,
+    SelectNextTab, SelectPreviousTab, SelectTab, WorkspaceView,
 };
 pub use history::{placeholder_history, HistoryRow};
 pub use launch::{stop_in_background, Launch, SwarmConfig, SHUTDOWN_DEADLINE};
