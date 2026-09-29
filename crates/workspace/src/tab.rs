@@ -56,8 +56,14 @@ const NOTICE_LIFETIME: Duration = Duration::from_secs(4);
 /// anything else is a failure, shown in the danger colour with the reply's own
 /// words. Neither is ever a modal, and neither is re-validated here (§8): the
 /// text is the server's.
+///
+/// A POST the server never answered has no words to show, so it gets [`notice_words`]'
+/// plain sentence instead — and `detail` keeps the raw error text for the hover.
 pub(crate) struct Notice {
     pub(crate) text: SharedString,
+    /// The error behind a paraphrased line, shown on hover (§4): the socket's own
+    /// words, kept rather than thrown away.
+    pub(crate) detail: Option<SharedString>,
     pub(crate) tone: NoticeTone,
 }
 
@@ -92,6 +98,31 @@ pub(crate) fn notice_tone(error: &tab_engine::PostError) -> NoticeTone {
     } else {
         NoticeTone::Error
     }
+}
+
+/// What a failed POST says above the composer, and the raw error to keep for the
+/// hover (§4).
+///
+/// A reply is the server's own words, always: `409`, `422`, `400` are the swarm
+/// talking about the request, and re-stating them is the one thing §8 forbids.
+/// The two cases with nothing to re-state are:
+///
+/// - **no reply at all** — the connection, the deadline, the half-read answer.
+///   `io: Connection refused (os error 61)` is the socket talking, not the swarm,
+///   and what happened is that the swarm is not there (yet).
+/// - **`503`** — the server answered, and its answer is that it is going away.
+///
+/// Both get a sentence; the raw text is returned as the detail so it can ride in
+/// the notice's tooltip instead of being dropped.
+fn notice_words(error: &tab_engine::PostError) -> (String, Option<String>) {
+    let plain = match error.status {
+        None => "Can't reach the swarm — it may be restarting.",
+        Some(503) => "The swarm is shutting down.",
+        Some(_) => return (error.message.clone(), None),
+    };
+    let raw = error.message.trim();
+    let detail = (!raw.is_empty() && raw != plain).then(|| raw.to_owned());
+    (plain.to_owned(), detail)
 }
 
 /// Identity of a tab inside the window.
@@ -875,13 +906,20 @@ impl TabContent {
     ///
     /// A newer notice replaces an older one; the task that would have cleared the
     /// older one finds different words and leaves the new one alone.
-    fn show_notice(&mut self, text: String, tone: NoticeTone, cx: &mut Context<Self>) {
+    fn show_notice(
+        &mut self,
+        text: String,
+        detail: Option<String>,
+        tone: NoticeTone,
+        cx: &mut Context<Self>,
+    ) {
         if text.trim().is_empty() {
             return;
         }
         let text = SharedString::from(text);
         self.notice = Some(Notice {
             text: text.clone(),
+            detail: detail.map(SharedString::from),
             tone,
         });
         cx.notify();
@@ -903,9 +941,17 @@ impl TabContent {
         self.notice.as_ref()
     }
 
-    /// The refused POST's own words, while the notice is up (§4).
+    /// The line above the composer, while there is something to say (§4).
     pub fn notice_text(&self) -> Option<&str> {
         self.notice.as_ref().map(|notice| notice.text.as_ref())
+    }
+
+    /// The raw error behind that line, when it had to be paraphrased: the text
+    /// the notice's tooltip carries (§4).
+    pub fn notice_detail(&self) -> Option<&str> {
+        self.notice
+            .as_ref()
+            .and_then(|notice| notice.detail.as_deref())
     }
 
     /// A `POST` came back: the button takes its outcome, and a refusal is shown
@@ -931,7 +977,8 @@ impl TabContent {
         }
         if let Err(error) = result {
             let tone = notice_tone(&error);
-            self.show_notice(error.message, tone, cx);
+            let (text, detail) = notice_words(&error);
+            self.show_notice(text, detail, tone, cx);
         }
     }
 
@@ -1164,6 +1211,26 @@ mod tests {
         .expect("the refused post");
     }
 
+    /// A POST that never reached a server: the transport's own words are not what
+    /// a person needs, so the line says what happened and the raw error waits on
+    /// hover (§4).
+    fn transport_failed(
+        cx: &mut TestAppContext,
+        window: AnyWindowHandle,
+        tab: &Entity<TabContent>,
+        raw: &str,
+    ) {
+        let error = tab_engine::PostError {
+            status: None,
+            not_now: false,
+            message: raw.to_string(),
+        };
+        cx.update_window(window, |_, window, cx| {
+            tab.update(cx, |tab, cx| tab.finish_post(1, Err(error), window, cx));
+        })
+        .expect("the failed post");
+    }
+
     /// §4, §9.2: a refusal is a dim line above the composer, a failure is an
     /// error-coloured one, both in the server's own words, and neither is a modal:
     /// the page keeps its place and the line leaves on its own.
@@ -1205,6 +1272,25 @@ mod tests {
             );
         })
         .expect("the error notice frame");
+
+        // A POST the server never answered (§9.7): the socket's `io:` line is not
+        // what a person reads, so the line says what it means and the raw error
+        // is what hovers over it.
+        transport_failed(cx, window, &tab, "io: Connection refused (os error 61)");
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("composer-notice-error").label().as_deref(),
+                Some("Can't reach the swarm — it may be restarting."),
+                "an unanswered POST says what happened, not what the socket said"
+            );
+        })
+        .expect("the transport notice frame");
+        assert_eq!(
+            cx.update(|cx| tab.read(cx).notice_detail().map(str::to_owned)),
+            Some("io: Connection refused (os error 61)".to_string()),
+            "and the raw error is not thrown away: it is the notice's tooltip"
+        );
 
         // It goes away by itself, on the app clock (§4).
         let mut gone = false;
@@ -1293,6 +1379,74 @@ mod tests {
                 "the click reached the transcript's own state"
             );
         });
+    }
+
+    /// §4: a POST the server never answered has no reply to quote, so the line
+    /// says what happened in plain words — and keeps the raw error for the hover,
+    /// where `io: Connection refused (os error 61)` is the evidence.
+    #[test]
+    fn a_post_with_no_reply_is_said_in_plain_words() {
+        for raw in [
+            "io: Connection refused (os error 61)",
+            "connection closed",
+            "timeout: POST /prompt after 30s",
+            "protocol: expected an HTTP status line",
+        ] {
+            let error = tab_engine::PostError {
+                status: None,
+                not_now: false,
+                message: raw.to_owned(),
+            };
+            let (text, detail) = notice_words(&error);
+            assert_eq!(text, "Can't reach the swarm — it may be restarting.");
+            assert_eq!(detail.as_deref(), Some(raw), "the raw text is kept");
+        }
+
+        // Nothing was said, so there is nothing to hover.
+        let silent = tab_engine::PostError {
+            status: None,
+            not_now: false,
+            message: "  ".into(),
+        };
+        assert_eq!(notice_words(&silent).1, None);
+    }
+
+    /// §4: `503` is a reply — the server saying it is going away — and the line
+    /// says so instead of quoting the shutdown text.
+    #[test]
+    fn a_shutting_down_server_says_so() {
+        let error = tab_engine::PostError {
+            status: Some(503),
+            not_now: false,
+            message: "the server is shutting down".into(),
+        };
+        let (text, detail) = notice_words(&error);
+        assert_eq!(text, "The swarm is shutting down.");
+        assert_eq!(detail.as_deref(), Some("the server is shutting down"));
+
+        // Already the same words: nothing to add on hover.
+        let same = tab_engine::PostError {
+            status: Some(503),
+            not_now: false,
+            message: "The swarm is shutting down.".into(),
+        };
+        assert_eq!(notice_words(&same).1, None);
+    }
+
+    /// A reply is the server's own words, verbatim and with nothing hidden behind
+    /// a hover: `409`, `422`, `400` are the swarm talking about the request (§8).
+    #[test]
+    fn a_reply_is_shown_as_the_server_wrote_it() {
+        for status in [409u16, 422, 400, 404, 500] {
+            let error = tab_engine::PostError {
+                status: Some(status),
+                not_now: status == 409,
+                message: "unreadable code".into(),
+            };
+            let (text, detail) = notice_words(&error);
+            assert_eq!(text, "unreadable code", "{status}");
+            assert_eq!(detail, None, "{status}");
+        }
     }
 
     /// The notice decision is the server's, not ours (§8): `not_now` — tab_engine's

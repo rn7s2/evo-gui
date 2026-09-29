@@ -9,7 +9,6 @@ use gpui_kit::{
     base::Root, px, size, App, AppContext, Bounds, ElementId, Entity, Point, TestAppContext,
     WindowBounds, WindowHandle, WindowOptions,
 };
-use std::path::PathBuf;
 use workspace::{TabState, WorkspaceView};
 
 /// Opens the app's window with one empty tab, at a deterministic size.

@@ -419,8 +419,11 @@ fn elide_middle(text: &str, limit: usize) -> String {
 /// A transient line above the composer: the server's own words, dim when the
 /// answer was `409 not now` and in the danger colour for a failure (§4, §9.2).
 ///
-/// The two tones are two elements, so a test can tell them apart.
+/// The two tones are two elements, so a test can tell them apart. A line that had
+/// to be paraphrased — a POST the server never answered, `503` — carries the raw
+/// error text on hover, so nothing is lost by saying it in plain words.
 fn notice_line(notice: &Notice, cx: &App) -> AnyElement {
+    let detail = notice.detail.clone();
     h_flex()
         .id(notice.tone.element_id())
         .test_support()
@@ -435,6 +438,13 @@ fn notice_line(notice: &Notice, cx: &App) -> AnyElement {
         .text_color(match notice.tone {
             NoticeTone::Dim => cx.theme().muted_foreground,
             NoticeTone::Error => cx.theme().danger,
+        })
+        .when_some(detail, |this, detail| {
+            this.tooltip(move |window, cx| {
+                Tooltip::new(detail.clone())
+                    .max_w(px(520.))
+                    .build(window, cx)
+            })
         })
         .child(div().min_w_0().truncate().child(notice.text.clone()))
         .into_any_element()
