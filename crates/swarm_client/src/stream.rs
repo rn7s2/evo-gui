@@ -209,6 +209,9 @@ fn run(
     let mut cursor = target.since;
     let mut backoff = cfg.initial_backoff;
     let mut first = true;
+    // The first connection names its cursor in the query (`?since=N`, §5); a
+    // reconnect sends the standard `Last-Event-ID` header (docs/serve.md §Events).
+    let mut reconnected = false;
 
     'outer: loop {
         if stop.load(Ordering::SeqCst) {
@@ -246,7 +249,14 @@ fn run(
         }
         first = false;
 
-        match target.http.open_sse(&target.path, cursor) {
+        let (path, last_event_id) = if reconnected {
+            (target.path.clone(), cursor)
+        } else {
+            (with_since(&target.path, cursor), None)
+        };
+        reconnected = true;
+
+        match target.http.open_sse(&path, last_event_id) {
             Err(error) => {
                 if !send(
                     &tx,
@@ -350,6 +360,14 @@ fn bump(backoff: Duration, max: Duration) -> Duration {
     (backoff * 2).min(max)
 }
 
+/// The stream path with its cursor in the query: `/events?since=0`.
+fn with_since(path: &str, since: Option<i64>) -> String {
+    match since {
+        Some(n) => format!("{path}?since={n}"),
+        None => path.to_owned(),
+    }
+}
+
 /// Sleep in slices so a stop is noticed at once.
 fn sleep_or_stop(total: Duration, stop: &AtomicBool) -> bool {
     let deadline = Instant::now() + total;
@@ -362,5 +380,34 @@ fn sleep_or_stop(total: Duration, stop: &AtomicBool) -> bool {
             return true;
         }
         thread::sleep((deadline - now).min(Duration::from_millis(25)));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_query_names_the_cursor() {
+        assert_eq!(with_since("/events", Some(0)), "/events?since=0");
+        assert_eq!(with_since("/events", Some(57)), "/events?since=57");
+        assert_eq!(with_since("/lanes/2/events", Some(1)), "/lanes/2/events?since=1");
+        // No cursor: tail from now, no query at all.
+        assert_eq!(with_since("/events", None), "/events");
+    }
+
+    #[test]
+    fn backoff_doubles_and_stops_at_the_ceiling() {
+        let max = Duration::from_secs(10);
+        let mut backoff = Duration::from_millis(500);
+        let mut seen = vec![backoff];
+        for _ in 0..10 {
+            backoff = bump(backoff, max);
+            seen.push(backoff);
+        }
+        assert_eq!(seen[1], Duration::from_secs(1));
+        assert_eq!(seen[2], Duration::from_secs(2));
+        assert_eq!(*seen.last().unwrap(), max);
+        assert!(seen.windows(2).all(|pair| pair[1] >= pair[0]));
     }
 }
