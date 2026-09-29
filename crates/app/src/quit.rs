@@ -32,9 +32,16 @@ pub fn is_quitting(cx: &App) -> bool {
     cx.global::<Shell>().quitting
 }
 
-/// Start the quit sequence. Idempotent: the second caller (a close, then Cmd-Q)
-/// returns at once.
+/// Start the quit sequence, taking the tabs' engines out of the workspace.
+/// Idempotent: the second caller (a close, then Cmd-Q) returns at once.
 pub fn begin(cx: &mut App) {
+    let engines = take_engines(cx);
+    begin_with(cx, engines);
+}
+
+/// Start the quit sequence with engines the caller already took — the window's
+/// quit hook is handed them when the user closes the window (§9.8). Idempotent.
+pub fn begin_with(cx: &mut App, engines: Vec<EngineHandle>) {
     if is_quitting(cx) {
         return;
     }
@@ -43,9 +50,8 @@ pub fn begin(cx: &mut App) {
     let log = cx.global::<Shell>().log.clone();
     log.info("quitting: stopping every tab");
 
-    // Take the engines first, then persist: the bounds and the recents are what
-    // the next launch needs, and they do not depend on the swarms stopping.
-    let engines = take_engines(cx);
+    // The bounds and the recents are what the next launch needs, and they do not
+    // depend on the swarms stopping, so they are written first.
     let tabs = engines.len();
     save_state(cx);
 
@@ -102,21 +108,14 @@ fn save_state(cx: &mut App) {
 
 /// Every live tab's engine, taken out of the workspace.
 ///
-/// **Seam.** The tab list owns its engines (lane 1's `launch::Started`), and the
-/// call this needs — `WorkspaceView::take_engines` — is not there yet. Until it
-/// is, a quit cannot reach them and the swarms are left to
-/// `EVO_SERVE_WATCH_PID`: they stop when this process does. Wiring it is this
-/// one expression.
+/// The tab list owns its engines; this is the one place the app asks for them.
+/// A tab that has already been handed over (the window's quit hook) has none
+/// left, so a later call returns nothing rather than a second copy.
 pub fn take_engines(cx: &mut App) -> Vec<EngineHandle> {
     let Some(view) = view(cx) else {
         return Vec::new();
     };
-    // TODO(lane 1): `view.update(cx, |view, cx| view.take_engines(cx))`. Until
-    // it lands the tab list's engines are unreachable from the app, so a quit
-    // leaves the swarms to `EVO_SERVE_WATCH_PID` (§3): they stop when this
-    // process does.
-    let _tabs = view.read(cx).tabs().len();
-    Vec::new()
+    view.update(cx, |view, cx| view.take_engines(cx))
 }
 
 /// The window's root view, while it exists.

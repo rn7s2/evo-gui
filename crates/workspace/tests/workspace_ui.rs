@@ -138,6 +138,9 @@ fn closing_a_tab_selects_its_neighbour(cx: &mut TestAppContext) {
     cx.update_window(handle.into(), |_, window, cx| {
         window.render_frame(cx);
         window.click("tab-add", cx);
+        // Only the tab being shown carries a close button, so the first tab is
+        // selected before it is closed — which is what a user does.
+        window.click(tab_label(first), cx);
         window.click(tab_close(first), cx);
     })
     .unwrap();
@@ -176,47 +179,31 @@ fn closing_the_last_tab_leaves_a_fresh_empty_tab(cx: &mut TestAppContext) {
     });
 }
 
-/// A tab whose swarm came up draws the tab page: the real transcript view and
-/// the real composer, with no todo panel while that agent has no todos (§7.3).
+/// Only the tab being shown carries a close button: an × on every tab is noise,
+/// and an invisible one would still be clickable (§7.1).
 #[gpui_kit::test]
-fn a_running_tab_shows_the_transcript_and_the_composer(cx: &mut TestAppContext) {
+fn only_the_shown_tab_carries_a_close_button(cx: &mut TestAppContext) {
     let (handle, view) = open_workspace(cx);
-    let folder = PathBuf::from("/tmp/evo-desktop-a-running-tab");
-
-    cx.update(|cx| {
-        view.update(cx, |view, cx| {
-            view.selected_tab().update(cx, |tab, cx| {
-                tab.begin_boot(folder.clone(), cx);
-                tab.mark_running(cx);
-            });
-        });
-    });
+    let first = cx.update(|cx| tab_id(&view, 0, cx));
 
     cx.update_window(handle.into(), |_, window, cx| {
         window.render_frame(cx);
-        assert!(window.find("tab-page").visible());
-        assert!(window.find("transcript-column").visible());
-        assert!(window.find("composer-column").visible());
-        assert!(window.find(composer::READOUT_ID).visible());
-        assert_eq!(
-            window.find(composer::BUTTON_ID).label(),
-            Some("Send"),
-            "an idle coordinator offers Send"
+        window.click("tab-add", cx);
+        let second = tab_id(&view, 1, cx);
+        window.render_frame(cx);
+        assert!(
+            window.try_find(tab_close(first)).is_none(),
+            "the tab that is not shown has no close button"
         );
         assert!(
-            window.try_find("todo-panel").is_none(),
-            "an agent with no todos shows no panel"
+            window.try_find(tab_close(second)).is_some(),
+            "the tab being shown has one"
         );
+
+        window.click(tab_label(first), cx);
+        window.render_frame(cx);
+        assert!(window.try_find(tab_close(first)).is_some());
+        assert!(window.try_find(tab_close(second)).is_none());
     })
     .unwrap();
-
-    cx.update(|cx| {
-        let tab = view.read(cx).selected_tab().read(cx);
-        assert_eq!(
-            tab.state(),
-            &TabState::Running { folder },
-            "the tab stays on the page it moved to"
-        );
-        assert!(tab.transcript().read(cx).rows(cx).is_empty());
-    });
 }

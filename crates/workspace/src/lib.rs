@@ -9,10 +9,12 @@ mod bridge;
 mod chrome;
 mod empty_tab;
 mod history;
+mod launch;
 mod tab;
 mod tab_page;
 
 pub use bridge::{Bridge, BridgeSender, Revision, Tagged, Worker};
 pub use chrome::{fit_to_work_area, initial_window_bounds, window_options, WorkspaceView};
 pub use history::{placeholder_history, HistoryRow};
+pub use launch::{Launch, SwarmConfig, SHUTDOWN_DEADLINE, stop_in_background};
 pub use tab::{TabContent, TabContentEvent, TabId, TabState};

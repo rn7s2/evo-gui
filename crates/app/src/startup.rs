@@ -3,29 +3,30 @@
 //!
 //! Three things happen here, in this order:
 //!
-//! 1. the cached catalog (`model-cache.json`) is pushed straight away — it is
-//!    already on disk, so the choosers fill in the first frame;
+//! 1. the cached catalog (`model-cache.json`) is handed to the empty tabs
+//!    straight away — it is already on disk, so the choosers fill in the first
+//!    frame;
 //! 2. the session scan (`store::history`) runs on its own thread and its rows
 //!    arrive later;
-//! 3. if the cache is missing or older than [`CACHE_MAX_AGE`], a catalog probe
+//! 3. if that cache is missing or older than [`CACHE_MAX_AGE`], a catalog probe
 //!    (`tab_engine::catalog`, two throwaway servers under
 //!    `~/.evo/desktop/probe`) refreshes it, is written back through `store`, and
-//!    pushed when it lands.
+//!    handed over when it lands.
 //!
-//! Nothing here touches `~/.evo/desktop` itself: persistence is the store
-//! crate's, and the probe's scratch files live under `probe/`.
+//! Each arrival goes through [`crate::launcher`], which both pushes it into the
+//! tabs that exist and remembers it for the ones created later.
 
 use std::time::Duration;
 
 use gpui_kit::App;
 
-use store::app_state::{Binaries, Recent};
-use store::history::{self, HistoryEntry, ScanBudget};
+use store::app_state::Binaries;
+use store::history::{self, ScanBudget};
 use store::model_cache::ModelCache;
 use store::paths::Root;
+use store::time;
 
-use workspace::{TabContent, TabState, WorkspaceView};
-
+use crate::launcher;
 use crate::logging::AppLog;
 use crate::Shell;
 
@@ -47,7 +48,7 @@ pub fn cache_is_stale(cache: &ModelCache, now_epoch: u64) -> bool {
 
 /// Start the launch-time loads. Called once, after the window exists.
 pub fn start(cx: &mut App) {
-    let (root, log, cache, recents, binaries, view) = snapshot(cx);
+    let (root, log, cache, binaries) = snapshot(cx);
     log.info(format!(
         "startup: cached catalog has {} model(s), fetched {}",
         cache.models().len(),
@@ -55,45 +56,58 @@ pub fn start(cx: &mut App) {
     ));
 
     // 1. The cache we already have goes out first.
-    push(cx, &view, &log, TabData::Catalog(Box::new(cache.clone())));
+    launcher::set_catalog(cx, cache.clone(), None);
+    log.info(format!(
+        "startup: {} empty tab(s) will show it",
+        launcher::empty_tab_count(cx)
+    ));
 
     // 2. The session scan, on the store's own thread, bridged onto an
     //    `async_channel` so the rows land on a gpui task.
-    push(cx, &view, &log, TabData::Scanning(true));
-    let scan = history::scan_in_background(history::sessions_dir(), ScanBudget::default());
+    launcher::set_scanning(cx, true);
+    let sessions = history::sessions_dir();
+    let scan = history::scan_in_background(sessions.clone(), ScanBudget::default());
     let (scan_tx, scan_rx) = async_channel::bounded(1);
-    std::thread::Builder::new()
+    let bridged = std::thread::Builder::new()
         .name("evo-desktop-history".to_owned())
         .spawn(move || {
             if let Ok(outcome) = scan.recv() {
                 let _ = scan_tx.send_blocking(outcome);
             }
-        })
-        .ok();
+        });
+    if let Err(error) = bridged {
+        log.error(format!("could not start the history bridge: {error}"));
+    }
     let scan_log = log.clone();
-    let scan_view = view.clone();
+    let scan_sessions = sessions.clone();
     cx.spawn(async move |cx| {
         let Ok(outcome) = scan_rx.recv().await else {
             return;
         };
         cx.update(|cx| {
             // The app's own recents join the scan (§9.5, §14.3).
+            let recents = cx.global::<Shell>().recents.clone();
             let entries = history::merge(outcome.entries, &recents);
             scan_log.info(format!(
-                "history: {} entries ({} files read of {} seen{})",
+                "history: {} row(s) ({} files read of {} seen{})",
                 entries.len(),
                 outcome.files_read,
                 outcome.files_seen,
                 if outcome.stopped_early { ", stopped early" } else { "" }
             ));
-            push(cx, &scan_view, &scan_log, TabData::History(entries));
-            push(cx, &scan_view, &scan_log, TabData::Scanning(false));
+            let error = (!scan_sessions.is_dir()).then(|| {
+                format!("{} could not be read", scan_sessions.display())
+            });
+            if let Some(error) = &error {
+                scan_log.warn(format!("history: {error}"));
+            }
+            launcher::set_history(cx, entries, error);
         });
     })
     .detach();
 
     // 3. The catalog probe, when the cache cannot be trusted.
-    if cache_is_stale(&cache, store::time::now_epoch()) {
+    if cache_is_stale(&cache, time::now_epoch()) {
         log.info(format!(
             "catalog: probing with {} (cache older than {:?} or missing)",
             binaries.evo_agent.display(),
@@ -102,39 +116,37 @@ pub fn start(cx: &mut App) {
         let probe = tab_engine::catalog::learn(binaries.evo_agent.clone(), root.probe_dir());
         let probe_log = log.clone();
         let probe_root = root.clone();
-        let probe_view = view;
         cx.spawn(async move |cx| {
             let Ok(update) = probe.recv().await else {
                 return;
             };
-            cx.update(|cx| {
-                match update {
-                    tab_engine::catalog::CatalogUpdate::Done { registry, kernel_apis } => {
-                        let mut cache = ModelCache::from_probe(registry);
-                        if let Some(apis) = kernel_apis {
-                            cache = cache.with_kernel_apis(apis);
-                        }
-                        probe_log.info(format!(
-                            "catalog: probed {} model(s), {} kernel api(s)",
-                            cache.models().len(),
-                            cache.kernel_apis.len()
+            cx.update(|cx| match update {
+                tab_engine::catalog::CatalogUpdate::Done { registry, kernel_apis } => {
+                    let mut cache = ModelCache::from_probe(registry);
+                    if let Some(apis) = kernel_apis {
+                        cache = cache.with_kernel_apis(apis);
+                    }
+                    probe_log.info(format!(
+                        "catalog: probed {} model(s), {} kernel api(s)",
+                        cache.models().len(),
+                        cache.kernel_apis.len()
+                    ));
+                    if let Err(error) = cache.save(&probe_root) {
+                        probe_log.error(format!(
+                            "could not save {}: {error}",
+                            probe_root.model_cache().display()
                         ));
-                        if let Err(error) = cache.save(&probe_root) {
-                            probe_log.error(format!(
-                                "could not save {}: {error}",
-                                probe_root.model_cache().display()
-                            ));
-                        }
-                        push(cx, &probe_view, &probe_log, TabData::Catalog(Box::new(cache)));
                     }
-                    tab_engine::catalog::CatalogUpdate::Failed { message, log_tail } => {
-                        // The cache we have stays in use; the tab simply keeps
-                        // showing what it had (§9.4).
-                        probe_log.error(format!("catalog probe failed: {message}"));
-                        if !log_tail.is_empty() {
-                            probe_log.error(format!("catalog probe log tail:\n{log_tail}"));
-                        }
+                    launcher::set_catalog(cx, cache, None);
+                }
+                tab_engine::catalog::CatalogUpdate::Failed { message, log_tail } => {
+                    // The cache we have stays in use; the tab says the catalog
+                    // could not be refreshed (§9.4).
+                    probe_log.error(format!("catalog probe failed: {message}"));
+                    if !log_tail.is_empty() {
+                        probe_log.error(format!("catalog probe log tail:\n{log_tail}"));
                     }
+                    launcher::set_catalog_error(cx, Some(message));
                 }
             });
         })
@@ -142,62 +154,9 @@ pub fn start(cx: &mut App) {
     }
 }
 
-/// One of the three things the empty tab is fed.
-pub enum TabData {
-    Catalog(Box<ModelCache>),
-    History(Vec<HistoryEntry>),
-    /// The scan started (`true`) or finished (`false`) — the empty tab's
-    /// "scanning…" state.
-    Scanning(bool),
-}
-
-/// Push one piece of launch data into every empty tab.
-///
-/// **Seam.** The empty tab's setters are lane 6's — `set_registry` /
-/// `set_kernel_apis` / `set_history_entries` / `set_scanning`. Until they exist
-/// this records what would have gone where; the durable half (the model cache in
-/// `~/.evo/desktop/model-cache.json`) is already written, so a later launch
-/// still benefits. Wiring them is this one function.
-pub fn push(cx: &mut App, view: &Option<gpui_kit::WeakEntity<WorkspaceView>>, log: &AppLog, data: TabData) {
-    let empty = empty_tabs(cx, view);
-    match data {
-        TabData::Catalog(cache) => log.info(format!(
-            "catalog: {} model(s), {} kernel api(s) ready for {empty} empty tab(s)",
-            cache.models().len(),
-            cache.kernel_apis.len()
-        )),
-        TabData::History(entries) => {
-            log.info(format!("history: {} row(s) ready for {empty} empty tab(s)", entries.len()))
-        }
-        TabData::Scanning(true) => log.info(format!("history: scanning ({empty} empty tab(s))")),
-        TabData::Scanning(false) => log.info("history: scan finished"),
-    }
-}
-
-/// How many tabs are still empty (no folder chosen, no swarm).
-fn empty_tabs(cx: &mut App, view: &Option<gpui_kit::WeakEntity<WorkspaceView>>) -> usize {
-    let Some(view) = view.as_ref().and_then(|view| view.upgrade()) else {
-        return 0;
-    };
-    view.read(cx)
-        .tabs()
-        .iter()
-        .filter(|tab: &&gpui_kit::Entity<TabContent>| matches!(tab.read(cx).state(), TabState::Empty))
-        .count()
-}
-
-type Snapshot = (Root, AppLog, ModelCache, Vec<Recent>, Binaries, Option<gpui_kit::WeakEntity<WorkspaceView>>);
-
-fn snapshot(cx: &App) -> Snapshot {
+fn snapshot(cx: &App) -> (Root, AppLog, ModelCache, Binaries) {
     let shell = cx.global::<Shell>();
-    (
-        shell.root.clone(),
-        shell.log.clone(),
-        shell.cache.clone(),
-        shell.recents.clone(),
-        shell.binaries.clone(),
-        shell.view.clone(),
-    )
+    (shell.root.clone(), shell.log.clone(), shell.launcher.cache.clone(), shell.binaries.clone())
 }
 
 #[cfg(test)]
@@ -211,8 +170,7 @@ mod tests {
 
     #[test]
     fn a_missing_cache_is_stale() {
-        let empty = ModelCache::default();
-        assert!(cache_is_stale(&empty, 1_000));
+        assert!(cache_is_stale(&ModelCache::default(), 1_000));
     }
 
     #[test]

@@ -16,9 +16,12 @@ gpui-kit = { workspace = true }
 anyhow = { workspace = true }
 workspace = { path = "../workspace" }
 store = { path = "../store" }
+session = { path = "../session" }
 tab_engine = { path = "../tab_engine" }
+swarm_client = { path = "../swarm_client" }
 serde_json = { workspace = true }
 async-channel = "2"
+libc = "0.2"
 
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }

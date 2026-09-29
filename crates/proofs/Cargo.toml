@@ -5,3 +5,15 @@ edition.workspace = true
 publish = false
 
 [dependencies]
+# The view models the tab page holds, and the two crates the UI sits on top of.
+session = { path = "../session" }
+store = { path = "../store" }
+tab_engine = { path = "../tab_engine" }
+serde_json = { workspace = true }
+async-channel = "2"
+
+[dev-dependencies]
+# The real-swarm fixture (temp HOME + stub provider + installed binaries). Off in
+# a normal build of this crate: only the proofs compile it.
+swarm_client = { path = "../swarm_client", features = ["test-harness"] }
+libc = "0.2"

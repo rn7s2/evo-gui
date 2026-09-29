@@ -1,0 +1,422 @@
+//! A tab driving a **real** swarm, in a test window — the M0/M1 proof.
+//!
+//! Every test here starts an actual `evo-swarm serve` through `swarm_client`'s
+//! harness (a temp `HOME` whose `init.lisp` registers the scripted stub model),
+//! launches a tab into it through the production path, and then drives the tab
+//! the way a user does: type in the composer, press Enter, click a lane row.
+//!
+//! The engine runs on its own threads and hands its updates to a `cx.spawn` task,
+//! so these tests pump the UI thread (`wait_for`) instead of blocking on it.
+//! Against GPUI's deterministic scheduler a real thread waking a GPUI task is
+//! rejected as non-determinism, so each test opts into parking — the supported
+//! switch for a test that talks to real I/O.
+
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use gpui_kit::test::TestWindowExt as _;
+use gpui_kit::{
+    AppContext as _, Bounds, Entity, Point, TestAppContext, WindowBounds, WindowHandle,
+    WindowOptions, base::Root, px, size,
+};
+use session::{AgentKey, LaunchPlan};
+use swarm_client::harness::{Fixture, HarnessConfig, STUB_MODEL};
+use workspace::{Launch, SwarmConfig, TabState, WorkspaceView};
+
+/// How long a test waits for the swarm before it gives up (§3 gives boot 90 s).
+const WAIT: Duration = Duration::from_secs(120);
+
+/// A swarm, a window and the tab that drives it.
+struct Bench {
+    fixture: Fixture,
+    window: WindowHandle<Root>,
+    view: Entity<WorkspaceView>,
+}
+
+fn bench(cx: &mut TestAppContext, workers: u16) -> Bench {
+    // A real swarm's threads wake this test's tasks: that is the point.
+    cx.dispatcher.allow_parking();
+
+    let fixture = Fixture::new(HarnessConfig {
+        workers,
+        model: STUB_MODEL.to_owned(),
+        ..HarnessConfig::default()
+    })
+    .expect("a stub swarm to run against");
+    let config = Arc::new(SwarmConfig {
+        swarm_bin: fixture.bins.swarm.clone(),
+        agent_bin: fixture.bins.agent.clone(),
+        root: store::paths::Root::at(fixture.dir.join("app")),
+        env: fixture.env(),
+        env_remove: fixture.env_remove(),
+    });
+
+    cx.update(gpui_kit::init);
+    let (window, view) = cx
+        .update(|cx| {
+            gpui_kit::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds {
+                        origin: Point::default(),
+                        size: size(px(1280.), px(800.)),
+                    })),
+                    ..Default::default()
+                },
+                cx,
+                |window, cx| cx.new(|cx| WorkspaceView::with_config(config, window, cx)),
+            )
+        })
+        .expect("open the workspace window");
+
+    Bench {
+        fixture,
+        window: window.downcast::<Root>().expect("base Root"),
+        view,
+    }
+}
+
+/// Start the first tab's swarm in FOLDER (§3).
+fn launch(
+    cx: &mut TestAppContext,
+    bench: &Bench,
+    tab: &Entity<workspace::TabContent>,
+    folder: PathBuf,
+    workers: Option<u16>,
+) {
+    cx.update_window(bench.window.into(), |_, window, cx| {
+        tab.update(cx, |tab, cx| {
+            tab.launch(
+                Launch::New {
+                    folder,
+                    plan: LaunchPlan {
+                        workers,
+                        ..LaunchPlan::default()
+                    },
+                },
+                window,
+                cx,
+            )
+        });
+    })
+    .unwrap();
+}
+
+/// Type a turn into the composer and press Enter — the app's own send path (§9.2).
+fn prompt(
+    cx: &mut TestAppContext,
+    bench: &Bench,
+    tab: &Entity<workspace::TabContent>,
+    text: &str,
+) {
+    cx.update_window(bench.window.into(), |_, window, cx| {
+        // The composer has to have been laid out before it can take focus, so
+        // the frame the user is looking at is drawn first.
+        window.render_frame(cx);
+        tab.update(cx, |tab, cx| {
+            let composer = tab.composer().clone();
+            composer.update(cx, |composer, cx| composer.focus_input(window, cx));
+        });
+        window.input(text, cx);
+        window.press("enter", cx);
+    })
+    .unwrap();
+}
+
+/// Pump the UI thread until `done` holds, or fail. The engine's work happens on
+/// threads of its own and arrives through a channel, so waiting means keeping the
+/// executor running, not sleeping on the state.
+fn wait_for(
+    cx: &mut TestAppContext,
+    what: &str,
+    mut done: impl FnMut(&mut TestAppContext) -> bool,
+) {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        cx.run_until_parked();
+        if done(cx) {
+            return;
+        }
+        if Instant::now() >= deadline {
+            panic!("timed out waiting for {what}");
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+fn state(cx: &mut TestAppContext, tab: &Entity<workspace::TabContent>) -> TabState {
+    cx.update(|cx| tab.read(cx).state().clone())
+}
+
+fn tab_rows(cx: &mut TestAppContext, tab: &Entity<workspace::TabContent>) -> Vec<session::Row> {
+    cx.update(|cx| {
+        tab.read(cx)
+            .transcript()
+            .map(|view| view.read(cx).rows(cx).to_vec())
+            .unwrap_or_default()
+    })
+}
+
+/// How much assistant text the shown transcript carries: the number a streaming
+/// message grows.
+fn assistant_chars(rows: &[session::Row]) -> usize {
+    rows.iter()
+        .filter_map(|row| match &row.kind {
+            session::RowKind::Assistant { markdown, .. } => Some(markdown.chars().count()),
+            _ => None,
+        })
+        .sum()
+}
+
+/// Whether lane N is working, from the tab's own lane list.
+fn lane_working(cx: &mut TestAppContext, tab: &Entity<workspace::TabContent>, n: u64) -> bool {
+    cx.update(|cx| {
+        tab.read(cx).model().is_some_and(|model| {
+            model
+                .lane_rows()
+                .iter()
+                .any(|lane| lane.n == n && lane.status == session::LaneStatus::Working)
+        })
+    })
+}
+
+fn selected_agent(cx: &mut TestAppContext, tab: &Entity<workspace::TabContent>) -> AgentKey {
+    cx.update(|cx| tab.read(cx).selected_agent())
+}
+
+fn select(cx: &mut TestAppContext, tab: &Entity<workspace::TabContent>, agent: AgentKey) {
+    cx.update(|cx| tab.update(cx, |tab, cx| tab.select_agent(agent, cx)));
+}
+
+/// One tab boots a swarm of its own, streams a turn into its transcript, and the
+/// composer's single button reports the outcome (§3, §9.1, §9.2).
+#[gpui_kit::test]
+fn a_tab_boots_a_real_swarm_and_streams_a_turn(cx: &mut TestAppContext) {
+    let b = bench(cx, 2);
+    let tab = cx.update(|cx| b.view.read(cx).selected_tab().clone());
+    launch(cx, &b, &tab, b.fixture.project.clone(), Some(2));
+
+    wait_for(cx, "the swarm to answer /health", |cx| {
+        matches!(state(cx, &tab), TabState::Running { .. })
+    });
+
+    // The page is the real one: the coordinator's readout comes from /state and
+    // /registry, not from a placeholder (§7.3). It arrives right after Ready.
+    wait_for(cx, "the readout to name the model", |cx| {
+        cx.update(|cx| {
+            tab.read(cx)
+                .model()
+                .is_some_and(|model| model.readout_text().contains(STUB_MODEL))
+        })
+    });
+
+    prompt(cx, &b, &tab, "SLOW say something long");
+
+    // The turn reached the swarm: the user's own row is in the transcript.
+    wait_for(cx, "the user's row to appear", |cx| {
+        tab_rows(cx, &tab)
+            .iter()
+            .any(|row| matches!(&row.kind, session::RowKind::User { text } if text.contains("SLOW")))
+    });
+
+    // The assistant row is rendered markdown **while it grows**: two samples that
+    // differ are the proof that deltas are landing in the view as they arrive.
+    wait_for(cx, "the first delta", |cx| {
+        assistant_chars(&tab_rows(cx, &tab)) > 0
+    });
+    let first = assistant_chars(&tab_rows(cx, &tab));
+    wait_for(cx, "more of the message", |cx| {
+        assistant_chars(&tab_rows(cx, &tab)) > first + 20
+    });
+
+    // The turn ends; the settled resync rebuilds the same rows from /transcript.
+    wait_for(cx, "the run to settle", |cx| {
+        cx.update(|cx| {
+            tab.read(cx)
+                .model()
+                .is_some_and(|model| model.activity() == session::Activity::Idle)
+        })
+    });
+    wait_for(cx, "the resync to rebuild the rows", |cx| {
+        let rows = tab_rows(cx, &tab);
+        rows.iter().any(|row| matches!(row.kind, session::RowKind::User { .. }))
+            && assistant_chars(&rows) > 100
+    });
+
+    // §9.2: the button is a Send button again, disabled because the draft was
+    // cleared only after the server took the text.
+    cx.update_window(b.window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(
+            window.find(composer::BUTTON_ID).label(),
+            Some("Send"),
+            "an idle coordinator offers Send again"
+        );
+        assert!(window.find("tab-page").visible());
+        assert!(window.find("agent-column").visible());
+    })
+    .unwrap();
+    // The draft was cleared only after the server took it, so the Send face has
+    // nothing to do and clicking it does nothing (§9.2).
+    cx.update(|cx| {
+        let composer = tab.read(cx).composer().read(cx);
+        assert!(
+            !composer.is_action_enabled(cx),
+            "an empty draft leaves the button inert"
+        );
+        assert_eq!(composer.face(), composer::ActionFace::Send);
+    });
+}
+
+/// A delegated lane: the coordinator's transcript shows the tool call, and
+/// selecting the lane shows **its own** transcript — its rows, its stream
+/// (§7.3, §9.3, and docs/review-1.md F5).
+#[gpui_kit::test]
+fn a_delegated_lane_shows_its_own_transcript(cx: &mut TestAppContext) {
+    let b = bench(cx, 2);
+    let tab = cx.update(|cx| b.view.read(cx).selected_tab().clone());
+    launch(cx, &b, &tab, b.fixture.project.clone(), Some(2));
+    wait_for(cx, "the swarm to answer /health", |cx| {
+        matches!(state(cx, &tab), TabState::Running { .. })
+    });
+
+    // Choose the lane first: its stream is opened while it is idle, so what it
+    // streams when it starts working arrives live (§9.3 — one lane, the shown one).
+    select(cx, &tab, AgentKey::Lane(1));
+    assert_eq!(selected_agent(cx, &tab), AgentKey::Lane(1));
+
+    let coordinator = session::AgentKey::Coordinator;
+    prompt(
+        cx,
+        &b,
+        &tab,
+        "CALL delegate {\"lane\":1,\"task\":\"SLOW lane work for the test\"}",
+    );
+
+    wait_for(cx, "lane 1 to take the work", |cx| lane_working(cx, &tab, 1));
+    wait_for(cx, "the lane's own transcript to stream", |cx| {
+        assistant_chars(&tab_rows(cx, &tab)) > 20
+    });
+
+    // The lane's rows are the lane's: its own task, its own answer.
+    let lane_rows = tab_rows(cx, &tab);
+    assert!(
+        lane_rows.iter().any(|row| matches!(
+            &row.kind,
+            session::RowKind::User { text } if text.contains("lane work for the test")
+        )),
+        "the lane's transcript carries the task it was given: {lane_rows:#?}"
+    );
+
+    // The coordinator's own transcript is untouched by the lane's rows: it has
+    // the turn of the user, and the delegate tool call.
+    select(cx, &tab, coordinator);
+    wait_for(cx, "the coordinator's transcript to show the delegation", |cx| {
+        tab_rows(cx, &tab).iter().any(|row| {
+            matches!(&row.kind, session::RowKind::Tool { name, .. } if name == "delegate")
+                || matches!(&row.kind, session::RowKind::User { text } if text.contains("delegate"))
+        })
+    });
+
+    let coordinator_rows = tab_rows(cx, &tab);
+    assert!(
+        !coordinator_rows.iter().any(|row| matches!(
+            &row.kind,
+            session::RowKind::User { text } if text.contains("lane work for the test")
+        )),
+        "the lane's task text belongs to the lane's transcript, not the coordinator's"
+    );
+}
+
+/// §11's M0 requirement: two tabs streaming at once, with the UI thread still
+/// answering. The numbers are printed so the run reports them.
+#[gpui_kit::test]
+fn two_tabs_stream_at_once_and_the_ui_stays_responsive(cx: &mut TestAppContext) {
+    let b = bench(cx, 2);
+    let first = cx.update(|cx| b.view.read(cx).selected_tab().clone());
+    launch(cx, &b, &first, b.fixture.project.clone(), Some(2));
+
+    // A second swarm, in a project of its own. It shares the fixture's HOME —
+    // one stub provider serves both, and each swarm keeps its own session and
+    // lane directories inside it.
+    let second_project = b.fixture.dir.join("proj2");
+    std::fs::create_dir_all(&second_project).expect("a second project");
+    cx.update_window(b.window.into(), |_, window, cx| {
+        let second = b.view.update(cx, |view, cx| view.open_empty_tab(window, cx));
+        second.update(cx, |tab, cx| {
+            tab.launch(
+                Launch::New {
+                    folder: second_project.clone(),
+                    plan: LaunchPlan {
+                        workers: Some(2),
+                        ..LaunchPlan::default()
+                    },
+                },
+                window,
+                cx,
+            )
+        });
+    })
+    .unwrap();
+    let second = cx.update(|cx| b.view.read(cx).selected_tab().clone());
+
+    wait_for(cx, "both swarms to answer /health", |cx| {
+        matches!(state(cx, &first), TabState::Running { .. })
+            && matches!(state(cx, &second), TabState::Running { .. })
+    });
+
+    // Both stream at once: 60 deltas a tenth apart, each.
+    prompt(cx, &b, &first, "SLOW first tab");
+    select(cx, &second, AgentKey::Coordinator);
+    prompt(cx, &b, &second, "SLOW second tab");
+
+    wait_for(cx, "both tabs to be streaming", |cx| {
+        assistant_chars(&tab_rows(cx, &first)) > 0 && assistant_chars(&tab_rows(cx, &second)) > 0
+    });
+
+    // While both stream, sample what the UI thread costs: draining the updates
+    // that arrived, and drawing the frame the user is looking at.
+    let mut drain = Vec::new();
+    let mut frame = Vec::new();
+    for _ in 0..40 {
+        let started = Instant::now();
+        cx.run_until_parked();
+        drain.push(started.elapsed());
+
+        let started = Instant::now();
+        cx.update_window(b.window.into(), |_, window, cx| window.render_frame(cx))
+            .unwrap();
+        frame.push(started.elapsed());
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let stat = |samples: &[Duration]| {
+        let max = samples.iter().max().copied().unwrap_or_default();
+        let mean =
+            Duration::from_secs_f64(samples.iter().map(|d| d.as_secs_f64()).sum::<f64>() / samples.len() as f64);
+        (mean, max)
+    };
+    let (drain_mean, drain_max) = stat(&drain);
+    let (frame_mean, frame_max) = stat(&frame);
+    println!(
+        "[two tabs streaming] update drain: mean {drain_mean:?}, max {drain_max:?} | \
+         frame: mean {frame_mean:?}, max {frame_max:?}"
+    );
+
+    // Both transcripts kept growing while we measured: the streams really were
+    // live for the whole sample.
+    let first_chars = assistant_chars(&tab_rows(cx, &first));
+    let second_chars = assistant_chars(&tab_rows(cx, &second));
+    assert!(first_chars > 100 && second_chars > 100, "{first_chars} / {second_chars}");
+
+    // A frame is what a user feels: it has to stay in interactive territory even
+    // with two swarms streaming through the same UI thread.
+    assert!(
+        frame_max < Duration::from_millis(250),
+        "a frame took {frame_max:?} while two tabs streamed"
+    );
+    assert!(
+        drain_max < Duration::from_millis(250),
+        "draining the updates took {drain_max:?} while two tabs streamed"
+    );
+}

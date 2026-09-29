@@ -19,26 +19,30 @@
 //! ```
 
 mod bounds;
+mod launcher;
 mod logging;
+mod menus;
 mod quit;
 mod startup;
 
 pub use bounds::{Tracker, window_bounds, window_options};
+pub use launcher::{
+    LauncherData, empty_tab_count, history_entries, on_live_registry, registry_payload,
+    utc_offset_seconds,
+};
 pub use logging::{AppLog, Level, LOG_NAME};
+pub use menus::{CloseTab, NewTab, QuitApp};
 pub use quit::{SHUTDOWN_DEADLINE, begin as begin_quit, is_quitting, take_engines};
-pub use startup::{CACHE_MAX_AGE, TabData, cache_is_stale};
+pub use startup::{CACHE_MAX_AGE, cache_is_stale};
 
-use gpui_kit::{App, Entity, Global, KeyBinding, QuitMode, Subscription, WeakEntity};
 use gpui_kit::prelude::*;
+use gpui_kit::{App, Entity, Global, QuitMode, Subscription, WeakEntity};
 
 use store::app_state::{AppState, Binaries, Recent};
 use store::model_cache::ModelCache;
 use store::paths::Root;
 use store::single::{Activation, SingleInstance};
-use workspace::WorkspaceView;
-
-
-gpui_kit::actions!(evo_desktop, [QuitApp]);
+use workspace::{TabContent, WorkspaceView};
 
 /// Everything the app's threads share: where its files are, what the launch
 /// loaded, and the window it is driving.
@@ -53,8 +57,9 @@ pub struct Shell {
     pub view: Option<WeakEntity<WorkspaceView>>,
     /// The bounds watcher, so the quit path can ask where the window was.
     pub tracker: Option<Entity<Tracker>>,
-    /// The catalog the launch found on disk.
-    pub cache: ModelCache,
+    /// What every empty tab is shown (§9.4, §9.5): the catalog, the history,
+    /// and the errors when either could not be learned.
+    pub launcher: LauncherData,
     /// The binaries this launch spawns.
     pub binaries: Binaries,
     /// The recents `app.json` held at launch; the session scan merges with them
@@ -83,7 +88,7 @@ impl Shell {
             log,
             binaries,
             recents,
-            cache,
+            launcher: LauncherData::new(cache),
             view: None,
             tracker: None,
             quitting: false,
@@ -159,10 +164,18 @@ pub fn run() {
             gpui_kit::init(cx);
             Shell::new(root.clone(), log.clone(), binaries, recents, cache).install(cx);
 
-            // Cmd-Q goes through the same sequence as closing the window, rather
-            // than ending the process on the spot and leaving swarms behind.
-            cx.bind_keys([KeyBinding::new("cmd-q", QuitApp, None)]);
-            cx.on_action(|_: &QuitApp, cx: &mut App| quit::begin(cx));
+            // The menu bar, its shortcuts, and the app's action handlers.
+            menus::install(cx);
+
+            // A tab created later — the `+`, or one opened while the scan is
+            // still walking — starts with what the launch already knows.
+            let observing = cx.observe_new::<TabContent>(|tab, window, cx| {
+                let Some(window) = window else {
+                    return;
+                };
+                launcher::apply_to(tab, window, cx);
+            });
+            cx.update_global::<Shell, _>(|shell, _| shell.subscriptions.push(observing));
 
             let options = bounds::window_options(cx, stored_bounds);
             let opened = gpui_kit::open_window(options, cx, |window, cx: &mut App| {
@@ -180,6 +193,17 @@ pub fn run() {
                 }
             };
             log.info("window open");
+            // Closing the window: the workspace hands the tabs' engines over, and
+            // the app owns stopping them.
+            view.update(cx, |view, _cx| {
+                view.set_quit_hook(Box::new(|request, _window, cx| {
+                    quit::begin_with(cx, request.engines);
+                    // Let the close go ahead: the app is still alive while the
+                    // ladders run (the quit mode is explicit), and ends itself
+                    // when they are done.
+                    false
+                }));
+            });
             let closing = cx.on_window_closed(|cx: &mut App, _id| quit::begin(cx));
             cx.update_global::<Shell, _>(|shell, _| {
                 shell.view = Some(view.downgrade());

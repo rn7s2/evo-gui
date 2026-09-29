@@ -1735,8 +1735,11 @@ dependencies = [
  "anyhow",
  "async-channel",
  "gpui-kit",
+ "libc",
  "serde_json",
+ "session",
  "store",
+ "swarm_client",
  "tab_engine",
  "workspace",
 ]
@@ -5168,6 +5171,19 @@ checksum = "4488a4a36b9a4ba6b9334a32a39971f77c1436ec82c38707bce707699cc3bbcb"
 dependencies = [
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "proofs"
+version = "0.1.0"
+dependencies = [
+ "async-channel",
+ "libc",
+ "serde_json",
+ "session",
+ "store",
+ "swarm_client",
+ "tab_engine",
 ]
 
 [[package]]
