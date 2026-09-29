@@ -12,11 +12,12 @@ use gpui_kit::component::{
     h_flex,
     input::{InputEvent, Textarea, TextareaState},
     tooltip::Tooltip,
-    v_flex, ActiveTheme as _, Disableable as _,
+    v_flex, ActiveTheme as _, Disableable as _, IconName, Sizable as _, Size,
 };
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    div, App, AppContext as _, Context, Entity, EventEmitter, Global, InteractiveElement as _,
-    IntoElement, KeyBinding, ParentElement as _, Render, SharedString,
+    div, px, App, AppContext as _, Context, Entity, EventEmitter, Global, InteractiveElement as _,
+    IntoElement, KeyBinding, ParentElement as _, Pixels, Render, SharedString,
     StatefulInteractiveElement as _, Styled as _, Subscription, TestSupportExt as _, Window,
 };
 use session::Activity;
@@ -24,6 +25,30 @@ use session::Activity;
 /// The input grows from two rows to eight; past that it scrolls.
 const MIN_ROWS: usize = 2;
 const MAX_ROWS: usize = 8;
+
+/// The input is a card: a chat input, not a form field.
+const INPUT_RADIUS: Pixels = px(10.);
+const INPUT_BORDER: Pixels = px(1.);
+/// The focus ring: a band around the card, in the accent, while the caret is in
+/// the input.
+const FOCUS_RING: Pixels = px(3.);
+const FOCUS_RING_INK: f32 = 0.18;
+
+/// What the input is for, and the two keys that submit it.
+///
+/// The hint is a line of its own: a column this narrow cannot show the whole
+/// sentence at once, and the placeholder of a multi-line input is drawn line by
+/// line (`placeholder_line_runs` splits on newlines), so it stays readable here
+/// instead of being clipped at the input's edge.
+const PLACEHOLDER: &str =
+    "Message the coordinator\u{2026}\n(Enter to send, Shift+Enter for newline)";
+
+/// The action button's height: a compact control sharing the readout's line.
+const ACTION_HEIGHT: Pixels = px(28.);
+/// The readout's size: the TUI's dim status line, small enough to stay one line.
+const READOUT_SIZE: Pixels = px(12.);
+/// The width the readout's tooltip wraps to: the column's own width.
+const READOUT_TOOLTIP_WIDTH: Pixels = px(340.);
 
 /// Key context of the composer, so `Esc` reaches the composer even though the
 /// textarea holds the focus and handles `Escape` first.
@@ -54,11 +79,21 @@ pub enum ActionFace {
 }
 
 impl ActionFace {
-    /// The button's visible label: primary `Send`, or `Stop` behind a square glyph.
+    /// The button's visible label: `Send`, or `Stop` behind its square glyph.
     pub fn label(self) -> &'static str {
         match self {
             Self::Send => "Send",
             Self::Stop => "\u{25a0} Stop",
+        }
+    }
+
+    /// The glyph leading the label: an up arrow to send. Stop's square is part of
+    /// its label instead — the icon set the app bundles carries no plain square,
+    /// and the screen's own glyph draws one at the label's own size.
+    pub fn icon(self) -> Option<IconName> {
+        match self {
+            Self::Send => Some(IconName::ArrowUp),
+            Self::Stop => None,
         }
     }
 }
@@ -88,7 +123,7 @@ impl Composer {
         let input = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(MIN_ROWS, MAX_ROWS)
-                .placeholder("Prompt the coordinator\u{2026}")
+                .placeholder(PLACEHOLDER)
                 // `Enter` submits, `Shift+Enter` inserts a newline.
                 .submit_on_enter(true)
         });
@@ -213,16 +248,28 @@ impl Composer {
             .flex_1()
             .min_w_0()
             .truncate()
-            .text_sm()
+            .text_size(READOUT_SIZE)
             .text_color(cx.theme().muted_foreground)
-            .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+            // The whole line, wrapped rather than a single line wider than the
+            // window it is read in.
+            .tooltip(move |window, cx| {
+                // The whole line, in a card the width of the column it belongs
+                // to: a status line is wider than the window it is read in, and
+                // an unwrapped tooltip runs off the screen.
+                let line = tooltip.clone();
+                Tooltip::element(move |_, _| div().w(READOUT_TOOLTIP_WIDTH).child(line.clone()))
+                    .build(window, cx)
+            })
             .child(full)
     }
 
     fn action_button(&self, cx: &Context<Self>) -> impl IntoElement {
         let face = self.face();
         let mut button = Button::new(BUTTON_ID)
+            .small()
+            .h(ACTION_HEIGHT)
             .label(face.label())
+            // The glyph is decoration: what the button is called is the word.
             .accessibility_label(match face {
                 ActionFace::Send => "Send",
                 ActionFace::Stop => "Stop",
@@ -235,27 +282,81 @@ impl Composer {
                 }
                 ActionFace::Stop => this.interrupt(cx),
             }));
-        button = match face {
+        if let Some(icon) = face.icon() {
+            button = button.icon(icon);
+        }
+
+        match face {
             ActionFace::Send => button.primary(),
             ActionFace::Stop => button.secondary(),
-        };
-        button
+        }
     }
 }
 
 impl Render for Composer {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().clone();
         let readout = self.readout_element(cx);
         let button = self.action_button(cx);
+        // The caret is what "focused" means here: the ring belongs to the card,
+        // which the input does not own.
+        let focused = self
+            .input
+            .read(cx)
+            .presentation()
+            .focus_handle()
+            .is_focused(window);
+
+        // The composer is the top of its column (§7.3): the input, its status
+        // row, and nothing below them — the column's height belongs to the tab
+        // page, not to the composer.
         v_flex()
-            .w_full()
+            .size_full()
+            .items_stretch()
             .gap_2()
             .key_context(KEY_CONTEXT)
             .on_action(cx.listener(Self::interrupt_action))
-            .child(Textarea::new(&self.input))
+            .child(
+                // A chat input: a rounded card with one hairline edge, and the
+                // hint that this is where a message is typed — the accent, as a
+                // ring around the card, while the caret is in it. The input
+                // draws none of this itself, so the card can round further than
+                // the theme's default radius and pad the text by the size's own
+                // 12px without a second inset around it.
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .rounded(INPUT_RADIUS + FOCUS_RING)
+                    .p(FOCUS_RING)
+                    .when(focused, |this| {
+                        this.bg(theme.primary.alpha(FOCUS_RING_INK))
+                    })
+                    .child(
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            .rounded(INPUT_RADIUS)
+                            .border(INPUT_BORDER)
+                            .border_color(if focused {
+                                theme.primary
+                            } else {
+                                theme.border
+                            })
+                            .bg(theme.input_background())
+                            .child(
+                                Textarea::new(&self.input)
+                                    .with_size(Size::Large)
+                                    .appearance(false)
+                                    .bordered(false)
+                                    .w_full()
+                                    .min_w_0(),
+                            ),
+                    ),
+            )
             .child(
                 h_flex()
                     .w_full()
+                    .min_w_0()
                     .items_center()
                     .gap_2()
                     .child(readout)
@@ -368,6 +469,51 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn the_input_is_a_card_at_the_top_and_the_action_is_one_compact_button(
+        cx: &mut TestAppContext,
+    ) {
+        let f = open(cx);
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+
+            // The input opens the column, and what it is for is its own
+            // placeholder — including the two keys that submit it (§7.3).
+            let input = window.find(f.input_frame(cx));
+            assert!(input.visible(), "the input is the top of the column");
+            assert!(
+                input.bounds().origin.y <= px(4.),
+                "the input opens the column — only its ring and border sit above it: {:?}",
+                input.bounds()
+            );
+            assert_eq!(input.label(), Some(PLACEHOLDER));
+
+            // Under it, one status row: the readout on the left, the action
+            // button flush right, both on one line of the button's height.
+            let readout = window.find(READOUT_ID).bounds();
+            let button = window.find(BUTTON_ID).bounds();
+            assert!(
+                button.origin.y >= input.bounds().bottom(),
+                "the button left the row under the input: input {:?}, button {:?}",
+                input.bounds(),
+                button
+            );
+            assert_eq!(button.size.height, ACTION_HEIGHT);
+            assert!(
+                readout.right() <= button.left(),
+                "the readout runs into the button: {readout:?} vs {button:?}"
+            );
+
+            // The rest of the column is empty: the composer owns the top of it,
+            // not its height (§7.3).
+            assert!(
+                button.bottom() < window.bounds().size.height / 2.,
+                "the composer filled the column: button {button:?} in {:?}",
+                window.bounds()
+            );
+        });
+    }
+
+    #[gpui_kit::test]
     fn enter_sends_the_draft_and_the_owner_clears_it_only_on_ok(cx: &mut TestAppContext) {
         let f = open(cx);
         f.act(cx, |window, cx| {
@@ -413,9 +559,20 @@ mod tests {
     }
 
     #[test]
-    fn the_stop_face_carries_its_square_glyph() {
+    fn each_face_has_a_label_and_its_own_glyph() {
+        use gpui_kit::component::IconNamed as _;
+
         assert_eq!(ActionFace::Send.label(), "Send");
         assert_eq!(ActionFace::Stop.label(), "\u{25a0} Stop");
+        assert_eq!(
+            ActionFace::Send.icon().map(|icon| icon.path().to_string()),
+            Some("icons/arrow-up.svg".to_string()),
+            "Send leads with an up arrow"
+        );
+        assert!(
+            ActionFace::Stop.icon().is_none(),
+            "Stop's square is a glyph in its label"
+        );
     }
 
     #[gpui_kit::test]
