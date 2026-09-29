@@ -48,7 +48,7 @@ Invariants
   found (`c1b901c`, `dfdb3d3`).
 
 ## Commands
-- `cargo test -p transcript` (39) and `cargo test -p composer` (21); `cargo fmt -p transcript -p composer`;
+- `cargo test -p transcript` (40) and `cargo test -p composer` (21); `cargo fmt -p transcript -p composer`;
   `cargo clippy -p transcript --all-targets` is clean.
 - Captures: `cargo run -q -p transcript --example transcript_demo -- --capture crates/transcript/screenshots`, and the
   same for `-p composer`'s `composer_demo` (both dirs git-ignored). Cost harness: `cargo run -q -p transcript --example
@@ -68,9 +68,24 @@ Invariants
   nodes (`format/markdown.rs::inline_groups`), and drops what its HTML reader cannot parse. Everything else is ours.
 - **Inline plugin nodes are atomic**: `render_inline` output is one object measured at its intrinsic width
   (`WrapLineFragment::element`), it cannot wrap inside itself, and the object's own text is what a plugin must set.
-- **Syntax highlighting is off**: gpui-component installs a tree-sitter highlighter only under its `tree-sitter` feature,
-  which `gpui-kit`'s default features do not enable. Fenced blocks render plain; turning it on is a workspace
-  `Cargo.toml`/`Cargo.lock` change (big grammar dependency), not a transcript one.
+- **Syntax highlighting is on**, and it is a workspace decision: the root `Cargo.toml` enables gpui-kit's `tree-sitter`
+  (which brings the highlighter + the JSON grammar) plus `tree-sitter-{bash,javascript,python,rust,toml,typescript}`.
+  The theme then installs the highlighter for every `TextView` (`install_text_view_defaults`), so a transcript only has
+  to stay out of the way: an explicit component `TextViewStyle` left at its default `HighlightTheme::default_light()`
+  is *not* an override (`text/compat.rs` ptr-compares it), and the theme's own light/dark highlight theme is used.
+  Cost: release binary 27.88 MiB → 32.94 MiB (+5.06 MiB, +18%; 10 new lock packages). Aliases resolve through
+  `highlighter/language_name.rs` (`sh`→bash, `js`→javascript, `py`/`pyi`→python, `rs`→rust, `ts`→typescript,
+  `jsonc`→json); a tag with no grammar — or none at all — leaves the fence plain rather than failing, and
+  `SyntaxHighlighter::styles` answers one unstyled range in that case. The kit ships **no lisp grammar**.
+  `code_fences_are_highlighted_and_an_unknown_language_stays_plain` guards all of it (it fails on the stub the kit
+  compiles when the feature is off). `tsx`, `yaml`, `go`, `c`/`cpp`, `sql`, `diff` and the rest are one feature name away.
+- **Task-list markers are the kit's** (`text/node.rs::render_list_item_row`): unchecked is a 14px box bordered in
+  `style.foreground()`, checked is the same box filled with it plus a 10px SVG check in the opposite colour. There is no
+  list-marker field in `TextViewStyle` and no hook on the marker element, and the component adapter ignores a legacy
+  style's colours — so the marker cannot be muted per view without recolouring all message text. The check **does**
+  paint: it is an async asset (`ImageDecoder`), so a headless capture must let the loader park before the frame it
+  reads — `shot()` in the demo calls `allow_parking()` + `run_until_parked()` between two frames, without which the box
+  looks like a solid square in every PNG.
 - **Table cell padding**: gpui-base measures a scroll column as `text + CELL_PAD_PX (16)`, so padding of 8px a side makes
   the text box exactly as wide as its text and words break ("call|s"); 4px a side leaves slack and keeps columns apart.
 - **Nested ordered lists** number `1. 2. 3.` at the top level and `A. B. C.` one level in (`text/utils.rs::list_item_prefix`,

@@ -480,6 +480,13 @@ fn render_row(data: &mut TranscriptData, index: usize) -> AnyElement {
 }
 ```
 
+A tag the kit has no grammar for is left plain:
+
+```console
+$ cargo test -p transcript
+test result: ok. 39 passed; 0 failed
+```
+
 An image reference is drawn as its alt text and never fetched:
 
 ![the transcript column](https://example.com/screenshots/transcript.png)
@@ -1322,6 +1329,13 @@ fn shot(
     name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     std::thread::sleep(FADE_SETTLE);
+    cx.update_window(window, |_, window, cx| window.render_frame(cx))?;
+    // The frame above is what asks the asset system for the images it needs, and
+    // a checkbox's SVG check is decoded off the main thread. Parking is what
+    // lets the wait block on that load at all; the frame after it paints the
+    // glyph rather than the box it sits in.
+    cx.allow_parking();
+    cx.run_until_parked();
     cx.update_window(window, |_, window, cx| window.render_frame(cx))?;
     let image = cx.capture_screenshot(window)?;
     let path = dir.join(name);

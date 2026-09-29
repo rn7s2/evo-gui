@@ -8,7 +8,18 @@ edition = "2021"
 license = "MIT"
 
 [workspace.dependencies]
-gpui-kit = "=0.7.0"
+# `tree-sitter` ships the highlighter; each language feature adds one grammar.
+# They belong to the application, so they are turned on here once rather than by
+# whichever crate happens to render a code fence.
+gpui-kit = { version = "=0.7.0", features = [
+    "tree-sitter",
+    "tree-sitter-bash",
+    "tree-sitter-javascript",
+    "tree-sitter-python",
+    "tree-sitter-rust",
+    "tree-sitter-toml",
+    "tree-sitter-typescript",
+] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"

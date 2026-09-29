@@ -2099,3 +2099,88 @@ fn row_id(block: &'static str, id: RowId, path: &[usize]) -> gpui_kit::ElementId
     }
     row
 }
+
+/// A fenced block is highlighted: the kit's tree-sitter highlighter is installed
+/// for every `TextView`, the tags a model writes resolve to a grammar, and a tag
+/// nobody has a grammar for stays plain rather than failing.
+///
+/// The kit ships a stub behind the same names when its `tree-sitter` feature is
+/// off, so this test compiles either way and fails on the stub — where every
+/// language, known or not, comes back as one unstyled range.
+#[gpui_kit::test]
+fn code_fences_are_highlighted_and_an_unknown_language_stays_plain(cx: &mut TestAppContext) {
+    use gpui_kit::component::highlighter::{HighlightTheme, LanguageRegistry, SyntaxHighlighter};
+    use gpui_kit::component::Rope;
+
+    cx.update(gpui_kit::init);
+    cx.update(|cx| {
+        assert!(
+            gpui_kit::base::TextViewDefaults::global(cx).has_code_block_highlighter(),
+            "the theme installs a code block highlighter for the app's text views"
+        );
+    });
+
+    let registry = LanguageRegistry::singleton();
+    for tag in [
+        "rust",
+        "rs",
+        "python",
+        "py",
+        "javascript",
+        "js",
+        "typescript",
+        "ts",
+        "json",
+        "bash",
+        "sh",
+        "toml",
+    ] {
+        assert!(
+            registry
+                .language(tag)
+                .is_some_and(|config| config.has_grammar()),
+            "{tag} resolves to a grammar"
+        );
+    }
+
+    // What the highlighter makes of a fence: the ranges it styles, and whether
+    // any of them carries a color at all.
+    let styled = |tag: &str, code: &str| {
+        let mut highlighter = SyntaxHighlighter::new(tag);
+        highlighter.update(None, &Rope::from_str(code), None);
+        let styles = highlighter.styles(&(0..code.len()), &*HighlightTheme::default_light());
+        styles
+            .iter()
+            .filter(|(_, style)| style.color.is_some())
+            .count()
+    };
+
+    let rust = "fn main() {\n    // a comment\n    println!(\"hi\");\n}\n";
+    assert!(
+        styled("rust", rust) >= 4,
+        "a Rust fence is colored: keywords, a string and a comment"
+    );
+    assert!(styled("rs", rust) >= 4, "and so is the `rs` alias");
+    assert!(styled("python", "def f(x):\n    return x + 1\n") >= 3);
+    assert!(styled("json", "{\"a\": [1, true, null]}\n") >= 2);
+    assert!(styled("bash", "for f in *.rs; do echo \"$f\"; done\n") >= 2);
+    assert!(
+        styled("sh", "cargo test -p transcript\n") >= 1,
+        "the `sh` alias"
+    );
+    assert!(styled("typescript", "const n: number = 1;\n") >= 2);
+
+    // A tag with no grammar, and no tag at all, are both left as one plain run.
+    for (tag, code) in [
+        ("not-a-language", rust),
+        ("", rust),
+        ("lisp", "(defun f (x) x)\n"),
+        ("console", "$ cargo test\n"),
+    ] {
+        assert_eq!(
+            styled(tag, code),
+            0,
+            "{tag:?} has no grammar, so nothing is colored and nothing fails"
+        );
+    }
+}
