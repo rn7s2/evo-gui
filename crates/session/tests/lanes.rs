@@ -74,6 +74,46 @@ fn an_idle_lane_keeps_the_task_it_last_ran() {
     assert_eq!(lane2.reports, 1, "lane 2 filed one report");
 }
 
+/// The lane row's composed tooltip, against the swarm's own `lane-status-line`
+/// (`swarm/tools.lisp`) — the expected strings below are that `format` string evaluated on
+/// the same fields in a real Common Lisp.
+#[test]
+fn the_tooltip_is_the_swarms_own_lane_line() {
+    let list = LaneList::from_lanes(&fixture("lanes-final.json"));
+    let lane2 = list.lane(2).unwrap();
+    assert_eq!(
+        lane2.tooltip(),
+        r#"lane 2  idle · task: CALL report {"done":"lane 2 finished the fixture work","evid… · 1 report · pid 87894"#
+    );
+
+    // Lane 1 of the working capture: the step clock is in the line while it works.
+    let working = LaneList::from_lanes(&fixture("lanes-lane1-working.json"));
+    let lane1 = working.lane(1).unwrap();
+    assert_eq!(
+        lane1.tooltip(),
+        r#"lane 1  working · step 0s · task: DELAY3 CALL todo {"items":[{"text":"lane step one","status":… · 0 reports · pid 87897"#
+    );
+
+    // `lane-status-line` writes the fields it has and skips the ones it has not, and `~:p`
+    // pluralises anything but one.
+    let row = LaneList::from_lanes(&json!({ "lanes": [ {
+        "n": 3, "state": "starting", "worktree": "/w", "branch": "lanes/x",
+        "restarts": 2, "reports": 1, "pid": 12,
+        "goal": { "goal_id": "g", "status": "active" }
+    }] }))
+    .lane(3)
+    .unwrap()
+    .clone();
+    assert_eq!(
+        row.tooltip(),
+        "lane 3  starting · worktree /w (lanes/x) · 1 report · 2 restarts · pid 12 · goal active"
+    );
+
+    // A lane that has never been given work: state, the report count, its pid.
+    let bare = LaneList::from_lanes(&fixture("lanes.json")).lane(1).unwrap().clone();
+    assert_eq!(bare.tooltip(), "lane 1  idle · 0 reports · pid 87897");
+}
+
 /// The state vocabulary (`swarm/state.lisp`: `:starting :idle :working :compacting :down
 /// :stopped`) and the swarm TUI's own glyphs (`swarm/tui.lisp`: everything else is ✗).
 #[test]

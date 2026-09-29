@@ -168,11 +168,22 @@ fn a_stale_transcript_is_dropped() {
         other => panic!("the newer transcript is still on screen: {other:?}"),
     }
 
-    // The same revision again is applied — the transcript is the truth, and re-reading it
-    // is harmless (a fresh id space, the same rows).
+    // The same revision again is a duplicate, not news: the I/O layer's revisions are
+    // monotone per agent, so applying it twice would only rebuild the same rows.
     let changes = tab.on_transcript(COORDINATOR, 7, &rev7);
-    assert_eq!(changes.rows_for(COORDINATOR), Some(&RowChanges::Rebuilt));
+    assert!(changes.is_empty(), "an equal revision is a duplicate: {changes:?}");
     assert_eq!(tab.coordinator().rows().len(), rows);
+
+    // A newer one applies.
+    let rev8 = json!({ "messages": [{ "role": "user", "content": [{ "type": "text", "text": "eight" }] }] });
+    assert_eq!(
+        tab.on_transcript(COORDINATOR, 8, &rev8).rows_for(COORDINATOR),
+        Some(&RowChanges::Rebuilt)
+    );
+    match &tab.selected_rows()[0].kind {
+        RowKind::User { text } => assert_eq!(text, "eight"),
+        other => panic!("the newest transcript is on screen: {other:?}"),
+    }
 }
 
 /// §3: the supervisor restarts a crashed coordinator, and the new server's ids start at 1.
@@ -259,11 +270,12 @@ fn the_todo_panel_follows_the_selected_agent() {
     assert_eq!(tab.selected_todos()[2].status, TodoStatus::Done);
 }
 
-/// §9.7: a lane that is down says why, from its own transcript's `output` lines.
+/// §9.7: a lane that is down says why, from its own transcript's `output` lines — and the
+/// coordinator's stream answers when the lane's own transcript has nothing.
 #[test]
 fn lane_down_reason_comes_from_the_lanes_own_output_rows() {
     let mut tab = TabModel::new();
-    // No transcript loaded: nothing to say.
+    // No transcript loaded anywhere: nothing to say.
     assert_eq!(tab.lane_down_reason(1), None);
 
     tab.select(lane(1));
@@ -276,24 +288,66 @@ fn lane_down_reason_comes_from_the_lanes_own_output_rows() {
     // Work goes on after the error; the reason stays the error line, not the newest line.
     tab.on_event(lane(1), 2, "task-start", &json!({ "task_id": "t", "kind": "run" }));
     tab.on_event(lane(1), 3, "output", &json!({ "style": "dim", "text": "queued" }));
+    // The coordinator also says something about this lane, later.
+    tab.on_event(COORDINATOR, 1, "output", &json!({
+        "style": "error",
+        "text": "[lane 1] is down: its process exited. restart_lane brings it back."
+    }));
 
     // The lane goes down (a lane-state on the coordinator's stream).
-    let changes = tab.on_event(COORDINATOR, 1, "lane-state", &json!({
+    let changes = tab.on_event(COORDINATOR, 2, "lane-state", &json!({
         "lane": 1, "state": "down", "task": null, "goal": null, "restarts": 0, "pid": null
     }));
     assert!(changes.lanes);
     let row = tab.lanes().lane(1).unwrap();
     assert_eq!(row.status, LaneStatus::Down);
     assert_eq!(row.glyph(), '✗');
+    // The lane's own account wins: it is the lane's transcript that the row describes.
     assert_eq!(
         tab.lane_down_reason(1).as_deref(),
         Some("✗ lane 1 cannot use its model st-1: its API :openai-completions is not in the lane")
     );
 
-    // A lane with no error line has no reason.
-    tab.select(lane(2));
-    tab.on_event(lane(2), 1, "output", &json!({ "style": "dim", "text": "just talking" }));
-    assert_eq!(tab.lane_down_reason(2), None);
+    // The newest error line of the winning source is the one shown.
+    tab.on_event(lane(1), 4, "output", &json!({ "style": "error", "text": "✗ lane 1: second failure" }));
+    assert_eq!(tab.lane_down_reason(1).as_deref(), Some("✗ lane 1: second failure"));
+
+    // A lane whose own transcript is not loaded falls back to the coordinator's line about
+    // it — the only evidence the tab has.
+    assert!(tab.lane_model(2).is_none());
+    assert_eq!(
+        tab.lane_down_reason(2),
+        None,
+        "the coordinator has said nothing about lane 2"
+    );
+    tab.on_event(COORDINATOR, 3, "output", &json!({
+        "style": "error",
+        "text": "[lane 2] is down: its process exited. restart_lane brings it back."
+    }));
+    assert_eq!(
+        tab.lane_down_reason(2).as_deref(),
+        Some("[lane 2] is down: its process exited. restart_lane brings it back.")
+    );
+
+    // A lane whose own transcript has no error keeps the fallback too.
+    tab.select(lane(3));
+    tab.on_event(lane(3), 1, "output", &json!({ "style": "dim", "text": "just talking" }));
+    assert_eq!(tab.lane_down_reason(3), None);
+
+    // `[lane 1]` is not `[lane 10]`: the match is the whole bracket token.
+    tab.on_event(COORDINATOR, 4, "output", &json!({
+        "style": "error",
+        "text": "[lane 10] is down: its process exited. restart_lane brings it back."
+    }));
+    assert_eq!(
+        tab.lane_down_reason(1).as_deref(),
+        Some("✗ lane 1: second failure"),
+        "lane 10's line is not lane 1's"
+    );
+    assert_eq!(
+        tab.lane_down_reason(10).as_deref(),
+        Some("[lane 10] is down: its process exited. restart_lane brings it back.")
+    );
 }
 
 #[test]

@@ -74,6 +74,54 @@ impl LaneRow {
     pub fn task_label(&self) -> Option<String> {
         self.task.as_deref().map(lane_task_label)
     }
+
+    /// The lane as the swarm's own list writes it (`swarm/tools.lisp`'s
+    /// `lane-status-line`), for the row's tooltip:
+    ///
+    /// ```text
+    /// lane 1  working · step 0s · task: DELAY3 CALL todo … · 0 reports · pid 87897
+    /// ```
+    ///
+    /// Field for field the swarm's string — the step clock only when the lane has one (so
+    /// only while it works), the task truncated to 60 characters, worktree with the branch
+    /// in parentheses, the report count always, restarts only when there were any, the pid
+    /// when the lane has one — plus the goal status the lane list carries and
+    /// `lane-status-line` does not.
+    pub fn tooltip(&self) -> String {
+        let mut line = format!("lane {}  {}", self.n, self.state.to_lowercase());
+        if let Some(clock) = self.step_clock() {
+            line.push_str(&format!(" · step {}", clock));
+        }
+        if let Some(task) = self.task_label() {
+            line.push_str(&format!(" · task: {}", task));
+        }
+        if let Some(worktree) = self.worktree.as_deref() {
+            line.push_str(&format!(" · worktree {}", worktree));
+        }
+        if let Some(branch) = self.branch.as_deref() {
+            line.push_str(&format!(" ({})", branch));
+        }
+        line.push_str(&format!(" · {} {}", self.reports, plural(self.reports, "report")));
+        if self.restarts > 0 {
+            line.push_str(&format!(" · {} {}", self.restarts, plural(self.restarts, "restart")));
+        }
+        if let Some(pid) = self.pid {
+            line.push_str(&format!(" · pid {}", pid));
+        }
+        if let Some(goal) = self.goal_status.as_deref() {
+            line.push_str(&format!(" · goal {}", goal));
+        }
+        line
+    }
+}
+
+/// `~:p`: the plural `s` for anything but one — `0 reports`, `1 report`.
+fn plural(n: u64, word: &str) -> String {
+    if n == 1 {
+        word.to_string()
+    } else {
+        format!("{}s", word)
+    }
 }
 
 /// A compact elapsed clock: `45s`, `3m`, `1h2m` — `evo.tui:short-duration`

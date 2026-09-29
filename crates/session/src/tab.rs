@@ -213,16 +213,20 @@ impl TabModel {
         self.stream_status(agent).is_reconnecting()
     }
 
-    /// Why lane N is down: the last error line its own transcript carries, which is where
-    /// a lane says what went wrong (a model it cannot register, a crashed process) — the
-    /// §9.7 "reason from the transcript's `output` lines". `None` while the lane's
-    /// transcript has not been loaded or has no error line.
+    /// Why lane N is down, for the `✗` row's tooltip — the §9.7 "reason from the
+    /// transcript's `output` lines".
+    ///
+    /// The lane's own transcript first: that is where the lane says what went wrong (a model
+    /// it cannot register, an internal error). When it has no error line — or was never
+    /// loaded — the coordinator's own stream is asked instead, for an error line about that
+    /// lane (`[lane N] is down: its process exited…`, `swarm/lanes.lisp`). Either way the
+    /// **most recent** line wins; `None` when neither source has one.
     pub fn lane_down_reason(&self, n: u32) -> Option<String> {
-        let model = self.lane_models.get(&n)?;
-        model.rows().iter().rev().find_map(|row| match &row.kind {
-            RowKind::Dim { style: DimStyle::Error, text } if !text.is_empty() => Some(text.clone()),
-            _ => None,
-        })
+        if let Some(reason) = self.lane_models.get(&n).and_then(last_error_line) {
+            return Some(reason);
+        }
+        let about = format!("[lane {}]", n);
+        last_error_line_where(&self.coordinator, |text| text.contains(&about))
     }
 
     /// The lane rows as the left column draws them.
@@ -251,11 +255,12 @@ impl TabModel {
 
     // --- updates from the I/O layer --------------------------------------
 
-    /// `GET /transcript` for AGENT, stamped with the revision of the fetch it answered.
-    /// An answer older than the last one applied is dropped (a refetch overtook it); an
-    /// equal one is applied again, because the transcript is the truth.
+    /// `GET /transcript` for AGENT, stamped with the revision of the fetch it answered. Only
+    /// a strictly newer revision is applied: an answer older than the last one is a refetch
+    /// that overtook it, and an equal one is the same answer twice, so neither changes
+    /// anything (the tab's I/O layer numbers these monotonically per agent).
     pub fn on_transcript(&mut self, agent: AgentKey, revision: u64, transcript: &Value) -> Changes {
-        if self.transcript_revisions.get(&agent).is_some_and(|last| revision < *last) {
+        if self.transcript_revisions.get(&agent).is_some_and(|last| revision <= *last) {
             return Changes::default();
         }
         self.transcript_revisions.insert(agent, revision);
@@ -369,4 +374,20 @@ impl TabModel {
         }
         changes
     }
+}
+
+/// The newest error line of one agent's transcript: what `output` said, in the order serve
+/// sent it — the agent's own account of what went wrong.
+fn last_error_line(model: &AgentModel) -> Option<String> {
+    last_error_line_where(model, |_| true)
+}
+
+/// The newest error line of one agent's transcript whose text passes `want`.
+fn last_error_line_where(model: &AgentModel, want: impl Fn(&str) -> bool) -> Option<String> {
+    model.rows().iter().rev().find_map(|row| match &row.kind {
+        RowKind::Dim { style: DimStyle::Error, text } if !text.is_empty() && want(text) => {
+            Some(text.clone())
+        }
+        _ => None,
+    })
 }
