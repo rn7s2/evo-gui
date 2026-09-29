@@ -45,7 +45,8 @@ impl TabContent {
                 folder,
                 message,
                 log_tail,
-            } => self.render_failed(folder, message.clone(), log_tail, cx),
+                was_up,
+            } => self.render_failed(folder, message.clone(), log_tail, *was_up, cx),
             TabState::Stopping { .. } => self.render_stopping(cx),
         }
     }
@@ -78,13 +79,18 @@ impl TabContent {
         )
     }
 
-    /// A boot that failed: the tail of the swarm's log, and a way to try again
-    /// (§9.7).
+    /// A failed swarm: the tail of its log, and a way to try again (§9.7).
+    ///
+    /// Two failures wear this screen, and `was_up` is which: a swarm that never
+    /// answered `/health`, and one that was up and went away. The second is not
+    /// a boot that failed — the session it was writing is still there, and Retry
+    /// resumes it — so it says so.
     fn render_failed(
         &self,
         folder: &Path,
         message: Option<String>,
         log_tail: &str,
+        was_up: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let folder = folder.to_path_buf();
@@ -99,11 +105,11 @@ impl TabContent {
             .justify_center()
             .gap_3()
             .p_6()
-            .child(
-                div()
-                    .font_semibold()
-                    .child(SharedString::from("Could not start a swarm")),
-            )
+            .child(div().font_semibold().child(SharedString::from(if was_up {
+                "The swarm is gone"
+            } else {
+                "Could not start a swarm"
+            })))
             .child(path_text(
                 "failure-folder",
                 &folder,
@@ -123,6 +129,23 @@ impl TabContent {
                         .truncate()
                         .text_color(cx.theme().danger)
                         .child(SharedString::from(message)),
+                )
+            })
+            // A swarm that had been up has no boot reason: nothing failed to
+            // start. It still owes the reader the two things they will ask —
+            // what happened, and what Retry does with their session (§9.7).
+            .when(was_up && message.is_none(), |this| {
+                this.child(
+                    div()
+                        .id("failure-gone-note")
+                        .test_support()
+                        .max_w(px(720.))
+                        .min_w_0()
+                        .text_center()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(SharedString::from(
+                            "The server exited on its own. Retry resumes the session it was writing.",
+                        )),
                 )
             })
             // The engine repeats its reason as the log tail when the process

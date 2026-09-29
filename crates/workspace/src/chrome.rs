@@ -59,9 +59,10 @@ const ADD_TAB_ID: &str = "tab-add";
 
 /// The key context the window's own shortcuts are bound in (§7.1).
 ///
-/// The window root carries it, so a shortcut means the same thing wherever the
-/// keyboard happens to be inside the window — including the composer's text
-/// field, which is where the caret is most of the time.
+/// Nothing is bound in it any more — the tab strip's shortcuts are bound
+/// app-wide (see [`bind_tab_keys`]) — but the window root still carries it, and
+/// the composer's own context sits inside it, so a shortcut means the same thing
+/// wherever the keyboard happens to be inside the window.
 const WORKSPACE_CONTEXT: &str = "Workspace";
 
 gpui_kit::actions!(
@@ -90,29 +91,38 @@ pub struct SelectTab(pub usize);
 struct TabKeysBound;
 impl Global for TabKeysBound {}
 
-/// Bind the window's tab shortcuts (§7.1): once per app, whatever opens the
+/// Bind the window's tab shortcuts (§7.1) — once per app, whatever opens the
 /// first window.
-fn bind_tab_keys(cx: &mut App) {
+///
+/// They are bound **app-wide**, with no key context, for two reasons:
+///
+/// * macOS draws a menu item's key equivalent from the app's keymap, and the
+///   Window menu's items are these actions. A binding that exists only inside a
+///   window's context is not in that keymap when the menu bar is built — and the
+///   menu bar is built once, at install, before any window exists — so the menu
+///   would show a bare title. This is why the app calls this function before it
+///   sets its menus, and not only when a window opens.
+/// * the shortcuts mean the same thing wherever the keyboard is: the composer's
+///   text field binds none of ⌃⇥, ⌃⇧⇥, ⌘1…⌘9 or ⌘⇧[/⌘⇧], so a global binding
+///   changes no text-editing behaviour while it reaches the strip from anywhere
+///   in the window.
+pub fn bind_tab_keys(cx: &mut App) {
     if cx.has_global::<TabKeysBound>() {
         return;
     }
     cx.set_global(TabKeysBound);
     let mut keys = vec![
-        KeyBinding::new("ctrl-tab", SelectNextTab, Some(WORKSPACE_CONTEXT)),
-        KeyBinding::new("ctrl-shift-tab", SelectPreviousTab, Some(WORKSPACE_CONTEXT)),
-        KeyBinding::new("cmd-shift-]", SelectNextTab, Some(WORKSPACE_CONTEXT)),
-        KeyBinding::new("cmd-shift-[", SelectPreviousTab, Some(WORKSPACE_CONTEXT)),
-        KeyBinding::new("cmd-9", SelectLastTab, Some(WORKSPACE_CONTEXT)),
+        KeyBinding::new("ctrl-tab", SelectNextTab, None),
+        KeyBinding::new("ctrl-shift-tab", SelectPreviousTab, None),
+        KeyBinding::new("cmd-shift-]", SelectNextTab, None),
+        KeyBinding::new("cmd-shift-[", SelectPreviousTab, None),
+        KeyBinding::new("cmd-9", SelectLastTab, None),
     ];
     // ⌘1…⌘8 is the tab with that number; with fewer tabs than the number, the
     // shortcut does nothing rather than wrapping (§7.1).
-    keys.extend((0..8).map(|index| {
-        KeyBinding::new(
-            &format!("cmd-{}", index + 1),
-            SelectTab(index),
-            Some(WORKSPACE_CONTEXT),
-        )
-    }));
+    keys.extend(
+        (0..8).map(|index| KeyBinding::new(&format!("cmd-{}", index + 1), SelectTab(index), None)),
+    );
     cx.bind_keys(keys);
 }
 
@@ -880,11 +890,13 @@ impl Render for WorkspaceView {
         v_flex()
             .id("workspace")
             .test_support()
-            // The window's own shortcuts live here (§7.1). The root carries the
-            // context they are bound in and a focus handle of its own, so
-            // `⌘2` or `⌃⇥` reaches the tab strip whenever the keyboard is
-            // anywhere inside the window — the composer included — and still
-            // works on a fresh window, where nothing else holds it.
+            // The window root is where the tab strip's actions are handled
+            // (§7.1), and the focus handle is what puts the keyboard somewhere
+            // at all: a fresh window has nothing else holding it. The actions
+            // themselves are bound app-wide (see `bind_tab_keys`), so `⌘2` or
+            // `⌃⇥` reaches the strip from anywhere inside the window — the
+            // composer included — and the context here is what the composer's
+            // own context nests inside.
             .track_focus(&self.root_focus)
             .key_context(WORKSPACE_CONTEXT)
             .on_action(cx.listener(Self::on_select_next_tab))

@@ -713,6 +713,400 @@ fn two_tabs_stream_at_once_and_the_ui_stays_responsive(cx: &mut TestAppContext) 
     );
 }
 
+/// One stub reply's normalized usage, from `../evo-agent/tests/stub-messages.py`:
+/// `message_start` reports `{"input_tokens": 10}`, `message_delta`
+/// `{"output_tokens": 5}`, and the stub reports no cache fields at all. So every
+/// `message-end` folds 15 tokens into the session's readout (§7.3).
+const STUB_USAGE_TOKENS: u64 = 15;
+
+/// §7.3: the readout's context figure is re-anchored from every `message-end`'s
+/// usage, so the line moves **with the run** rather than jumping when the run
+/// settles.
+///
+/// The coordinator's model here is a stub of its own with a 1000-token window,
+/// which is what makes the move readable at all: with the stock stub's 200k
+/// window both figures round to `0%`. The run is a delegation — the lane's work
+/// is seconds long, so the first `message-end` (the coordinator's tool call) is
+/// well inside the run, and the line has to have moved while the tab still shows
+/// the coordinator working.
+#[gpui_kit::test]
+fn the_readout_moves_with_the_run_not_only_at_settled(cx: &mut TestAppContext) {
+    let b = bench_with(
+        cx,
+        2,
+        "(evo:register-model \"stub-tiny\" :provider :stub :context-window 1000 \
+         :max-output 8000 :effort t)\n",
+    );
+    let tab = cx.update(|cx| b.view.read(cx).selected_tab().clone());
+    launch(
+        cx,
+        &b,
+        &tab,
+        b.fixture.project.clone(),
+        LaunchPlan {
+            model: Some(("stub-tiny".to_string(), "stub".to_string())),
+            workers: Some(2),
+            ..LaunchPlan::default()
+        },
+    );
+    wait_for_running(cx, &tab);
+
+    // The seed is `/state`: a session that has said nothing yet, and the window
+    // its model registers.
+    wait_for(cx, "the readout to be seeded from /state", |cx| {
+        readout(cx, &tab)
+            .is_some_and(|line| line.contains("stub-tiny") && line.contains("ctx 0k/1k"))
+    });
+    assert_eq!(
+        context_tokens(cx, &tab),
+        0,
+        "nothing has been said, so the context is empty: {}",
+        readout(cx, &tab).unwrap_or_default()
+    );
+
+    // A run that lasts: the coordinator delegates, and the lane takes seconds.
+    prompt(
+        cx,
+        &b,
+        &tab,
+        "CALL delegate {\"lane\":1,\"task\":\"SLOW lane work for the test\"}",
+    );
+
+    // While the coordinator is still working, the first message's usage has
+    // already re-anchored the line — 15 tokens of 1000 is 2%, where the seed
+    // read 0%.
+    wait_for(cx, "the line to move while the run is in flight", |cx| {
+        cx.update(|cx| {
+            let tab = tab.read(cx);
+            let line = tab.model().map(|model| model.readout_text());
+            tab.is_running() && line.is_some_and(|line| line.contains("ctx 0k/1k (2%)"))
+        })
+    });
+    assert_eq!(
+        context_tokens(cx, &tab),
+        STUB_USAGE_TOKENS,
+        "the figure is the folded usage, not the /state estimate it started from"
+    );
+
+    // And the settled resync says the same thing from `/state`, because the fold
+    // that moved the line is the same arithmetic the server does (§9.1).
+    wait_for(cx, "the run to settle", |cx| {
+        cx.update(|cx| {
+            tab.read(cx)
+                .model()
+                .is_some_and(|model| model.activity() == session::Activity::Idle)
+        })
+    });
+    assert_eq!(context_tokens(cx, &tab), STUB_USAGE_TOKENS);
+}
+
+/// The line the composer's status row is handed, as the tab's model has it
+/// (§7.3).
+fn readout(cx: &mut TestAppContext, tab: &Entity<workspace::TabContent>) -> Option<String> {
+    cx.update(|cx| tab.read(cx).model().map(|model| model.readout_text()))
+}
+
+/// The context figure the same line is built from — the number §7.3 says every
+/// `message-end` re-anchors.
+fn context_tokens(cx: &mut TestAppContext, tab: &Entity<workspace::TabContent>) -> u64 {
+    cx.update(|cx| {
+        tab.read(cx)
+            .model()
+            .map(|model| model.readout().context_tokens())
+            .unwrap_or_default()
+    })
+}
+
+/// §7.3: the two segments a coordinator's own state adds to the page — the goal
+/// and the todo panel — come from the server and nowhere else: the goal from
+/// `/state.goal` (the model's `create_goal` puts it there) and the todos from
+/// `todo-changed` on the coordinator's stream, which `/state.todos` re-states on
+/// every resync.
+#[gpui_kit::test]
+fn the_coordinators_goal_and_todos_reach_the_tab_page(cx: &mut TestAppContext) {
+    let b = bench(cx, 2);
+    let tab = cx.update(|cx| b.view.read(cx).selected_tab().clone());
+    launch(cx, &b, &tab, b.fixture.project.clone(), two_workers());
+    wait_for_running(cx, &tab);
+
+    // A session with no goal and no todos: the line carries no goal segment, and
+    // the panel is not drawn at all — an empty panel is not a panel (§7.3).
+    wait_for(cx, "the readout to name the model", |cx| {
+        readout(cx, &tab).is_some_and(|line| line.contains(STUB_MODEL))
+    });
+    assert!(
+        !readout(cx, &tab).unwrap_or_default().contains("goal "),
+        "a session with no goal hides the segment"
+    );
+    cx.update_window(b.window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("todo-panel").is_none());
+    })
+    .unwrap();
+
+    // `create_goal`, through the tool the model is given. The objective ends in
+    // the stub's `FINISH` marker on purpose: an active goal makes the coordinator
+    // continue itself (its settled hook queues the next continuation), and the
+    // marker is what makes the stub's continuation turn close the goal — so the
+    // run ends, a `settled` arrives, and the segment comes with the resync that
+    // follows it (§9.1). The goal is the server's either way; this only decides
+    // when the tab gets to re-read it.
+    prompt(
+        cx,
+        &b,
+        &tab,
+        "CALL create_goal {\"objective\":\"prove the goal segment FINISH\",\"token-budget\":50000}",
+    );
+    wait_for_tab(cx, &tab, "the goal segment to appear", BOOT, |cx| {
+        readout(cx, &tab).is_some_and(|line| {
+            line.contains(" · goal g-") && line.contains("(complete)") && line.ends_with("/50k")
+        })
+    });
+
+    // And the checklist: `todo` replaces the whole list, and the panel that
+    // appears is the *coordinator's* — the engine shows the selected agent's
+    // todos, and `main` is what a tab page starts on.
+    prompt(
+        cx,
+        &b,
+        &tab,
+        "CALL todo {\"items\":[\
+         {\"text\":\"write the readout test\",\"status\":\"in-progress\"},\
+         {\"text\":\"run it\",\"status\":\"pending\"}]}",
+    );
+    wait_for(cx, "the coordinator's todos to arrive", |cx| {
+        cx.update(|cx| {
+            tab.read(cx)
+                .model()
+                .is_some_and(|model| model.selected_todos().len() == 2)
+        })
+    });
+    cx.update_window(b.window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(
+            window.find("todo-panel").visible(),
+            "the panel is on the page"
+        );
+        assert!(window.find(("todo-item", 0usize)).visible());
+        assert!(window.find(("todo-item", 1usize)).visible());
+        assert!(
+            window.try_find(("todo-item", 2usize)).is_none(),
+            "two items, two rows"
+        );
+        assert!(
+            window.find("todo-header").visible(),
+            "and the header that counts them"
+        );
+    })
+    .unwrap();
+}
+
+/// §7.3, §9.2: one button, whose face says what it does. While the coordinator
+/// works it reads **Stop**, and clicking it interrupts — it never sends, and it
+/// leaves the draft exactly where it was.
+#[gpui_kit::test]
+fn stop_interrupts_the_run_and_keeps_the_draft(cx: &mut TestAppContext) {
+    let b = bench(cx, 2);
+    let tab = cx.update(|cx| b.view.read(cx).selected_tab().clone());
+    launch(cx, &b, &tab, b.fixture.project.clone(), two_workers());
+    wait_for_running(cx, &tab);
+
+    // A reply that takes its time: 60 deltas, a tenth apart.
+    prompt(cx, &b, &tab, "SLOW say something long");
+    wait_for(cx, "the run to be in flight", |cx| {
+        cx.update(|cx| tab.read(cx).is_running())
+    });
+    wait_for(cx, "the reply to start streaming", |cx| {
+        assistant_chars(&tab_rows(cx, &tab)) > 0
+    });
+
+    // A draft typed while the coordinator works, and the button that will not
+    // send it.
+    cx.update_window(b.window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(
+            window.find(composer::BUTTON_ID).label(),
+            Some("Stop"),
+            "a working coordinator offers Stop"
+        );
+        window.input("half a next turn", cx);
+        window.render_frame(cx);
+        assert_eq!(
+            window.find(composer::BUTTON_ID).label(),
+            Some("Stop"),
+            "a stop is a stop whatever the input holds"
+        );
+        window.click(composer::BUTTON_ID, cx);
+    })
+    .unwrap();
+
+    // The interrupt landed: the run is over, and the stream stopped where it
+    // was — a full reply is sixty deltas long.
+    wait_for(cx, "the interrupt to end the run", |cx| {
+        cx.update(|cx| !tab.read(cx).is_running())
+    });
+    let streamed = assistant_chars(&tab_rows(cx, &tab));
+    assert!(
+        streamed < 400,
+        "the reply was interrupted, not finished: {streamed} chars"
+    );
+
+    // And the draft is still there: the button is a Send button again, and it
+    // has something to send (§7.3 — Stop leaves the draft untouched).
+    cx.update(|cx| {
+        let composer = tab.read(cx).composer().read(cx);
+        assert_eq!(composer.face(), composer::ActionFace::Send);
+        assert!(
+            composer.is_action_enabled(cx),
+            "an interrupt's reply never clears the draft"
+        );
+    });
+}
+
+/// §7.3: `Esc` is the second route to that same interrupt — with the caret in
+/// the composer, where a person's hands are while they read a reply.
+#[gpui_kit::test]
+fn escape_interrupts_the_run_and_keeps_the_draft(cx: &mut TestAppContext) {
+    let b = bench(cx, 2);
+    let tab = cx.update(|cx| b.view.read(cx).selected_tab().clone());
+    launch(cx, &b, &tab, b.fixture.project.clone(), two_workers());
+    wait_for_running(cx, &tab);
+
+    prompt(cx, &b, &tab, "SLOW say something long");
+    wait_for(cx, "the run to be in flight", |cx| {
+        cx.update(|cx| tab.read(cx).is_running())
+    });
+    wait_for(cx, "the reply to start streaming", |cx| {
+        assistant_chars(&tab_rows(cx, &tab)) > 0
+    });
+
+    // The keyboard is in the composer — the tab puts it there (§7.1) — and Esc
+    // is what it does there, not the input's own clear.
+    cx.update_window(b.window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.input("half a next turn", cx);
+        window.press("escape", cx);
+    })
+    .unwrap();
+
+    wait_for(cx, "escape to interrupt the run", |cx| {
+        cx.update(|cx| !tab.read(cx).is_running())
+    });
+    cx.update(|cx| {
+        let composer = tab.read(cx).composer().read(cx);
+        assert_eq!(composer.face(), composer::ActionFace::Send, "idle again");
+        assert!(
+            composer.is_action_enabled(cx),
+            "the draft Esc interrupted over is still in the input"
+        );
+    });
+}
+
+/// §9.7, §3: a swarm that is **gone** — its whole process group killed, the
+/// supervisor with it — is a failure the tab shows, with the log the server was
+/// writing and a Retry. Retrying a swarm that had been up resumes the session it
+/// was writing (§3's `--resume`): the point of the retry is the conversation,
+/// not a new one.
+#[gpui_kit::test]
+fn a_swarm_that_is_gone_shows_its_log_and_retry_resumes_the_session(cx: &mut TestAppContext) {
+    let b = bench(cx, 2);
+    let tab = cx.update(|cx| b.view.read(cx).selected_tab().clone());
+    launch(cx, &b, &tab, b.fixture.project.clone(), two_workers());
+    wait_for_running(cx, &tab);
+
+    wait_for(cx, "/state to name the session", |cx| {
+        cx.update(|cx| tab.read(cx).session_path().is_some())
+    });
+    let session = cx
+        .update(|cx| tab.read(cx).session_path().map(Path::to_path_buf))
+        .expect("/state named the session");
+
+    // One turn first: a conversation to keep, and the journal on disk that
+    // `--resume` opens. The file is the answer to both — evo writes it at the
+    // first assistant message, so waiting for it is waiting for the turn.
+    prompt(cx, &b, &tab, "remember this turn");
+    wait_for(cx, "the journal to be on disk", |_cx| session.is_file());
+    wait_for(cx, "the turn to settle", |cx| {
+        cx.update(|cx| {
+            tab.read(cx)
+                .model()
+                .is_some_and(|model| model.activity() == session::Activity::Idle)
+        })
+    });
+
+    // The whole swarm goes at once. `evo-swarm serve` is spawned into a process
+    // group of its own (§3), so one signal takes the supervisor, the server it
+    // supervises and every lane — nothing is left to bring the server back, and
+    // the reconnect the tab does for a *restarting* swarm never applies.
+    let pid = cx
+        .update(|cx| tab.read(cx).swarm_pid())
+        .expect("the swarm's own pid, from /health");
+    let killed = std::process::Command::new("kill")
+        .args(["-KILL", &format!("-{pid}")])
+        .status()
+        .expect("kill");
+    assert!(killed.success(), "kill -KILL -{pid}");
+
+    // The tab says so, with the evidence: no one-line reason (nothing failed to
+    // start), the log's own tail, and Retry (§9.7).
+    wait_for_tab(cx, &tab, "the tab to fail", RECONNECT, |cx| {
+        matches!(state(cx, &tab), TabState::Failed { .. })
+    });
+    let TabState::Failed {
+        message,
+        log_tail,
+        was_up,
+        ..
+    } = state(cx, &tab)
+    else {
+        unreachable!("just matched")
+    };
+    assert!(was_up, "this swarm had answered /health");
+    assert!(
+        message.is_none(),
+        "a swarm that went away has no boot reason"
+    );
+    assert!(
+        !log_tail.trim().is_empty(),
+        "the log tail is the evidence, and it is what the screen shows"
+    );
+    cx.update_window(b.window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.find("boot-failure").visible());
+        assert!(
+            window.find("boot-log-tail").visible(),
+            "the swarm's own log is on the screen"
+        );
+        assert!(
+            window.find("failure-gone-note").visible(),
+            "a swarm that was up has no boot reason, so the screen says what happened and what Retry does"
+        );
+        assert!(
+            window.try_find("boot-failure-reason").is_none(),
+            "and it is not dressed as a boot that could not start"
+        );
+        assert_eq!(window.find("tab-retry").label(), Some("Retry"));
+    })
+    .unwrap();
+
+    // Retry: the same folder, the same session.
+    cx.update_window(b.window.into(), |_, window, cx| {
+        window.click("tab-retry", cx);
+    })
+    .unwrap();
+    wait_for_running(cx, &tab);
+    wait_for(cx, "the resumed swarm to be the same session", |cx| {
+        cx.update(|cx| tab.read(cx).session_path() == Some(session.as_path()))
+    });
+    // And the conversation is back: the row the user typed before the crash is
+    // in the resumed transcript, which is what resuming is for.
+    wait_for(cx, "the earlier turn to come back", |cx| {
+        tab_rows(cx, &tab).iter().any(
+            |row| matches!(&row.kind, session::RowKind::User { text } if text.contains("remember this turn")),
+        )
+    });
+}
+
 /// §9.7: a swarm that stops answering. Its stream goes to reconnecting — the tab
 /// says so, the agent list badges the coordinator's row — and a turn posted while
 /// it is unreachable fails with an error notice above the composer, with the

@@ -381,6 +381,74 @@ fn the_strip_answers_the_keyboard(cx: &mut TestAppContext) {
     .unwrap();
 }
 
+/// §7.1: the Window menu's tab items are the workspace's actions, and macOS
+/// draws a menu item's key equivalent from the **app's** keymap, read once, when
+/// the menu bar is built — which happens at install, before any window exists.
+///
+/// So the tab keys are bound app-wide, with no key context: this drives the same
+/// lookup the platform does (the bindings for one action, with the keystroke
+/// each carries) and asserts that every one of them is unscoped and in the app's
+/// keymap before a window is opened.
+#[gpui_kit::test]
+fn the_tab_keys_are_bound_app_wide_so_the_menu_can_show_them(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    // The state the menu bar is built in: no window yet, only the app.
+    cx.update(workspace::bind_tab_keys);
+
+    /// The keystrokes the app's keymap holds for one action, and whether each
+    /// binding is scoped to a key context.
+    fn bindings(cx: &mut TestAppContext, action: &dyn gpui_kit::Action) -> Vec<(String, bool)> {
+        let keymap = cx.update(|cx| cx.key_bindings());
+        let keymap = keymap.borrow();
+        keymap
+            .bindings_for_action(action)
+            .map(|binding| {
+                let keys = binding
+                    .keystrokes()
+                    .iter()
+                    .map(|keystroke| keystroke.unparse())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                (keys, binding.predicate().is_some())
+            })
+            .collect()
+    }
+
+    let next = bindings(cx, &workspace::SelectNextTab);
+    assert_eq!(
+        next,
+        [
+            ("ctrl-tab".to_string(), false),
+            ("cmd-shift-]".to_string(), false)
+        ],
+        "the menu shows the first of these, and both have to be in the app's keymap"
+    );
+    assert_eq!(
+        bindings(cx, &workspace::SelectPreviousTab),
+        [
+            ("ctrl-shift-tab".to_string(), false),
+            ("cmd-shift-[".to_string(), false)
+        ]
+    );
+    assert_eq!(
+        bindings(cx, &workspace::SelectLastTab),
+        [("cmd-9".to_string(), false)]
+    );
+    // ⌘1…⌘8, one action per number.
+    for index in 0..8 {
+        assert_eq!(
+            bindings(cx, &workspace::SelectTab(index)),
+            [(format!("cmd-{}", index + 1), false)],
+            "⌘{} is the tab with that number",
+            index + 1
+        );
+    }
+
+    // Binding them again — what opening a window does — does not double them up.
+    cx.update(workspace::bind_tab_keys);
+    assert_eq!(bindings(cx, &workspace::SelectNextTab).len(), 2);
+}
+
 /// §7.1: a middle click closes the tab it lands on — what the `×` does, without
 /// having to aim at it.
 #[gpui_kit::test]

@@ -63,6 +63,12 @@ pub fn install(cx: &mut App) {
         KeyBinding::new("cmd-m", MinimizeWindow, None),
         KeyBinding::new("cmd-,", SettingsApp, None),
     ]);
+    // The Window menu's tab items are the workspace's actions, and their key
+    // equivalents come from the same place: the app's keymap, read once, when
+    // the menu bar is built below. A window binds them too, but the menu bar
+    // outlives every window's keyboard and is built before the first window
+    // exists, so the bindings have to be here first (workspace::bind_tab_keys).
+    workspace::bind_tab_keys(cx);
 
     cx.on_action(|_: &QuitApp, cx: &mut App| quit::begin(cx));
     cx.on_action(|_: &AboutApp, cx: &mut App| open_about(cx));

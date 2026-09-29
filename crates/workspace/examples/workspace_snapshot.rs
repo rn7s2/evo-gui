@@ -32,6 +32,13 @@ const WINDOW_SIZE: (f32, f32) = (1600., 1000.);
 /// A transition samples the app clock; advance it before a capture.
 const SETTLE: Duration = Duration::from_millis(400);
 
+/// One turn of a wait loop. The app clock — which a headless context only moves
+/// when it is asked — is advanced by the same amount, so a wait of four real
+/// seconds is four app seconds: a notice's lifetime, a stream's fade and a
+/// spinner all move while the batch works, instead of standing still and putting
+/// something in a picture that a user would never see.
+const TICK: Duration = Duration::from_millis(50);
+
 /// How long a capture waits for the swarm to answer (§3 gives boot 90 s).
 const WAIT: Duration = Duration::from_secs(90);
 
@@ -124,7 +131,7 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     //    before the first pump, which is the only moment it is on screen.
     shot(&mut cx, window, dir, "03-booting.png")?;
 
-    wait_until(&mut cx, |cx| {
+    wait_until(&mut cx, "the swarm to answer /health", |cx| {
         matches!(
             tab.read_with(cx, |tab, _| tab.state().clone()),
             TabState::Running { .. }
@@ -137,11 +144,13 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     prompt(&mut cx, window, &tab, "SLOW say something long")?;
     // Wait until the assistant row is actually growing, so the picture shows
     // markdown rendered mid-stream rather than an empty page (§2.8).
-    wait_until(&mut cx, |cx| text_chars(cx, &tab) > 40)?;
+    wait_until(&mut cx, "the reply to start streaming", |cx| {
+        text_chars(cx, &tab) > 40
+    })?;
     shot(&mut cx, window, dir, "05-streaming.png")?;
 
     // 5. The swarm was settled before the next turn asks it to work.
-    wait_until(&mut cx, |cx| !working(cx, &tab))?;
+    wait_until(&mut cx, "the run to settle", |cx| !working(cx, &tab))?;
 
     // 6. Lane 1 is chosen first — its stream is opened while it is idle — and
     //    then the coordinator delegates to it: the center column follows the
@@ -149,7 +158,7 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     //    types to the coordinator (§14.4).
     // The swarm's lanes are `starting` until their baseline is evaluated, and the
     // delegate tool takes an idle lane: wait for lane 1 to be ready (§9.3).
-    wait_until(&mut cx, |cx| {
+    wait_until(&mut cx, "lane 1 to be ready for work", |cx| {
         tab.read_with(cx, |tab, _| {
             tab.model().is_some_and(|model| {
                 model
@@ -166,14 +175,16 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
         &tab,
         "CALL delegate {\"lane\":1,\"task\":\"SLOW lane work for the picture\"}",
     )?;
-    wait_until(&mut cx, |cx| {
+    wait_until(&mut cx, "the lane to take the work and stream", |cx| {
         lane_working(cx, &tab) && text_chars(cx, &tab) > 40
     })?;
     shot(&mut cx, window, dir, "06-lane-selected.png")?;
 
     // 7. Back to the coordinator, with the report the lane sent back.
     select_main(&mut cx, window, &tab)?;
-    wait_until(&mut cx, |cx| rows(cx, &tab) >= 3)?;
+    wait_until(&mut cx, "the coordinator to show the delegation", |cx| {
+        rows(cx, &tab) >= 3
+    })?;
     shot(&mut cx, window, dir, "07-coordinator-after-delegation.png")?;
 
     // 8. A swarm that cannot start: the tab shows the log tail, a Retry and a
@@ -193,7 +204,7 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
             plan: LaunchPlan::default(),
         },
     )?;
-    wait_until(&mut cx, |cx| {
+    wait_until(&mut cx, "the boot to fail", |cx| {
         matches!(
             broken_tab.read_with(cx, |tab, _| tab.state().clone()),
             TabState::Failed { .. }
@@ -214,7 +225,7 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
         .expect("the swarm's pid, from /health");
     let server = served_by(pid).ok_or("the serving child of the supervisor")?;
     signal(server, "-KILL");
-    wait_until(&mut cx, |cx| {
+    wait_until(&mut cx, "the stream to go to reconnecting", |cx| {
         tab.read_with(cx, |tab, _| tab.is_reconnecting())
     })?;
     println!(
@@ -226,7 +237,7 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     // 10. A turn typed while the swarm cannot answer: the POST fails, and the
     //     failure is a line above the composer, with the draft still there (§4).
     prompt(&mut cx, window, &tab, "SLOW unreachable swarm")?;
-    wait_until(&mut cx, |cx| {
+    wait_until(&mut cx, "the refused turn to be shown", |cx| {
         tab.read_with(cx, |tab, _| tab.notice_text().is_some())
     })?;
     println!(
@@ -236,9 +247,18 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     );
     shot(&mut cx, window, dir, "10-post-failed-notice.png")?;
 
+    // 10b. A notice is a line, not a state: it clears itself a few seconds later
+    //      (§4). The capture runs on a simulated clock, so this is where the
+    //      clock gets the chance to say so — the pictures from here on are of a
+    //      tab that is not still apologising for a POST nine steps ago.
+    wait_until(&mut cx, "the notice to clear itself", |cx| {
+        tab.read_with(cx, |tab, _| tab.notice_text().is_none())
+    })?;
+    println!("[capture] the notice cleared itself");
+
     // 11. The supervisor put the server back (§3): the stream comes back on its way
     //     to the new process, and the badge goes with it.
-    wait_until(&mut cx, |cx| {
+    wait_until(&mut cx, "the stream to come back", |cx| {
         tab.read_with(cx, |tab, _| !tab.is_reconnecting())
     })?;
     shot(&mut cx, window, dir, "11-recovered.png")?;
@@ -251,6 +271,118 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
         click(&mut cx, window, "tab-add")?;
     }
     shot(&mut cx, window, dir, "12-strip-overflow.png")?;
+
+    // Back to the tab that drives a swarm: the goal and the checklist are its
+    // own state, and the page has to be the one on screen to show them.
+    cx.update_window(window, |_, window, cx| {
+        view.update(cx, |view, cx| view.select_tab(0, window, cx));
+    })?;
+    let tab = view.read_with(&cx, |view, _| view.tabs()[0].clone());
+
+    // 13. §7.3: the coordinator's todo panel, at the foot of the center column —
+    //     the checklist the `todo` tool replaces wholesale. The stub's FINISH
+    //     marker in the goal objective below is deliberate: an active goal makes
+    //     the coordinator continue itself, and the marker is what makes the
+    //     stub's continuation turn close it, so the run settles and the resync
+    //     that follows puts the goal segment on the line.
+    prompt(
+        &mut cx,
+        window,
+        &tab,
+        "CALL todo {\"items\":[\
+         {\"text\":\"read the tab page against §7.3\",\"status\":\"done\"},\
+         {\"text\":\"check the goal segment\",\"status\":\"in-progress\"},\
+         {\"text\":\"capture the page\",\"status\":\"pending\"}]}",
+    )?;
+    wait_until(&mut cx, "the coordinator's todos", |cx| {
+        tab.read_with(cx, |tab, _| {
+            tab.model()
+                .is_some_and(|model| model.selected_todos().len() == 3)
+        })
+    })?;
+
+    prompt(
+        &mut cx,
+        window,
+        &tab,
+        "CALL create_goal {\"objective\":\"read the tab page §7.3 FINISH\",\"token-budget\":50000}",
+    )?;
+    wait_until(&mut cx, "the goal segment", |cx| {
+        tab.read_with(cx, |tab, _| {
+            tab.model()
+                .is_some_and(|model| model.readout_text().contains("goal g-"))
+        })
+    })?;
+    println!(
+        "[capture] readout: {:?}",
+        tab.read_with(&cx, |tab, _| tab.model().map(|model| model.readout_text()))
+    );
+    shot(&mut cx, window, dir, "13-goal-and-todos.png")?;
+
+    // 14. §7.3, §9.2: the one button, mid-run. A turn streams while a draft is
+    //     typed into the input, and the button reads **Stop** — it interrupts,
+    //     never sends, and it leaves that draft exactly where it was.
+    prompt(&mut cx, window, &tab, "SLOW say something long")?;
+    wait_until(&mut cx, "the run to be in flight", |cx| {
+        tab.read_with(cx, |tab, _| tab.is_running())
+    })?;
+    wait_until(&mut cx, "the reply to start streaming", |cx| {
+        text_chars(cx, &tab) > 20
+    })?;
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.input("half a next turn", cx);
+        window.render_frame(cx);
+    })?;
+    println!(
+        "[capture] button: {:?}",
+        cx.update_window(window, |_, window, _cx| {
+            window.find(composer::BUTTON_ID).label().map(str::to_owned)
+        })?
+    );
+    shot(&mut cx, window, dir, "14-stop-with-draft.png")?;
+    // `Esc` is the same interrupt by another route, and it is how this capture
+    // gets back to an idle coordinator before the swarm is killed.
+    cx.update_window(window, |_, window, cx| window.press("escape", cx))?;
+    wait_until(&mut cx, "the interrupt to end the run", |cx| {
+        tab.read_with(cx, |tab, _| !tab.is_running())
+    })?;
+
+    // 15. §9.7: the swarm is **gone** — the whole process group killed at once,
+    //     supervisor and server together, so nothing is left to bring the server
+    //     back. The tab says so, with the log the server was writing.
+    let pid = tab
+        .read_with(&cx, |tab, _| tab.swarm_pid())
+        .expect("the swarm's pid, from /health");
+    let killed = std::process::Command::new("kill")
+        .args(["-KILL", &format!("-{pid}")])
+        .status()?;
+    if !killed.success() {
+        return Err(format!("kill -KILL -{pid}").into());
+    }
+    wait_until(&mut cx, "the swarm-gone failure", |cx| {
+        matches!(
+            tab.read_with(cx, |tab, _| tab.state().clone()),
+            TabState::Failed { .. }
+        )
+    })?;
+    println!(
+        "[capture] gone tooltip: {:?}",
+        tab.read_with(&cx, |tab, _| tab.tooltip())
+    );
+    shot(&mut cx, window, dir, "15-swarm-gone.png")?;
+
+    // 16. §3/§9.7: Retry on a swarm that had been up resumes the session it was
+    //     writing, so the conversation comes back with it.
+    click(&mut cx, window, "tab-retry")?;
+    wait_until(&mut cx, "the retried swarm to run", |cx| {
+        matches!(
+            tab.read_with(cx, |tab, _| tab.state().clone()),
+            TabState::Running { .. }
+        )
+    })?;
+    wait_until(&mut cx, "the resumed transcript", |cx| rows(cx, &tab) > 2)?;
+    shot(&mut cx, window, dir, "16-retry-resumed.png")?;
 
     Ok(())
 }
@@ -306,6 +438,11 @@ fn launch(
 }
 
 /// Type a turn into the composer and press Enter — the app's own send path (§9.2).
+/// Type a turn into the composer and press Enter — the app's own send path (§9.2).
+///
+/// The input is emptied first: a POST the swarm never answered leaves its draft
+/// exactly where it was (§9.2), and a capture that types on top of it would send
+/// the two turns as one.
 fn prompt(
     cx: &mut HeadlessAppContext,
     window: AnyWindowHandle,
@@ -317,6 +454,8 @@ fn prompt(
             let composer = tab.composer().clone();
             composer.update(cx, |composer, cx| composer.focus_input(window, cx));
         });
+        window.press("cmd-a", cx);
+        window.press("backspace", cx);
         window.input(text, cx);
         window.press("enter", cx);
     })?;
@@ -404,11 +543,16 @@ fn lane_working(cx: &HeadlessAppContext, tab: &gpui_kit::Entity<workspace::TabCo
 
 /// Spin the UI thread until `done` holds or the wait runs out. A capture is a
 /// batch job, so a bounded wait loop is what it uses instead of events.
+///
+/// `what` is what a run that gave up says: a batch that dies at 90 s has to name
+/// the state it was waiting for, or the log is a wall of pictures.
 fn wait_until(
     cx: &mut HeadlessAppContext,
+    what: &str,
     done: impl Fn(&HeadlessAppContext) -> bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let deadline = Instant::now() + WAIT;
+    let started = Instant::now();
+    let deadline = started + WAIT;
     let mut ticks = 0u32;
     loop {
         cx.run_until_parked();
@@ -416,13 +560,16 @@ fn wait_until(
             return Ok(());
         }
         if std::env::var_os("SNAPSHOT_TRACE").is_some() && ticks.is_multiple_of(20) {
-            eprintln!("[wait] tick {ticks}");
+            eprintln!("[wait] tick {ticks} {what}");
         }
         ticks += 1;
         if Instant::now() >= deadline {
-            return Err("timed out waiting for the swarm".into());
+            return Err(
+                format!("timed out after {:?} waiting for {what}", started.elapsed()).into(),
+            );
         }
-        std::thread::sleep(Duration::from_millis(50));
+        cx.advance_clock(TICK);
+        std::thread::sleep(TICK);
     }
 }
 
