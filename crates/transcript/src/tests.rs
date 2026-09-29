@@ -15,7 +15,7 @@ use gpui_kit::px;
 
 use crate::rows::{
     block_text, json_fields, looks_like_code, run_outcome_style, Field, FieldValue, BLOCK_LINES,
-    KEY_WIDTH, TOOL_TEXT_LIMIT, VALUE_LIMIT,
+    COLUMN_GAP, KEY_WIDTH, MAX_ARRAY, MAX_DEPTH, NEST_INDENT, TOOL_TEXT_LIMIT, VALUE_LIMIT,
 };
 use crate::style::MEASURE;
 use crate::todo::MAX_LIST_HEIGHT;
@@ -423,9 +423,23 @@ fn field(key: &str, value: &str) -> Field {
     }
 }
 
-/// The id of the `index`th key/value row of a tool row's block.
-fn field_row_id(block: &'static str, id: RowId, index: usize) -> (gpui_kit::ElementId, String) {
-    ((block, id).into(), index.to_string())
+/// A field whose value is a container the panel draws out.
+fn nested(key: &str, children: Vec<Field>) -> Field {
+    Field {
+        key: key.into(),
+        value: FieldValue::Nested(children),
+    }
+}
+
+/// A field whose value is a container the panel only counts.
+fn collapsed(key: &str, summary: &str, full: &str) -> Field {
+    Field {
+        key: key.into(),
+        value: FieldValue::Collapsed {
+            summary: summary.into(),
+            full: full.into(),
+        },
+    }
 }
 
 #[test]
@@ -448,9 +462,9 @@ fn tool_arguments_read_as_a_key_value_list() {
             field("env.RUST_BACKTRACE", "1"),
             field("args.0", "--lib"),
             field("args.1", "--nocapture"),
-            // Only one level flattens: what is left of a deeper structure is one
-            // line of compact JSON, not a wall of braces.
-            field("matrix.0", "[1,2]"),
+            // One level flattens; what is inside it keeps its own keys and is
+            // drawn as rows indented under it.
+            nested("matrix.0", vec![field("0", "1"), field("1", "2")]),
         ]
     );
 
@@ -613,9 +627,9 @@ fn a_plain_result_starts_at_the_panels_own_edge(cx: &mut TestAppContext) {
         );
 
         // The keyed panels keep their grid: a key column, then its values.
-        let key = window.find(field_row_id(ARGUMENTS, 1, 0)).bounds();
+        let key = window.find(row_id(ARGUMENTS, 1, &[0])).bounds();
         assert!(text.origin.x < key.origin.x + KEY_WIDTH);
-        assert!(window.find(field_row_id(ARGUMENTS, 1, 1)).bounds().origin.x == key.origin.x);
+        assert!(window.find(row_id(ARGUMENTS, 1, &[1])).bounds().origin.x == key.origin.x);
     });
 }
 
@@ -654,13 +668,13 @@ fn an_open_tool_row_renders_its_arguments_as_key_value_rows(cx: &mut TestAppCont
         window.render_frame(cx);
 
         // One row per argument, in key order — no field beyond the two.
-        assert!(window.try_find(field_row_id(ARGUMENTS, 1u64, 0)).is_some());
-        assert!(window.try_find(field_row_id(ARGUMENTS, 1, 1)).is_some());
-        assert!(window.try_find(field_row_id(ARGUMENTS, 1, 2)).is_none());
+        assert!(window.try_find(row_id(ARGUMENTS, 1u64, &[0])).is_some());
+        assert!(window.try_find(row_id(ARGUMENTS, 1, &[1])).is_some());
+        assert!(window.try_find(row_id(ARGUMENTS, 1, &[2])).is_none());
 
         // A JSON result opens onto the same list, keyed by its own block.
         assert!(
-            window.try_find(field_row_id(RESULT, 1, 0)).is_some(),
+            window.try_find(row_id(RESULT, 1, &[0])).is_some(),
             "a JSON result reads as a key/value list too"
         );
 
@@ -671,7 +685,7 @@ fn an_open_tool_row_renders_its_arguments_as_key_value_rows(cx: &mut TestAppCont
                 .is_some(),
             "arguments that are not JSON are shown as they came"
         );
-        assert!(window.try_find(field_row_id(ARGUMENTS, 2, 0)).is_none());
+        assert!(window.try_find(row_id(ARGUMENTS, 2, &[0])).is_none());
     });
 }
 
@@ -916,19 +930,26 @@ fn markdown_tables_use_the_sideways_scrolling_layout(cx: &mut TestAppContext) {
             Some(gpui_kit::Overflow::Scroll),
             "the table scrolls rather than squeezing its columns"
         );
-        // The cell's own padding stays zero on purpose: gpui-base has already
-        // counted its `CELL_PAD_PX` into every column's floor, so asking for
-        // that padding again would leave each text box exactly as wide as its
-        // text, which is where a word gets broken in half.
+        // A cell carries a little padding of its own — less than the 8px a side
+        // gpui-base has already counted into every column's floor. Asking for
+        // all 16px would leave each text box exactly as wide as its text, which
+        // is where a word gets broken in half; asking for none leaves two
+        // columns touching ("91%crates/transcript/src/rows.rs"). What is left of
+        // the floor is the air between them.
         let padding = style.table_cell.padding;
+        let base = gpui_kit::AbsoluteLength::Pixels(gpui_kit::px(0.));
+        let rem = gpui_kit::px(16.);
+        let side = |side: Option<gpui_kit::DefiniteLength>| {
+            side.map(|side| side.to_pixels(base, rem))
+                .unwrap_or(gpui_kit::px(0.))
+        };
+        let (left, right) = (side(padding.left), side(padding.right));
         assert!(
-            padding
-                .left
-                .is_none_or(|left| left == gpui_kit::px(0.).into())
-                && padding
-                    .right
-                    .is_none_or(|right| right == gpui_kit::px(0.).into()),
-            "no cell padding of our own, so the measured floor keeps its slack: {padding:?}"
+            left > gpui_kit::px(0.)
+                && left < gpui_kit::px(8.)
+                && right > gpui_kit::px(0.)
+                && right < gpui_kit::px(8.),
+            "a cell keeps a little air and the measured floor keeps its slack: {padding:?}"
         );
     });
 }
@@ -1576,4 +1597,505 @@ fn a_message_copies_its_markdown_source(cx: &mut TestAppContext) {
             "the button acknowledges the click"
         );
     });
+}
+
+/// The point a click lands on when a test means "the start of this message's
+/// first line": a couple of pixels in from the measure's top-left corner.
+fn first_line_start(window: &mut Window, row: RowId) -> gpui_kit::Point<gpui_kit::Pixels> {
+    let bounds = window.find(("transcript-measure", row)).bounds();
+    point(bounds.left() + px(4.), bounds.top() + px(8.))
+}
+
+/// An HTTP client that records what a test's app asks it to fetch, so a test
+/// can prove that something was *not* fetched. Nothing is sent: the point is
+/// the request, not the reply.
+struct RecordingClient(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+impl gpui_kit::http_client::HttpClient for RecordingClient {
+    fn user_agent(&self) -> Option<&gpui_kit::http_client::http::HeaderValue> {
+        None
+    }
+
+    fn proxy(&self) -> Option<&gpui_kit::http_client::Url> {
+        None
+    }
+
+    fn send(
+        &self,
+        req: gpui_kit::http_client::Request<gpui_kit::http_client::AsyncBody>,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = gpui_kit::http_client::Result<
+                        gpui_kit::http_client::Response<gpui_kit::http_client::AsyncBody>,
+                    >,
+                > + Send
+                + 'static,
+        >,
+    > {
+        self.0.lock().unwrap().push(req.uri().to_string());
+        Box::pin(async move { Err(gpui_kit::http_client::anyhow!("no network in a test")) })
+    }
+}
+
+/// Install a recording client and hand back what it has been asked for.
+fn record_http(cx: &mut TestAppContext) -> std::sync::Arc<std::sync::Mutex<Vec<String>>> {
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    cx.update(|cx| {
+        cx.set_http_client(std::sync::Arc::new(RecordingClient(requests.clone())));
+    });
+    requests
+}
+
+/// A window holding one bare image: the control that proves the test platform
+/// really does fetch an image, so an empty request list means something.
+struct BareImage;
+
+impl Render for BareImage {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .w(px(120.))
+            .h(px(120.))
+            .child(gpui_kit::img("https://example.com/control.png"))
+    }
+}
+
+/// An image reference is drawn as its alt text and nothing is fetched: a
+/// message must not make this app issue a request to an address a model chose.
+#[gpui_kit::test]
+fn an_image_reference_is_drawn_as_its_alt_text_and_never_fetched(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let requests = record_http(cx);
+    let (host, cx) = add_root_window(cx);
+    let view = cx.read(|cx| host.read(cx).transcript.clone());
+
+    view.update(cx, |view, cx| {
+        view.replace(
+            1,
+            vec![assistant(
+                1,
+                1,
+                "A diagram ![architecture diagram](https://example.com/diagram.png) sits here.",
+            )],
+            cx,
+        );
+    });
+    cx.update(|window, cx| window.render_frame(cx));
+
+    let document = cx.read(|cx| document(&view, cx, 1));
+    cx.read(|cx| {
+        let rendered = document.read(cx).rendered_text();
+        assert!(
+            rendered.as_str().contains("[image: architecture diagram]"),
+            "the reference is drawn as its alt text: {:?}",
+            rendered.as_str()
+        );
+    });
+    assert_eq!(
+        requests.lock().unwrap().len(),
+        0,
+        "an image reference must not fetch anything"
+    );
+
+    // The control: the same platform, given an image element, asks for it. So
+    // the empty list above is the claim being held, not the loader being idle.
+    let (_root, cx) = cx.add_window_view(|_window, _cx| BareImage);
+    cx.update(|window, cx| window.render_frame(cx));
+    cx.run_until_parked();
+    assert_eq!(
+        requests.lock().unwrap().clone(),
+        vec!["https://example.com/control.png".to_string()],
+        "the platform does load images, so the transcript holding none is the point"
+    );
+}
+
+/// Raw HTML is shown as the source it is: the kit interprets the tags it knows
+/// and drops a node it cannot parse, which loses text the reader was meant to
+/// see — and turns an `<img>` into something this app would fetch.
+#[gpui_kit::test]
+fn raw_html_is_shown_as_the_source_it_is(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let requests = record_http(cx);
+    let (host, cx) = add_root_window(cx);
+    let view = cx.read(|cx| host.read(cx).transcript.clone());
+
+    view.update(cx, |view, cx| {
+        view.replace(
+            1,
+            vec![
+                assistant(
+                    1,
+                    1,
+                    "Press <kbd>K</kbd>, keep <br> and <img src=\"https://example.com/pixel.png\" alt=\"beacon\"> as tags.",
+                ),
+                assistant(
+                    2,
+                    1,
+                    "<div align=\"center\">\n  <p>a block of markup</p>\n</div>",
+                ),
+            ],
+            cx,
+        );
+    });
+    cx.update(|window, cx| window.render_frame(cx));
+
+    let rendered = cx.read(|cx| document(&view, cx, 1).read(cx).rendered_text());
+    let rendered = rendered.as_str().to_string();
+    for piece in [
+        "<kbd>K</kbd>",
+        "<br>",
+        "<img src=\"https://example.com/pixel.png\" alt=\"beacon\">",
+    ] {
+        assert!(
+            rendered.contains(piece),
+            "{piece} is shown as it was written: {rendered:?}"
+        );
+    }
+
+    let block = cx.read(|cx| document(&view, cx, 2).read(cx).rendered_text());
+    assert!(
+        block.as_str().contains("<div align=\"center\">")
+            && block.as_str().contains("a block of markup"),
+        "a block of raw HTML is shown too: {:?}",
+        block.as_str()
+    );
+
+    assert_eq!(
+        requests.lock().unwrap().len(),
+        0,
+        "raw HTML is never handed to the renderer, so it cannot fetch either"
+    );
+}
+
+/// The schemes the app opens, and the ones it refuses to hand to the OS.
+#[test]
+fn the_app_opens_web_and_mail_links_and_nothing_else() {
+    for url in [
+        "https://gpui.rs/docs",
+        "http://example.com",
+        "HTTPS://Example.com/Upper",
+        "mailto:dev@example.com",
+        "MAILTO:dev@example.com",
+    ] {
+        assert!(crate::link::openable(url), "{url} opens");
+    }
+
+    for url in [
+        "file:///etc/passwd",
+        "javascript:alert(1)",
+        "data:text/html,<script>alert(1)</script>",
+        "ftp://example.com/file",
+        "ssh://git@github.com/x",
+        "./crates/transcript/src/rows.rs",
+        "#a-fragment",
+        "crates/transcript/src/rows.rs:412",
+        "https:/one-slash",
+        "",
+    ] {
+        assert!(!crate::link::openable(url), "{url} does not open");
+    }
+}
+
+/// A left click on a link opens it in the browser.
+#[gpui_kit::test]
+fn a_left_click_on_a_link_opens_it(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (host, cx) = add_root_window(cx);
+    let view = cx.read(|cx| host.read(cx).transcript.clone());
+    view.update(cx, |view, cx| {
+        view.replace(
+            1,
+            vec![assistant(1, 1, "[the GPUI docs](https://gpui.rs/docs)")],
+            cx,
+        );
+    });
+
+    let point = cx.update(|window, cx| {
+        window.render_frame(cx);
+        first_line_start(window, 1)
+    });
+    cx.simulate_click(point, gpui_kit::Modifiers::default());
+
+    assert_eq!(
+        cx.opened_url().as_deref(),
+        Some("https://gpui.rs/docs"),
+        "a click on the link opens it"
+    );
+}
+
+/// A click on plain text — the same place in the same kind of row — opens
+/// nothing: the handler is the link's, not the row's.
+#[gpui_kit::test]
+fn a_click_on_plain_text_opens_nothing(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (host, cx) = add_root_window(cx);
+    let view = cx.read(|cx| host.read(cx).transcript.clone());
+    view.update(cx, |view, cx| {
+        view.replace(
+            1,
+            vec![assistant(1, 1, "no link in this message at all")],
+            cx,
+        );
+    });
+
+    let point = cx.update(|window, cx| {
+        window.render_frame(cx);
+        first_line_start(window, 1)
+    });
+    cx.simulate_click(point, gpui_kit::Modifiers::default());
+
+    assert_eq!(cx.opened_url(), None, "there is nothing to open");
+}
+
+/// A right click on a link opens nothing, as it does in the kit's own links:
+/// a right click is how a reader asks for a menu, not for a page.
+#[gpui_kit::test]
+fn a_right_click_on_a_link_opens_nothing(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (host, cx) = add_root_window(cx);
+    let view = cx.read(|cx| host.read(cx).transcript.clone());
+    view.update(cx, |view, cx| {
+        view.replace(
+            1,
+            vec![assistant(1, 1, "[the GPUI docs](https://gpui.rs/docs)")],
+            cx,
+        );
+    });
+
+    let point = cx.update(|window, cx| {
+        window.render_frame(cx);
+        first_line_start(window, 1)
+    });
+    let button = gpui_kit::MouseButton::Right;
+    cx.simulate_mouse_down(point, button, gpui_kit::Modifiers::default());
+    cx.simulate_mouse_up(point, button, gpui_kit::Modifiers::default());
+
+    assert_eq!(cx.opened_url(), None, "a right click is not an activation");
+}
+
+/// A scheme the app does not open is ignored rather than handed to the OS:
+/// `file:` would reach the filesystem and `javascript:` the browser's own
+/// address bar.
+#[gpui_kit::test]
+fn a_link_the_app_does_not_open_is_ignored(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (host, cx) = add_root_window(cx);
+    let view = cx.read(|cx| host.read(cx).transcript.clone());
+    view.update(cx, |view, cx| {
+        view.replace(
+            1,
+            vec![assistant(1, 1, "[a local file](file:///etc/passwd)")],
+            cx,
+        );
+    });
+
+    let point = cx.update(|window, cx| {
+        window.render_frame(cx);
+        first_line_start(window, 1)
+    });
+    cx.simulate_click(point, gpui_kit::Modifiers::default());
+
+    assert_eq!(
+        cx.opened_url(),
+        None,
+        "a file: link is not opened by a click"
+    );
+}
+
+/// A `mailto:` link opens the reader's mail composer.
+#[gpui_kit::test]
+fn a_mailto_link_opens_a_mail_composer(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (host, cx) = add_root_window(cx);
+    let view = cx.read(|cx| host.read(cx).transcript.clone());
+    view.update(cx, |view, cx| {
+        view.replace(
+            1,
+            vec![assistant(1, 1, "[write to us](mailto:dev@example.com)")],
+            cx,
+        );
+    });
+
+    let point = cx.update(|window, cx| {
+        window.render_frame(cx);
+        first_line_start(window, 1)
+    });
+    cx.simulate_click(point, gpui_kit::Modifiers::default());
+
+    assert_eq!(
+        cx.opened_url().as_deref(),
+        Some("mailto:dev@example.com"),
+        "the mail composer is opened with the address"
+    );
+}
+
+/// A payload nests as deep as the panel draws it out — four levels under the
+/// one that flattens — and summarises what is left.
+#[test]
+fn a_payload_nests_four_levels_and_summarises_the_rest() {
+    let arguments = r#"{"one":{"two":{"three":{"four":{"five":{"six":{"seven":"deep"}}}}}}}"#;
+    let fields = json_fields(arguments).expect("an object");
+
+    assert_eq!(
+        fields,
+        vec![nested(
+            "one.two",
+            vec![nested(
+                "three",
+                vec![nested(
+                    "four",
+                    vec![nested(
+                        "five",
+                        vec![collapsed("six", "{…1 key}", r#"{"seven":"deep"}"#)],
+                    )],
+                )],
+            )],
+        )],
+    );
+    assert_eq!(MAX_DEPTH, 4, "the chain above is drawn four levels deep");
+
+    // An array under the limit is drawn, item by item, however deep it sits.
+    let a_list = r#"{"a":{"b":{"tags":["one","two"]}}}"#;
+    let fields = json_fields(a_list).expect("an object");
+    let FieldValue::Nested(children) = &fields[0].value else {
+        panic!("a container nests: {fields:?}");
+    };
+    assert_eq!(
+        children,
+        &vec![nested("tags", vec![field("0", "one"), field("1", "two")])],
+        "a list inside a container keeps its items as rows of their own"
+    );
+}
+
+/// A long array is counted rather than drawn row by row — the whole of it stays
+/// one hover away — while one at the bound is drawn.
+#[test]
+fn a_long_array_is_summarised_rather_than_drawn_row_by_row() {
+    let long: Vec<String> = (0..MAX_ARRAY + 22)
+        .map(|index| format!("\"row-{index}\""))
+        .collect();
+    let arguments = format!(r#"{{"rows":[{}],"count":{}}}"#, long.join(","), long.len());
+    let fields = json_fields(&arguments).expect("an object");
+
+    assert_eq!(fields[0].key, "rows");
+    let FieldValue::Collapsed { summary, full } = &fields[0].value else {
+        panic!("a long array is summarised: {:?}", fields[0]);
+    };
+    assert_eq!(summary, &format!("[…{} items]", long.len()));
+    assert!(
+        full.starts_with("[\"row-0\",\"row-1\""),
+        "the whole array is what the tooltip carries: {full:?}"
+    );
+    assert_eq!(
+        fields[1],
+        field("count", &long.len().to_string()),
+        "the fields after it are untouched"
+    );
+
+    // An array at the bound is still drawn item by item, keyed by index.
+    let at_the_bound: Vec<String> = (0..MAX_ARRAY).map(|index| format!("\"{index}\"")).collect();
+    let fields =
+        json_fields(&format!(r#"{{"rows":[{}]}}"#, at_the_bound.join(","))).expect("an object");
+    assert_eq!(fields.len(), MAX_ARRAY);
+    assert_eq!(fields[0], field("rows.0", "0"));
+    assert_eq!(
+        fields[MAX_ARRAY - 1],
+        field(
+            &format!("rows.{}", MAX_ARRAY - 1),
+            &format!("{}", MAX_ARRAY - 1)
+        )
+    );
+
+    // A container inside one is summarised too, not just one at the top.
+    let deep = format!(r#"{{"a":{{"rows":[{}]}}}}"#, long.join(","));
+    let fields = json_fields(&deep).expect("an object");
+    assert_eq!(fields[0].key, "a.rows");
+    assert!(
+        matches!(fields[0].value, FieldValue::Collapsed { .. }),
+        "a long array nested one level in is summarised as well: {:?}",
+        fields[0]
+    );
+}
+
+/// A nested payload is drawn as rows under their key, indented a step per
+/// level; a container the panel will not draw out reads as the count it is.
+#[gpui_kit::test]
+fn a_nested_payload_renders_as_rows_indented_under_their_key(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (host, cx) = add_root_window(cx);
+    // A chain deeper than the panel draws, and a field beside it that must stay
+    // at the panel's own column.
+    let arguments = r#"{"outer":{"inner":{"deep":{"deeper":{"deepest":{"deeper-still":{"too-deep":1}}}}}},"flat":"x"}"#;
+
+    host.update(cx, |host, cx| {
+        host.transcript.update(cx, |view, cx| {
+            view.replace(1, vec![tool_with(1, "bash", arguments, None)], cx);
+            view.set_expanded(1, true, cx);
+        });
+    });
+
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+
+        let at = |path: &[usize]| window.find(key_cell_id(ARGUMENTS, 1, path)).bounds();
+
+        // `outer.inner` is what the top level flattened; the levels under it keep
+        // their own keys, each a step further in than the one above it.
+        let mut previous = at(&[0]);
+        let levels: [&[usize]; 3] = [&[0, 0], &[0, 0, 0], &[0, 0, 0, 0]];
+        for (level, path) in levels.iter().enumerate() {
+            let here = at(path);
+            assert_eq!(
+                here.origin.x - previous.origin.x,
+                NEST_INDENT,
+                "level {} is one indent in: {:?} -> {:?}",
+                level + 1,
+                previous,
+                here
+            );
+            previous = here;
+        }
+
+        assert_eq!(
+            at(&[1]).origin.x,
+            at(&[0]).origin.x,
+            "a field at the top level stays at the panel's own column"
+        );
+
+        // The container that would sit past the bound is one row: its key, and
+        // the count of what it holds beside it.
+        let summary = window
+            .find(row_value_id(ARGUMENTS, 1, &[0, 0, 0, 0, 0]))
+            .bounds();
+        let key = at(&[0, 0, 0, 0, 0]);
+        assert_eq!(
+            summary.origin.x - (key.origin.x + key.size.width),
+            COLUMN_GAP,
+            "the summary sits in the value column of its own row: {summary:?} {key:?}"
+        );
+        assert!(
+            key.origin.x - at(&[0]).origin.x == NEST_INDENT * 4.,
+            "four levels of indentation, and the fifth row is the summary"
+        );
+    });
+}
+
+/// The value cell of the row at `path`: a container the panel only counts puts
+/// its summary there.
+fn row_value_id(block: &'static str, id: RowId, path: &[usize]) -> gpui_kit::ElementId {
+    (row_id(block, id, path), "value").into()
+}
+
+/// The key cell of the row at `path` — one index per nesting level.
+fn key_cell_id(block: &'static str, id: RowId, path: &[usize]) -> gpui_kit::ElementId {
+    (row_id(block, id, path), "key").into()
+}
+
+/// The id of the row at `path`, one index per nesting level.
+fn row_id(block: &'static str, id: RowId, path: &[usize]) -> gpui_kit::ElementId {
+    let mut row: gpui_kit::ElementId = (block, id).into();
+    for index in path {
+        row = (row, index.to_string()).into();
+    }
+    row
 }

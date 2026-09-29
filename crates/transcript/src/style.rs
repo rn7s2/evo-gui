@@ -83,7 +83,8 @@ pub(crate) fn text_style(cx: &App) -> TextViewStyle {
     let mut table = StyleRefinement::default();
     table.overflow.x = Some(Overflow::Scroll);
 
-    // A cell draws no padding of its own, deliberately.
+    // A cell draws a little padding of its own — deliberately less than the
+    // 16px gpui-base assumes.
     //
     // gpui-base measures a scroll-layout column as `text + CELL_PAD_PX (16) +
     // border` and uses that as the column's flex floor, while the cell it
@@ -91,12 +92,11 @@ pub(crate) fn text_style(cx: &App) -> TextViewStyle {
     // Asking for the 8px a side that measurement assumes leaves the text box
     // exactly as wide as the text, and the flex pass then hands the column a
     // fraction less than its floor — so a word that fits at all gets broken
-    // mid-word ("call|s", "cach|e"). Leaving the padding to the measurement
-    // keeps those 16px as slack, so no column ever shrinks below its longest
-    // word: short cells stay on one line and the table scrolls sideways. The
-    // one cell that may still break is the one whose word is longer than its
-    // floor, which is what a token with no word boundary is.
-    let table_cell = StyleRefinement::default().px(px(0.));
+    // mid-word ("call|s", "cach|e"). Asking for 4px a side leaves half of the
+    // measured 16px as slack, so no column shrinks below its longest word —
+    // and a cell still has air around it, which a table with no padding at all
+    // does not: its columns run together ("91%crates/transcript/src/rows.rs").
+    let table_cell = StyleRefinement::default().px(px(4.));
 
     TextViewStyle {
         paragraph_gap: rems(0.5),

@@ -31,6 +31,8 @@
 //! transcript.update(cx, |view, cx| view.upsert(1, row, cx));
 //! ```
 
+mod link;
+mod markdown;
 mod rows;
 mod style;
 mod todo;

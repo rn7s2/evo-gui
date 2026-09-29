@@ -12,9 +12,14 @@
 //! report and status rows; a long todo list, scrolled, with the panel's own
 //! thumb; and two calls — a `bash` one and a `write_file` carrying a whole file
 //! — opened so their arguments and results read as a key/value list rather than
-//! as the JSON they arrived in.
+//! as the JSON they arrived in. A third call's arguments nest: its containers
+//! are drawn as rows indented under their key, and the list it ends with is
+//! counted rather than drawn row by row.
 //!
-//! The last stages are the states before any of that: a fresh tab, where the
+//! Two stages are about markdown as a model actually writes it: one message
+//! carries every construct a reader meets — links, nested lists, a task list, a
+//! blockquote, a long table, a fence, an image reference and raw HTML — and the
+//! other one holds the states before any of that: a fresh tab, where the
 //! transcript invites the reader to ask for something; a lane with no work yet;
 //! and an assistant message that has started without sending a word, which holds
 //! its place with the waiting pips.
@@ -106,9 +111,25 @@ const WAITING_SHOT: &str = "20-message-waiting.png";
 /// The invitation and the waiting pips in the dark theme.
 const DARK_FRESH_TAB_SHOT: &str = "21-dark-fresh-tab-invitation.png";
 const DARK_WAITING_SHOT: &str = "22-dark-message-waiting.png";
+/// Markdown as a model actually writes it, in one message: links, nested lists,
+/// a task list, a blockquote, a long table, a fence, an image reference and raw
+/// HTML. Two shots, because the message is taller than any other turn here.
+const COVERAGE_SHOT: &str = "26-markdown-coverage.png";
+const DARK_COVERAGE_SHOT: &str = "28-dark-markdown-coverage.png";
+/// A tool call whose arguments nest: what an expanded row draws out with rows of
+/// their own, and what it only counts.
+const NESTED_ARGUMENTS_SHOT: &str = "30-nested-tool-arguments.png";
+const DARK_NESTED_ARGUMENTS_SHOT: &str = "31-dark-nested-tool-arguments.png";
 
 const ASSISTANT_ID: RowId = 2;
 const SECOND_ASSISTANT_ID: RowId = 21;
+/// The call of the nested-arguments stage.
+const DEEP_CALL: RowId = 47;
+/// The message of the markdown-coverage stage.
+const COVERAGE_ASSISTANT_ID: RowId = 40;
+/// A capture window tall enough for the whole coverage message at once, so a
+/// shot of it does not depend on where the scroller happens to sit.
+const COVERAGE_SIZE: (f32, f32) = (1100., 1440.);
 /// The two calls of the tool-arguments stage.
 const BASH_CALL: RowId = 30;
 const WRITE_CALL: RowId = 31;
@@ -398,6 +419,118 @@ pub(crate) fn tool_row(id: RowId, name: &str, arguments: &str) -> AnyElement {
         .into_any_element()
 }
 ";
+
+/// A message written the way a model writes one: every construct a reader meets
+/// in a real answer, in one turn, so the rendering can be looked at rather than
+/// assumed.
+///
+/// It carries the shapes that used to be handed to the renderer as-is: a link
+/// (which opens), a `file:` link (which does not), an image reference (drawn as
+/// its alt text, never fetched) and raw HTML (shown as the source it is).
+const COVERAGE_SOURCE: &str = r#"# Markdown, as a model writes it
+
+Everything below is what a model actually puts in a message. It is here so the
+rendering can be looked at rather than assumed.
+
+## Links
+
+- [the GPUI docs](https://gpui.rs/docs) open in the browser on a click
+- <https://example.com/autolinks/also-work> is an autolink
+- [dev@example.com](mailto:dev@example.com) opens a mail composer
+- [a local file](file:///etc/passwd) does nothing: only http(s) and mailto
+- a bare path like crates/transcript/src/rows.rs:412 is not a link
+
+### A third heading
+
+#### And a fourth, which is as deep as they go
+
+One paragraph with **bold**, *italic*, ***both at once***, ~~struck through~~
+and `inline code`, long enough that it has to reflow across two lines.
+
+> A blockquote, which is how a model quotes the spec back at you.
+>
+> It holds a second paragraph, with **emphasis** of its own.
+
+1. Ordered steps, the first
+2. The second, with a nested list:
+   1. nested ordered one
+   2. nested ordered two
+3. The third
+
+- Bullets nest three deep:
+  - the second level
+    - the third level, which is as deep as a model goes
+- and a plan is usually a task list:
+  - [x] fold /transcript into rows
+  - [ ] teach the rows about nested payloads
+
+---
+
+| call | calls | errors | p50 | p99 | tokens in | tokens out | cache | longest argument |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| read_file | 128 | 0 | 12ms | 41ms | 184k | 6k | 91% | crates/transcript/src/rows.rs |
+| bash | 37 | 2 | 320ms | 2.4s | 96k | 21k | 88% | cargo test -p transcript --lib |
+| write_file | 54 | 1 | 18ms | 60ms | 42k | 9k | 93% | crates/transcript/src/tests.rs |
+| edit | 19 | 0 | 9ms | 22ms | 31k | 4k | 96% | crates/composer/src/lib.rs |
+
+```rust
+fn render_row(data: &mut TranscriptData, index: usize) -> AnyElement {
+    let row = &data.rows[index];
+    div().id(("transcript-row", row.id)).child(row.text()).into_any_element()
+}
+```
+
+An image reference is drawn as its alt text and never fetched:
+
+![the transcript column](https://example.com/screenshots/transcript.png)
+
+Raw HTML is shown as it was written: <img src="https://example.com/pixel.png" alt="beacon">,
+and <br> stays a tag rather than becoming a line break.
+"#;
+
+/// The turn of the markdown-coverage stage: a question, and that answer.
+fn coverage_rows() -> Vec<Row> {
+    vec![
+        user_row(
+            39,
+            "Show me a message with every kind of markdown a model writes.",
+        ),
+        Row {
+            id: COVERAGE_ASSISTANT_ID,
+            version: 1,
+            kind: RowKind::Assistant {
+                markdown: COVERAGE_SOURCE.into(),
+                thinking: String::new(),
+                streaming: false,
+                error: None,
+            },
+        },
+    ]
+}
+
+/// A call whose arguments nest: a check run's configuration, with a list inside
+/// an object inside a list, a container past what the panel draws out, and a
+/// list of cases longer than it draws row by row.
+const DEEP_ARGUMENTS: &str = r#"{"run":"hook-parity","config":{"suite":{"steps":[{"name":"parity","env":{"LANG":"C.UTF-8","PYTHONHASHSEED":"0","extra":{"timeout":{"seconds":30}}},"args":["-m","pytest","-q","tests/test_hook_parity.py"]}],"matrix":{"os":["macos","linux"],"python":["3.11","3.12"]}},"paths":{"base_ref":"75cefe3","head":"c1b901c","root":"/Users/you/coding/evo-gui"}},"cases":["a_case_00","a_case_01","a_case_02","a_case_03","a_case_04","a_case_05","a_case_06","a_case_07","a_case_08","a_case_09","a_case_10","a_case_11","a_case_12","a_case_13","a_case_14","a_case_15","a_case_16","a_case_17","a_case_18","a_case_19","a_case_20","a_case_21","a_case_22"]}"#;
+
+/// The nested-arguments stage: one call, opened.
+fn deep_argument_rows() -> Vec<Row> {
+    vec![
+        user_row(46, "Show me the hook-parity run, not its JSON."),
+        tool_row(
+            DEEP_CALL,
+            1,
+            "aiden_run",
+            DEEP_ARGUMENTS,
+            Some(ToolResult {
+                is_error: false,
+                content: r#"{"passed":52,"failed":0,"duration_ms":8421,"base_ref":"75cefe3"}"#
+                    .into(),
+                content_chars: None,
+            }),
+        ),
+    ]
+}
 
 /// The calls of the tool-arguments stage: a `bash` call whose command is longer
 /// than the value column, and a `write_file` call carrying the whole file. Both
@@ -878,6 +1011,27 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     });
     shot(&mut cx, blank, dir, WAITING_SHOT)?;
 
+    // Markdown as a model actually writes it, whole, in a window tall enough to
+    // hold the message at once.
+    let (cover, cover_demo) = open_capture_window(&mut cx, COVERAGE_SIZE)?;
+    cover_demo.update(&mut cx, |demo, cx| {
+        demo.transcript.update(cx, |view, cx| {
+            view.replace(1, coverage_rows(), cx);
+        });
+    });
+    shot(&mut cx, cover, dir, COVERAGE_SHOT)?;
+
+    // A call whose arguments nest: one key/value row per field, the containers
+    // under it, and a list the panel only counts.
+    let (nested, nested_demo) = open_capture_window(&mut cx, CAPTURE_SIZE)?;
+    nested_demo.update(&mut cx, |demo, cx| {
+        demo.transcript.update(cx, |view, cx| {
+            view.replace(1, deep_argument_rows(), cx);
+            view.set_expanded(DEEP_CALL, true, cx);
+        });
+    });
+    shot(&mut cx, nested, dir, NESTED_ARGUMENTS_SHOT)?;
+
     // What an expanded tool row shows: the calls' own JSON as a key/value list,
     // a multi-line value as a block, and both shapes of result.
     let (tools, tools_demo) = open_capture_window(&mut cx, CAPTURE_SIZE)?;
@@ -954,6 +1108,9 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     // And the open tool rows in the dark theme.
     shot(&mut cx, tools, dir, DARK_TOOL_ARGUMENTS_SHOT)?;
 
+    // And the nested arguments in the dark theme.
+    shot(&mut cx, nested, dir, DARK_NESTED_ARGUMENTS_SHOT)?;
+
     // The states before a transcript has anything in it, in the dark.
     blank_demo.update(&mut cx, |demo, cx| {
         demo.transcript.update(cx, |view, cx| {
@@ -975,6 +1132,11 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
         });
     });
     shot(&mut cx, blank, dir, DARK_WAITING_SHOT)?;
+
+    // The same message in the dark theme, which is the one the application runs
+    // in by default: the muted fallbacks and the table's own surface have to
+    // hold up on a dark background too.
+    shot(&mut cx, cover, dir, DARK_COVERAGE_SHOT)?;
 
     Ok(())
 }

@@ -8,7 +8,8 @@
 //!
 //! Nothing here prints protocol payloads: a row is a user turn, rendered
 //! markdown, a one-line tool row that opens onto its arguments and result as a
-//! key/value list, a report block, or a dim line.
+//! key/value list — containers drawn out as rows indented under their key — a
+//! report block, or a dim line.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -28,7 +29,7 @@ use serde_json::Value;
 use session::{DimStyle, Row, RowId, RowKind, ToolResult};
 
 use crate::style::{text_style, Palette, BLOCK_GAP, GROUP_GAP, MEASURE, TIGHT_GAP, TURN_GAP};
-use crate::{TranscriptData, TranscriptView};
+use crate::{link, markdown, TranscriptData, TranscriptView};
 
 /// Fade window for text appended by a streaming delta (§2.8).
 const STREAM_FADE: Duration = Duration::from_millis(350);
@@ -54,6 +55,20 @@ const CARET_SIZE: Pixels = px(14.);
 /// Width of the key column of an expanded argument list: enough for a nested
 /// key like `diff.removed` without eliding it.
 pub(crate) const KEY_WIDTH: Pixels = px(112.);
+/// How far each level of a nested payload is indented from the level above it.
+///
+/// The children keep their own keys — nothing is spelled `env.sub` once it is
+/// indented — so the indent is what says whose fields they are.
+pub(crate) const NEST_INDENT: Pixels = px(12.);
+/// How deep a payload is drawn out before what is left of it is summarised.
+///
+/// Four levels is as far as a reader follows a structure without losing the key
+/// it belongs to; past that the summary and its tooltip carry the rest.
+pub(crate) const MAX_DEPTH: usize = 4;
+/// Longest array drawn item by item. A longer one is summarised: the panel is a
+/// reading surface, and a hundred rows of one list is a wall rather than a
+/// payload.
+pub(crate) const MAX_ARRAY: usize = 20;
 /// The gap between a key and its value — and so the indent of a block whose
 /// content has no keys of its own.
 pub(crate) const COLUMN_GAP: Pixels = px(8.);
@@ -458,6 +473,12 @@ fn assistant_row(row: &Row, data: &TranscriptData, cx: &App, palette: &Palette) 
                     TextView::new(document)
                         .style(text_style(cx))
                         .motion(stream_motion())
+                        // A link opens in the browser, if it names a scheme the
+                        // app opens at all (`link::openable`).
+                        .on_link_click(link::on_click())
+                        // Image references and raw HTML are the transcript's
+                        // own business (`markdown::extensions`).
+                        .markdown_extensions(markdown::extensions())
                         // A fenced block carries its own Copy: the reader who
                         // wants the code wants only the code, not the prose
                         // around it.
@@ -709,8 +730,8 @@ fn arguments_block(id: RowId, arguments: &str, palette: &Palette) -> AnyElement 
     }
 }
 
-/// The result of an open tool row: a JSON object as the same key/value list, any
-/// other text as a capped mono block.
+/// The result of an open tool row: a JSON object — or array — as the same
+/// key/value list, any other text as a capped mono block.
 fn result_block(id: RowId, result: Option<&ToolResult>, palette: &Palette) -> AnyElement {
     let Some(result) = result.filter(|result| !result.content.is_empty()) else {
         return div().into_any_element();
@@ -731,11 +752,13 @@ fn result_block(id: RowId, result: Option<&ToolResult>, palette: &Palette) -> An
     }
 }
 
-/// One field of a tool call's arguments, or of a JSON result.
+/// One field — or one container — of a tool call's arguments, or of a JSON
+/// result.
 #[derive(Debug, PartialEq)]
 pub(crate) struct Field {
-    /// The key the reader sees: `timeout`, or `env.RUST_LOG` when the call
-    /// nested one object inside another.
+    /// The key the reader sees: `timeout`, `env.RUST_LOG` for a container the
+    /// top-level object holds directly, or the bare `env` when its own fields
+    /// are drawn under it.
     pub(crate) key: String,
     pub(crate) value: FieldValue,
 }
@@ -748,6 +771,12 @@ pub(crate) enum FieldValue {
     Text { text: String, full: Option<String> },
     /// A string with line breaks in it: a small mono block, capped.
     Block(String),
+    /// A container drawn as its own fields, indented under this one.
+    Nested(Vec<Field>),
+    /// A container the panel will not draw out — deeper than [`MAX_DEPTH`], or
+    /// an array longer than [`MAX_ARRAY`]: what it holds, in a muted summary,
+    /// with the whole of it on hover.
+    Collapsed { summary: String, full: String },
 }
 
 /// `text` as the fields of a JSON object — or of an array, keyed by index — in
@@ -760,12 +789,16 @@ pub(crate) fn json_fields(text: &str) -> Option<Vec<Field>> {
     match value {
         Value::Object(object) => {
             for (key, value) in object {
-                push_field(&mut fields, key, &value, true);
+                push_field(&mut fields, key, &value, 0, true);
             }
         }
         Value::Array(items) => {
+            if items.len() > MAX_ARRAY {
+                fields.push(collapsed(String::new(), &Value::Array(items)));
+                return Some(fields);
+            }
             for (index, value) in items.iter().enumerate() {
-                push_field(&mut fields, index.to_string(), value, true);
+                push_field(&mut fields, index.to_string(), value, 0, true);
             }
         }
         _ => return None,
@@ -773,42 +806,110 @@ pub(crate) fn json_fields(text: &str) -> Option<Vec<Field>> {
     Some(fields)
 }
 
-/// Add what `value` draws as. A container directly inside the object flattens
-/// into one field per leaf (`key.sub`, `key.0`); anything nested deeper is
-/// compact JSON on one line, so a structure never arrives as a wall of braces.
-fn push_field(fields: &mut Vec<Field>, key: String, value: &Value, flatten: bool) {
-    match (value, flatten) {
-        (Value::Object(object), true) => {
+/// Add what `value` draws as.
+///
+/// A container the top-level object holds directly flattens into one field per
+/// leaf (`env.RUST_LOG`, `args.0`): one dense row per leaf reads better than a
+/// row for the container and its children under it. What is nested inside that
+/// keeps its own keys and is drawn as rows indented under it, up to
+/// [`MAX_DEPTH`]; past that — or for an array longer than [`MAX_ARRAY`] — the
+/// container is summarised, so a structure never arrives as a wall of braces.
+fn push_field(fields: &mut Vec<Field>, key: String, value: &Value, depth: usize, flatten: bool) {
+    if flatten {
+        match value {
+            Value::Object(object) => {
+                for (sub, value) in object {
+                    push_field(fields, format!("{key}.{sub}"), value, depth, false);
+                }
+                return;
+            }
+            Value::Array(items) if items.len() <= MAX_ARRAY => {
+                for (index, value) in items.iter().enumerate() {
+                    push_field(fields, format!("{key}.{index}"), value, depth, false);
+                }
+                return;
+            }
+            _ => {}
+        }
+    }
+
+    match value {
+        Value::Object(object) if object.is_empty() => fields.push(Field {
+            key,
+            value: FieldValue::Text {
+                text: "{}".to_string(),
+                full: None,
+            },
+        }),
+        Value::Array(items) if items.is_empty() => fields.push(Field {
+            key,
+            value: FieldValue::Text {
+                text: "[]".to_string(),
+                full: None,
+            },
+        }),
+        Value::Object(object) if depth < MAX_DEPTH => {
+            let mut children = Vec::new();
             for (sub, value) in object {
-                push_field(fields, format!("{key}.{sub}"), value, false);
+                push_field(&mut children, sub.clone(), value, depth + 1, false);
             }
+            fields.push(Field {
+                key,
+                value: FieldValue::Nested(children),
+            });
         }
-        (Value::Array(items), true) => {
+        Value::Array(items) if depth < MAX_DEPTH && items.len() <= MAX_ARRAY => {
+            let mut children = Vec::new();
             for (index, value) in items.iter().enumerate() {
-                push_field(fields, format!("{key}.{index}"), value, false);
+                push_field(&mut children, index.to_string(), value, depth + 1, false);
             }
+            fields.push(Field {
+                key,
+                value: FieldValue::Nested(children),
+            });
         }
+        Value::Object(_) | Value::Array(_) => fields.push(collapsed(key, value)),
         // A string with line breaks in it is not a line of a list: it gets a
         // block of its own, so file contents and multi-line commands stay
         // readable.
-        (Value::String(text), _) if text.contains('\n') => fields.push(Field {
+        Value::String(text) if text.contains('\n') => fields.push(Field {
             key,
             value: FieldValue::Block(text.clone()),
         }),
-        (Value::String(text), _) => {
+        Value::String(text) => {
             let (text, full) = elide(text);
             fields.push(Field {
                 key,
                 value: FieldValue::Text { text, full },
             });
         }
-        (other, _) => {
+        other => {
             let (text, full) = elide(&other.to_string());
             fields.push(Field {
                 key,
                 value: FieldValue::Text { text, full },
             });
         }
+    }
+}
+
+/// A container the panel will not draw out: how much it holds, and the whole of
+/// it as one line for the tooltip.
+fn collapsed(key: String, value: &Value) -> Field {
+    let summary = match value {
+        Value::Object(object) if object.len() == 1 => "{…1 key}".to_string(),
+        Value::Object(object) => format!("{{…{} keys}}", object.len()),
+        Value::Array(items) if items.len() == 1 => "[…1 item]".to_string(),
+        Value::Array(items) => format!("[…{} items]", items.len()),
+        // Only a container is ever collapsed.
+        _ => String::new(),
+    };
+    Field {
+        key,
+        value: FieldValue::Collapsed {
+            summary,
+            full: value.to_string(),
+        },
     }
 }
 
@@ -844,6 +945,10 @@ fn caption(label: &str, palette: &Palette) -> AnyElement {
 
 /// A JSON object as a compact list: one `key  value` row per field, the key
 /// muted and the value plain — never the braces and quotes it arrived in.
+///
+/// A field whose value is a container carries the rows of its own fields
+/// indented under it, [`NEST_INDENT`] per level, so a payload's shape is read
+/// from the indentation rather than from a row of compact JSON.
 fn fields_block(
     id: impl Into<ElementId>,
     label: &str,
@@ -874,61 +979,57 @@ fn fields_block(
     block.test_support().into_any_element()
 }
 
-/// One `key  value` row of a [`fields_block`].
+/// One field of a [`fields_block`]: a `key  value` row, or — for a container
+/// the panel draws out — that row with the rows of its own fields under it.
 fn field_row(base: &ElementId, index: usize, field: &Field, palette: &Palette) -> AnyElement {
+    let id: ElementId = (base.clone(), index.to_string()).into();
+
+    // A value that was cut to fit, or a container that was summarised: the
+    // whole of it is one hover away.
     let elided = match &field.value {
         FieldValue::Text { full, .. } => full.clone(),
-        FieldValue::Block(_) => None,
+        FieldValue::Collapsed { full, .. } => Some(full.clone()),
+        FieldValue::Block(_) | FieldValue::Nested(_) => None,
     };
-    let id: ElementId = (base.clone(), index.to_string()).into();
-    let row = div()
-        .id(id.clone())
-        .w_full()
-        .min_w_0()
-        .flex()
-        .items_start()
-        .gap(COLUMN_GAP)
-        .child(
-            div()
-                .w(KEY_WIDTH)
-                .flex_shrink_0()
-                .truncate()
-                .text_size(KEY_SIZE)
-                .text_color(palette.muted_foreground)
-                .child(SelectableText::new((id.clone(), "key"), field.key.clone())),
-        )
-        .child(match &field.value {
-            FieldValue::Text { text, .. } => {
-                // Only a value that reads as code is set in mono; prose stays in
-                // the UI font, where it is easier to read.
-                let value = div()
-                    .flex_1()
+
+    let row = match &field.value {
+        FieldValue::Nested(children) => div()
+            .id(id.clone())
+            .w_full()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(key_cell(&id, &field.key, palette))
+            .child(
+                // The children keep their own keys, [`NEST_INDENT`] further in
+                // per level: the indentation is what says whose fields they are.
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .w_full()
                     .min_w_0()
-                    .text_color(palette.foreground)
-                    .child(SelectableText::new((id.clone(), "value"), text.clone()));
-                if looks_like_code(text) {
-                    value.font_family(palette.mono.clone()).into_any_element()
-                } else {
-                    value.into_any_element()
-                }
-            }
-            FieldValue::Block(text) => div()
-                .flex_1()
-                .min_w_0()
-                .pl_2()
-                .border_l_2()
-                .border_color(palette.border)
-                .font_family(palette.mono.clone())
-                .text_color(palette.foreground)
-                .child(SelectableText::new(
-                    (id.clone(), "value"),
-                    block_text(text, None),
-                ))
-                .into_any_element(),
-        });
+                    .pl(NEST_INDENT)
+                    .children(
+                        children
+                            .iter()
+                            .enumerate()
+                            .map(|(index, field)| field_row(&id, index, field, palette)),
+                    ),
+            ),
+        value => div()
+            .id(id.clone())
+            .w_full()
+            .min_w_0()
+            .flex()
+            .items_start()
+            .gap(COLUMN_GAP)
+            .child(key_cell(&id, &field.key, palette))
+            .child(value_cell(&id, value, palette)),
+    };
 
     match elided {
-        // Cut to fit: the whole text is one hover away.
         Some(full) => row
             .tooltip(move |window, cx| Tooltip::new(full.clone()).max_w(px(520.)).build(window, cx))
             .test_support()
@@ -937,7 +1038,76 @@ fn field_row(base: &ElementId, index: usize, field: &Field, palette: &Palette) -
     }
 }
 
-/// A lane report: its own block, one labeled field per non-empty part.
+/// The key column of a field: as wide in every row, so the values of one level
+/// share a left edge, and a key too long for it is one hover away — a
+/// `python_hash_seed` the reader cannot read is a key they cannot look up. The
+/// cells are addressable on their own, which is what a test measures an indent
+/// with.
+fn key_cell(id: &ElementId, key: &str, palette: &Palette) -> AnyElement {
+    let full = key.to_string();
+    div()
+        .id((id.clone(), "key"))
+        .w(KEY_WIDTH)
+        .flex_shrink_0()
+        .truncate()
+        .text_size(KEY_SIZE)
+        .text_color(palette.muted_foreground)
+        .child(SelectableText::new((id.clone(), "key"), key.to_string()))
+        .tooltip(move |window, cx| Tooltip::new(full.clone()).build(window, cx))
+        .test_support()
+        .into_any_element()
+}
+
+/// What a field's value draws as, beside its key.
+fn value_cell(id: &ElementId, value: &FieldValue, palette: &Palette) -> AnyElement {
+    match value {
+        FieldValue::Text { text, .. } => {
+            // Only a value that reads as code is set in mono; prose stays in the
+            // UI font, where it is easier to read.
+            let cell = div()
+                .id((id.clone(), "value"))
+                .flex_1()
+                .min_w_0()
+                .text_color(palette.foreground)
+                .child(SelectableText::new((id.clone(), "value"), text.clone()));
+            if looks_like_code(text) {
+                cell.font_family(palette.mono.clone())
+                    .test_support()
+                    .into_any_element()
+            } else {
+                cell.test_support().into_any_element()
+            }
+        }
+        FieldValue::Block(text) => div()
+            .id((id.clone(), "value"))
+            .flex_1()
+            .min_w_0()
+            .pl_2()
+            .border_l_2()
+            .border_color(palette.border)
+            .font_family(palette.mono.clone())
+            .text_color(palette.foreground)
+            .child(SelectableText::new(
+                (id.clone(), "value"),
+                block_text(text, None),
+            ))
+            .test_support()
+            .into_any_element(),
+        // A container the panel does not draw out: what it holds, quiet enough
+        // that it reads as a count rather than as a value.
+        FieldValue::Collapsed { summary, .. } => div()
+            .id((id.clone(), "value"))
+            .flex_1()
+            .min_w_0()
+            .text_size(KEY_SIZE)
+            .text_color(palette.muted_foreground)
+            .child(SelectableText::new((id.clone(), "value"), summary.clone()))
+            .test_support()
+            .into_any_element(),
+        FieldValue::Nested(_) => unreachable!("a container is drawn by field_row itself"),
+    }
+}
+
 fn report_row(
     id: RowId,
     done: &str,
