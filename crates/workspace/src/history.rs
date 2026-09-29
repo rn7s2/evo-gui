@@ -25,6 +25,8 @@ pub struct HistoryRow {
     pub meta: SharedString,
     /// Everything known about the session, for the row's tooltip.
     pub tooltip: SharedString,
+    /// The app had this session open when it last quit: the row wears a badge for it.
+    pub open_at_quit: bool,
 }
 
 impl HistoryRow {
@@ -37,6 +39,7 @@ impl HistoryRow {
             subtitle: SharedString::from(row.subtitle.clone()),
             meta: SharedString::from(row.meta.clone()),
             tooltip: SharedString::from(row.tooltip.clone()),
+            open_at_quit: row.open_at_quit,
         }
     }
 }
@@ -79,6 +82,7 @@ mod tests {
             coordinator_model: Some("gpt-5".to_string()),
             lanes_model: None,
             source: session::HistorySource::Scan,
+            open_at_quit: false,
         }
     }
 

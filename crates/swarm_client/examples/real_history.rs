@@ -96,6 +96,7 @@ fn to_session_entry(entry: &store::history::HistoryEntry) -> HistoryEntry {
             StoreSource::Scanned => HistorySource::Scan,
             StoreSource::Recent => HistorySource::Recent,
         },
+        open_at_quit: entry.open_at_quit,
     }
 }
 

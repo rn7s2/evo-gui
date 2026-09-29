@@ -77,6 +77,9 @@ const HISTORY_HINT_ID: &str = "history-hint";
 /// the title, with the path and the facts under it.
 const ROW_ICON_SIZE: Pixels = px(14.);
 const ROW_TITLE_SIZE: Pixels = px(15.);
+/// The badge on a row the app had open when it last quit (§9.5).
+const OPEN_AT_QUIT_ID: &str = "history-open-at-quit";
+const OPEN_AT_QUIT_TEXT: &str = "open at last quit";
 
 /// One option of a chooser, as the Select draws it: the label, a muted detail line under
 /// it, and — for a model a lane could not register — the reason it is greyed out.
@@ -965,8 +968,32 @@ impl ListDelegate for HistoryList {
     ) -> Option<Self::Item> {
         let row = self.rows.get(ix.row)?;
         let selected = Some(ix) == self.selected;
-        let muted = cx.theme().muted_foreground;
+        let theme = cx.theme();
+        let muted = theme.muted_foreground;
+        let badge_face = theme.secondary;
+        let radius = theme.radius;
         let tooltip = row.tooltip.clone();
+        // The session the app had open when it last quit wears a pill, so it reads as a
+        // fact about this row rather than as part of its name.
+        let badge = row.open_at_quit.then(|| {
+            div()
+                .id(ElementId::NamedInteger(
+                    OPEN_AT_QUIT_ID.into(),
+                    ix.row as u64,
+                ))
+                .test_support()
+                .flex_none()
+                .px_1p5()
+                .py_0p5()
+                .rounded(radius)
+                .bg(badge_face)
+                .text_color(muted)
+                // A badge, not a word: a notch under the meta's own size, the way the agent
+                // list's row badges are set.
+                .text_size(px(11.))
+                .child(OPEN_AT_QUIT_TEXT)
+                .into_any_element()
+        });
         Some(
             ListItem::new(ElementId::NamedInteger(
                 HISTORY_ROW_ID.into(),
@@ -996,13 +1023,21 @@ impl ListDelegate for HistoryList {
                             .min_w_0()
                             .gap_0p5()
                             .child(
-                                div()
+                                h_flex()
                                     .w_full()
                                     .min_w_0()
-                                    .truncate()
-                                    .text_size(ROW_TITLE_SIZE)
-                                    .font_medium()
-                                    .child(row.title.clone()),
+                                    .gap_2()
+                                    .items_center()
+                                    .child(
+                                        div()
+                                            .flex_shrink(1.)
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_size(ROW_TITLE_SIZE)
+                                            .font_medium()
+                                            .child(row.title.clone()),
+                                    )
+                                    .when_some(badge, |line, badge| line.child(badge)),
                             )
                             .child(
                                 // The path and the facts share the second line. The path
@@ -1224,6 +1259,7 @@ mod tests {
             coordinator_model: Some("ark-deepseek-v4.1-flash".to_string()),
             lanes_model: None,
             source: session::HistorySource::Scan,
+            open_at_quit: false,
         }
     }
 
@@ -1518,6 +1554,61 @@ mod tests {
             assert_eq!(f.tab.read(cx).history_rows(cx)[0].subtitle, "~/coding/foo");
 
             window.click(ElementId::NamedInteger(HISTORY_ROW_ID.into(), 0), cx);
+        });
+
+        assert_eq!(
+            f.events(),
+            vec![TabContentEvent::Resume {
+                session_path: PathBuf::from("/Users/you/.evo/sessions/a/1.sexp"),
+                folder: PathBuf::from("/Users/you/coding/foo"),
+            }]
+        );
+    }
+
+    #[gpui_kit::test]
+    fn only_a_row_the_app_had_open_wears_the_badge(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.act(cx, |window, cx| {
+            // The app's own recents know the tab was open when it last quit; the scan cannot.
+            let mut opened = history_entry(
+                "/Users/you/.evo/sessions/a/1.sexp",
+                "/Users/you/coding/foo",
+                5,
+            );
+            opened.open_at_quit = true;
+            opened.source = session::HistorySource::Recent;
+            let scanned = history_entry(
+                "/Users/you/.evo/sessions/b/2.sexp",
+                "/Users/you/coding/bar",
+                90,
+            );
+            f.tab.update(cx, |tab, cx| {
+                tab.set_history_entries(
+                    &[opened, scanned],
+                    1_700_000_000,
+                    0,
+                    Some("/Users/you"),
+                    cx,
+                )
+            });
+            window.render_frame(cx);
+
+            assert!(window
+                .find(ElementId::NamedInteger(OPEN_AT_QUIT_ID.into(), 0))
+                .visible());
+            // The row it sits on is still a row: the badge did not replace its own id.
+            assert!(window
+                .find(ElementId::NamedInteger(HISTORY_ROW_ID.into(), 0))
+                .visible());
+            assert!(
+                window
+                    .try_find(ElementId::NamedInteger(OPEN_AT_QUIT_ID.into(), 1))
+                    .is_none(),
+                "a session the scan alone found cannot say it was open at quit"
+            );
+            // A badge is decoration on the row, not a thing of its own: the pill takes no
+            // click, so the click lands on the row under it and opens the session.
+            window.click(ElementId::NamedInteger(OPEN_AT_QUIT_ID.into(), 0), cx);
         });
 
         assert_eq!(

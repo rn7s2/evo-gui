@@ -193,6 +193,10 @@ pub struct HistoryEntry {
     pub coordinator_model: Option<String>,
     pub lanes_model: Option<String>,
     pub source: HistorySource,
+    /// The app had this session open when it last quit. Only the app's own recents can say
+    /// so — the scan sees the journal, and a swarm that never came down wrote no new one —
+    /// so a row the scan alone found is always `false` (the store's `Recent.open_at_quit`).
+    pub open_at_quit: bool,
 }
 
 /// One row of the history list (§7.2): the folder's name, its path shortened around the
@@ -212,6 +216,8 @@ pub struct HistoryRow {
     pub coordinator_model: Option<String>,
     pub lanes_model: Option<String>,
     pub source: HistorySource,
+    /// The app had this session open when it last quit: the row wears a badge for it.
+    pub open_at_quit: bool,
 }
 
 // --- choosers from /registry -------------------------------------------------------
@@ -569,6 +575,9 @@ pub fn history_rows(
                 if base.lanes_model.is_none() {
                     base.lanes_model = entry.lanes_model.clone();
                 }
+                // The app's own recents are the only side that can know this, so one true
+                // copy makes the row true.
+                base.open_at_quit |= entry.open_at_quit;
             }
             None => merged.push(entry.clone()),
         }
@@ -596,6 +605,7 @@ fn history_row(entry: &HistoryEntry, now: i64, offset_seconds: i32, home: Option
         coordinator_model: entry.coordinator_model.clone(),
         lanes_model: entry.lanes_model.clone(),
         source: entry.source,
+        open_at_quit: entry.open_at_quit,
     }
 }
 
@@ -614,6 +624,11 @@ fn tooltip_line(entry: &HistoryEntry, offset_seconds: i32) -> String {
     }
     if let Some(when) = entry.when.epoch_seconds() {
         parts.push(absolute_time(when, offset_seconds));
+    }
+    // The app's own record, right after the instant: this is the session you were in when
+    // the app went away, not merely the one written last.
+    if entry.open_at_quit {
+        parts.push("open at last quit".to_string());
     }
     if let Some(model) = entry.coordinator_model.as_deref().filter(|model| !model.is_empty()) {
         parts.push(format!("coordinator: {}", model));

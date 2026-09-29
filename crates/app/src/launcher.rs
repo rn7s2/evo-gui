@@ -129,6 +129,8 @@ pub fn history_entries(entries: &[store::history::HistoryEntry]) -> Vec<HistoryE
                 StoreSource::Scanned => HistorySource::Scan,
                 StoreSource::Recent => HistorySource::Recent,
             },
+            // Only the app's own recents know this: the tab was open when it last quit.
+            open_at_quit: entry.open_at_quit,
         })
         .collect()
 }

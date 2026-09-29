@@ -42,6 +42,10 @@ const SMALL_TEXT_SIZE: Pixels = px(11.);
 /// The glyph cell and the lead cell are fixed, so a task always starts at the same x
 /// whatever the state of the row — and the step clock never gets pushed off the row.
 const GLYPH_WIDTH: Pixels = px(14.);
+/// The status glyphs are drawn a little larger than the row text: the theme's
+/// monospace family draws its shapes at a smaller share of the em than the UI
+/// font, and this lands `○` and `◌` at the ten logical pixels they occupy there.
+const GLYPH_TEXT_SIZE: Pixels = px(16.);
 const LEAD_WIDTH: Pixels = px(16.);
 
 /// Rows are inset by this much; the owner aligns its title bar's own inset to it, so the
@@ -316,11 +320,18 @@ impl AgentList {
             .when(!selected, |row| row.hover(|row| row.bg(theme.list_hover)))
             .child(
                 // Fixed glyph cell: the icon column stays put while states change.
+                //
+                // The glyphs are drawn in the theme's monospace family: the UI font's
+                // `◌` is a dotted ring a third of the em wide, which at row size is a
+                // smudge of sub-pixel dots, while a monospace family draws it as a
+                // dashed ring the same size as the other four.
                 h_flex()
                     .w(GLYPH_WIDTH)
                     .flex_none()
                     .justify_center()
                     .items_center()
+                    .font_family(theme.mono_font_family.clone())
+                    .text_size(GLYPH_TEXT_SIZE)
                     .text_color(view.glyph_color)
                     .child(glyph),
             )
@@ -461,16 +472,17 @@ pub fn activity_word(activity: Activity) -> &'static str {
     }
 }
 
-/// The status glyph's color (§7.3): work is the live accent, compaction a warning, idle
-/// muted, a starting lane the faint outline of a row that is not up yet, and down the
-/// danger red. The glyph shape carries the meaning; the color only speeds it up.
+/// The status glyph's color (§7.3): work is the live accent, compaction a warning, idle and
+/// a lane that is still coming up both the muted foreground, and down the danger red. The
+/// glyph shape carries the meaning — the dashed `◌` is what says "not up yet" — so the
+/// color only speeds it up, and fading a starting lane on top of that only made it harder
+/// to read.
 pub fn status_color(status: LaneStatus, theme: &Theme) -> Hsla {
     match status {
         LaneStatus::Working => theme.success,
         LaneStatus::Compacting => theme.warning,
         LaneStatus::Idle => theme.muted_foreground,
-        // The dashed glyph is what says "not up yet"; the color stays legible (§7.3).
-        LaneStatus::Starting => theme.muted_foreground.opacity(0.85),
+        LaneStatus::Starting => theme.muted_foreground,
         LaneStatus::Down => theme.danger,
     }
 }
@@ -1079,25 +1091,32 @@ mod tests {
                 theme.muted_foreground
             );
             assert_eq!(status_color(LaneStatus::Down, theme), theme.danger);
-            // A starting lane is the muted outline of a row that is not up yet.
-            let starting = status_color(LaneStatus::Starting, theme);
-            assert!(starting.a > 0.);
-            assert!(starting.a < theme.muted_foreground.a);
-            assert_ne!(starting, theme.muted_foreground);
-            // The five states do not collapse into each other.
-            let colors: Vec<Hsla> = [
+            // A starting lane is the same muted tone as an idle one, at full opacity: the
+            // dashed glyph is what says "not up yet", and a faded one was unreadable at 1x.
+            assert_eq!(
+                status_color(LaneStatus::Starting, theme),
+                theme.muted_foreground
+            );
+            assert_eq!(theme.muted_foreground.a, 1.);
+            // The colours separate work, compaction and down from the two resting states;
+            // idle and starting share a colour on purpose, and the glyphs separate them.
+            let resting = [LaneStatus::Idle, LaneStatus::Starting];
+            for status in [
                 LaneStatus::Working,
                 LaneStatus::Compacting,
-                LaneStatus::Idle,
-                LaneStatus::Starting,
                 LaneStatus::Down,
-            ]
-            .iter()
-            .map(|status| status_color(*status, theme))
-            .collect();
-            for (index, color) in colors.iter().enumerate() {
-                assert!(!colors[..index].contains(color), "duplicate status color");
+            ] {
+                assert!(
+                    !resting.contains(&status),
+                    "{status:?} is not a resting state"
+                );
+                assert_ne!(status_color(status, theme), theme.muted_foreground);
             }
+            assert_ne!(
+                LaneStatus::Idle.glyph(),
+                LaneStatus::Starting.glyph(),
+                "the two resting states are told apart by their glyphs"
+            );
         });
     }
 

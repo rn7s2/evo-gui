@@ -76,15 +76,17 @@ const REGISTRY: &str = r#"{
 }"#;
 
 /// The sessions the history list shows: five swarms, one of them in a folder whose path is
-/// far too deep for the row to hold (§9.5).
+/// far too deep for the row to hold (§9.5). The first is the tab the app had open when it
+/// last quit, so its row wears the badge only the app's own recents can earn.
 fn history() -> Vec<session::HistoryEntry> {
-    let entries: [(&str, &str, i64, u32, &str); 5] = [
+    let entries: [(&str, &str, i64, u32, &str, bool); 5] = [
         (
             "/Users/you/.evo/sessions/3f1a/2026-09-29T09-25-44.sexp",
             "/Users/you/coding/evo-gui",
             12,
             6,
             "claude-opus-4.5",
+            true,
         ),
         (
             "/Users/you/.evo/sessions/9c02/2026-09-29T07-02-10.sexp",
@@ -92,6 +94,7 @@ fn history() -> Vec<session::HistoryEntry> {
             130,
             4,
             "ark-deepseek-v4.1-flash",
+            false,
         ),
         (
             "/Users/you/.evo/sessions/77bd/2026-09-28T22-41-00.sexp",
@@ -100,6 +103,7 @@ fn history() -> Vec<session::HistoryEntry> {
             900,
             2,
             "claude-sonnet-4.5",
+            false,
         ),
         (
             "/Users/you/.evo/sessions/5a1e/2026-09-27T11-15-32.sexp",
@@ -107,6 +111,7 @@ fn history() -> Vec<session::HistoryEntry> {
             2_600,
             1,
             "",
+            false,
         ),
         (
             "/Users/you/.evo/sessions/b088/2026-09-19T16-44-08.sexp",
@@ -114,12 +119,13 @@ fn history() -> Vec<session::HistoryEntry> {
             86_000,
             8,
             "ark-deepseek-v4.1-flash",
+            false,
         ),
     ];
     entries
         .into_iter()
         .map(
-            |(session, folder, minutes_ago, lanes, model)| session::HistoryEntry {
+            |(session, folder, minutes_ago, lanes, model, open_at_quit)| session::HistoryEntry {
                 session_path: session.to_string(),
                 folder: folder.to_string(),
                 when: session::When::Epoch(NOW - minutes_ago * 60),
@@ -127,6 +133,7 @@ fn history() -> Vec<session::HistoryEntry> {
                 coordinator_model: (!model.is_empty()).then(|| model.to_string()),
                 lanes_model: None,
                 source: session::HistorySource::Scan,
+                open_at_quit,
             },
         )
         .collect()

@@ -36,6 +36,7 @@ fn entry(path: &str, folder: &str, when: When) -> HistoryEntry {
         coordinator_model: None,
         lanes_model: None,
         source: HistorySource::Scan,
+        open_at_quit: false,
     }
 }
 
@@ -415,10 +416,12 @@ fn history_rows_merge_by_session_newest_first() {
     scanned.source = HistorySource::Scan;
 
     // The same session from the app's own recents: same path, and it knows the model the
-    // scan could not (and no lane count).
+    // scan could not (and no lane count) — and, unlike the scan, that the tab was open when
+    // the app last quit.
     let mut recent = entry("/sessions/a.sexp", "/Users/me/coding/foo", When::Epoch(now - 2 * 3600));
     recent.coordinator_model = Some("gpt-5".to_string());
     recent.source = HistorySource::Recent;
+    recent.open_at_quit = true;
 
     // Another session, older, and a third whose header timestamp is an RFC3339 string.
     let mut older = entry("/sessions/b.sexp", "/Users/me/coding/bar/", When::Text("2026-09-27T09:00:00Z".into()));
@@ -457,15 +460,19 @@ fn history_rows_merge_by_session_newest_first() {
     // coordinator's.
     assert_eq!(foo.coordinator_model.as_deref(), Some("gpt-5"));
     assert_eq!(foo.lanes_model.as_deref(), Some("claude-4"));
+    // The scan found the session; only the app's recents could say it was open at quit, and
+    // one true copy makes the merged row true.
+    assert!(foo.open_at_quit);
     assert_eq!(
         foo.tooltip,
-        "/Users/me/coding/foo · a.sexp · 2026-09-29 10:00:00 +00:00 \
+        "/Users/me/coding/foo · a.sexp · 2026-09-29 10:00:00 +00:00 · open at last quit \
          · coordinator: gpt-5 · lanes: claude-4 · 4 lanes"
     );
 
     let bar = &rows[2];
     assert_eq!(bar.title, "bar", "a trailing separator is not part of the name");
     assert_eq!(bar.meta, "1 lane · 2d ago", "`lane` is singular for one, and no model is known");
+    assert!(!bar.open_at_quit, "the scan alone cannot know it was open at quit");
     // The RFC3339 header timestamp reads back as the same instant, at the offset asked for.
     assert_eq!(
         bar.tooltip,
