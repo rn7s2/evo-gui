@@ -29,6 +29,7 @@ use gpui_kit::{
     div, px, relative, AnyElement, App, Context, ElementId, Entity, FocusHandle, IntoElement,
     Pixels, SharedString, Subscription, TestSupportExt as _, WeakEntity, Window,
 };
+use serde_json::Value;
 use session::{Choice, ChooserOption, HistoryEntry, LaunchPlan, Launcher, DEFAULT_KEY};
 use store::ModelCache;
 use swarm_client::{Payload, Registry};
@@ -334,10 +335,12 @@ impl EmptyTabState {
 
     /// The catalog the disk cache holds (§9.4's `model-cache.json`).
     ///
-    /// A cache a `--no-userspace` probe wrote still carries the probe's `apis` array, which
-    /// is what the lanes chooser measures availability against; one refreshed from a live
-    /// server does not, and the lanes chooser then says it is uncertain rather than claiming
-    /// a model works in a lane.
+    /// The registry is the cache's own either way; what decides which models a lane may
+    /// offer is the **kernel api set** the cache remembers, not the registry's `apis` — a
+    /// live server's `apis` also carries the APIs its extensions added, while a lane only
+    /// has the kernel's own. A cache a live refresh moved forward keeps that set
+    /// ([`ModelCache::with_live_registry`]), so the lanes chooser stays exact after one
+    /// rather than falling back to uncertain.
     fn set_model_cache(&mut self, cache: &ModelCache, window: &mut Window, cx: &mut Context<Self>) {
         self.catalog = !cache.is_empty();
         self.catalog_error = None;
@@ -346,11 +349,9 @@ impl EmptyTabState {
             cx.notify();
             return;
         }
-        if cache.registry.get("apis").is_some() {
-            self.launcher.set_probe_registry(&cache.registry);
-        } else {
-            self.launcher.set_registry(&cache.registry);
-        }
+        self.launcher.set_registry(&cache.registry);
+        self.launcher
+            .set_kernel_apis(kernel_apis_value(&cache.kernel_apis).as_ref());
         self.sync_choosers(window, cx);
         cx.notify();
     }
@@ -432,7 +433,8 @@ impl EmptyTabState {
             None => "<folder>".to_string(),
         };
         Some(SharedString::from(
-            self.launcher.lanes_model_note(&folder, self.home.as_deref()),
+            self.launcher
+                .lanes_model_note(&folder, self.home.as_deref()),
         ))
     }
 
@@ -601,6 +603,18 @@ fn chooser_state(
         .collect();
     // Default is the first option, so a fresh tab starts on it (§7.2).
     cx.new(|cx| SelectState::new(items, Some(IndexPath::default()), window, cx))
+}
+
+/// The kernel API set a [`ModelCache`] recorded, as the `apis` array
+/// [`Launcher::set_kernel_apis`] reads. An empty set is `None`: no probe has said, so the
+/// lanes chooser reports uncertainty rather than claiming a model works in a lane.
+fn kernel_apis_value(apis: &[String]) -> Option<Value> {
+    if apis.is_empty() {
+        return None;
+    }
+    Some(Value::Array(
+        apis.iter().cloned().map(Value::String).collect(),
+    ))
 }
 
 impl TabContent {
@@ -1178,6 +1192,17 @@ mod tests {
             .collect()
     }
 
+    /// Whether the lanes chooser has not been measured against a kernel api set.
+    fn lanes_uncertain(cx: &App, tab: &Entity<TabContent>) -> bool {
+        tab.read(cx)
+            .choosers
+            .state
+            .read(cx)
+            .launcher
+            .lanes()
+            .uncertain
+    }
+
     fn caption_text(cx: &App, tab: &Entity<TabContent>) -> String {
         tab.read(cx)
             .choosers
@@ -1273,6 +1298,52 @@ mod tests {
             let item = ChooserItem::from(blocked);
             assert!(item.disabled(), "{}", item.label);
             assert!(item.detail.contains("extension API"), "{}", item.detail);
+        });
+    }
+
+    #[gpui_kit::test]
+    fn a_live_registry_refresh_keeps_the_lanes_availability_exact(cx: &mut TestAppContext) {
+        let cache = CacheDir::new(REGISTRY);
+        let f = open(cx);
+        f.act(cx, |window, cx| {
+            // A probe's cache names the kernel api set, so the lanes chooser is measured.
+            let probe = cache.cache();
+            assert!(probe.kernel_apis_known());
+            f.tab
+                .update(cx, |tab, cx| tab.set_model_cache(&probe, window, cx));
+            assert!(!lanes_uncertain(cx, &f.tab));
+
+            // A live server's `/registry` moved the catalog forward (§9.4): it carries the
+            // models but not the kernel's own `apis` — a live body's `apis` holds the
+            // extensions the server added, which a lane cannot register. The cache kept the
+            // probe's set, so the lanes chooser stays exact instead of falling back to
+            // uncertain.
+            let mut live_body = probe.registry.clone();
+            live_body
+                .as_object_mut()
+                .expect("a registry object")
+                .remove("apis");
+            let live = probe.clone().with_live_registry(live_body);
+            f.tab
+                .update(cx, |tab, cx| tab.set_model_cache(&live, window, cx));
+
+            assert!(
+                !lanes_uncertain(cx, &f.tab),
+                "a live refresh lost the kernel api set"
+            );
+            let lanes = lanes_options(cx, &f.tab);
+            assert!(
+                lanes
+                    .iter()
+                    .any(|(key, ok)| key.starts_with("claude-opus-4.5") && *ok),
+                "{lanes:?}"
+            );
+            assert!(
+                lanes
+                    .iter()
+                    .any(|(key, ok)| key.starts_with("ark-deepseek") && !*ok),
+                "{lanes:?}"
+            );
         });
     }
 
@@ -1541,8 +1612,16 @@ mod tests {
         let f = open(cx);
         f.act(cx, |window, cx| {
             let entries = vec![
-                history_entry("/Users/you/.evo/sessions/a/1.sexp", "/Users/you/coding/foo", 5),
-                history_entry("/Users/you/.evo/sessions/b/2.sexp", "/Users/you/coding/bar", 90),
+                history_entry(
+                    "/Users/you/.evo/sessions/a/1.sexp",
+                    "/Users/you/coding/foo",
+                    5,
+                ),
+                history_entry(
+                    "/Users/you/.evo/sessions/b/2.sexp",
+                    "/Users/you/coding/bar",
+                    90,
+                ),
             ];
             f.tab.update(cx, |tab, cx| {
                 tab.set_history_entries(&entries, 1_700_000_000, 0, Some("/Users/you"), cx)

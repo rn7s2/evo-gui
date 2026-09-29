@@ -207,3 +207,47 @@ fn only_the_shown_tab_carries_a_close_button(cx: &mut TestAppContext) {
     })
     .unwrap();
 }
+
+/// ⌘T and ⌘W: the window's own add and close, which the app's key bindings call
+/// (§7.1). They are the same paths the `+` button and the tab's `×` take.
+#[gpui_kit::test]
+fn the_keyboard_shortcuts_add_and_close_tabs(cx: &mut TestAppContext) {
+    let (handle, view) = open_workspace(cx);
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        view.update(cx, |view, cx| {
+            view.add_tab(window, cx);
+        });
+    })
+    .unwrap();
+    cx.update(|cx| {
+        let view = view.read(cx);
+        assert_eq!(view.tabs().len(), 2);
+        assert_eq!(view.selected_index(), 1, "the new tab is selected");
+    });
+
+    // ⌘W closes the tab being shown and the tab that was there takes its place.
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        view.update(cx, |view, cx| view.close_selected_tab(window, cx));
+    })
+    .unwrap();
+    cx.update(|cx| {
+        let view = view.read(cx);
+        assert_eq!(view.tabs().len(), 1, "the shown tab was closed");
+        assert_eq!(view.selected_index(), 0);
+    });
+
+    // ⌘W on the last tab leaves a fresh empty one: the window is never empty.
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        view.update(cx, |view, cx| view.close_selected_tab(window, cx));
+    })
+    .unwrap();
+    cx.update(|cx| {
+        let view = view.read(cx);
+        assert_eq!(view.tabs().len(), 1);
+        assert_eq!(view.selected_tab().read(cx).state(), &TabState::Empty);
+    });
+}

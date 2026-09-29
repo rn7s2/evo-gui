@@ -13,7 +13,9 @@ use std::path::Path;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, IconName, Sizable as _, StyledExt as _};
+use gpui_kit::component::{
+    h_flex, v_flex, ActiveTheme as _, IconName, Sizable as _, StyledExt as _,
+};
 use gpui_kit::prelude::*;
 use gpui_kit::{div, px, AnyElement, App, Context, IntoElement, SharedString, TestSupportExt as _};
 use session::{Activity, AgentKey, LaneStatus, TabModel};
@@ -82,14 +84,11 @@ impl TabContent {
                     .child(
                         h_flex()
                             .gap_2()
-                            .child(
-                                Button::new("tab-retry")
-                                    .label("Retry")
-                                    .outline()
-                                    .on_click(cx.listener(move |_this, _, _, cx| {
-                                        cx.emit(TabContentEvent::RetryRequested(folder.clone()))
-                                    })),
-                            )
+                            .child(Button::new("tab-retry").label("Retry").outline().on_click(
+                                cx.listener(move |_this, _, _, cx| {
+                                    cx.emit(TabContentEvent::RetryRequested(folder.clone()))
+                                }),
+                            ))
                             .child(
                                 Button::new("tab-failure-close")
                                     .label("Close")
@@ -253,15 +252,10 @@ impl TabContent {
             .when(self.is_reconnecting(), |this| {
                 this.child(reconnect_badge(cx))
             })
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .child(match view {
-                        Some(view) if !empty => view.into_any_element(),
-                        _ => empty_transcript(selected, cx).into_any_element(),
-                    }),
-            )
+            .child(div().flex_1().min_h_0().child(match view {
+                Some(view) if !empty => view.into_any_element(),
+                _ => empty_transcript(selected, cx).into_any_element(),
+            }))
             // The panel renders nothing while the agent has no todos, so this
             // row disappears rather than leaving a gap (§7.3).
             .child(TodoPanel::new(&todos))
@@ -427,4 +421,3 @@ fn centered_region(
         )
         .into_any_element()
 }
-

@@ -4,10 +4,12 @@
 //! cargo run -p workspace --example empty_tab_demo -- --capture <dir>
 //! ```
 //!
-//! Ten pictures: the catalog loading, the catalog loaded with a lanes model chosen (the
-//! `swarm.lisp` note under the chooser), a history list of many rows — one of them a very
-//! long path — an empty history, and the two states with no rows yet (scanning, and a scan
-//! that failed) — the first four each in the light and the dark theme.
+//! Fourteen pictures: the catalog loading, the catalog loaded with a lanes model chosen
+//! (the `swarm.lisp` note under the chooser), a history list of many rows — one of them a
+//! very long path — an empty history, and the two states with no rows yet (scanning, and a
+//! scan that failed), each in the light and the dark theme; plus the three interaction
+//! states a still picture cannot show on its own — the folder card's keyboard focus ring,
+//! and the card's and a history row's hover fills.
 //!
 //! Capture mode drives GPUI's headless renderer, so the pictures do not depend on a window
 //! being on screen (the machine may be locked).
@@ -202,9 +204,23 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
 
     // 3b. The two hover fills and the keyboard focus ring: states a still picture cannot
     // show on its own. The card is reached by walking the tab stops, which is what Tab does.
-    for _ in 0..4 {
+    // The strip has tab stops of its own, so the walk ends when the card reports the
+    // keyboard focus rather than at a fixed count; `focused()` reads the last drawn frame,
+    // hence the render before the query.
+    let mut reached = false;
+    for _ in 0..16 {
+        cx.update_window(window, |_, window, cx| window.render_frame(cx))?;
+        if cx.update_window(window, |_, window, _| window.find(FOLDER_ID).focused())? == Some(true)
+        {
+            reached = true;
+            break;
+        }
         cx.update_window(window, |_, window, cx| window.focus_next(cx))?;
     }
+    assert!(
+        reached,
+        "walking the tab stops never focused the folder card"
+    );
     shot(&mut cx, window, dir, "12-folder-card-focus-light.png")?;
     pointer(&mut cx, window, ElementId::Name(FOLDER_ID.into()))?;
     shot(&mut cx, window, dir, "13-folder-card-hover-light.png")?;
@@ -230,14 +246,21 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     });
     shot(&mut cx, window, dir, "11-lanes-note-folder-hint-light.png")?;
 
-    // 6. While the scan runs, and when it fails: the two states with no rows yet.
+    // 6. While the scan runs, and when it fails: the two states with no rows yet, in both
+    // themes.
     tab.update(&mut cx, |tab, cx| tab.set_scanning(true, cx));
     shot(&mut cx, window, dir, "09-scanning-light.png")?;
+    dark(&mut cx);
+    shot(&mut cx, window, dir, "09-scanning-dark.png")?;
+    light(&mut cx);
     tab.update(&mut cx, |tab, cx| {
         tab.set_scanning(false, cx);
         tab.set_history_error(Some("~/.evo/sessions is not readable".to_string()), cx);
     });
     shot(&mut cx, window, dir, "10-scan-error-light.png")?;
+    dark(&mut cx);
+    shot(&mut cx, window, dir, "10-scan-error-dark.png")?;
+    light(&mut cx);
 
     let _ = std::fs::remove_dir_all(&home);
     Ok(())

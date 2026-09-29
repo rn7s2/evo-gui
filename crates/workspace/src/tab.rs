@@ -629,7 +629,10 @@ impl TabContent {
     /// How long the coordinator's current step has been running, in seconds
     /// (§7.3, §5's `turn-start` clock).
     pub fn step_seconds(&self) -> Option<u64> {
-        let started = self.model()?.coordinator_step_started()?.started_at_millis?;
+        let started = self
+            .model()?
+            .coordinator_step_started()?
+            .started_at_millis?;
         Some(now_millis().saturating_sub(started) / 1000)
     }
 
@@ -682,8 +685,9 @@ impl TabContent {
             None => false,
         };
         if !sent {
-            self.composer
-                .update(cx, |composer, cx| composer.request_finished(false, window, cx));
+            self.composer.update(cx, |composer, cx| {
+                composer.request_finished(false, window, cx)
+            });
         }
     }
 
@@ -704,8 +708,9 @@ impl TabContent {
             if let Some(live) = self.live.as_mut() {
                 live.in_flight = None;
             }
-            self.composer
-                .update(cx, |composer, cx| composer.request_finished(result.is_ok(), window, cx));
+            self.composer.update(cx, |composer, cx| {
+                composer.request_finished(result.is_ok(), window, cx)
+            });
         }
         if let Err(error) = result {
             // `409 Not now` is not a mistake: it is the server saying it cannot
@@ -732,12 +737,10 @@ impl TabContent {
         self.gone = Some("swarm: the server exited".into());
         // Reading the log is I/O, so it happens on a thread of its own and comes
         // back through the bridge like every other result.
-        let (bridge, _worker) = crate::bridge::Bridge::spawn(
-            crate::bridge::Revision::new(0),
-            move |updates| {
+        let (bridge, _worker) =
+            crate::bridge::Bridge::spawn(crate::bridge::Revision::new(0), move |updates| {
                 let _ = updates.send(swarm_client::log_tail(&log, 40));
-            },
-        );
+            });
         bridge
             .drive_into(
                 cx,
@@ -783,7 +786,13 @@ impl TabContent {
             .and_then(|launch| launch.plan())
             .and_then(|plan| plan.workers)
             .map(u32::from)
-            .or_else(|| live.model.lanes().swarm.as_ref().map(|swarm| swarm.workers as u32))
+            .or_else(|| {
+                live.model
+                    .lanes()
+                    .swarm
+                    .as_ref()
+                    .map(|swarm| swarm.workers as u32)
+            })
             .unwrap_or_default();
 
         let mut recent = store::app_state::Recent::new(session, folder, lanes);
@@ -814,20 +823,27 @@ impl Live {
     /// has to apply — or `None` when the update was not the model's.
     fn absorb(&mut self, update: Update) -> Option<Changes> {
         let changes = match update {
-            Update::Transcript { agent, revision, raw } => {
-                self.model.on_transcript(agent_key(agent), revision, &raw)
-            }
+            Update::Transcript {
+                agent,
+                revision,
+                raw,
+            } => self.model.on_transcript(agent_key(agent), revision, &raw),
             Update::Lanes { raw } => self.model.on_lanes(&raw),
-            Update::Event { agent, id, kind, data } => {
+            Update::Event {
+                agent,
+                id,
+                kind,
+                data,
+            } => {
                 let id = id.unwrap_or_default().max(0) as u64;
                 // The event is stamped with when the UI saw it, which is what the
                 // step clock counts from (§7.3).
                 self.model
                     .on_event_at(agent_key(agent), id, &kind, &data, now_millis())
             }
-            Update::Stream { agent, status } => {
-                self.model.on_stream(agent_key(agent), stream_status(status))
-            }
+            Update::Stream { agent, status } => self
+                .model
+                .on_stream(agent_key(agent), stream_status(status)),
             Update::CacheSeed { entry } => self.model.on_cache_seed(entry.as_ref()),
             _ => return None,
         };

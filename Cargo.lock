@@ -6675,7 +6675,10 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
+ "session",
+ "store",
  "swarm_client",
+ "tab_engine",
 ]
 
 [[package]]
@@ -7219,6 +7222,7 @@ version = "0.1.0"
 dependencies = [
  "gpui-kit",
  "image",
+ "serde_json",
  "session",
 ]
 

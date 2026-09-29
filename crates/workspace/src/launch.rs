@@ -12,7 +12,7 @@ use async_channel::Receiver;
 use session::LaunchPlan;
 use store::paths::Root;
 use store::swarm_config::{self, LanesModel};
-use tab_engine::{EngineHandle, ShutdownReport, TabSpec, Update, shutdown_all};
+use tab_engine::{shutdown_all, EngineHandle, ShutdownReport, TabSpec, Update};
 
 use crate::bridge::{Bridge, Revision};
 
@@ -103,9 +103,7 @@ pub struct Started {
 /// fails the launch instead: a swarm silently running the wrong lanes model is
 /// worse than a tab that does not start.
 pub fn start(config: &SwarmConfig, launch: &Launch) -> std::io::Result<Started> {
-    let tab_dir = config
-        .root
-        .ensure_tab_dir(&store::paths::TabId::new())?;
+    let tab_dir = config.root.ensure_tab_dir(&store::paths::TabId::new())?;
     let folder = launch.folder().clone();
 
     if let Some(plan) = launch.plan() {
@@ -129,8 +127,10 @@ pub fn start(config: &SwarmConfig, launch: &Launch) -> std::io::Result<Started> 
     spec.env = config.env.clone();
     spec.env_remove = config.env_remove.clone();
     // §3: the swarm and its lanes shut down if this app dies.
-    spec.env
-        .push(("EVO_SERVE_WATCH_PID".to_owned(), std::process::id().to_string()));
+    spec.env.push((
+        "EVO_SERVE_WATCH_PID".to_owned(),
+        std::process::id().to_string(),
+    ));
 
     let (engine, updates) = tab_engine::TabEngine::start(spec);
     Ok(Started {

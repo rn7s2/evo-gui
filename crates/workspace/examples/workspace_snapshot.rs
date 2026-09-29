@@ -19,8 +19,8 @@ use std::time::{Duration, Instant};
 use gpui_kit::component::TitleBar;
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
-    AnyWindowHandle, AppContext as _, Bounds, HeadlessAppContext, Entity, WindowBounds,
-    WindowOptions, point, px, size,
+    point, px, size, AnyWindowHandle, AppContext as _, Bounds, Entity, HeadlessAppContext,
+    WindowBounds, WindowOptions,
 };
 use session::LaunchPlan;
 use swarm_client::harness::{Fixture, HarnessConfig, STUB_MODEL};
@@ -119,7 +119,10 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
         },
     )?;
     wait_until(&mut cx, |cx| {
-        matches!(tab.read_with(cx, |tab, _| tab.state().clone()), TabState::Running { .. })
+        matches!(
+            tab.read_with(cx, |tab, _| tab.state().clone()),
+            TabState::Running { .. }
+        )
     })?;
     shot(&mut cx, window, dir, "03-tab-page.png")?;
 
@@ -145,7 +148,9 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
         &tab,
         "CALL delegate {\"lane\":1,\"task\":\"SLOW lane work for the picture\"}",
     )?;
-    wait_until(&mut cx, |cx| lane_working(cx, &tab) && text_chars(cx, &tab) > 40)?;
+    wait_until(&mut cx, |cx| {
+        lane_working(cx, &tab) && text_chars(cx, &tab) > 40
+    })?;
     shot(&mut cx, window, dir, "05-lane-selected.png")?;
 
     // 7. Back to the coordinator, with the report the lane sent back.
@@ -230,7 +235,9 @@ fn select_lane(
     n: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
     cx.update_window(window, |_, _window, cx| {
-        tab.update(cx, |tab, cx| tab.select_agent(session::AgentKey::Lane(n), cx));
+        tab.update(cx, |tab, cx| {
+            tab.select_agent(session::AgentKey::Lane(n), cx)
+        });
     })?;
     Ok(())
 }
@@ -253,13 +260,7 @@ fn select_main(
 fn text_chars(cx: &HeadlessAppContext, tab: &Entity<workspace::TabContent>) -> usize {
     tab.read_with(cx, |tab, cx| {
         tab.transcript()
-            .map(|view| {
-                view.read(cx)
-                    .rows(cx)
-                    .iter()
-                    .map(row_chars)
-                    .sum::<usize>()
-            })
+            .map(|view| view.read(cx).rows(cx).iter().map(row_chars).sum::<usize>())
             .unwrap_or_default()
     })
 }

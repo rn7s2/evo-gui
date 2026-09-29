@@ -26,7 +26,7 @@ use session::{HistoryEntry, LaunchPlan};
 use store::model_cache::ModelCache;
 use tab_engine::EngineHandle;
 
-use crate::launch::{Launch, SwarmConfig, stop_in_background};
+use crate::launch::{stop_in_background, Launch, SwarmConfig};
 use crate::tab::{RegistryHook, TabContent, TabContentEvent, TabId};
 
 /// The size the window opens at when the display has room for it (§7.1).
@@ -208,11 +208,7 @@ impl WorkspaceView {
     }
 
     /// Open a new empty tab and select it — what ⌘T does (§7.1).
-    pub fn add_tab(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Entity<TabContent> {
+    pub fn add_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<TabContent> {
         self.open_empty_tab(window, cx)
     }
 

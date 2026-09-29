@@ -17,8 +17,8 @@ use std::time::{Duration, Instant};
 
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
-    AppContext as _, Bounds, Entity, Point, TestAppContext, WindowBounds, WindowHandle,
-    WindowOptions, base::Root, px, size,
+    base::Root, px, size, AppContext as _, Bounds, Entity, Point, TestAppContext, WindowBounds,
+    WindowHandle, WindowOptions,
 };
 use session::{AgentKey, LaunchPlan};
 use swarm_client::harness::{Fixture, HarnessConfig, STUB_MODEL};
@@ -32,9 +32,41 @@ struct Bench {
     fixture: Fixture,
     window: WindowHandle<Root>,
     view: Entity<WorkspaceView>,
+    /// These tests each boot real swarms (two of them, here); three at once on
+    /// one machine starves the boot and turns a healthy test into a timeout, so
+    /// they take turns. Held for the test's lifetime.
+    _serial: std::sync::MutexGuard<'static, ()>,
+}
+
+/// The lock `Bench` holds, so the swarm tests run one at a time.
+static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// The last `/registry` the window's hook was handed (§9.4).
+static SEEN_REGISTRY: std::sync::Mutex<Option<serde_json::Value>> = std::sync::Mutex::new(None);
+
+/// Install the window's registry hook, which is how the app refreshes its model
+/// cache from a live server (§9.4).
+fn watch_registry(cx: &mut TestAppContext, bench: &Bench) {
+    *SEEN_REGISTRY.lock().expect("the registry slot") = None;
+    cx.update(|cx| {
+        bench.view.update(cx, |view, cx| {
+            view.on_registry(
+                |raw, _cx| {
+                    *SEEN_REGISTRY.lock().expect("the registry slot") = Some(raw.clone());
+                },
+                cx,
+            );
+        });
+    });
 }
 
 fn bench(cx: &mut TestAppContext, workers: u16) -> Bench {
+    // A poisoned lock means an earlier test panicked while holding it; the next
+    // one still runs, because the swarms it started died with that process.
+    let serial = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
     // A real swarm's threads wake this test's tasks: that is the point.
     cx.dispatcher.allow_parking();
 
@@ -73,6 +105,7 @@ fn bench(cx: &mut TestAppContext, workers: u16) -> Bench {
         fixture,
         window: window.downcast::<Root>().expect("base Root"),
         view,
+        _serial: serial,
     }
 }
 
@@ -103,12 +136,10 @@ fn launch(
 }
 
 /// Type a turn into the composer and press Enter — the app's own send path (§9.2).
-fn prompt(
-    cx: &mut TestAppContext,
-    bench: &Bench,
-    tab: &Entity<workspace::TabContent>,
-    text: &str,
-) {
+///
+/// The tab has to be the one the window is showing: a composer that was never
+/// laid out cannot take the focus the typing goes to.
+fn prompt(cx: &mut TestAppContext, bench: &Bench, tab: &Entity<workspace::TabContent>, text: &str) {
     cx.update_window(bench.window.into(), |_, window, cx| {
         // The composer has to have been laid out before it can take focus, so
         // the frame the user is looking at is drawn first.
@@ -193,11 +224,22 @@ fn select(cx: &mut TestAppContext, tab: &Entity<workspace::TabContent>, agent: A
 #[gpui_kit::test]
 fn a_tab_boots_a_real_swarm_and_streams_a_turn(cx: &mut TestAppContext) {
     let b = bench(cx, 2);
+    watch_registry(cx, &b);
     let tab = cx.update(|cx| b.view.read(cx).selected_tab().clone());
     launch(cx, &b, &tab, b.fixture.project.clone(), Some(2));
 
     wait_for(cx, "the swarm to answer /health", |cx| {
         matches!(state(cx, &tab), TabState::Running { .. })
+    });
+
+    // §9.4: the window hands every live tab's /registry to the app, which is how
+    // the model cache is refreshed from a server that really answered.
+    wait_for(cx, "the registry to reach the app", |_cx| {
+        SEEN_REGISTRY
+            .lock()
+            .expect("the registry slot")
+            .as_ref()
+            .is_some_and(|raw| raw.to_string().contains(STUB_MODEL))
     });
 
     // The page is the real one: the coordinator's readout comes from /state and
@@ -210,13 +252,26 @@ fn a_tab_boots_a_real_swarm_and_streams_a_turn(cx: &mut TestAppContext) {
         })
     });
 
+    // §9.5: the session this tab started is recorded, so a swarm the app brought
+    // up is in the history next time. The write is the app's own file, off the UI
+    // thread, so the test waits for the file rather than the frame.
+    let root = store::paths::Root::at(b.fixture.dir.join("app"));
+    wait_for(cx, "the session to be recorded as a recent", |_cx| {
+        store::app_state::AppState::load(&root)
+            .recents
+            .iter()
+            .any(|recent| {
+                recent.folder == b.fixture.project && !recent.session.as_os_str().is_empty()
+            })
+    });
+
     prompt(cx, &b, &tab, "SLOW say something long");
 
     // The turn reached the swarm: the user's own row is in the transcript.
     wait_for(cx, "the user's row to appear", |cx| {
-        tab_rows(cx, &tab)
-            .iter()
-            .any(|row| matches!(&row.kind, session::RowKind::User { text } if text.contains("SLOW")))
+        tab_rows(cx, &tab).iter().any(
+            |row| matches!(&row.kind, session::RowKind::User { text } if text.contains("SLOW")),
+        )
     });
 
     // The assistant row is rendered markdown **while it grows**: two samples that
@@ -239,7 +294,8 @@ fn a_tab_boots_a_real_swarm_and_streams_a_turn(cx: &mut TestAppContext) {
     });
     wait_for(cx, "the resync to rebuild the rows", |cx| {
         let rows = tab_rows(cx, &tab);
-        rows.iter().any(|row| matches!(row.kind, session::RowKind::User { .. }))
+        rows.iter()
+            .any(|row| matches!(row.kind, session::RowKind::User { .. }))
             && assistant_chars(&rows) > 100
     });
 
@@ -268,6 +324,13 @@ fn a_tab_boots_a_real_swarm_and_streams_a_turn(cx: &mut TestAppContext) {
     });
 }
 
+/// The lane's own prompt row: the task text and nothing else. The coordinator's
+/// row for the same words is the `CALL delegate {...}` line the user typed, so
+/// only the lane has a row that is exactly the task.
+fn is_lane_task(text: &str) -> bool {
+    text.trim() == "SLOW lane work for the test"
+}
+
 /// A delegated lane: the coordinator's transcript shows the tool call, and
 /// selecting the lane shows **its own** transcript — its rows, its stream
 /// (§7.3, §9.3, and docs/review-1.md F5).
@@ -293,7 +356,9 @@ fn a_delegated_lane_shows_its_own_transcript(cx: &mut TestAppContext) {
         "CALL delegate {\"lane\":1,\"task\":\"SLOW lane work for the test\"}",
     );
 
-    wait_for(cx, "lane 1 to take the work", |cx| lane_working(cx, &tab, 1));
+    wait_for(cx, "lane 1 to take the work", |cx| {
+        lane_working(cx, &tab, 1)
+    });
     wait_for(cx, "the lane's own transcript to stream", |cx| {
         assistant_chars(&tab_rows(cx, &tab)) > 20
     });
@@ -301,30 +366,32 @@ fn a_delegated_lane_shows_its_own_transcript(cx: &mut TestAppContext) {
     // The lane's rows are the lane's: its own task, its own answer.
     let lane_rows = tab_rows(cx, &tab);
     assert!(
-        lane_rows.iter().any(|row| matches!(
-            &row.kind,
-            session::RowKind::User { text } if text.contains("lane work for the test")
-        )),
+        lane_rows
+            .iter()
+            .any(|row| matches!(&row.kind, session::RowKind::User { text } if is_lane_task(text))),
         "the lane's transcript carries the task it was given: {lane_rows:#?}"
     );
 
     // The coordinator's own transcript is untouched by the lane's rows: it has
     // the turn of the user, and the delegate tool call.
     select(cx, &tab, coordinator);
-    wait_for(cx, "the coordinator's transcript to show the delegation", |cx| {
-        tab_rows(cx, &tab).iter().any(|row| {
+    wait_for(
+        cx,
+        "the coordinator's transcript to show the delegation",
+        |cx| {
+            tab_rows(cx, &tab).iter().any(|row| {
             matches!(&row.kind, session::RowKind::Tool { name, .. } if name == "delegate")
                 || matches!(&row.kind, session::RowKind::User { text } if text.contains("delegate"))
         })
-    });
+        },
+    );
 
     let coordinator_rows = tab_rows(cx, &tab);
     assert!(
-        !coordinator_rows.iter().any(|row| matches!(
-            &row.kind,
-            session::RowKind::User { text } if text.contains("lane work for the test")
-        )),
-        "the lane's task text belongs to the lane's transcript, not the coordinator's"
+        !coordinator_rows
+            .iter()
+            .any(|row| matches!(&row.kind, session::RowKind::User { text } if is_lane_task(text))),
+        "the lane's task is the lane's own row, not the coordinator's: {coordinator_rows:#?}"
     );
 }
 
@@ -342,7 +409,9 @@ fn two_tabs_stream_at_once_and_the_ui_stays_responsive(cx: &mut TestAppContext) 
     let second_project = b.fixture.dir.join("proj2");
     std::fs::create_dir_all(&second_project).expect("a second project");
     cx.update_window(b.window.into(), |_, window, cx| {
-        let second = b.view.update(cx, |view, cx| view.open_empty_tab(window, cx));
+        let second = b
+            .view
+            .update(cx, |view, cx| view.open_empty_tab(window, cx));
         second.update(cx, |tab, cx| {
             tab.launch(
                 Launch::New {
@@ -365,9 +434,13 @@ fn two_tabs_stream_at_once_and_the_ui_stays_responsive(cx: &mut TestAppContext) 
             && matches!(state(cx, &second), TabState::Running { .. })
     });
 
-    // Both stream at once: 60 deltas a tenth apart, each.
+    // Both stream at once: 60 deltas a tenth apart, each. The user sends in the
+    // first tab, switches to the second and sends there — from then on both
+    // swarms are streaming while the window shows one of them, which is the
+    // shape that has to stay responsive.
+    cx.update(|cx| b.view.update(cx, |view, cx| view.select_tab(0, cx)));
     prompt(cx, &b, &first, "SLOW first tab");
-    select(cx, &second, AgentKey::Coordinator);
+    cx.update(|cx| b.view.update(cx, |view, cx| view.select_tab(1, cx)));
     prompt(cx, &b, &second, "SLOW second tab");
 
     wait_for(cx, "both tabs to be streaming", |cx| {
@@ -376,6 +449,8 @@ fn two_tabs_stream_at_once_and_the_ui_stays_responsive(cx: &mut TestAppContext) 
 
     // While both stream, sample what the UI thread costs: draining the updates
     // that arrived, and drawing the frame the user is looking at.
+    let first_before = assistant_chars(&tab_rows(cx, &first));
+    let second_before = assistant_chars(&tab_rows(cx, &second));
     let mut drain = Vec::new();
     let mut frame = Vec::new();
     for _ in 0..40 {
@@ -387,27 +462,35 @@ fn two_tabs_stream_at_once_and_the_ui_stays_responsive(cx: &mut TestAppContext) 
         cx.update_window(b.window.into(), |_, window, cx| window.render_frame(cx))
             .unwrap();
         frame.push(started.elapsed());
-        std::thread::sleep(Duration::from_millis(10));
+        // A tenth of the two streams' own pace: the sample covers several deltas
+        // of each, so the numbers are not a single quiet instant.
+        std::thread::sleep(Duration::from_millis(40));
     }
 
     let stat = |samples: &[Duration]| {
         let max = samples.iter().max().copied().unwrap_or_default();
-        let mean =
-            Duration::from_secs_f64(samples.iter().map(|d| d.as_secs_f64()).sum::<f64>() / samples.len() as f64);
+        let mean = Duration::from_secs_f64(
+            samples.iter().map(|d| d.as_secs_f64()).sum::<f64>() / samples.len() as f64,
+        );
         (mean, max)
     };
     let (drain_mean, drain_max) = stat(&drain);
     let (frame_mean, frame_max) = stat(&frame);
-    println!(
-        "[two tabs streaming] update drain: mean {drain_mean:?}, max {drain_max:?} | \
-         frame: mean {frame_mean:?}, max {frame_max:?}"
-    );
-
     // Both transcripts kept growing while we measured: the streams really were
-    // live for the whole sample.
+    // live for the whole sample, not just when it started.
     let first_chars = assistant_chars(&tab_rows(cx, &first));
     let second_chars = assistant_chars(&tab_rows(cx, &second));
-    assert!(first_chars > 100 && second_chars > 100, "{first_chars} / {second_chars}");
+    println!(
+        "[two tabs streaming] both pumps, one shown page — update drain: \
+         mean {drain_mean:?}, max {drain_max:?} | frame: mean {frame_mean:?}, \
+         max {frame_max:?} | chars {first_before}->{first_chars}, \
+         {second_before}->{second_chars}"
+    );
+    assert!(
+        first_chars > first_before && second_chars > second_before,
+        "both streams grew during the sample: {first_before}->{first_chars}, \
+         {second_before}->{second_chars}"
+    );
 
     // A frame is what a user feels: it has to stay in interactive territory even
     // with two swarms streaming through the same UI thread.
