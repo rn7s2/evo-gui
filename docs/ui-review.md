@@ -15,3 +15,23 @@ Findings from screenshots, to be addressed in the polish pass once the tab page 
 - Report row: good. Keep label column width fixed; add next/blocked/requests only when non-empty.
 - Todo panel: glyph column misaligned (☑ is smaller and green, ◐ bold black, ☐ tiny). Use one
   fixed-width glyph column, same size, muted colours except the in-progress one.
+
+## Empty tab (workspace snapshot 01)
+- Sprawl: choosers sit at the left edge and "Select folder..." floats ~1500 px away at the far right.
+  Compose the launcher as one centred block (max ≈ 880 px): a header line, the three chooser rows on
+  the left, and a tall primary "Select folder…" button (folder icon, real ellipsis char) that spans
+  exactly the three rows, directly beside them.
+- The swarm.lisp note breaks the rows' rhythm; render it as a muted caption under the lanes chooser
+  aligned with the select, showing the real path once a folder is known, generic text before.
+- Choosers need option details (context window, effort) and disabled/greyed lanes options with the
+  reason; show "uncertain" hint when the kernel api set is unknown.
+- History: same centred measure; rows as hoverable list items with folder name, `~` path, meta line
+  (lanes · when · coordinator model) right-aligned or beneath; tooltip with full details; empty and
+  scanning states ("Scanning sessions…").
+## Tab strip
+- `+` sits at the far right; browsers put it right after the last tab (pinned when overflowing).
+- Close icon is a heavy circled ⊗; use a small × shown on hover and on the selected tab.
+## Tab page (workspace snapshot 04)
+- Centre column empty state missing.
+- Right column is a tall blank area under the composer; fine per spec, but give the composer a
+  subtle top padding aligned with the lane list's first row.
