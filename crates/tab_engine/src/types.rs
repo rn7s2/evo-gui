@@ -156,8 +156,12 @@ pub enum Command {
     /// `POST /prompt` — the user's turn.
     Prompt { req_id: ReqId, text: String },
     /// `POST /steer` — mid-run input, landing at the running turn's next
-    /// boundary. It is the one command serve answers `409 Not now` when nothing
-    /// runs, so its reply is how the composer shows a soft refusal.
+    /// boundary.
+    ///
+    /// The UI never sends this: a turn always goes through
+    /// [`Command::Prompt`], which the server queues at the running task's next
+    /// boundary (§14.7). It is kept for tests and diagnostics, and because it is
+    /// the one command serve answers `409 Not now` when nothing runs.
     Steer { req_id: ReqId, text: String },
     /// `POST /interrupt` — the TUI's esc.
     Interrupt { req_id: ReqId },

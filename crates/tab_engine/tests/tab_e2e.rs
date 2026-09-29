@@ -7,12 +7,15 @@
 //!
 //! Run with `CARGO_TARGET_DIR=target/tab_engine cargo test -p tab_engine`.
 
+use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use async_channel::Receiver;
 use serde_json::Value;
 use swarm_client::harness::{Bins, Fixture, HarnessConfig, TempDir, STUB_MODEL};
-use tab_engine::{Agent, Command, StreamStatus, TabEngine, TabSpec, Update};
+use tab_engine::catalog::{self, CatalogUpdate};
+use tab_engine::{Agent, Command, ShutdownReport, StreamStatus, TabEngine, TabSpec, Update};
 
 /// One swarm at a time: a test run is not a load test, and each swarm is a
 /// supervisor plus a lane process each.
@@ -534,6 +537,133 @@ fn a_dead_server_is_reported() {
     }
     assert!(!swarm_client::process_alive(pid), "the swarm process is gone");
     handle.join();
+}
+
+/// #9 — a tab shut down while it is still booting stops within about a second,
+/// and nothing is left running.
+#[test]
+fn a_handle_stops_within_a_second_while_booting() {
+    let _guard = one_swarm();
+    let bins = Bins::installed();
+    assert!(bins.available(), "no binaries to test against");
+    let dir = TempDir::new("tab-engine-slowboot").expect("temp dir");
+    let project = dir.join("proj");
+    std::fs::create_dir_all(&project).expect("temp project");
+    // A "server" that never writes a token and never exits: a boot that will
+    // never become ready, which is exactly what the abort is for.
+    let script = dir.join("slow-server.sh");
+    std::fs::write(&script, "#!/bin/sh\nsleep 600\n").expect("write script");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+    let (mut handle, rx) = TabEngine::start(TabSpec::new(&script, &project, dir.path()));
+    let mut updates = Updates::new(rx);
+    updates.next(Instant::now() + Duration::from_secs(20), |u| matches!(u, Update::Booting));
+    // Let readiness polling get going.
+    std::thread::sleep(Duration::from_millis(300));
+
+    let started = Instant::now();
+    assert!(handle.shutdown());
+    handle.join();
+    let took = started.elapsed();
+    eprintln!("aborted boot took {took:?}");
+    assert!(took < Duration::from_secs(2), "the aborted boot took {took:?}");
+
+    updates.pump();
+    assert!(
+        !updates.all.iter().any(|u| matches!(u, Update::BootFailed { .. })),
+        "an aborted boot is not a failure to show: {:?}",
+        updates.all.iter().map(kind_of).collect::<Vec<_>>()
+    );
+    assert!(
+        updates.all.iter().any(|u| matches!(u, Update::Exited { .. })),
+        "the tab says it stopped"
+    );
+    assert!(!running(&script), "the slow server is gone");
+}
+
+/// #10 — the §9.4 catalog probe: a userspace `evo-agent serve` for the registry
+/// and a `--no-userspace` one for the kernel's api set, both stopped again.
+#[test]
+fn the_catalog_probe_learns_registry_and_kernel_apis() {
+    let _guard = one_swarm();
+    let bins = Bins::installed();
+    assert!(bins.available(), "no binaries to test against");
+    let dir = TempDir::new("tab-engine-catalog").expect("temp dir");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).expect("temp home");
+    // The model the userspace probe should find, registered as init.lisp does.
+    std::fs::write(home.join("init.lisp"), swarm_client::harness::stub_init_lisp(1, "catalog-model"))
+        .expect("write init.lisp");
+    let probe_dir = dir.join("probe");
+
+    let updates = catalog::learn_with(
+        &bins.agent,
+        &probe_dir,
+        vec![("EVO_HOME".to_owned(), home.to_string_lossy().into_owned())],
+    );
+    let update = updates
+        .recv_blocking()
+        .expect("the probe should answer");
+    match update {
+        CatalogUpdate::Done { registry, kernel_apis } => {
+            let models = registry["models"].as_array().expect("models");
+            assert!(
+                models.iter().any(|model| model["id"] == "catalog-model"),
+                "the userspace registry should carry the init.lisp model: {registry}"
+            );
+            assert!(
+                registry["apis"].as_array().unwrap().iter().any(|api| api == "anthropic-messages"),
+                "{registry}"
+            );
+            let apis = kernel_apis.expect("the --no-userspace probe should have answered");
+            assert!(apis.iter().any(|api| api == "anthropic-messages"), "{apis:?}");
+        }
+        CatalogUpdate::Failed { message, log_tail } => panic!("catalog failed: {message}\n{log_tail}"),
+    }
+
+    // Both probes stopped the ladder's way: it removes the token it wrote.
+    assert!(!probe_dir.join("userspace/token").exists(), "the userspace probe kept its token");
+    assert!(!probe_dir.join("kernel/token").exists(), "the kernel probe kept its token");
+}
+
+/// #11 — every tab stops at once (§3, §9.8).
+#[test]
+fn shutdown_all_stops_every_tab() {
+    let _guard = one_swarm();
+    let first = fixture(1);
+    let second = fixture(1);
+    let (first_handle, first_rx) = TabEngine::start(spec(&first, 1));
+    let (second_handle, second_rx) = TabEngine::start(spec(&second, 1));
+    let mut first_updates = Updates::new(first_rx);
+    let mut second_updates = Updates::new(second_rx);
+    let deadline = Instant::now() + Duration::from_secs(150);
+
+    let first_pid = ready_pid(&mut first_updates, deadline);
+    let second_pid = ready_pid(&mut second_updates, deadline);
+    assert_ne!(first_pid, second_pid);
+
+    let report: ShutdownReport =
+        tab_engine::shutdown_all(vec![first_handle, second_handle], Duration::from_secs(60));
+    assert!(report.all_exited(), "{report:?}");
+    assert_eq!(report.exited.len(), 2, "{report:?}");
+    assert!(!swarm_client::process_alive(first_pid), "the first swarm is gone");
+    assert!(!swarm_client::process_alive(second_pid), "the second swarm is gone");
+}
+
+fn ready_pid(updates: &mut Updates, deadline: Instant) -> u32 {
+    match updates.next(deadline, |u| matches!(u, Update::Ready { .. })) {
+        Update::Ready { pid, .. } => pid,
+        _ => unreachable!(),
+    }
+}
+
+/// Whether a process whose command line names PATH is running.
+fn running(path: &Path) -> bool {
+    let Ok(output) = std::process::Command::new("pgrep").arg("-f").arg(path).output() else {
+        // No pgrep: the timing assertion above is the real evidence.
+        return false;
+    };
+    output.status.success() && !output.stdout.is_empty()
 }
 
 fn now() -> f64 {

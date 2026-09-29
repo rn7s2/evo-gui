@@ -8,13 +8,14 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_channel::{Receiver, Sender};
 use serde_json::Value;
 
 use swarm_client::{
-    Client, EventStream, Server, ShutdownOutcome, SseParser, StreamConfig, StreamMsg, StreamTarget,
+    BootCancel, Client, EventStream, Server, ShutdownOutcome, SseParser, StreamConfig, StreamMsg,
+    StreamTarget,
 };
 
 use crate::types::{Agent, Command, PostError, ReqId, StreamStatus, TabSpec, Update};
@@ -86,7 +87,8 @@ impl EngineHandle {
         self.send(Command::Interrupt { req_id })
     }
 
-    /// `POST /steer`.
+    /// `POST /steer`. Tests and diagnostics only — a UI turn goes through
+    /// [`EngineHandle::prompt`] (§14.7), which the server queues itself.
     pub fn steer(&self, req_id: ReqId, text: impl Into<String>) -> bool {
         self.send(Command::Steer { req_id, text: text.into() })
     }
@@ -124,6 +126,71 @@ impl EngineHandle {
             let _ = thread.join();
         }
     }
+
+    /// Give up waiting: the engine keeps stopping on its own thread, and this
+    /// handle stops caring. Only [`shutdown_all`] uses it, when the deadline has
+    /// passed and the caller has to return anyway.
+    pub fn detach(mut self) {
+        self.shutdown_requested = true;
+        self.thread = None;
+    }
+}
+
+/// What [`shutdown_all`] managed, by folder.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ShutdownReport {
+    /// Tabs whose engine thread finished within the deadline.
+    pub exited: Vec<PathBuf>,
+    /// Tabs still running when the deadline passed. Their handles were detached,
+    /// so they keep stopping on their own threads; nothing blocks on them.
+    pub pending: Vec<PathBuf>,
+}
+
+impl ShutdownReport {
+    pub fn all_exited(&self) -> bool {
+        self.pending.is_empty()
+    }
+}
+
+/// Stop every tab at once (§3, §9.8) and wait up to `deadline` for all of them.
+///
+/// Every handle is asked to stop first, so the tabs run their ladders **in
+/// parallel** — each on its own engine thread, which is also where the waiting
+/// happens. Returns as soon as the last tab is gone, or at the deadline with the
+/// folders that did not make it.
+///
+/// `std` has no timed join, so the wait is a bounded poll of the handles'
+/// threads; there is no event to wait on for a thread finishing.
+pub fn shutdown_all(handles: Vec<EngineHandle>, deadline: Duration) -> ShutdownReport {
+    let mut remaining: Vec<EngineHandle> = handles;
+    for handle in &mut remaining {
+        handle.shutdown();
+    }
+
+    let end = Instant::now() + deadline;
+    let mut report = ShutdownReport::default();
+    loop {
+        let mut still_running = Vec::new();
+        for handle in remaining.drain(..) {
+            if handle.is_running() {
+                still_running.push(handle);
+            } else {
+                report.exited.push(handle.folder().to_path_buf());
+                handle.join();
+            }
+        }
+        remaining = still_running;
+        if remaining.is_empty() || Instant::now() >= end {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    for handle in remaining {
+        report.pending.push(handle.folder().to_path_buf());
+        handle.detach();
+    }
+    report
 }
 
 impl Drop for EngineHandle {
@@ -141,6 +208,9 @@ impl Drop for EngineHandle {
 // ---------------------------------------------------------------- internals
 
 enum Inbound {
+    /// The boot thread's one message: the server, or why there is none. Boxed,
+    /// because the other variants are small and a `Server` is not.
+    Booted(Box<std::result::Result<Server, swarm_client::Error>>),
     Command(Command),
     Stream { agent: Agent, msg: StreamMsg },
 }
@@ -271,7 +341,7 @@ struct Engine {
 fn run(spec: TabSpec, mailbox: Sender<Inbound>, inbox: Receiver<Inbound>, updates: Sender<Update>) {
     let mut engine = Engine {
         updates,
-        streams: Streams::new(mailbox),
+        streams: Streams::new(mailbox.clone()),
         revisions: Revisions::default(),
         coordinator_connected: false,
         lane_connected: false,
@@ -279,26 +349,23 @@ fn run(spec: TabSpec, mailbox: Sender<Inbound>, inbox: Receiver<Inbound>, update
     };
 
     engine.send(Update::Booting);
-    let config = spec.server_config();
-    let mut server = match Server::start(&config) {
-        Ok(server) => server,
-        Err(error) => {
-            engine.send(Update::BootFailed {
-                message: error.to_string(),
-                log_tail: error.log_tail().unwrap_or_default().to_owned(),
-            });
-            return;
-        }
-    };
-    engine.send(Update::Ready {
-        health: server.health().clone(),
-        pid: server.pid(),
-        port: server.port(),
-    });
 
-    let client = server.client().clone();
-    engine.assemble(&client, server.health().cursor);
-    engine.serve(&mut server, &client, &inbox);
+    // Boot on its own thread, so the wait for readiness can be aborted: the
+    // engine's own loop stays free to hear a shutdown, and cancelling makes the
+    // boot thread run the ladder and come back within about a second (§3).
+    let cancel = BootCancel::new();
+    let boot_cancel = cancel.clone();
+    let config = spec.server_config();
+    let boot_mailbox = mailbox.clone();
+    let boot = thread::Builder::new()
+        .name(format!("tab-engine boot {}", spec.folder.display()))
+        .spawn(move || {
+            let result = Server::start_cancellable(&config, &boot_cancel);
+            let _ = boot_mailbox.send_blocking(Inbound::Booted(Box::new(result)));
+        })
+        .ok();
+
+    engine.run_loop(&inbox, cancel, boot);
 }
 
 impl Engine {
@@ -323,11 +390,57 @@ impl Engine {
 
     /// The main loop: commands from the UI and messages from the streams, until
     /// shutdown or the server's death.
-    fn serve(&mut self, server: &mut Server, client: &Client, inbox: &Receiver<Inbound>) {
+    /// The engine's whole life: wait for the boot, then for commands and stream
+    /// messages, until shutdown or the server's death. Nothing here polls.
+    fn run_loop(&mut self, inbox: &Receiver<Inbound>, cancel: BootCancel, boot: Option<JoinHandle<()>>) {
+        let mut boot = boot;
+        let mut server: Option<Server> = None;
+        let mut booting = true;
+
         while let Ok(inbound) = inbox.recv_blocking() {
-            let alive = match inbound {
+            match inbound {
+                Inbound::Booted(result) => {
+                    // The boot thread sends exactly one message; join it so no
+                    // thread outlives the engine.
+                    if let Some(handle) = boot.take() {
+                        let _ = handle.join();
+                    }
+                    booting = false;
+                    match *result {
+                        Ok(started) => {
+                            self.send(Update::Ready {
+                                health: started.health().clone(),
+                                pid: started.pid(),
+                                port: started.port(),
+                            });
+                            let client = started.client().clone();
+                            self.assemble(&client, started.health().cursor);
+                            server = Some(started);
+                        }
+                        Err(error) => {
+                            // A boot we aborted is not a failure to show: the
+                            // caller asked for the tab to stop, so it stops.
+                            return match error.cancelled() {
+                                Some(outcome) => self.exit(outcome),
+                                None => {
+                                    self.send(Update::BootFailed {
+                                        message: error.to_string(),
+                                        log_tail: error.log_tail().unwrap_or_default().to_owned(),
+                                    });
+                                }
+                            };
+                        }
+                    }
+                }
                 Inbound::Command(Command::Shutdown) => {
                     self.want_shutdown = true;
+                    if booting {
+                        // Abort the wait for readiness; the boot thread runs the
+                        // ladder and reports how the process went.
+                        cancel.cancel();
+                        continue;
+                    }
+                    let Some(server) = server.as_mut() else { continue };
                     // Stop the streams first, so nothing more arrives while the
                     // ladder runs.
                     self.streams.stop_all();
@@ -335,21 +448,35 @@ impl Engine {
                     return self.exit(outcome);
                 }
                 Inbound::Command(command) => {
-                    self.command(client, command);
-                    Liveness::Alive
+                    let Some(server) = server.as_mut() else { continue };
+                    let client = server.client().clone();
+                    self.command(&client, command);
                 }
-                Inbound::Stream { agent, msg } => self.stream_message(server, client, agent, msg),
-            };
-            if alive == Liveness::Gone {
-                self.want_shutdown = true;
-                self.streams.stop_all();
-                self.send(Update::ServerGone);
-                return self.exit(ShutdownOutcome::AlreadyGone);
+                Inbound::Stream { agent, msg } => {
+                    let Some(server) = server.as_mut() else { continue };
+                    let client = server.client().clone();
+                    if self.stream_message(server, &client, agent, msg) == Liveness::Gone {
+                        self.want_shutdown = true;
+                        self.streams.stop_all();
+                        self.send(Update::ServerGone);
+                        return self.exit(ShutdownOutcome::AlreadyGone);
+                    }
+                }
             }
         }
+
         // The mailbox closed: the handle went away without a shutdown command.
-        let outcome = self.ladder(server);
-        self.exit(outcome);
+        if booting {
+            cancel.cancel();
+        }
+        if let Some(server) = server.as_mut() {
+            let outcome = self.ladder(server);
+            self.exit(outcome);
+        } else if let Some(handle) = boot.take() {
+            // Wait for the aborted boot to finish and stop its process.
+            let _ = handle.join();
+        }
+        self.exit(ShutdownOutcome::AlreadyGone);
     }
 
     /// Stop every stream and tell the UI the tab is over.

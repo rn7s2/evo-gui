@@ -28,10 +28,11 @@
 //! * **cache seed** (§7.3) — the journal's newest `cache-stats` entry;
 //! * **commands** — `/prompt`, `/interrupt`, refetch, watch, shutdown.
 
+pub mod catalog;
 mod engine;
 mod types;
 
-pub use engine::{EngineHandle, TabEngine};
+pub use engine::{EngineHandle, ShutdownReport, TabEngine, shutdown_all};
 pub use types::{
     Agent, Command, PostError, ReqId, StreamStatus, TabSpec, Update,
 };
