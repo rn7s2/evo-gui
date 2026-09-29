@@ -3,6 +3,8 @@
 //!
 //! ```text
 //! new(values, window, cx)          the app's current state — `store::Binaries` + `Theme`
+//! embedded(true)                   the host draws the frame: no border, fill or padding of
+//!                                  our own, and its width rather than `PANEL_SIZE`
 //! set_verdicts                     tests and captures: answer paths without a process
 //! focus_into                       where the keyboard lands when the dialog opens
 //! → SettingsEvent::Saved(values)   Save, followed by DismissEvent
@@ -43,8 +45,9 @@ use store::{Binaries, Theme as StoredTheme};
 use crate::appearance::mode_for;
 use crate::probe::{probe, Check};
 
-/// The dialog-sized view the app presents (§13). The app may frame it however it likes;
-/// this is what fits.
+/// The size the standalone panel draws itself at — the demo, a capture — and the height
+/// floor of a hosted one, which takes its host's width instead
+/// ([`SettingsPanel::embedded`]).
 pub const PANEL_SIZE: (f32, f32) = (560., 360.);
 
 /// The panel's own element id, and the ids of everything in it, so the app's tests (and
@@ -222,6 +225,8 @@ pub struct SettingsPanel {
     theme: StoredTheme,
     /// The mode in force when the panel opened — what Cancel puts back.
     opened_mode: ThemeMode,
+    /// Whether the panel draws its own frame. See [`SettingsPanel::embedded`].
+    embedded: bool,
     prober: Prober,
     picker: Picker,
     /// The theme row's focus, for the arrows and Escape.
@@ -269,6 +274,7 @@ impl SettingsPanel {
             theme: values.theme,
             // Read now, before anything is previewed: this is what Cancel puts back.
             opened_mode: cx.theme().mode,
+            embedded: false,
             prober: Prober::default(),
             picker: Picker::default(),
             focus: cx.focus_handle(),
@@ -278,6 +284,21 @@ impl SettingsPanel {
             panel.check(binary, Duration::ZERO, cx);
         }
         panel
+    }
+
+    /// The panel for a host that draws the frame itself, which is how the app shows it: the
+    /// panel goes inside a gpui-kit `Dialog` (`crates/app/src/settings.rs`), and the dialog
+    /// already draws a frame, a fill and padding of its own. With `embedded(true)` the panel
+    /// draws none of its own — no border, no background, no padding, no corner — and takes
+    /// the width the host gives it instead of advertising [`PANEL_SIZE`]. Two frames read as
+    /// a doubled border, and the inner one clips the rows the outer one has already made
+    /// room for.
+    ///
+    /// Inside, nothing changes: the same rows, the same footer, the same keys. The default is
+    /// the standalone panel, whose own frame is what the demo and a capture show.
+    pub fn embedded(mut self, embedded: bool) -> Self {
+        self.embedded = embedded;
+        self
     }
 
     /// What the fields say now.
@@ -749,20 +770,29 @@ impl EventEmitter<DismissEvent> for SettingsPanel {}
 
 impl Render for SettingsPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        v_flex()
+        let mut panel = v_flex()
             .id(PANEL_ID)
             .test_support()
-            .w(px(PANEL_SIZE.0))
-            .min_h(px(PANEL_SIZE.1))
-            .p_3p5()
             .gap_2()
-            .bg(cx.theme().popover)
-            .border_1()
-            .border_color(cx.theme().border)
-            .rounded(cx.theme().radius_lg)
             .text_color(cx.theme().foreground)
             // Escape, from anywhere inside: the panel is the whole dialog.
-            .on_key_down(cx.listener(Self::panel_key))
+            .on_key_down(cx.listener(Self::panel_key));
+        panel = if self.embedded {
+            // The host's frame is the only one: it has already drawn the border, the fill
+            // and the room around us, so ours would be a second frame inside it — and the
+            // width is the host's to decide, not ours.
+            panel.w_full().min_h(px(PANEL_SIZE.1))
+        } else {
+            panel
+                .w(px(PANEL_SIZE.0))
+                .min_h(px(PANEL_SIZE.1))
+                .p_3p5()
+                .bg(cx.theme().popover)
+                .border_1()
+                .border_color(cx.theme().border)
+                .rounded(cx.theme().radius_lg)
+        };
+        panel
             .child(self.header(cx))
             .child(self.binary_row(Binary::Swarm, window, cx))
             .child(self.binary_row(Binary::Agent, window, cx))
@@ -980,6 +1010,116 @@ mod tests {
     /// The settings a fresh install would open on.
     fn fixture(cx: &mut TestAppContext) -> Fixture {
         open_with(SettingsValues::default(), Some(installed()), cx)
+    }
+
+    /// How much room the host draws around the panel — the dialog's own padding, which the
+    /// embedded panel must not add to.
+    const HOST_PADDING: f32 = 24.;
+
+    /// The panel the way the app hosts it (§13): `embedded(true)`, inside a box that has
+    /// already drawn the padding a `Dialog` draws, in a window exactly that much wider than
+    /// the panel advertises. Answers the window and the panel's own handle.
+    fn open_hosted(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<SettingsPanel>) {
+        cx.update(gpui_kit::init);
+        cx.update(|cx| ComponentTheme::change(ThemeMode::Light, None, cx));
+
+        let slot: Rc<RefCell<Option<Entity<SettingsPanel>>>> = Rc::new(RefCell::new(None));
+        let keep = slot.clone();
+        let (window, _host) = cx.update(|cx| {
+            let options = WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(Bounds {
+                    origin: point(px(0.), px(0.)),
+                    size: size(
+                        px(PANEL_SIZE.0 + 2. * HOST_PADDING),
+                        px(PANEL_SIZE.1 + 2. * HOST_PADDING),
+                    ),
+                })),
+                ..Default::default()
+            };
+            gpui_kit::open_window(options, cx, move |window, cx| {
+                let panel = cx.new(|cx| {
+                    SettingsPanel::new(SettingsValues::default(), window, cx).embedded(true)
+                });
+                *keep.borrow_mut() = Some(panel.clone());
+                cx.new(|_cx| HostView { panel })
+            })
+            .expect("hosted settings window")
+        });
+        let panel = slot.borrow_mut().take().expect("the panel");
+        (window, panel)
+    }
+
+    /// A view that draws the padding a `Dialog` draws and puts the panel inside it — the
+    /// app's own host around the panel, in miniature.
+    struct HostView {
+        panel: Entity<SettingsPanel>,
+    }
+
+    impl Render for HostView {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div().p(px(HOST_PADDING)).child(self.panel.clone())
+        }
+    }
+
+    /// The panel in a host that draws the frame: no second border, no fill, no padding, and
+    /// the host's width rather than the panel's own advertised one.
+    #[gpui_kit::test]
+    fn an_embedded_panel_lets_the_host_draw_the_frame(cx: &mut TestAppContext) {
+        let (window, _panel) = open_hosted(cx);
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            let panel = window.find(PANEL_ID).bounds();
+            // The panel starts where the host's padding ends, and is as wide as the host
+            // made room for — not `PANEL_SIZE.0` again inside it.
+            assert_eq!(
+                panel.origin.x,
+                px(HOST_PADDING),
+                "the host's padding is the only one"
+            );
+            assert_eq!(
+                panel.size.width,
+                px(PANEL_SIZE.0),
+                "the panel takes the width the host gives it"
+            );
+            // The footer's first control is the panel's own left edge: with no padding of
+            // our own, the rows start there rather than an inset inside it.
+            let reset = window.find(RESET_ID).bounds();
+            assert_eq!(
+                reset.origin.x, panel.origin.x,
+                "the embedded panel pads nothing of its own"
+            );
+            for id in [
+                PANEL_ID,
+                SWARM_PATH_ID,
+                THEME_ID,
+                RESET_ID,
+                CANCEL_ID,
+                SAVE_ID,
+            ] {
+                assert!(window.find(id).visible(), "{id} is not on screen");
+            }
+        })
+        .expect("hosted settings window");
+    }
+
+    /// The standalone panel keeps the frame it shows in the demo: its own padding is what
+    /// sets its rows in from its edge.
+    #[gpui_kit::test]
+    fn a_standalone_panel_still_draws_its_own_frame(cx: &mut TestAppContext) {
+        let f = fixture(cx);
+        let (panel, reset) = f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            (
+                window.find(PANEL_ID).bounds(),
+                window.find(RESET_ID).bounds().origin.x,
+            )
+        });
+        assert!(
+            reset > panel.origin.x,
+            "the standalone panel pads its rows ({reset:?} vs {:?})",
+            panel.origin.x
+        );
+        assert_eq!(panel.size.width, px(PANEL_SIZE.0));
     }
 
     #[gpui_kit::test]
