@@ -4,7 +4,7 @@
 //! cargo run -p workspace --example empty_tab_demo -- --capture <dir>
 //! ```
 //!
-//! Fourteen pictures: the catalog loading, the catalog loaded with a lanes model chosen
+//! Sixteen pictures: the catalog loading, the catalog loaded with a lanes model chosen
 //! (the `swarm.lisp` note under the chooser), a history list of many rows — one of them a
 //! very long path — an empty history, and the two states with no rows yet (scanning, and a
 //! scan that failed), each in the light and the dark theme; plus the three interaction
