@@ -46,3 +46,15 @@ Findings from screenshots, to be addressed in the polish pass once the tab page 
 - Status rows read like protocol ("provider-retry 1/3 in 500ms", "run-end · outcome aborted",
   "output · …"): humanize in session ("Retrying provider (1/3) in 500 ms", "Run aborted", plain
   output text) and give session a first-class run-outcome row so the view stops sniffing strings.
+
+## Tab page, live (workspace captures /tmp/evo-live-shots2 04/05, after 68df775)
+- Left column is still lane 1's placeholder list, not the polished `agent_list::AgentList` crate
+  (glyph colours, tooltips, trailing clock cell, down reasons, header "N lanes · M busy"). Mount it.
+- The raw folder path (`/var/folders/.../proj`) wraps over four lines at the bottom of the agent list.
+  Show the folder as a single `~`-shortened line, ellipsized in the middle, with the full path in a
+  tooltip — or drop it (the tab tooltip already carries it).
+- Close icon on the tab is still the heavy circled ⊗; use a light `×` (IconName::Close, small, muted,
+  accent on hover).
+- The center column has no heading: when a lane is selected nothing says whose transcript it is.
+  Add a slim sticky header ("main" / "Lane 1 · <task>" + status glyph) above the transcript.
+- Idle lane glyphs (○) are near-invisible at this size — same fix as agent_list's starting glyph.
