@@ -61,7 +61,15 @@ Per-crate fmt --check + tests (own target dirs), workspace clippy, table; `--hea
 worktree of HEAD with `CARGO_TARGET_DIR=target/head`. Logs in target/check/. Needs an idle machine.
 
 ## Open
-- The lane step clock ages only when the list is read.
+- The lane step clock is wired in `session` but not yet in the UI: lane 1 passes `now` from the 1 s
+  ticker (`TabModel::on_lanes_at` on the way in, `LaneRow::step_clock_at(now)` on the way out), and
+  the ticker has to run while a *lane* is busy, not only while the coordinator has a step.
 - `assemble` still reads `/registry` and `/lanes` on the loop (before the stream opens). Only a
   server that stops answering *between* the readiness check and those two reads could hold the tab
   there, and the first frame's ordering is what buys it; the rest of the assembly is off the loop.
+- A lane stream carries no cursor of its own against a lane that restarts *and* whose new log grows
+  past the old cursor before the pid change is seen: reopening on the pid is what covers it
+  (`Engine::reopen_lane`), and the relay's `?since=N` is only ever read on a first connect.
+- The proofs' `Drive` folds a thread's updates in arrival order; a test that delegates to a lane must
+  wait for the lane list to say it is *idle* first — the swarm refuses a lane that is not, and a fast
+  watch no longer gives a lane its boot or its run time for free.
