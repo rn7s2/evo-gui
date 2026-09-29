@@ -17,8 +17,8 @@ use std::time::{Duration, Instant};
 
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
-    base::Root, px, size, AppContext as _, Bounds, Entity, Point, TestAppContext, WindowBounds,
-    WindowHandle, WindowOptions,
+    base::Root, px, size, AppContext as _, Bounds, ElementId, Entity, Point, TestAppContext,
+    WindowBounds, WindowHandle, WindowOptions,
 };
 use session::{AgentKey, LaunchPlan};
 use swarm_client::harness::{Fixture, HarnessConfig, STUB_MODEL};
@@ -36,6 +36,32 @@ struct Bench {
     /// one machine starves the boot and turns a healthy test into a timeout, so
     /// they take turns. Held for the test's lifetime.
     _serial: std::sync::MutexGuard<'static, ()>,
+}
+
+/// Send a signal to one process this test started (§9.7).
+fn signal(pid: u32, which: &str) {
+    let status = std::process::Command::new("kill")
+        .arg(which)
+        .arg(pid.to_string())
+        .status()
+        .expect("kill");
+    assert!(status.success(), "kill {which} {pid}");
+}
+
+/// The pid the swarm's supervisor reports, and the pid that is actually serving:
+/// `evo-swarm serve` runs the server as its own child, which is the one to kill to
+/// leave a supervisor watching a closed port (§9.7).
+fn served_by(supervisor: u32) -> Option<u32> {
+    let out = std::process::Command::new("pgrep")
+        .args(["-P", &supervisor.to_string()])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .next()?
+        .trim()
+        .parse()
+        .ok()
 }
 
 /// The lock `Bench` holds, so the swarm tests run one at a time.
@@ -290,14 +316,30 @@ fn a_tab_boots_a_real_swarm_and_streams_a_turn(cx: &mut TestAppContext) {
     cx.update(|cx| {
         let records = b.view.read(cx).tab_records(cx);
         assert_eq!(records.len(), 1, "one tab is open");
-        let (_, folder, session) = &records[0];
-        assert_eq!(folder.as_ref(), Some(&b.fixture.project));
+        let record = &records[0];
+        assert_eq!(record.folder.as_ref(), Some(&b.fixture.project));
         assert_eq!(
-            session.as_deref(),
+            record.session.as_deref(),
             tab.read(cx).session_path(),
             "the record carries the session the tab is writing to"
         );
-        assert!(session.is_some(), "/state named the session");
+        assert!(record.session.is_some(), "/state named the session");
+        assert_eq!(
+            record.store_id.as_ref(),
+            tab.read(cx).store_id(),
+            "and the id of the directory its swarm writes to (§6)"
+        );
+        assert!(
+            record.store_id.as_ref().is_some_and(|id| {
+                b.fixture
+                    .dir
+                    .join("app")
+                    .join("tabs")
+                    .join(id.as_str())
+                    .is_dir()
+            }),
+            "the store id names a directory that is really there"
+        );
     });
 
     prompt(cx, &b, &tab, "SLOW say something long");
@@ -376,6 +418,19 @@ fn a_delegated_lane_shows_its_own_transcript(cx: &mut TestAppContext) {
     launch(cx, &b, &tab, b.fixture.project.clone(), Some(2));
     wait_for(cx, "the swarm to answer /health", |cx| {
         matches!(state(cx, &tab), TabState::Running { .. })
+    });
+
+    // A lane comes up on demand and is `starting` until its baseline is evaluated;
+    // the swarm's delegate takes an idle lane, so wait for that first (§9.3).
+    wait_for(cx, "lane 1 to be idle and ready for work", |cx| {
+        cx.update(|cx| {
+            tab.read(cx).model().is_some_and(|model| {
+                model
+                    .lane_rows()
+                    .iter()
+                    .any(|lane| lane.n == 1 && lane.status == session::LaneStatus::Idle)
+            })
+        })
     });
 
     // Choose the lane first: its stream is opened while it is idle, so what it
@@ -537,4 +592,109 @@ fn two_tabs_stream_at_once_and_the_ui_stays_responsive(cx: &mut TestAppContext) 
         drain_max < Duration::from_millis(250),
         "draining the updates took {drain_max:?} while two tabs streamed"
     );
+}
+
+/// §9.7: a swarm that stops answering. Its stream goes to reconnecting — the tab
+/// says so, the agent list badges the coordinator's row — and a turn posted while
+/// it is unreachable fails with an error notice above the composer, with the
+/// draft still there. Never a modal, and the tab keeps its page.
+///
+/// What dies here is the process *serving* (`evo-swarm serve` runs the server as
+/// its child, and supervises it): the tab's own process is still running, so the
+/// engine reconnects instead of declaring the swarm gone — which is the state the
+/// badge is for — and the supervisor brings the server back, so the stream
+/// recovers on its own (§3).
+#[gpui_kit::test]
+fn a_swarm_that_stops_answering_reconnects_and_refuses_quietly(cx: &mut TestAppContext) {
+    let b = bench(cx, 2);
+    let tab = cx.update(|cx| b.view.read(cx).selected_tab().clone());
+    launch(cx, &b, &tab, b.fixture.project.clone(), Some(2));
+    wait_for(cx, "the swarm to answer /health", |cx| {
+        matches!(state(cx, &tab), TabState::Running { .. })
+    });
+
+    let pid = cx
+        .update(|cx| tab.read(cx).swarm_pid())
+        .expect("the swarm's own pid, from /health");
+    let server = served_by(pid).expect("the serving child of the supervisor");
+    signal(server, "-KILL");
+
+    // A turn typed into a frozen swarm: the POST goes out and no answer comes
+    // back. The composer keeps the draft, because the server never took it (§9.2).
+    prompt(cx, &b, &tab, "SLOW frozen swarm");
+
+    wait_for(cx, "the failed post to be shown", |cx| {
+        cx.update_window(b.window.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.try_find("composer-notice-error").is_some()
+        })
+        .unwrap_or(false)
+    });
+    cx.update_window(b.window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let notice = window.find("composer-notice-error");
+        assert!(
+            !notice.label().unwrap_or_default().trim().is_empty(),
+            "the notice carries the failure's own words"
+        );
+        assert!(
+            window.find("tab-page").visible(),
+            "a failure is a line, not a modal: the page is still there"
+        );
+        assert!(
+            window.try_find("composer-notice-dim").is_none(),
+            "a transport failure is not a 409 refusal"
+        );
+    })
+    .unwrap();
+    cx.update(|cx| {
+        let composer = tab.read(cx).composer().read(cx);
+        assert_eq!(composer.face(), composer::ActionFace::Send);
+        assert!(
+            composer.is_action_enabled(cx),
+            "the draft the server never took is still in the composer"
+        );
+    });
+
+    // The stream gives up on the silence (serve keeps it alive with a keepalive
+    // every 15 s, and the client waits 45 s) and starts retrying.
+    wait_for(cx, "the stream to go to reconnecting", |cx| {
+        cx.update(|cx| tab.read(cx).is_reconnecting())
+    });
+    cx.update(|cx| {
+        let tooltip = tab.read(cx).tooltip();
+        assert!(
+            tooltip.contains("reconnecting"),
+            "the tab says what the swarm is doing: {tooltip}"
+        );
+    });
+    cx.update_window(b.window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(
+            window.find("reconnecting").visible(),
+            "the page carries the reconnecting badge"
+        );
+        // The agent list badges the coordinator's own row (§9.7); `main` is row 0.
+        assert!(
+            window
+                .find(ElementId::from(("agent-badge", 0u64)))
+                .visible(),
+            "and so does the list"
+        );
+    })
+    .unwrap();
+
+    // SIGCONT: the swarm answers again, and the stream comes back on its own.
+
+    wait_for(cx, "the stream to come back", |cx| {
+        cx.update(|cx| !tab.read(cx).is_reconnecting())
+    });
+    cx.update_window(b.window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(
+            window.try_find("reconnecting").is_none(),
+            "the badge left with the silence"
+        );
+    })
+    .unwrap();
 }

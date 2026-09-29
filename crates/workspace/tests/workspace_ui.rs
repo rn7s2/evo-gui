@@ -292,13 +292,13 @@ fn the_window_lists_its_tabs_for_persistence(cx: &mut TestAppContext) {
         let view = view.read(cx);
         let records = view.tab_records(cx);
         assert_eq!(records.len(), 2, "one record per tab, in strip order");
-        assert_eq!(records[0].0, view.tabs()[0].read(cx).id());
-        assert_eq!(records[1].0, view.tabs()[1].read(cx).id());
+        assert_eq!(records[0].window_id, view.tabs()[0].read(cx).id());
+        assert_eq!(records[1].window_id, view.tabs()[1].read(cx).id());
         assert!(
-            records
-                .iter()
-                .all(|(_, folder, session)| folder.is_none() && session.is_none()),
-            "a tab that never started a swarm has neither a folder nor a session"
+            records.iter().all(|record| record.folder.is_none()
+                && record.session.is_none()
+                && record.store_id.is_none()),
+            "a tab that never started a swarm has no folder, session or tab directory"
         );
         assert_eq!(
             view.selected_index(),

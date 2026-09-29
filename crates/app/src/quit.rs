@@ -17,7 +17,6 @@ use std::time::Duration;
 
 use std::path::PathBuf;
 
-
 use gpui_kit::{App, WeakEntity};
 
 use store::app_state::{AppState, Recent};
@@ -93,14 +92,15 @@ pub fn begin_with(cx: &mut App, engines: Vec<EngineHandle>) {
     .detach();
 }
 
-/// The snapshot the quit sequence persists: the window's last bounds and the
-/// recents `app.json` already knew.
 /// One open tab, as `app.json` records it (§6).
 #[derive(Clone, Debug, PartialEq)]
 pub struct TabRecord {
     /// The window's handle for this tab (`workspace::TabId`), as a number: the
     /// app never mints one, it only records what the window handed out.
     pub id: u64,
+    /// The `tabs/<id>/` directory this tab's swarm writes to. `None` until it
+    /// starts one.
+    pub store_id: Option<StoredTabId>,
     /// Where it runs, once a folder was chosen.
     pub folder: Option<PathBuf>,
     /// The session it resumed, when it has one — what makes a tab resumable.
@@ -110,20 +110,16 @@ pub struct TabRecord {
 impl TabRecord {
     /// The id `app.json` stores for this tab.
     ///
-    /// This should be the tab's own `tabs/<id>/` id — the one its `tab.json` and
-    /// `swarm.log` live under — so that the stored set and the directories on
-    /// disk name the same tabs. It is not reachable today: `TabContent` creates
-    /// that directory in `launch::start` from a fresh `TabId` and keeps only the
-    /// *path* privately, and `WorkspaceView::tab_records` hands back the window's
-    /// own per-run handle. Asked of lane 1; when it lands this is one line.
-    ///
-    /// Until then the id is derived from that handle, which keeps the set ordered
-    /// and unique — nothing restores from it yet — and the tab-directory prune
-    /// (which matches ids to directories) simply never recognises a live one. A
-    /// live tab's directory is minutes old, so the week-long prune does not reach
-    /// it either way.
+    /// Once the tab has started a swarm that is the id its `tabs/<id>/` directory
+    /// is named by, so the stored set and the directories on disk name the same
+    /// tabs — which is what the tab-directory prune matches against. A tab that
+    /// has not started one names no directory; it is stored under its window
+    /// handle, which keeps the set ordered and unique.
     pub fn stored_id(&self) -> StoredTabId {
-        StoredTabId::parse(&format!("tab-{}", self.id)).expect("`tab-<n>` is safe as a path segment")
+        self.store_id.clone().unwrap_or_else(|| {
+            StoredTabId::parse(&format!("tab-{}", self.id))
+                .expect("`tab-<n>` is safe as a path segment")
+        })
     }
 }
 
@@ -136,10 +132,11 @@ pub fn open_tabs(cx: &App) -> (Vec<TabRecord>, Option<usize>) {
     let records = view
         .tab_records(cx)
         .into_iter()
-        .map(|(id, folder, session)| TabRecord {
-            id: id.get(),
-            folder,
-            session,
+        .map(|record| TabRecord {
+            id: record.window_id.get(),
+            store_id: record.store_id,
+            folder: record.folder,
+            session: record.session,
         })
         .collect();
     (records, Some(view.selected_index()))
@@ -246,9 +243,30 @@ mod tests {
     fn record(id: u64, folder: Option<&str>, session: Option<&str>) -> TabRecord {
         TabRecord {
             id,
+            store_id: None,
             folder: folder.map(PathBuf::from),
             session: session.map(PathBuf::from),
         }
+    }
+
+    #[test]
+    fn a_tab_with_a_swarm_is_stored_under_its_own_directory_id() {
+        let mut state = AppState::default();
+        let started = TabRecord {
+            id: 4,
+            store_id: Some(StoredTabId::parse("9f2c1a").unwrap()),
+            folder: Some(PathBuf::from("/coding/a")),
+            session: Some(PathBuf::from("/sessions/one.sexp")),
+        };
+        remember_tab_set(&mut state, &[started, record(5, None, None)], Some(1));
+
+        let ids: Vec<&str> = state.tabs.iter().map(StoredTabId::as_str).collect();
+        assert_eq!(
+            ids,
+            ["9f2c1a", "tab-5"],
+            "the directory id when the tab has one, the window handle otherwise"
+        );
+        assert_eq!(state.selected.as_ref().map(StoredTabId::as_str), Some("tab-5"));
     }
 
     fn sessions(state: &AppState) -> Vec<(String, bool)> {

@@ -18,6 +18,7 @@
 //!             └── quit: every tab's ladder, then app.json, then exit
 //! ```
 
+mod about;
 mod bounds;
 mod housekeeping;
 mod launcher;
@@ -27,6 +28,8 @@ mod quit;
 mod startup;
 mod theme;
 
+pub use about::{Versions, start as start_version_probe};
+pub use menus::open_about;
 pub use bounds::{Tracker, window_bounds, window_options};
 pub use housekeeping::{Pruned, TAB_DIR_TTL, prune_tab_dirs};
 pub use launcher::{
@@ -67,6 +70,9 @@ pub struct Shell {
     /// What every empty tab is shown (§9.4, §9.5): the catalog, the history,
     /// and the errors when either could not be learned.
     pub launcher: Launcher,
+    /// What `evo-swarm --version` and `evo-agent --version` said, read once at
+    /// startup (the About dialog's second line).
+    pub versions: Versions,
     /// Light, dark, or whatever the system says (§7.1). `app.json`'s setting,
     /// kept here so the appearance observer and the quit path can both read it.
     pub theme: Theme,
@@ -90,6 +96,7 @@ impl Shell {
         Shell {
             root,
             log,
+            versions: Versions::default(),
             theme: state.theme,
             binaries: state.binaries,
             recents: state.recents,
@@ -257,6 +264,8 @@ pub fn run() {
             })
             .detach();
 
+            // The binaries' own versions, for the About dialog (§7.1).
+            about::start(cx);
             startup::start(cx);
         });
 }

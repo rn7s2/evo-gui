@@ -86,7 +86,7 @@ fn open(cx: &mut TestAppContext, root: &AppRoot, binaries: Binaries) -> (AnyWind
             )
         })
         .expect("the window");
-    (window.into(), view)
+    (window, view)
 }
 
 #[gpui_kit::test]

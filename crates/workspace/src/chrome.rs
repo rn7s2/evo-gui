@@ -122,6 +122,20 @@ pub struct LauncherData {
     pub home: Option<String>,
 }
 
+/// One tab as an app stores it (§6, §9.8).
+///
+/// `window_id` is the id this window knows the tab by — stable while it is open,
+/// never reused. `store_id` is the `tabs/<id>/` directory its swarm writes to,
+/// which is what a stored set has to keep so the directory can be found again;
+/// it is `None` until the tab starts a swarm.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TabRecord {
+    pub window_id: TabId,
+    pub store_id: Option<store::paths::TabId>,
+    pub folder: Option<PathBuf>,
+    pub session: Option<PathBuf>,
+}
+
 /// What [`QuitHook`] is handed.
 pub struct QuitRequest {
     /// Every tab's engine, taken out of the tabs, so the app owns stopping them.
@@ -242,23 +256,23 @@ impl WorkspaceView {
         }
     }
 
-    /// The tabs as an app persists them: strip order, one
-    /// `(id, folder, session)` per tab, and `selected_index()` says which one is
-    /// showing (§9.8).
+    /// The tabs as an app persists them: strip order, one [`TabRecord`] per tab,
+    /// and `selected_index()` says which one is showing (§9.8).
     ///
-    /// `folder` is `None` only for a tab that has never started a swarm, and
-    /// `session` is `None` until that swarm has answered `/state` — which is the
-    /// path `Launch::Resume` takes (§9.5).
-    pub fn tab_records(&self, cx: &App) -> Vec<(TabId, Option<PathBuf>, Option<PathBuf>)> {
+    /// `folder`, `store_id` and `session` are `None` only while a tab has never
+    /// started a swarm; `session` alone stays `None` until that swarm has answered
+    /// `/state`, which is the path `Launch::Resume` takes (§9.5).
+    pub fn tab_records(&self, cx: &App) -> Vec<TabRecord> {
         self.tabs
             .iter()
             .map(|tab| {
                 let tab = tab.read(cx);
-                (
-                    tab.id(),
-                    tab.folder().map(Path::to_path_buf),
-                    tab.session_path().map(Path::to_path_buf),
-                )
+                TabRecord {
+                    window_id: tab.id(),
+                    store_id: tab.store_id().cloned(),
+                    folder: tab.folder().map(Path::to_path_buf),
+                    session: tab.session_path().map(Path::to_path_buf),
+                }
             })
             .collect()
     }

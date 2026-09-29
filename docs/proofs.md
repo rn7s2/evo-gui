@@ -240,6 +240,36 @@ Proven automatically:
   brings back two lanes, keeps writing to **the same session file**, and runs a new
   prompt whose answer streams in and lands in the transcript.
 
+### The left column's header and its rows
+
+The capture `docs/screens/03-lane-todos-dark.png` shows the lane list saying
+`2 lanes · 1 busy` over two idle rows: the header's count came from
+`GET /lanes`' `swarm.busy` as of the last read (taken while lane 1 was working),
+while the rows had followed the `lane-state` events on to idle. Both halves of that
+are fixed, and each has its own test:
+
+- **the header counts the rows it labels** (`crates/session`): `LaneList::busy`
+  counts the rows rather than repeating the snapshot's number, so the summary can
+  never contradict the column under it; and a row that is not working shows no step
+  clock, which is the swarm's own rule (`swarm/state.lisp`'s `lane-snapshot` reports
+  a step age only for `working`/`compacting`). Proven by
+  `crates/session/tests/lanes.rs`'s `the_header_counts_the_rows_it_labels`, over the
+  real captures: `lanes-lane1-working.json` (`swarm.busy` 1) plus the captured
+  `lane-state` for lane 1 going idle ⇒ the header says 0, which is what a fresh read
+  (`lanes-final.json`) says too. Before the change that test fails on the captured
+  data.
+- **a lane's state moving reads the list again** (`crates/tab_engine`): every
+  `lane-state` event asks for `/lanes` (debounced, as the launch announcement already
+  did), and so does the watched lane's own `settled` — the coordinator's run ending
+  is not the only moment the clocks and the count move. Unit tests in
+  `crates/tab_engine/src/engine.rs` pin the decisions
+  (`a_lane_state_that_moves_asks_for_the_list`, `one_read_per_debounce_window`,
+  `a_launch_announcement_starts_the_follow_ups`).
+- `crates/proofs/tests/m1_delegation.rs`'s `m1_the_lane_list_follows_a_lane_to_idle`
+  proves the pair end to end on a real swarm: a delegated `SLOW` task puts lane 1's
+  row in `Working`, the header counts it busy, and after the lane's own `settled` the
+  row is idle and the header reads nothing busy again.
+
 ### m3_lane_down_up — a lane dies and the swarm brings it back
 
 The lane's pid is read from the lane list the left column folded (originally
@@ -290,7 +320,7 @@ Proven automatically:
 
 ### What the proofs changed
 
-Three things came out of the proofs and are fixed in the app now:
+Four things came out of the proofs (and the captures) and are fixed in the app now:
 
 1. **The lane list is read back when a lane comes up** (`crates/tab_engine`). The swarm
    publishes `starting` when it launches a lane and never announces that the lane came
@@ -302,8 +332,8 @@ Three things came out of the proofs and are fixed in the app now:
    "a lane is starting" episode (`LANES_DEBOUNCE` = 500 ms, coalescing a boot's
    per-lane announcements and a watched lane's first connect; `LANES_FOLLOWUPS` = 20
    looks while some lane is still starting, so a swarm that never finishes a boot is not
-   asked forever), and reads the list on `settled` too. §2.5 is kept: the read is
-   triggered by the event that exists, and it is not a loop.
+   asked forever), and reads the list whenever a lane's state moves or a run settles.
+   §2.5 is kept: every read has an event behind it, and none of it is a loop.
    `crates/tab_engine/tests/tab_e2e.rs`'s `a_lane_that_came_up_is_read_back_idle`
    proves it headless (an all-idle list arrives, and it is not the assembly one);
    m1_delegation proves it in the app's own model by dropping the direct `/lanes`
@@ -317,7 +347,11 @@ Three things came out of the proofs and are fixed in the app now:
    shows nothing at all for a lane that is not down. Unit tests in
    `crates/session/tests/tab.rs` pin the precedence, the "nothing for a lane that is
    up" rule and the survival across a resync; m3 proves the app-level half.
-3. **A resync replaces event-only rows** — documented behaviour, not a bug: a lane's
+3. **The lane list's header counts its own rows, and the list follows a lane's
+   state** — the `2 lanes · 1 busy` over two idle rows in
+   `docs/screens/03-lane-todos-dark.png`: see "The left column's header and its rows"
+   above.
+4. **A resync replaces event-only rows** — documented behaviour, not a bug: a lane's
    `report` event row becomes the transcript's `report` tool row, exactly as `output`
    lines go. A proof must assert the durable (tool) row.
 
@@ -391,3 +425,119 @@ recent-tab
 a directory's times decides its age (a swarm appends to its log without changing
 the directory's own time), an id `app.json` has open is kept however old it is,
 and anything the app cannot date it leaves alone.
+
+## M4 — the About dialog, and the bundle after the day's changes
+
+The same release path as "M4 — bundle" above, re-run once the day's changes were
+all in, plus §7.1's ninth piece of polish: the app's own About.
+
+### The About dialog
+
+`Evo Desktop ▸ About Evo Desktop`. It shows the app's icon — `assets/icon/icon-1024.png`,
+`include_bytes!`d into the binary so the dialog does not depend on where the bundle
+was put — the build, both binaries it spawns, and where the app's state and log live:
+
+```
+# /tmp/evo-app-check/r4/r4b-about.png, the dialog over the real window
+Evo Desktop          [the app icon]
+Version 0.1.0
+evo-swarm  0.1.0
+evo-agent  0.1.0
+State      ~/.evo/desktop
+Log        ~/.evo/desktop/app.log
+                                        [ Close ]
+```
+
+The two versions are read **once**, at startup, on a thread of its own: `--version`
+is process work, and this dialog is opened from a menu action, on the UI thread.
+What it found is kept on the `Shell`, so opening the dialog is a read:
+
+```
+2026-09-29T13:41:24Z info  versions: evo-swarm 0.1.0, evo-agent 0.1.0
+2026-09-29T13:41:36Z info  about: evo-desktop 0.1.0
+```
+
+`crates/app/src/about.rs` holds the probe and the dialog, with its tests: no
+`--version` to ask is `no --version` rather than a blank, `$HOME` is shortened to
+`~`, the version line drops the binary's own name (the row already names it), and
+the log line names both binaries. `crates/app/examples/about_snapshot.rs --capture
+<dir>` renders it headless in both themes (`about-light.png`, `about-dark.png`) —
+the picture the polish was judged on, with no screen involved.
+
+### Real history, R1 redacted, dark, and ⌘Q — in the bundle
+
+`scripts/bundle.sh` (exit 0) after the last change of the day, launched as its own
+binary with the **real** `$HOME`, so the state and the history under test are the
+user's. The launch, whole:
+
+```
+2026-09-29T13:41:23Z info  evo-desktop 0.1.0 starting (pid 14227, root /Users/bytedance/.evo/desktop)
+2026-09-29T13:41:23Z info  app.json: window 1600x992 at Some(64.0),Some(33.0), 0 recent(s), binaries /usr/local/bin/evo-swarm / /usr/local/bin/evo-agent
+2026-09-29T13:41:24Z info  window open
+2026-09-29T13:41:24Z info  window bounds 1600x992 at 64,33
+2026-09-29T13:41:24Z info  theme: dark (the system appearance)
+2026-09-29T13:41:24Z info  startup: cached catalog has 0 model(s), fetched never
+2026-09-29T13:41:24Z info  startup: 1 tab(s) will show it
+2026-09-29T13:41:24Z info  catalog: probing with /usr/local/bin/evo-agent (cache older than 86400s or missing)
+2026-09-29T13:41:24Z info  tab dirs: 0 kept, none old enough to prune
+2026-09-29T13:41:24Z info  versions: evo-swarm 0.1.0, evo-agent 0.1.0
+2026-09-29T13:41:26Z info  history: 16 row(s) (500 files read of 697 seen, stopped early)
+2026-09-29T13:41:26Z error catalog probe failed: http 500: The value
+  "Bearer <redacted>"
+is not of type
+  LIST
+2026-09-29T13:41:38Z info  quitting: stopping every tab
+2026-09-29T13:41:38Z info  saved /Users/bytedance/.evo/desktop/app.json: 1 tab(s), 0 of them resumable
+2026-09-29T13:41:38Z info  shutdown: all 0 tab(s) exited
+2026-09-29T13:41:38Z info  stopped; exiting
+$ pgrep -f 'MacOS/evo-desktop' | wc -l
+0
+```
+
+Four things this shows at once, each of them in the *release* build:
+
+* **the real history** — sixteen rows, the same ones the launcher drew
+  (`/tmp/evo-app-check/r4/r4b-app.png`): `work-harness · 6 lanes · 5h ago ·
+  coordinator: ark-glm-5.2`, `clog`, the `evo-agent` and `evo-gui` worktrees, and
+  so on, out of the user's own `~/.evo/sessions`;
+* **R1, redacted** — `GET /registry` answering 500 with the token in the message,
+  written as `Bearer <redacted>`, in the log *and* on the screen, with no raw
+  token anywhere (the screen capture shows the same redaction in the red error
+  line beside the model choosers);
+* **dark** — `theme: dark (the system appearance)`: the Mac is in dark mode and
+  `app.json` says `system`, so the window follows it;
+* **⌘Q** — the ladder, then `app.json`, then `stopped; exiting`, and no process
+  left behind.
+
+### One instance, on today's build
+
+`scripts/single_instance_check.sh` — the audit against two real launches, in a
+throwaway `$HOME`, 11 checks, 0 failures:
+
+```
+1. first launch takes the lock
+  ok   lock written by pid 12678
+  ok   the window opened
+  ok   the lock names the process we started
+2. second launch asks the first to come forward
+  ok   the second launch exited 0
+  ok   …within 0s
+  ok   it says why (another instance is running)
+  ok   the primary was activated by the knock
+  ok   the second launch did not disturb the primary
+3. a killed primary leaves no stale lock
+  ok   the primary is gone
+  ok   the next launch became the primary
+  ok   the new launch found no other instance
+single instance: all checks passed
+```
+
+### The stored tab set now names the directories
+
+`app.json`'s `tabs` are the ids the `tabs/<id>/` directories are named by, for
+every tab that has started a swarm: `TabRecord::store_id` is what the workspace
+hands over now, and it is what the recorded set keeps, so the tab-directory prune
+recognises the directories of the tabs that are open instead of only their age. A
+tab that has never started one names no directory and is stored under its window
+handle, which keeps the set ordered and unique. `crates/app/src/quit.rs` covers
+both, and the tab that started a swarm keeps its directory id through the write.

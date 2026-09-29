@@ -51,7 +51,7 @@ fn open(cx: &mut TestAppContext, theme: Theme) -> (AnyWindowHandle, AppLog) {
             }
         })
         .expect("the window");
-    (window.into(), log)
+    (window, log)
 }
 
 fn log_text(log: &AppLog) -> String {

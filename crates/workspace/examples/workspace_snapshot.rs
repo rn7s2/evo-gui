@@ -145,6 +145,18 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     //    then the coordinator delegates to it: the center column follows the
     //    lane's own transcript while it works (§7.3, §9.3). The composer still
     //    types to the coordinator (§14.4).
+    // The swarm's lanes are `starting` until their baseline is evaluated, and the
+    // delegate tool takes an idle lane: wait for lane 1 to be ready (§9.3).
+    wait_until(&mut cx, |cx| {
+        tab.read_with(cx, |tab, _| {
+            tab.model().is_some_and(|model| {
+                model
+                    .lane_rows()
+                    .iter()
+                    .any(|lane| lane.n == 1 && lane.status == session::LaneStatus::Idle)
+            })
+        })
+    })?;
     select_lane(&mut cx, window, &tab, 1)?;
     prompt(
         &mut cx,
@@ -191,6 +203,44 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     }
     shot(&mut cx, broken_window, dir, "08-boot-failed.png")?;
 
+    // 9. §9.7: the swarm stops answering. `evo-swarm serve` runs the server as its
+    //    own child and supervises it, so killing *that* child leaves a supervisor
+    //    watching a closed port: the stream goes to reconnecting, the tab keeps its
+    //    page, and the supervisor brings the server back.
+    let pid = tab
+        .read_with(&cx, |tab, _| tab.swarm_pid())
+        .expect("the swarm's pid, from /health");
+    let server = served_by(pid).ok_or("the serving child of the supervisor")?;
+    signal(server, "-KILL");
+    wait_until(&mut cx, |cx| {
+        tab.read_with(cx, |tab, _| tab.is_reconnecting())
+    })?;
+    println!(
+        "[capture] reconnecting — tab tooltip: {:?}",
+        tab.read_with(&cx, |tab, _| tab.tooltip())
+    );
+    shot(&mut cx, window, dir, "09-reconnecting.png")?;
+
+    // 10. A turn typed while the swarm cannot answer: the POST fails, and the
+    //     failure is a line above the composer, with the draft still there (§4).
+    prompt(&mut cx, window, &tab, "SLOW unreachable swarm")?;
+    wait_until(&mut cx, |cx| {
+        tab.read_with(cx, |tab, _| tab.notice_text().is_some())
+    })?;
+    println!(
+        "[capture] notice: {:?} (draft kept: {})",
+        tab.read_with(&cx, |tab, _| tab.notice_text().map(str::to_owned)),
+        tab.read_with(&cx, |tab, cx| tab.composer().read(cx).is_action_enabled(cx))
+    );
+    shot(&mut cx, window, dir, "10-post-failed-notice.png")?;
+
+    // 11. The supervisor put the server back (§3): the stream comes back on its way
+    //     to the new process, and the badge goes with it.
+    wait_until(&mut cx, |cx| {
+        tab.read_with(cx, |tab, _| !tab.is_reconnecting())
+    })?;
+    shot(&mut cx, window, dir, "11-recovered.png")?;
+
     Ok(())
 }
 
@@ -204,6 +254,32 @@ fn open_workspace(
         })
     })?;
     Ok((window.into(), view))
+}
+
+/// Send a signal to one process this capture started (§9.7).
+fn signal(pid: u32, which: &str) {
+    let status = std::process::Command::new("kill")
+        .arg(which)
+        .arg(pid.to_string())
+        .status()
+        .expect("kill");
+    assert!(status.success(), "kill {which} {pid}");
+}
+
+/// The process actually serving, which is the child of the reported pid: the
+/// supervisor is what `/health` names, and killing it would take the tab's whole
+/// swarm away instead of leaving a stream to reconnect (§9.7).
+fn served_by(supervisor: u32) -> Option<u32> {
+    let out = std::process::Command::new("pgrep")
+        .args(["-P", &supervisor.to_string()])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .next()?
+        .trim()
+        .parse()
+        .ok()
 }
 
 fn launch(

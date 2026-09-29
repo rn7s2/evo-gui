@@ -18,8 +18,6 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gpui_kit::component::list::{ListEvent, ListState};
-use gpui_kit::component::notification::Notification;
-use gpui_kit::component::WindowExt as _;
 use gpui_kit::prelude::*;
 use gpui_kit::{
     App, Context, Entity, EventEmitter, IntoElement, Render, SharedString, Subscription, Task,
@@ -46,6 +44,55 @@ pub type RegistryHook = std::rc::Rc<dyn Fn(&serde_json::Value, &mut App)>;
 /// How often the step clock re-renders while a turn runs. It is a UI ticker and
 /// nothing else: no request, no state (§7.3).
 const STEP_TICK: Duration = Duration::from_secs(1);
+
+/// How long a notice above the composer stays: long enough to read a refusal,
+/// short enough that it is gone before it becomes furniture (§4).
+const NOTICE_LIFETIME: Duration = Duration::from_secs(4);
+
+/// A transient line above the composer (§4, §9.2).
+///
+/// The server answered a POST with something other than 200: `409 not now` is
+/// the server saying it cannot take this right now — dim, not a mistake — and
+/// anything else is a failure, shown in the danger colour with the reply's own
+/// words. Neither is ever a modal, and neither is re-validated here (§8): the
+/// text is the server's.
+pub(crate) struct Notice {
+    pub(crate) text: SharedString,
+    pub(crate) tone: NoticeTone,
+}
+
+/// Which of the two a notice is (§4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NoticeTone {
+    /// `409 not now`: busy, not wrong.
+    Dim,
+    /// `422`, `503` or a transport failure: something went wrong.
+    Error,
+}
+
+impl NoticeTone {
+    /// The place a test can look for: the two tones are different elements, so a
+    /// test can tell a refusal from a failure without reading colours.
+    pub(crate) fn element_id(self) -> &'static str {
+        match self {
+            NoticeTone::Dim => "composer-notice-dim",
+            NoticeTone::Error => "composer-notice-error",
+        }
+    }
+}
+
+/// What a rejected POST reads as (§4).
+///
+/// The decision is the server's, not ours: `not_now` is tab_engine's reading of
+/// `409`, and everything else — `422`, `503`, a broken connection — is a failure
+/// carrying the reply's own `error`.
+pub(crate) fn notice_tone(error: &tab_engine::PostError) -> NoticeTone {
+    if error.not_now {
+        NoticeTone::Dim
+    } else {
+        NoticeTone::Error
+    }
+}
 
 /// Identity of a tab inside the window.
 ///
@@ -74,8 +121,16 @@ pub enum TabState {
     Booting { folder: PathBuf },
     /// The coordinator answered `/health`; the tab page is live (§7.3).
     Running { folder: PathBuf },
-    /// The swarm never came up: show the tail of its log (§9.7).
-    Failed { folder: PathBuf, log_tail: String },
+    /// The swarm never came up: why, and the tail of its log (§9.7).
+    ///
+    /// `message` is the engine's own one-line reason — a binary that is not
+    /// there, a folder that cannot be written — which is what a person needs
+    /// first; `log_tail` is the evidence behind it, and may be empty.
+    Failed {
+        folder: PathBuf,
+        message: Option<String>,
+        log_tail: String,
+    },
     /// The tab is being taken down — its swarm is running §3's ladder somewhere
     /// that is not the UI thread (§9.8).
     Stopping { folder: PathBuf },
@@ -136,6 +191,10 @@ pub struct TabContent {
     gone: Option<SharedString>,
     /// Called with this tab's `/registry` (§9.4).
     registry_hook: Option<RegistryHook>,
+    /// What the server last refused, until it ages out (§4, §9.2).
+    notice: Option<Notice>,
+    /// The task that takes the notice away again.
+    notice_task: Option<Task<()>>,
     /// The session the tab's swarm is writing to, once `/state` has said which it
     /// is: the `--resume` argument, and what the app persists (§9.5).
     session: Option<PathBuf>,
@@ -175,6 +234,10 @@ struct Live {
     state_revision: u64,
     /// True once this tab's session has been recorded as a recent (§9.5).
     recorded: bool,
+    /// The swarm process's pid, from `/health` (§3).
+    pid: Option<u32>,
+    /// The `tabs/<id>/` directory this tab's swarm keeps its files in (§6).
+    store_id: store::paths::TabId,
     /// The one-second re-render that keeps the coordinator's step clock moving
     /// while a turn runs; `None` when nothing is running.
     ticker: Option<Task<()>>,
@@ -248,6 +311,8 @@ impl TabContent {
             last_launch: None,
             gone: None,
             registry_hook: None,
+            notice: None,
+            notice_task: None,
             session: None,
             agents,
             _subscriptions: vec![
@@ -280,6 +345,19 @@ impl TabContent {
     /// The session the tab's swarm is writing to, while `/state` has named it.
     pub fn session_path(&self) -> Option<&Path> {
         self.session.as_deref()
+    }
+
+    /// The process behind the tab: the swarm's own pid, once `/health` has
+    /// answered (§3). Diagnostics, and how §9.7's failure modes are exercised.
+    pub fn swarm_pid(&self) -> Option<u32> {
+        self.live.as_ref().and_then(|live| live.pid)
+    }
+
+    /// The `tabs/<id>/` directory this tab's swarm writes to, while it has one.
+    /// It is the id a stored tab set has to name, or the prune would not find the
+    /// directory (§6, §9.8).
+    pub fn store_id(&self) -> Option<&store::paths::TabId> {
+        self.live.as_ref().map(|live| &live.store_id)
     }
 
     /// The tab's model, while it has a swarm to have one for.
@@ -426,7 +504,8 @@ impl TabContent {
                 self.last_launch = Some(launch);
                 self.state = TabState::Failed {
                     folder,
-                    log_tail: format!("could not prepare this tab: {error}"),
+                    message: Some(format!("could not prepare this tab: {error}")),
+                    log_tail: String::new(),
                 };
                 cx.notify();
             }
@@ -463,8 +542,9 @@ impl TabContent {
         let pump = self.spawn_pump(started.updates, window, cx);
         self.transcripts.clear();
         // The coordinator is what a fresh tab page shows (§7.3).
-        self.transcripts
-            .insert(AgentKey::Coordinator, cx.new(TranscriptView::new));
+        let coordinator = cx.new(TranscriptView::new);
+        coordinator.update(cx, |view, cx| view.set_agent(AgentKey::Coordinator, cx));
+        self.transcripts.insert(AgentKey::Coordinator, coordinator);
         self.live = Some(Live {
             engine: started.engine,
             model: TabModel::new(),
@@ -474,6 +554,8 @@ impl TabContent {
             in_flight: None,
             state_revision: 0,
             recorded: false,
+            pid: None,
+            store_id: started.store_id,
             ticker: None,
         });
         cx.notify();
@@ -512,15 +594,22 @@ impl TabContent {
     fn apply(&mut self, update: Update, window: &mut Window, cx: &mut Context<Self>) {
         match update {
             Update::Booting => {}
-            Update::Ready { .. } => {
+            Update::Ready { pid, .. } => {
+                if let Some(live) = self.live.as_mut() {
+                    live.pid = Some(pid);
+                }
                 if let Some(folder) = self.folder().map(Path::to_path_buf) {
                     self.state = TabState::Running { folder };
                     cx.notify();
                 }
             }
-            Update::BootFailed { log_tail, .. } => {
+            Update::BootFailed { message, log_tail } => {
                 if let Some(folder) = self.folder().map(Path::to_path_buf) {
-                    self.state = TabState::Failed { folder, log_tail };
+                    self.state = TabState::Failed {
+                        folder,
+                        message: Some(message),
+                        log_tail,
+                    };
                     cx.notify();
                 }
             }
@@ -740,9 +829,13 @@ impl TabContent {
         };
         // An agent's view exists from the moment it is first shown, and lives as
         // long as the tab: switching back keeps its scroll and its documents.
-        self.transcripts
+        let view = self
+            .transcripts
             .entry(agent)
-            .or_insert_with(|| cx.new(TranscriptView::new));
+            .or_insert_with(|| cx.new(TranscriptView::new))
+            .clone();
+        // The view says whose transcript it is, which is what an empty one shows.
+        view.update(cx, |view, cx| view.set_agent(agent, cx));
         self.push(changes, cx);
         self.sync_agents(cx);
     }
@@ -777,6 +870,44 @@ impl TabContent {
         }
     }
 
+    /// Put a transient line above the composer, and start the clock that takes it
+    /// away again (§4, §9.2).
+    ///
+    /// A newer notice replaces an older one; the task that would have cleared the
+    /// older one finds different words and leaves the new one alone.
+    fn show_notice(&mut self, text: String, tone: NoticeTone, cx: &mut Context<Self>) {
+        if text.trim().is_empty() {
+            return;
+        }
+        let text = SharedString::from(text);
+        self.notice = Some(Notice {
+            text: text.clone(),
+            tone,
+        });
+        cx.notify();
+        // The notice needs no window of its own: it clears itself wherever the tab
+        // is showing, or is dropped with the tab.
+        self.notice_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(NOTICE_LIFETIME).await;
+            let _ = this.update(cx, |tab, cx| {
+                if tab.notice.as_ref().map(|notice| notice.text.clone()) == Some(text) {
+                    tab.notice = None;
+                    cx.notify();
+                }
+            });
+        }));
+    }
+
+    /// What the composer shows above itself, while there is something to say.
+    pub(crate) fn notice(&self) -> Option<&Notice> {
+        self.notice.as_ref()
+    }
+
+    /// The refused POST's own words, while the notice is up (§4).
+    pub fn notice_text(&self) -> Option<&str> {
+        self.notice.as_ref().map(|notice| notice.text.as_ref())
+    }
+
     /// A `POST` came back: the button takes its outcome, and a refusal is shown
     /// from the reply's own words — never re-validated here (§8).
     fn finish_post(
@@ -799,14 +930,8 @@ impl TabContent {
             });
         }
         if let Err(error) = result {
-            // `409 Not now` is not a mistake: it is the server saying it cannot
-            // take this right now, so it reads as a notice and not an error.
-            let notice = if error.not_now {
-                Notification::info(error.message)
-            } else {
-                Notification::error(error.message)
-            };
-            window.push_notification(notice, cx);
+            let tone = notice_tone(&error);
+            self.show_notice(error.message, tone, cx);
         }
     }
 
@@ -901,7 +1026,13 @@ impl TabContent {
     /// Show a boot-style failure for a swarm that went away after it was up.
     fn fail_with_log(&mut self, log_tail: String, cx: &mut Context<Self>) {
         if let Some(folder) = self.folder().map(Path::to_path_buf) {
-            self.state = TabState::Failed { folder, log_tail };
+            // A swarm that died after it was up has no one-line reason: the log
+            // is the whole story.
+            self.state = TabState::Failed {
+                folder,
+                message: None,
+                log_tail,
+            };
             cx.notify();
         }
     }
@@ -976,4 +1107,216 @@ fn now_millis() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|since| since.as_millis() as u64)
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui_kit::test::TestWindowExt as _;
+    use gpui_kit::{
+        point, px, size, AnyWindowHandle, Bounds, Entity, TestAppContext, WindowBounds,
+        WindowOptions,
+    };
+
+    /// A tab showing a page of a swarm that is not there: what the composer's own
+    /// refusals need, and nothing more.
+    fn running_tab(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<TabContent>) {
+        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            let options = WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(Bounds {
+                    origin: point(px(0.), px(0.)),
+                    size: size(px(1000.), px(700.)),
+                })),
+                ..Default::default()
+            };
+            gpui_kit::open_window(options, cx, |window, cx| {
+                let tab = cx.new(|cx| {
+                    TabContent::new(TabId::new(1), Arc::new(SwarmConfig::default()), window, cx)
+                });
+                tab.update(cx, |tab, _cx| {
+                    tab.state = TabState::Running {
+                        folder: PathBuf::from("/tmp/proj"),
+                    };
+                });
+                tab
+            })
+            .expect("tab window")
+        })
+    }
+
+    /// A POST came back refused.
+    fn refused(
+        cx: &mut TestAppContext,
+        window: AnyWindowHandle,
+        tab: &Entity<TabContent>,
+        status: u16,
+        message: &str,
+    ) {
+        let error = tab_engine::PostError {
+            status: Some(status),
+            not_now: status == 409,
+            message: message.to_string(),
+        };
+        cx.update_window(window, |_, window, cx| {
+            tab.update(cx, |tab, cx| tab.finish_post(1, Err(error), window, cx));
+        })
+        .expect("the refused post");
+    }
+
+    /// §4, §9.2: a refusal is a dim line above the composer, a failure is an
+    /// error-coloured one, both in the server's own words, and neither is a modal:
+    /// the page keeps its place and the line leaves on its own.
+    #[gpui_kit::test]
+    fn a_refused_post_is_a_line_above_the_composer(cx: &mut TestAppContext) {
+        let (window, tab) = running_tab(cx);
+
+        // `409 not now`: the server cannot take this right now (§4).
+        refused(cx, window, &tab, 409, "no goal to pause");
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window.find("tab-page").visible(),
+                "a refusal is not a modal: the page stays"
+            );
+            assert_eq!(
+                window.find("composer-notice-dim").label().as_deref(),
+                Some("no goal to pause"),
+                "the notice carries the server's own words"
+            );
+            assert!(
+                window.try_find("composer-notice-error").is_none(),
+                "and is not dressed as a failure"
+            );
+        })
+        .expect("the dim notice frame");
+
+        // `422`: the command ran and failed. Same place, the reply's `error` (§4).
+        refused(cx, window, &tab, 422, "unreadable code");
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window.find("composer-notice-error").visible(),
+                "a failure is shown as one"
+            );
+            assert!(
+                window.try_find("composer-notice-dim").is_none(),
+                "and replaces the refusal it followed"
+            );
+        })
+        .expect("the error notice frame");
+
+        // It goes away by itself, on the app clock (§4).
+        let mut gone = false;
+        for _ in 0..5 {
+            // The clock moves outside an app update: a task that wakes up while
+            // the app is already borrowed cannot update its own entity.
+            cx.executor()
+                .advance_clock(NOTICE_LIFETIME + Duration::from_secs(1));
+            cx.run_until_parked();
+            gone = cx
+                .update_window(window, |_, window, cx| {
+                    window.render_frame(cx);
+                    assert!(window.find("tab-page").visible());
+                    window.try_find("composer-notice-error").is_none()
+                })
+                .expect("the frame after the notice");
+            if gone {
+                break;
+            }
+        }
+        assert!(gone, "the notice ages out on its own");
+    }
+
+    /// §7.3: the header's thinking control appears only when the shown agent has
+    /// thinking text, and it drives that transcript's own state.
+    #[gpui_kit::test]
+    fn the_thinking_toggle_follows_the_shown_transcript(cx: &mut TestAppContext) {
+        let (window, tab) = running_tab(cx);
+
+        // Nothing to reveal: a control that reveals nothing is noise.
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("transcript-thinking").is_none());
+        })
+        .expect("the header without thinking");
+
+        // The coordinator's view, as a tab with a swarm has one.
+        let view = cx.update(|cx| {
+            let view = cx.new(TranscriptView::new);
+            view.update(cx, |view, cx| view.set_agent(AgentKey::Coordinator, cx));
+            tab.update(cx, |tab, _cx| {
+                tab.transcripts.insert(AgentKey::Coordinator, view.clone());
+            });
+            view
+        });
+
+        // An assistant row that carries thinking: the control appears.
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.replace(
+                    1,
+                    vec![session::Row {
+                        id: 1,
+                        version: 1,
+                        kind: session::RowKind::Assistant {
+                            markdown: "an answer".into(),
+                            thinking: "because".into(),
+                            streaming: false,
+                            error: None,
+                        },
+                    }],
+                    cx,
+                );
+            });
+        });
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("transcript-thinking").label().as_deref(),
+                Some("Show thinking"),
+                "thinking is hidden until it is asked for"
+            );
+            window.click("transcript-thinking", cx);
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("transcript-thinking").label().as_deref(),
+                Some("Hide thinking"),
+                "and the button says what it will do next"
+            );
+        })
+        .expect("the header with thinking");
+
+        cx.update(|cx| {
+            assert!(
+                view.read(cx).is_showing_thinking(cx),
+                "the click reached the transcript's own state"
+            );
+        });
+    }
+
+    /// The notice decision is the server's, not ours (§8): `not_now` — tab_engine's
+    /// reading of `409` — is the only status that is not a failure.
+    #[test]
+    fn only_a_not_now_refusal_is_dim() {
+        let not_now = tab_engine::PostError {
+            status: Some(409),
+            not_now: true,
+            message: "no run to steer".into(),
+        };
+        assert_eq!(notice_tone(&not_now), NoticeTone::Dim);
+
+        for status in [Some(422), Some(503), Some(400), Some(500), None] {
+            let error = tab_engine::PostError {
+                status,
+                not_now: false,
+                message: "…".into(),
+            };
+            assert_eq!(
+                notice_tone(&error),
+                NoticeTone::Error,
+                "{status:?} is a failure"
+            );
+        }
+    }
 }

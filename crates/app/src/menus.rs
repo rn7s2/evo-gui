@@ -20,8 +20,6 @@
 //! to [`in_window_later`], which runs at the end of the effect cycle, when it is
 //! free again.
 
-use gpui_kit::component::dialog::AlertDialog;
-use gpui_kit::component::WindowExt as _;
 use gpui_kit::{App, KeyBinding, Menu, MenuItem, OsAction, Window};
 
 use crate::launcher;
@@ -64,7 +62,7 @@ pub fn install(cx: &mut App) {
     ]);
 
     cx.on_action(|_: &QuitApp, cx: &mut App| quit::begin(cx));
-    cx.on_action(|_: &AboutApp, cx: &mut App| about(cx));
+    cx.on_action(|_: &AboutApp, cx: &mut App| open_about(cx));
     cx.on_action(|_: &HideApp, cx: &mut App| {
         cx.hide();
         log(cx, "hide");
@@ -145,28 +143,13 @@ mod input {
     pub use gpui_kit::base::input::{Copy, Cut, Paste, Redo, SelectAll, Undo};
 }
 
-/// "About Evo Desktop": what the app is, which build, and where its log is.
-fn about(cx: &mut App) {
-    let (root, log) = {
-        let shell = cx.global::<crate::Shell>();
-        (shell.root.clone(), shell.log.clone())
-    };
-    let version = env!("CARGO_PKG_VERSION");
-    log.info(format!("about: evo-desktop {version}"));
-    in_window_later(cx, move |window, cx| {
-        window.open_alert_dialog(cx, move |alert: AlertDialog, _window, _cx| {
-            alert
-                .title(format!("Evo Desktop {version}"))
-                .description(format!(
-                    "A native window onto the evo agent runtime.\n\n\
-                     Log: {}\n\
-                     State: {}",
-                    log.path().display(),
-                    root.app_json().display()
-                ))
-                .ok_text("Close")
-        });
-    });
+/// "About Evo Desktop": the app, its build, the binaries it spawns, and where its
+/// state and log live (§7.1). The dialog itself is `about`'s; this is the menu
+/// item's half of it.
+pub fn open_about(cx: &mut App) {
+    let log = cx.global::<crate::Shell>().log.clone();
+    log.info(format!("about: evo-desktop {}", env!("CARGO_PKG_VERSION")));
+    in_window_later(cx, crate::about::open);
 }
 
 /// Run `f` with the app's window — the one window the app opens (§7.1) — at the

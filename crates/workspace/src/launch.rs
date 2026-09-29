@@ -93,6 +93,9 @@ pub struct Started {
     pub updates: Receiver<Update>,
     /// `tabs/<id>/` — the swarm's `token` and `swarm.log` (§6).
     pub tab_dir: PathBuf,
+    /// The id that directory is named for: what a stored tab set has to keep to
+    /// find the directory again (§6).
+    pub store_id: store::paths::TabId,
 }
 
 /// Start one tab's swarm (§3).
@@ -103,7 +106,8 @@ pub struct Started {
 /// fails the launch instead: a swarm silently running the wrong lanes model is
 /// worse than a tab that does not start.
 pub fn start(config: &SwarmConfig, launch: &Launch) -> std::io::Result<Started> {
-    let tab_dir = config.root.ensure_tab_dir(&store::paths::TabId::new())?;
+    let store_id = store::paths::TabId::new();
+    let tab_dir = config.root.ensure_tab_dir(&store_id)?;
     let folder = launch.folder().clone();
 
     if let Some(plan) = launch.plan() {
@@ -137,6 +141,7 @@ pub fn start(config: &SwarmConfig, launch: &Launch) -> std::io::Result<Started> 
         engine,
         updates,
         tab_dir,
+        store_id,
     })
 }
 

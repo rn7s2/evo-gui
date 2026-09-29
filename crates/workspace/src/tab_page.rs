@@ -21,7 +21,7 @@ use gpui_kit::{div, px, AnyElement, App, Context, IntoElement, SharedString, Tes
 use session::{lane_task_label, AgentKey, LaneStatus};
 use transcript::TodoPanel;
 
-use crate::tab::{TabContent, TabContentEvent, TabState};
+use crate::tab::{Notice, NoticeTone, TabContent, TabContentEvent, TabState};
 
 /// Width of the composer column on the tab page (§7.3).
 pub(crate) const COMPOSER_COLUMN_WIDTH: f32 = 360.;
@@ -41,7 +41,11 @@ impl TabContent {
             TabState::Empty => self.render_empty(cx),
             TabState::Booting { folder } => self.render_booting(folder, cx),
             TabState::Running { folder } => self.render_page(folder, cx),
-            TabState::Failed { folder, log_tail } => self.render_failed(folder, log_tail, cx),
+            TabState::Failed {
+                folder,
+                message,
+                log_tail,
+            } => self.render_failed(folder, message.clone(), log_tail, cx),
             TabState::Stopping { .. } => self.render_stopping(cx),
         }
     }
@@ -76,9 +80,17 @@ impl TabContent {
 
     /// A boot that failed: the tail of the swarm's log, and a way to try again
     /// (§9.7).
-    fn render_failed(&self, folder: &Path, log_tail: &str, cx: &mut Context<Self>) -> AnyElement {
+    fn render_failed(
+        &self,
+        folder: &Path,
+        message: Option<String>,
+        log_tail: &str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let folder = folder.to_path_buf();
         let retry = folder.clone();
+        let show_log = !log_tail.trim().is_empty()
+            && message.as_deref().map(str::trim) != Some(log_tail.trim());
         v_flex()
             .id("boot-failure")
             .test_support()
@@ -99,26 +111,45 @@ impl TabContent {
                 true,
                 cx,
             ))
-            .child(
-                // The log is the evidence: its own box, monospace, and only as
-                // tall as it needs to be before it scrolls (§9.7).
-                div()
-                    .id("boot-log-tail")
-                    .test_support()
-                    .w_full()
-                    .max_w(px(720.))
-                    .max_h(px(320.))
-                    .overflow_y_scroll()
-                    .p_3()
-                    .text_xs()
-                    .font_family(cx.theme().mono_font_family.clone())
-                    .rounded(cx.theme().radius)
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .bg(cx.theme().muted)
-                    .text_color(cx.theme().muted_foreground)
-                    .child(SharedString::from(log_tail.to_string())),
-            )
+            .when_some(message.clone(), |this, message| {
+                // The engine's own one-line reason, ahead of the evidence (§9.7).
+                this.child(
+                    div()
+                        .id("boot-failure-reason")
+                        .test_support()
+                        .aria_label(message.clone())
+                        .max_w(px(720.))
+                        .min_w_0()
+                        .truncate()
+                        .text_color(cx.theme().danger)
+                        .child(SharedString::from(message)),
+                )
+            })
+            // The engine repeats its reason as the log tail when the process
+            // never wrote a line, so the box only appears when it carries
+            // something the line above does not (§9.7).
+            .when(show_log, |this| {
+                this.child(
+                    // The log is the evidence: its own box, monospace, and only as
+                    // tall as it needs to be before it scrolls (§9.7).
+                    div()
+                        .id("boot-log-tail")
+                        .test_support()
+                        .w_full()
+                        .max_w(px(720.))
+                        .max_h(px(320.))
+                        .overflow_y_scroll()
+                        .p_3()
+                        .text_xs()
+                        .font_family(cx.theme().mono_font_family.clone())
+                        .rounded(cx.theme().radius)
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .bg(cx.theme().muted)
+                        .text_color(cx.theme().muted_foreground)
+                        .child(SharedString::from(log_tail.to_string())),
+                )
+            })
             .child(
                 h_flex()
                     .gap_2()
@@ -177,28 +208,37 @@ impl TabContent {
     /// agent is doing, and the task it was given (§7.3).
     ///
     /// The colours are the left column's own (`agent_list`'s status table), so the
-    /// header and the row agree at a glance.
-    fn render_agent_header(&self, cx: &App) -> AnyElement {
+    /// header and the row agree at a glance. On the right sits the one control the
+    /// transcript needs: showing the thinking the rows already carry.
+    fn render_agent_header(&self, cx: &mut Context<Self>) -> AnyElement {
         let agent = self.selected_agent();
-        let Some(model) = self.model() else {
-            return div().into_any_element();
+        let name = match agent {
+            AgentKey::Coordinator => SharedString::from("main"),
+            AgentKey::Lane(n) => SharedString::from(format!("Lane {n}")),
         };
-        let (name, status, task) = match agent {
-            AgentKey::Coordinator => (
-                SharedString::from("main"),
-                activity_status(model.activity()),
-                None,
-            ),
-            AgentKey::Lane(n) => {
-                let lane = model.lane_rows().iter().find(|lane| lane.n as u32 == n);
-                (
-                    SharedString::from(format!("Lane {n}")),
-                    lane.map(|lane| lane.status).unwrap_or(LaneStatus::Idle),
-                    lane.and_then(|lane| lane.task.as_deref())
-                        .filter(|task| !task.is_empty())
-                        .map(lane_task_label),
-                )
-            }
+        // The model is where the status and the task come from; without one (a
+        // page whose swarm is not there to ask) the header says who is shown and
+        // nothing more.
+        let model = self.model();
+        let status = match (agent, model) {
+            (AgentKey::Coordinator, Some(model)) => activity_status(model.activity()),
+            (AgentKey::Lane(n), Some(model)) => model
+                .lane_rows()
+                .iter()
+                .find(|lane| lane.n as u32 == n)
+                .map(|lane| lane.status)
+                .unwrap_or(LaneStatus::Idle),
+            _ => LaneStatus::Idle,
+        };
+        let task = match (agent, model) {
+            (AgentKey::Lane(n), Some(model)) => model
+                .lane_rows()
+                .iter()
+                .find(|lane| lane.n as u32 == n)
+                .and_then(|lane| lane.task.as_deref())
+                .filter(|task| !task.is_empty())
+                .map(lane_task_label),
+            _ => None,
         };
         h_flex()
             .id("transcript-header")
@@ -217,9 +257,9 @@ impl TabContent {
                     .child(SharedString::from(status.glyph().to_string())),
             )
             .child(div().font_medium().child(name))
-            .when_some(task, |this, task| {
-                // One line, elided: a task is a sentence, and the transcript below
-                // is where the whole of it can be read.
+            .child(div().flex_1().min_w_0().when_some(task, |this, task| {
+                // One line, elided: a task is a sentence, and the transcript
+                // below is where the whole of it can be read.
                 this.child(
                     div()
                         .min_w_0()
@@ -228,8 +268,39 @@ impl TabContent {
                         .text_color(cx.theme().muted_foreground)
                         .child(SharedString::from(task)),
                 )
-            })
+            }))
+            .when_some(self.thinking_toggle(cx), |this, toggle| this.child(toggle))
             .into_any_element()
+    }
+
+    /// The quiet control the header carries while the shown agent has thinking
+    /// text to reveal (§7.3).
+    ///
+    /// It is the *view's* own state: switching agents shows each transcript the
+    /// way its reader left it.
+    fn thinking_toggle(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let view = self.transcripts.get(&self.selected_agent())?.clone();
+        let (has_thinking, showing) = {
+            let view = view.read(cx);
+            (view.has_thinking(cx), view.is_showing_thinking(cx))
+        };
+        if !has_thinking {
+            return None;
+        }
+        Some(
+            Button::new("transcript-thinking")
+                .label(if showing {
+                    "Hide thinking"
+                } else {
+                    "Show thinking"
+                })
+                .ghost()
+                .xsmall()
+                .on_click(cx.listener(move |_this, _, _window, cx| {
+                    view.update(cx, |view, cx| view.toggle_thinking(cx));
+                }))
+                .into_any_element(),
+        )
     }
 
     /// The selected agent's transcript, with its todos along the bottom (§7.3).
@@ -240,9 +311,6 @@ impl TabContent {
             .as_ref()
             .map(|view| view.read(cx).todos().to_vec())
             .unwrap_or_default();
-        let empty = view
-            .as_ref()
-            .is_none_or(|view| view.read(cx).rows(cx).is_empty());
         v_flex()
             .id("transcript-column")
             .test_support()
@@ -253,10 +321,9 @@ impl TabContent {
             .when(self.is_reconnecting(), |this| {
                 this.child(reconnect_badge(cx))
             })
-            .child(div().flex_1().min_h_0().child(match view {
-                Some(view) if !empty => view.into_any_element(),
-                _ => empty_transcript(selected, cx).into_any_element(),
-            }))
+            // The view says what an agent with nothing to show means, and for
+            // which agent (§7.3).
+            .child(div().flex_1().min_h_0().children(view))
             // The panel renders nothing while the agent has no todos, so this
             // row disappears rather than leaving a gap (§7.3).
             .child(TodoPanel::new(&todos))
@@ -264,6 +331,9 @@ impl TabContent {
 
     /// The coordinator's composer: the input, and the readout and the single
     /// action button on one line beneath it (§7.3).
+    ///
+    /// A refused POST says so here — above the input that caused it, in the
+    /// server's own words, and gone on its own (§4, §9.2).
     fn render_composer_column(&self, cx: &App) -> impl IntoElement {
         v_flex()
             .id("composer-column")
@@ -274,6 +344,10 @@ impl TabContent {
             .border_l_1()
             .border_color(cx.theme().border)
             .p_4()
+            .gap_2()
+            .when_some(self.notice(), |this, notice| {
+                this.child(notice_line(notice, cx))
+            })
             .child(self.composer.clone())
     }
 }
@@ -342,23 +416,27 @@ fn elide_middle(text: &str, limit: usize) -> String {
     format!("{start}…{end}")
 }
 
-/// The center column with no rows yet: one muted line, centred (§7.3).
-fn empty_transcript(agent: AgentKey, cx: &App) -> AnyElement {
-    let what = match agent {
-        AgentKey::Coordinator => "the coordinator has not said anything yet",
-        AgentKey::Lane(_) => "this lane has not said anything yet",
-    };
-    v_flex()
-        .id("empty-transcript")
+/// A transient line above the composer: the server's own words, dim when the
+/// answer was `409 not now` and in the danger colour for a failure (§4, §9.2).
+///
+/// The two tones are two elements, so a test can tell them apart.
+fn notice_line(notice: &Notice, cx: &App) -> AnyElement {
+    h_flex()
+        .id(notice.tone.element_id())
         .test_support()
-        .size_full()
-        .items_center()
-        .justify_center()
-        .child(
-            div()
-                .text_color(cx.theme().muted_foreground)
-                .child(SharedString::from(what.to_string())),
-        )
+        .aria_label(notice.text.clone())
+        .w_full()
+        .min_w_0()
+        .px_2()
+        .py_1()
+        .rounded(cx.theme().radius)
+        .text_xs()
+        .bg(cx.theme().muted)
+        .text_color(match notice.tone {
+            NoticeTone::Dim => cx.theme().muted_foreground,
+            NoticeTone::Error => cx.theme().danger,
+        })
+        .child(div().min_w_0().truncate().child(notice.text.clone()))
         .into_any_element()
 }
 
