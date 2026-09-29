@@ -196,15 +196,21 @@ pub struct HistoryEntry {
 }
 
 /// One row of the history list (§7.2): the folder's name, its path shortened around the
-/// home directory, and a meta line of what is known about the session.
+/// home directory, a meta line of what is known about the session, and the whole of it for
+/// the row's tooltip.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HistoryRow {
     pub title: String,
     pub subtitle: String,
     pub meta: String,
+    /// The whole entry on one line, for the tooltip: the folder's full path, the session
+    /// file, the instant with its zone spelled out, both models and the lane count.
+    pub tooltip: String,
     /// The session to resume (`--resume`) and the folder to run in (cwd).
     pub session_path: String,
     pub folder: String,
+    pub coordinator_model: Option<String>,
+    pub lanes_model: Option<String>,
     pub source: HistorySource,
 }
 
@@ -358,13 +364,13 @@ fn model_options(
     all
 }
 
-/// One model's detail line: the context window in k, then what else the registry says —
+/// One model's detail line: the context window, then what else the registry says —
 /// `200k ctx · vision · effort low–max`.
 fn model_detail(model: &Value) -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Some(window) = model.get("context_window").and_then(Value::as_u64) {
         if window > 0 {
-            parts.push(format!("{} ctx", k_tokens(window)));
+            parts.push(format!("{} ctx", window_size(window)));
         }
     }
     if model.get("vision").and_then(Value::as_bool) == Some(true) {
@@ -381,6 +387,30 @@ fn model_detail(model: &Value) -> String {
         [first, .., last] => parts.push(format!("effort {}–{}", first, last)),
     }
     parts.join(" · ")
+}
+
+/// A context window as evo's own picker writes it — `format-context-window`
+/// (`src/command/command.lisp:241`), the narrow description column of `/model`:
+/// `200000` → `200k`, `1000000` → `1M`, `1500000` → `1.5M`, `1048576` → `1.0M`, and
+/// `999999` → `1000k`, because below a million it is the same `(round n 1000)` the status
+/// line uses. Only this chooser's detail follows the picker; the §7.3 readout keeps the
+/// TUI's k rule.
+fn window_size(window: u64) -> String {
+    if window < 1_000_000 {
+        return k_tokens(window);
+    }
+    if window.is_multiple_of(1_000_000) {
+        return format!("{}M", window / 1_000_000);
+    }
+    // The tenth, half up from the exact ratio: an integer computation, because the picker
+    // rounds a double and only differs where the ratio lands exactly on a tenth boundary.
+    let whole = window / 1_000_000;
+    let tenths = (window % 1_000_000 + 50_000) / 100_000;
+    match tenths {
+        // Rounded up into the next whole million: the picker still prints the decimal.
+        10 => format!("{}.0M", whole + 1),
+        tenths => format!("{}.{}M", whole, tenths),
+    }
 }
 
 /// The first option of every chooser.
@@ -465,13 +495,61 @@ pub fn history_rows(entries: &[HistoryEntry], now: i64, home: Option<&str>) -> V
 
 fn history_row(entry: &HistoryEntry, now: i64, home: Option<&str>) -> HistoryRow {
     HistoryRow {
-        title: folder_name(&entry.folder),
+        title: base_name(&entry.folder),
         subtitle: home_short(&entry.folder, home),
         meta: meta_line(&entry.lanes, entry.coordinator_model.as_deref(), entry.when.epoch_seconds(), now),
+        tooltip: tooltip_line(entry),
         session_path: entry.session_path.clone(),
         folder: entry.folder.clone(),
+        coordinator_model: entry.coordinator_model.clone(),
+        lanes_model: entry.lanes_model.clone(),
         source: entry.source,
     }
+}
+
+/// The row's tooltip: everything known about the session, in one line.
+fn tooltip_line(entry: &HistoryEntry) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if !entry.folder.is_empty() {
+        // The full path, not the `~`-shortened one the row shows: the tooltip is where the
+        // absolute answer belongs.
+        parts.push(entry.folder.trim_end_matches('/').to_string());
+    }
+    let session = base_name(&entry.session_path);
+    if !session.is_empty() {
+        parts.push(session);
+    }
+    if let Some(when) = entry.when.epoch_seconds() {
+        parts.push(absolute_time(when));
+    }
+    if let Some(model) = entry.coordinator_model.as_deref().filter(|model| !model.is_empty()) {
+        parts.push(format!("coordinator: {}", model));
+    }
+    if let Some(model) = entry.lanes_model.as_deref().filter(|model| !model.is_empty()) {
+        parts.push(format!("lanes: {}", model));
+    }
+    if let Some(lanes) = entry.lanes {
+        parts.push(format!("{} lane{}", lanes, if lanes == 1 { "" } else { "s" }));
+    }
+    parts.join(" · ")
+}
+
+/// An instant in full, with the zone spelled out: `2026-09-29 09:25:44 UTC (+00:00)`.
+///
+/// Every entry is normalized to UTC — a journal header may carry another offset, and the
+/// tooltip says which zone the printed time is in instead of leaving it to be guessed.
+fn absolute_time(when: i64) -> String {
+    let (year, month, day) = civil_from_epoch(when);
+    let seconds_of_day = when.rem_euclid(86_400);
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC (+00:00)",
+        year,
+        month,
+        day,
+        seconds_of_day / 3600,
+        (seconds_of_day % 3600) / 60,
+        seconds_of_day % 60
+    )
 }
 
 /// The meta line: what is known about the session, unknown parts left out.
@@ -489,9 +567,10 @@ fn meta_line(lanes: &Option<u32>, coordinator_model: Option<&str>, when: Option<
     parts.join(" · ")
 }
 
-/// The folder's own name, without its path or trailing separator.
-fn folder_name(folder: &str) -> String {
-    let trimmed = folder.trim_end_matches('/');
+/// The last component of a path, without a trailing separator: a folder's own name, or a
+/// session's file name.
+fn base_name(path: &str) -> String {
+    let trimmed = path.trim_end_matches('/');
     match trimmed.rsplit('/').next() {
         Some(name) if !name.is_empty() => name.to_string(),
         _ => trimmed.to_string(),

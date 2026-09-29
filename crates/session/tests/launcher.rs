@@ -109,7 +109,7 @@ fn the_lanes_chooser_measures_models_against_the_kernel_api_set() {
     let gpt = chooser.option("gpt-9@openai").expect("gpt-9");
     assert!(!gpt.available);
     assert_eq!(gpt.unavailable_reason.as_deref(), Some(NEEDS_EXTENSION_API));
-    assert_eq!(gpt.detail, "1000k ctx · vision · effort low", "single level, no range");
+    assert_eq!(gpt.detail, "1M ctx · vision · effort low", "a whole million reads 1M, and a single effort level has no range");
     assert!(chooser.option("mystery@acme").is_some_and(|option| !option.available),
         "a model that names no API cannot be checked, so a lane is not promised it");
     assert!(chooser.option("stub-a@stub").is_some_and(|option| option.available));
@@ -132,6 +132,45 @@ fn the_lanes_chooser_measures_models_against_the_kernel_api_set() {
     // unless the project's swarm.lisp says otherwise (§9.6).
     assert_eq!(chooser.options[0].key, DEFAULT_KEY);
     assert_eq!(chooser.options[0].detail, "follows the coordinator");
+}
+
+/// The detail's window figure is evo's own picker formatting (`format-context-window`,
+/// `src/command/command.lisp:241`) — above a million it is `M`, because "1000k reads worse
+/// than 1M". Every expected string below was produced by evaluating that function on the
+/// same number in a real Common Lisp.
+#[test]
+fn the_detail_shows_windows_the_way_evos_picker_does() {
+    let windows = [
+        (8_000u64, "8k"),
+        (100_000, "100k"),
+        (200_000, "200k"),
+        (936_000, "936k"),
+        (999_999, "1000k"),
+        (1_000_000, "1M"),
+        (1_000_001, "1.0M"),
+        (1_048_576, "1.0M"),
+        (1_200_000, "1.2M"),
+        (1_500_000, "1.5M"),
+        (1_999_999, "2.0M"),
+        (2_000_000, "2M"),
+        (2_500_000, "2.5M"),
+        (10_000_000, "10M"),
+    ];
+    let models: Vec<serde_json::Value> = windows
+        .iter()
+        .map(|(window, _)| json!({ "id": format!("m{}", window), "provider": "stub", "api": "anthropic-messages", "context_window": window }))
+        .collect();
+    let chooser = coordinator_chooser(&json!({ "models": models }));
+    for (window, expected) in windows {
+        let option = chooser.option(&format!("m{}@stub", window)).expect("every model is listed");
+        assert_eq!(option.detail, format!("{} ctx", expected), "{window}");
+    }
+
+    // A model the registry says nothing about has no detail at all, rather than a zero.
+    let chooser = coordinator_chooser(&json!({ "models": [
+        { "id": "quiet", "provider": "stub", "api": "anthropic-messages", "context_window": 0 }
+    ]}));
+    assert_eq!(chooser.option("quiet@stub").unwrap().detail, "");
 }
 
 #[test]
@@ -302,6 +341,7 @@ fn history_rows_merge_by_session_newest_first() {
     let now = 1790683200; // 2026-09-29T12:00:00Z
     let mut scanned = entry("/sessions/a.sexp", "/Users/me/coding/foo", When::Epoch(now - 2 * 3600));
     scanned.lanes = Some(4);
+    scanned.lanes_model = Some("claude-4".to_string());
     scanned.source = HistorySource::Scan;
 
     // The same session from the app's own recents: same path, and it knows the model the
@@ -327,6 +367,14 @@ fn history_rows_merge_by_session_newest_first() {
     assert_eq!(baz.subtitle, "~/coding/baz");
     assert_eq!(baz.meta, "just now", "nothing else is known about it");
     assert_eq!(baz.session_path, "/sessions/c.sexp");
+    assert_eq!(baz.coordinator_model, None);
+    assert_eq!(baz.lanes_model, None);
+    // The tooltip is the whole entry: the absolute folder, the session file, the instant
+    // with its zone spelled out — and no invented models or counts.
+    assert_eq!(
+        baz.tooltip,
+        "/Users/me/coding/baz · c.sexp · 2026-09-29 11:59:30 UTC (+00:00)"
+    );
 
     let foo = &rows[1];
     assert_eq!(foo.title, "foo");
@@ -335,10 +383,24 @@ fn history_rows_merge_by_session_newest_first() {
     assert_eq!(foo.session_path, "/sessions/a.sexp");
     assert_eq!(foo.folder, "/Users/me/coding/foo", "the absolute folder comes with the row");
     assert_eq!(foo.source, HistorySource::Scan, "the newest entry's source is the row's");
+    // Both models survive the merge: the scan knew the lanes', the app's own recents the
+    // coordinator's.
+    assert_eq!(foo.coordinator_model.as_deref(), Some("gpt-5"));
+    assert_eq!(foo.lanes_model.as_deref(), Some("claude-4"));
+    assert_eq!(
+        foo.tooltip,
+        "/Users/me/coding/foo · a.sexp · 2026-09-29 10:00:00 UTC (+00:00) \
+         · coordinator: gpt-5 · lanes: claude-4 · 4 lanes"
+    );
 
     let bar = &rows[2];
     assert_eq!(bar.title, "bar", "a trailing separator is not part of the name");
     assert_eq!(bar.meta, "1 lane · 2d ago", "`lane` is singular for one, and no model is known");
+    // The RFC3339 header timestamp reads back as the same instant, in UTC.
+    assert_eq!(
+        bar.tooltip,
+        "/Users/me/coding/bar · b.sexp · 2026-09-27 09:00:00 UTC (+00:00) · 1 lane"
+    );
 }
 
 #[test]
@@ -350,6 +412,8 @@ fn a_history_entry_with_no_usable_time_sorts_last_and_says_nothing() {
     let rows = history_rows(&[unknown, known], now, Some("/Users/me"));
     assert_eq!(rows[0].title, "y", "a session with a time sorts above one without");
     assert_eq!(rows[1].meta, "2 lanes", "the unknown time is left out entirely");
+    assert_eq!(rows[1].tooltip, "/Users/me/coding/x · x.sexp · 2 lanes",
+        "and the tooltip says nothing about the time either");
 }
 
 #[test]
