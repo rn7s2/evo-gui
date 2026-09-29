@@ -629,6 +629,12 @@ fn capture(dir: &Path, scale: f32, only: &[String]) -> Result<(), Box<dyn std::e
     cx.run_until_parked();
     if shot_here("04-tool-expanded") {
         both_themes_prepared(&mut cx, window, dir, "04-tool-expanded", screens, |cx| {
+            // Opened twice, with the queue drained in between: opening the row is
+            // itself a pump, and a resync that lands in it clears the expansion, so
+            // the second open — with nothing left queued behind it — is the one the
+            // picture is taken of.
+            expand_tool_row(cx, &first);
+            cx.run_until_parked();
             expand_tool_row(cx, &first);
         })?;
     }
@@ -810,6 +816,17 @@ fn capture(dir: &Path, scale: f32, only: &[String]) -> Result<(), Box<dyn std::e
     let retried = wait_within(&mut cx, 60, |cx| dim_row(cx, &bad, "retrying").is_some());
     let ended = wait_within(&mut cx, 90, |cx| run_outcome(cx, &bad).is_some());
     println!("[state] compaction row: {compacted}, retry row: {retried}, outcome row: {ended}");
+    if !compacted || !retried || !ended {
+        // Said in the log, because a picture of a state that was not reached
+        // cannot say what it missed.
+        println!(
+            "[state] the deep-context tab was working: {}",
+            working(&cx, &bad)
+        );
+        for row in row_dump(&cx, &bad) {
+            println!("[rows] {row}");
+        }
+    }
     if let Some(outcome) = run_outcome(&cx, &bad) {
         println!(
             "[state] the run says: {}",
@@ -1133,10 +1150,16 @@ fn both_themes_prepared(
     screens: Screens,
     prepare: impl Fn(&mut HeadlessAppContext),
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Whatever is already queued — a resync, most of all — is applied *before*
+    // the state is prepared: a rebuild that lands while a row is open replaces
+    // the rows and the expansion goes with them, and the picture is then of the
+    // state before the prepare.
     cx.update(|cx| Theme::change(ThemeMode::Light, None, cx));
+    cx.run_until_parked();
     prepare(cx);
     shot(cx, window, dir, &format!("{name}-light.png"), screens)?;
     cx.update(|cx| Theme::change(ThemeMode::Dark, None, cx));
+    cx.run_until_parked();
     prepare(cx);
     shot(cx, window, dir, &format!("{name}-dark.png"), screens)?;
     Ok(())
@@ -1310,10 +1333,18 @@ fn row_dump(cx: &HeadlessAppContext, tab: &Entity<workspace::TabContent>) -> Vec
                             RowKind::Assistant {
                                 markdown,
                                 streaming,
+                                error,
                                 ..
                             } => (
                                 "assistant",
-                                format!("{}{markdown}", if *streaming { "*" } else { "" }),
+                                format!(
+                                    "{}{markdown}{}",
+                                    if *streaming { "*" } else { "" },
+                                    match error {
+                                        Some(error) => format!(" [error: {error}]"),
+                                        None => String::new(),
+                                    }
+                                ),
                             ),
                             RowKind::Tool { name, result, .. } => (
                                 "tool",
@@ -1361,14 +1392,23 @@ fn dim_row(
 }
 
 /// The row a bad run leaves: `run-end` with an outcome that is not a clean stop.
+///
+/// A failed run is said once (`session::AgentModel::push_run_outcome`): when the
+/// failing message's own row already carries the error, that row *is* the run's
+/// last word and no outcome row is added beside it. Read from the last row back,
+/// so what comes back is that last word and not an earlier turn's.
 fn run_outcome(cx: &HeadlessAppContext, tab: &Entity<workspace::TabContent>) -> Option<String> {
     tab.read_with(cx, |tab, cx| {
         tab.transcript().and_then(|view| {
             view.read(cx)
                 .rows(cx)
                 .iter()
+                .rev()
                 .find_map(|row| match &row.kind {
                     RowKind::RunOutcome { text, .. } => Some(text.clone()),
+                    RowKind::Assistant {
+                        error: Some(error), ..
+                    } if !error.is_empty() => Some(format!("Run failed: {error}")),
                     _ => None,
                 })
         })

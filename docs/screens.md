@@ -25,29 +25,35 @@ these files come out of (110–172 colours, not a full 192).
 
 The pictures are a *golden* set — nothing re-checks them — so take them again
 after a change to the chrome, the tab page or the transcript and compare by eye.
-`--only 08,09` draws only the states whose names it lists, and takes the earlier
-ones without saving them, which is the cheap way to re-take the last few.
+`--only 08-narrow-1000x700,09-bad-run` saves those states and no others — the
+ids are the whole names in the table above, and a bare `08` matches nothing —
+while every state before them is still taken, which is the cheap way to re-take
+the last few.
 
 | capture | what it shows |
 |---|---|
 | `01-launch-light.png`, `01-launch-dark.png` | The app at launch (§7.2): one empty tab whose three choosers stand on `Default` — the first of them, `Coordinator model`, wearing the focus ring, because a tab puts the keyboard where its work starts — and the six resumable swarms the scan found, the newest of them `~/coding/evo-gui`, `6 lanes`, `11m ago`, `coordinator: claude-opus-5-5`. |
 | `01b-lanes-chooser-light.png`, `01b-lanes-chooser-dark.png` | The lanes chooser open (§9.4), its menu filled from the catalog: five models a quarantined lane may be given, and `claude-opus-5-5` greyed with *needs an extension API — set it in swarm.lisp*. The menu holds six rows and shows five and a half — `kimi-k2-0905` is cut at the fold, with no bar to say the menu scrolls. |
-| `02-three-tabs-light.png`, `02-three-tabs-dark.png` | Three tabs — two running swarms and an empty one — with the first mid-stream: a heading, a list, a table and a code fence, all rendered by the transcript's markdown (§2.8). The shown tab wears the activity dot the strip puts before a running coordinator's label, and its two lanes are still `starting` — the swarm is up before its lanes are. |
+| `02-three-tabs-light.png`, `02-three-tabs-dark.png` | Three tabs — two running swarms and an empty one — with the first mid-stream: a heading, a list, a table and a code fence, all rendered by the transcript's markdown (§2.8). The shown tab wears the activity dot the strip puts before a running coordinator's label, its two lanes are `idle` in the lane list (the capture waits for the swarm's rows to settle before it draws), and §7.3's readout sits under the transcript as the tab page's status line — `stub-a-preview-2026-09 · medium · ctx 0k/200k (0%)`. |
 | `03-lane-todos-light.png`, `03-lane-todos-dark.png` | Lane 1 selected (§7.3, §9.3): the task it was delegated, the `todo` call it made, the write-up it streamed, and the checklist panel — `Todos 1/3`, one item in each state. |
-| `04-tool-expanded-light.png`, `04-tool-expanded-dark.png` | The coordinator's `delegate` call opened onto its arguments and its result (§2.8). |
+| `04-tool-expanded-light.png`, `04-tool-expanded-dark.png` | The coordinator's `delegate` call opened onto its `arguments` (the lane, the task) and its `result` (§2.8), the captions lower-case as a tool panel draws them. |
 | `05-boot-failure-light.png`, `05-boot-failure-dark.png` | A swarm that could not start (§9.7): *Could not start a swarm*, the folder, the server's log tail, `Retry` and `Close`. |
-| `06-reconnecting-light.png`, `06-reconnecting-dark.png` | The coordinator's stream gone quiet (§9.7): the amber `reconnecting` badge on the `main` row, the spinner row in the centre, and a disabled `Send`. |
-| `07-tab-strip-light.png`, `07-tab-strip-dark.png` | The tab strip past its width (§7.1): fourteen tabs, ten of them folders whose names the strip truncates, and the last one a live swarm. The strip is scrolled to the tab being shown — the last one, with its `×` — so the seven tabs on screen are the seven newest, the first of them clipped at the window's left edge, and the `+` stays inside the window. |
-| `08-narrow-1000x700-light.png`, `08-narrow-1000x700-dark.png` | The tab page at §7.1's smallest window, 1000×700: three columns side by side, the coordinator's answer and the `delegate` row it made, lane 1's task ellipsized to `SLOW: walk the narrow layo…` in the lane list with its step clock beside it, the readout ellipsized behind `ctx 7…`, the composer's card, and nothing overlapping. |
+| `06-reconnecting-light.png`, `06-reconnecting-dark.png` | The coordinator's stream gone quiet (§9.7): the amber `reconnecting` badge on the `main` row, the spinner row in the centre, a disabled `Send`, and the swarm's `Lane 1 · run ended (stop) — task: …` drawn as a quiet row and answered in one line. |
+| `07-tab-strip-light.png`, `07-tab-strip-dark.png` | The tab strip past its width (§7.1): fourteen tabs, ten of them folders whose names the strip truncates, and the last one a live swarm. The strip is scrolled to the tab being shown — the last one, with its `×` — so the seven tabs on screen are the seven newest, the first of them clipped at the window's left edge, and the `+` sits outside the strip, past a divider, still inside the window. |
+| `08-narrow-1000x700-light.png`, `08-narrow-1000x700-dark.png` | The tab page at §7.1's smallest window, 1000×700: three columns side by side, lane 1 selected and its task ellipsized to `SLOW: walk the narrow l…` in the lane list with its step clock beside it, lane 1's own transcript mid-stream in the centre, the status line under it (a lane's own, `no metrics yet`, until the swarm reports any), the composer's card, and nothing overlapping. |
 | `09-bad-run-light.png`, `09-bad-run-dark.png` | A run that ended badly (§5, §9.5): the compaction a full context forced (`Compacting context…`, `Context compacted`), the provider dying mid-stream four times (`Retrying provider (n/4)`), and the failure itself, once per failed run — the failing message's own `error: Provider request failed after 4 attempts: Stream ended without a terminal event (truncated response)`. |
 
 ## What is real, and what is scripted
 
-Real: the window and its chrome, the tab strip, the empty tab and its choosers,
-the tab page's three columns, the transcript (markdown, tool rows, reports, dim
-rows), the composer and the §7.3 readout, the lane list with its glyphs, step
-clock and badge, `tab_engine` driving everything, and `evo-swarm`/`evo-agent`
-spawned as real processes with real SSE streams, journals and shutdown ladders.
+Real: the window and its chrome, the tab strip (its activity dot, its `×`, and
+the `+` past the last tab), the empty tab and its choosers, the tab page's three
+columns and their draggable splits (`crates/workspace/src/panes.rs`), the
+transcript (markdown, tool rows, reports, dim rows, and the quiet rows a lane
+notice or a piece of context becomes), the composer, the status line under the
+transcript — §7.3's readout, drawn for the agent being shown rather than for the
+coordinator alone — the lane list with its glyphs, step clock and badge,
+`tab_engine` driving everything, and `evo-swarm`/`evo-agent` spawned as real
+processes with real SSE streams, journals and shutdown ladders.
 
 Scripted, because a picture is not worth a model call:
 
