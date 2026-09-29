@@ -27,9 +27,9 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    div, px, relative, AnyElement, App, Context, ElementId, Entity, FocusHandle, Hsla, IntoElement,
-    KeyDownEvent, Pixels, Role, SharedString, Subscription, TestSupportExt as _, WeakEntity,
-    Window,
+    div, px, relative, AnyElement, App, Context, ElementId, Entity, FocusHandle, Focusable as _,
+    Hsla, IntoElement, KeyDownEvent, Pixels, Role, SharedString, Subscription, TestSupportExt as _,
+    WeakEntity, Window,
 };
 use serde_json::Value;
 use session::{Choice, ChooserOption, HistoryEntry, LaunchPlan, Launcher, DEFAULT_KEY};
@@ -203,6 +203,38 @@ impl Choosers {
     /// What the three choosers add up to (§7.2, §9.6).
     pub(crate) fn plan(&self, cx: &App) -> LaunchPlan {
         self.state.read(cx).launcher.plan()
+    }
+
+    /// Put the keyboard where the empty tab begins: the coordinator chooser — the
+    /// first tab stop of the three rows — or, if that chooser cannot take the
+    /// focus, the folder card beside them.
+    ///
+    /// The window is the owner's: selecting an empty tab lands the keyboard in it
+    /// (§7.1's polish), which is the window's own `TabContent::focus_primary` to
+    /// call. Answers whether anything took the focus; a window that takes no focus
+    /// at all (a capture, a window on its way out) answers `false` and is left
+    /// alone.
+    ///
+    /// The seam is what the window calls, and only the window can: until
+    /// `TabContent::focus_primary` is wired to it, nothing in this crate calls it,
+    /// hence the allow.
+    #[allow(dead_code)]
+    pub fn focus_primary(&self, window: &mut Window, cx: &mut App) -> bool {
+        // Read out of the state first: focusing borrows the window and the app, and
+        // the state is borrowed through both.
+        let (chooser, folder) = {
+            let state = self.state.read(cx);
+            (state.coordinator.clone(), state.folder_focus.clone())
+        };
+        let primary = chooser.read(cx).focus_handle(cx);
+        window.focus(&primary, cx);
+        if window.focused(cx).as_ref() == Some(&primary) {
+            return true;
+        }
+        // The first chooser would not have the keyboard: the folder card is the next
+        // thing on the tab that can.
+        window.focus(&folder, cx);
+        window.focused(cx).as_ref() == Some(&folder)
     }
 }
 
@@ -1204,8 +1236,7 @@ mod tests {
     use super::*;
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{
-        point, size, AnyWindowHandle, Bounds, Focusable as _, TestAppContext, WindowBounds,
-        WindowOptions,
+        point, size, AnyWindowHandle, Bounds, TestAppContext, WindowBounds, WindowOptions,
     };
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -1825,6 +1856,72 @@ mod tests {
             );
             assert!(f.act(cx, |window, _| window.find("empty-tab").visible()));
         }
+    }
+
+    /// Selecting an empty tab puts the keyboard where the tab begins: the
+    /// coordinator chooser, the first of its three rows (§7.1).
+    #[gpui_kit::test]
+    fn focus_primary_lands_the_keyboard_on_the_first_chooser(cx: &mut TestAppContext) {
+        let f = open(cx);
+        // Rendered first, the way a tab the window is showing is.
+        f.act(cx, |window, cx| window.render_frame(cx));
+
+        let (took, focused, trigger) = f.act(cx, |window, cx| {
+            let took = f
+                .tab
+                .update(cx, |tab, cx| tab.choosers.focus_primary(window, cx));
+            let trigger = chooser(&f, cx, Choice::Coordinator);
+            let trigger = trigger.read(cx).focus_handle(cx);
+            (took, window.focused(cx), trigger)
+        });
+        assert!(took, "the empty tab takes the keyboard");
+        assert_eq!(
+            focused,
+            Some(trigger.clone()),
+            "…and the coordinator chooser is what has it"
+        );
+
+        // The focus is this frame's, not a handle remembered from another: the key
+        // the tab supplies for its choosers opens the menu from where the keyboard
+        // now is.
+        f.act(cx, |window, cx| {
+            window.press("space", cx);
+            window.render_frame(cx);
+        });
+        assert_ne!(
+            f.act(cx, |window, cx| window.focused(cx)),
+            Some(trigger),
+            "space opened the chooser the keyboard landed on"
+        );
+    }
+
+    /// The call is idempotent, and a window that takes no focus at all is left
+    /// alone rather than half-focused.
+    #[gpui_kit::test]
+    fn focus_primary_answers_false_when_the_window_refuses_the_keyboard(cx: &mut TestAppContext) {
+        let f = open(cx);
+        let (first, landed, again, still) = f.act(cx, |window, cx| {
+            let first = f
+                .tab
+                .update(cx, |tab, cx| tab.choosers.focus_primary(window, cx));
+            let landed = window.focused(cx);
+            let again = f
+                .tab
+                .update(cx, |tab, cx| tab.choosers.focus_primary(window, cx));
+            (first, landed, again, window.focused(cx))
+        });
+        assert!(first && again, "both calls take the focus");
+        assert_eq!(landed, still, "and the second lands on the same control");
+
+        let refused = f.act(cx, |window, cx| {
+            window.disable_focus(cx);
+            let took = f
+                .tab
+                .update(cx, |tab, cx| tab.choosers.focus_primary(window, cx));
+            (took, window.focused(cx))
+        });
+        assert!(!refused.0, "a window taking no focus answers false");
+        assert_eq!(refused.1, None, "and nothing holds the keyboard");
     }
 
     /// The row the history list has highlighted, for the keyboard tests below.
