@@ -542,6 +542,74 @@ tab that has never started one names no directory and is stored under its window
 handle, which keeps the set ordered and unique. `crates/app/src/quit.rs` covers
 both, and the tab that started a swarm keeps its directory id through the write.
 
+### The bundle on the finished tree — menus, Settings…, one instance, ⌘Q
+
+`scripts/bundle.sh` (exit 0) with every lane's work in, launched the way a user
+does it — `open dist/evo-desktop.app`, so it is LaunchServices that starts it,
+not the inner binary — with the **real** `$HOME` and no swarm started:
+
+```
+2026-09-29T15:53:24Z info  evo-desktop 0.1.0 starting (pid 96155, root /Users/bytedance/.evo/desktop)
+2026-09-29T15:53:24Z info  app.json: window 1728x992 at Some(0.0),Some(33.0), 2 recent(s), binaries /usr/local/bin/evo-swarm / /usr/local/bin/evo-agent
+2026-09-29T15:53:25Z info  window open
+2026-09-29T15:53:25Z info  window bounds 1728x992 at 0,33
+2026-09-29T15:53:25Z info  theme: dark (the system appearance)
+2026-09-29T15:53:25Z info  startup: 1 tab(s) will show it
+2026-09-29T15:53:25Z info  catalog: probing with /usr/local/bin/evo-agent (cache older than 86400s or missing)
+2026-09-29T15:53:25Z info  tab dirs: 3 kept, none old enough to prune
+2026-09-29T15:53:26Z info  versions: evo-swarm 0.1.0, evo-agent 0.1.0
+2026-09-29T15:53:26Z info  history: 18 row(s) (500 files read of 699 seen, stopped early)
+2026-09-29T15:53:28Z error catalog probe failed: http 500: The value
+  "Bearer <redacted>"
+is not of type
+  LIST
+2026-09-29T15:55:58Z info  quitting: stopping every tab
+2026-09-29T15:55:58Z info  saved /Users/bytedance/.evo/desktop/app.json: 1 tab(s), 0 of them resumable
+2026-09-29T15:55:58Z info  shutdown: all 0 tab(s) exited
+2026-09-29T15:55:58Z info  stopped; exiting
+$ pgrep -f 'evo-desktop.app/Contents/MacOS/evo-desktop' | wc -l
+0
+```
+
+The empty tab drew the user's own history — eighteen rows this time, against
+sixteen four hours earlier, because the afternoon's verification runs are in
+`~/.evo/sessions` too — with `Workers Default`, both model choosers on
+`Default`, and R1 redacted in the red line beside them
+(`docs/screens/real/bundle-launch.png`, screen captured while it was up: one
+`New tab`, `History 18 resumable`).
+
+**The menu bar**, read back through System Events rather than by eye:
+
+```
+menu bar           Apple, Evo Desktop, File, Edit, Window
+Evo Desktop        About Evo Desktop, Settings…, —, Hide Evo Desktop, Hide Others, Show All, —, Quit Evo Desktop
+File               New Tab ⌘T, Close Tab ⌘W, …
+Window             … macOS's own window items …, Select Next Tab, Select Previous Tab, Select Last Tab, —, Minimize ⌘M, Zoom, —, Evo Desktop
+```
+
+`lsappinfo info` says `bundleID="com.evo.desktop"`, `type="Foreground"`,
+`Version="0.1.0"`, one process. One finding worth keeping: the three tab items
+carry the workspace's actions but **no key equivalent**, because the workspace
+binds ⌃⇥ / ⌃⇧⇥ / ⌘9 inside `WORKSPACE_CONTEXT`, while ⌘T, ⌘W, ⌘M, ⌘Q and ⌘, are
+bound unscoped and do show theirs. The keys work; the menu does not advertise
+them.
+
+**A second `open` activates, it does not duplicate.** With Finder brought to the
+front first, `open dist/evo-desktop.app` made `lsappinfo front` report
+`"Evo Desktop" … (in front)` again, at the same pid, one process —
+LaunchServices hands the bundle to the instance already running. Started the
+other way, by running the inner binary directly, the app's own guard runs: the
+second process logs `another instance is running (activation acknowledged:
+true); exiting` and exits 0, and the first logs `activated by another launch
+(pid 98088)`.
+
+**⌘Q**, sent as a keystroke to the foreground app, walked the ladder —
+`quitting: stopping every tab`, the `app.json` write, `shutdown: all 0 tab(s)
+exited`, `stopped; exiting` — and left no process behind: not the app, not the
+catalog probe it had spawned. One tab was open and none of them resumable, which
+is the journal rule: the tab was never spoken to, so it never wrote a journal to
+resume.
+
 ## M2 — relaunch, through the app
 
 The milestone's own proof, with the app's machinery rather than a model of it: two
