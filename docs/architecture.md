@@ -14,3 +14,14 @@ Spec: docs/PROMPT.md (copy of the build prompt). Section refs like §7.3 point t
 | `evo-desktop` (crates/app) | bin | main: single-instance, window options/bounds, quit handling. |
 
 Rules: pure crates must not depend on gpui. UI thread never blocks: I/O on own threads, results delivered via channels → weak entity updates with revision checks.
+
+## Commit convention
+
+Conventional commits: `type(scope): subject` — type ∈ feat, fix, refactor, test, docs, chore, perf, build;
+scope = crate name (`swarm_client`, `store`, `session`, `tab_engine`, `transcript`, `composer`, `workspace`,
+`app`) or `repo`/`scripts`/`docs`. Subject imperative, lower-case, no trailing period, ≤ 72 chars. Then a blank line and a body
+(wrapped at ~72) that says what changed and why — behaviour, notable decisions, how it was verified;
+a title-only message is not acceptable.
+Every message ends with the trailer `Co-authored-by: EvoAgent <evo@ruiqilei.com>`.
+Lanes do not commit; they end each report with a proposed message in this format, and the coordinator
+commits by explicit paths.
