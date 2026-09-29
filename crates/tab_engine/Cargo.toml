@@ -4,3 +4,12 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+swarm_client = { path = "../swarm_client" }
+serde_json = { workspace = true }
+async-channel = "2"
+
+[dev-dependencies]
+# The real-server harness (temp HOME + stub provider), for tests that drive a
+# live `evo-swarm serve`; a plain dependent of tab_engine never compiles it.
+swarm_client = { path = "../swarm_client", features = ["test-harness"] }
+libc = "0.2"

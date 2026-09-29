@@ -110,6 +110,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "agent_list"
+version = "0.1.0"
+dependencies = [
+ "gpui-kit",
+ "image",
+ "session",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3345,6 +3354,7 @@ dependencies = [
  "qoi",
  "ravif",
  "rayon",
+ "rgb",
  "tiff",
  "zune-core 0.5.3",
  "zune-jpeg 0.5.15",
@@ -6748,6 +6758,12 @@ dependencies = [
 [[package]]
 name = "tab_engine"
 version = "0.1.0"
+dependencies = [
+ "async-channel",
+ "libc",
+ "serde_json",
+ "swarm_client",
+]
 
 [[package]]
 name = "taffy"
@@ -7182,6 +7198,7 @@ name = "transcript"
 version = "0.1.0"
 dependencies = [
  "gpui-kit",
+ "image",
  "session",
 ]
 
@@ -8607,8 +8624,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-channel",
+ "composer",
  "gpui-kit",
+ "image",
  "rfd",
+ "session",
+ "transcript",
 ]
 
 [[package]]
