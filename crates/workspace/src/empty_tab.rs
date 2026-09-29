@@ -22,8 +22,8 @@ use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
-    h_flex, v_flex, ActiveTheme as _, Icon, IconName, IndexPath, Sizable as _, StyledExt as _,
-    Theme,
+    h_flex, v_flex, ActiveTheme as _, Colorize as _, Icon, IconName, IndexPath, Sizable as _,
+    StyledExt as _, Theme,
 };
 use gpui_kit::prelude::*;
 use gpui_kit::{
@@ -66,6 +66,48 @@ const CAPTION_HEIGHT: Pixels = px(40.);
 /// [`LABEL_WIDTH`] plus the row's own gap: the selects' left edge.
 const CAPTION_INDENT: Pixels = px(166.);
 const CAPTION_ID: &str = "lanes-caption";
+
+/// What the caption says when the catalog could not be read at all (§9.4): one sentence
+/// about what the tab still does, because the server's own words — `http 500: The value
+/// "Bearer …"` — are evidence, not a message. They go in the line's tooltip and in
+/// `app.log`; the choosers stay usable on Default, so a swarm can still be started.
+const CATALOG_FAILED: &str = "Couldn't load the model list — Default models will be used.";
+/// … and when a probe failed but the last catalog is still in the choosers.
+const CATALOG_STALE: &str = "Couldn't refresh the model list — using the last one it loaded.";
+
+/// The caption's warning tone, for the one line that is not the page's quiet grey.
+///
+/// The kit's `warning` is a bright amber: 13:1 on the dark theme's near-black, but 1.9:1 on
+/// the light theme's white — a 12px line nobody can read. The light theme darkens that same
+/// hue until it clears AA (`#EAB308` → `#8D6C05`, 4.9:1); the tone stays amber, which is what
+/// it means here: not an error, something to notice (§9.4).
+fn warning_ink(theme: &Theme) -> Hsla {
+    if theme.is_dark() {
+        theme.warning
+    } else {
+        theme.warning.darken(0.4)
+    }
+}
+
+/// The caption's own shape: the one line it shows, the tone it wears, and the longer version
+/// of itself for the hover.
+struct Caption {
+    text: SharedString,
+    tone: CaptionTone,
+    /// The words behind the line, when it is a summary of something longer: the catalog
+    /// probe's own error.
+    detail: Option<SharedString>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CaptionTone {
+    /// Nothing to say yet: the catalog is on its way.
+    Loading,
+    /// Something went wrong that the tab copes with (§9.4) — quiet amber, never red.
+    Warning,
+    /// The file a chosen lanes model will be written to (§9.6).
+    Note,
+}
 
 /// The folder call to action, and how its parts are drawn.
 const FOLDER_ID: &str = "select-folder";
@@ -458,12 +500,30 @@ impl EmptyTabState {
 
     /// The caption under the lanes chooser: the one place the empty tab says something went
     /// wrong, something is still loading, or a lanes model will be written to a file.
-    fn caption(&self) -> Option<SharedString> {
+    fn caption(&self) -> Option<Caption> {
         if let Some(error) = &self.catalog_error {
-            return Some(SharedString::from(error.clone()));
+            // The server's own words are evidence, not a message: they go in the hover (and
+            // in `app.log`, where the probe wrote them) and the line says what the tab does
+            // about it — nothing, which is why it still works: every chooser is on Default,
+            // and the folder card opens a swarm from there (§9.4).
+            let text = if self.catalog {
+                // A cache was in use, so the last catalog is still in the choosers.
+                CATALOG_STALE
+            } else {
+                CATALOG_FAILED
+            };
+            return Some(Caption {
+                text: SharedString::from(text),
+                tone: CaptionTone::Warning,
+                detail: Some(SharedString::from(error.clone())),
+            });
         }
         if !self.catalog {
-            return Some(SharedString::from("Loading models…"));
+            return Some(Caption {
+                text: SharedString::from("Loading models…"),
+                tone: CaptionTone::Loading,
+                detail: None,
+            });
         }
         let lanes = self.launcher.selected(Choice::Lanes)?;
         if lanes.key == DEFAULT_KEY {
@@ -477,10 +537,14 @@ impl EmptyTabState {
             Some(folder) => folder.display().to_string(),
             None => "<folder>".to_string(),
         };
-        Some(SharedString::from(
-            self.launcher
-                .lanes_model_note(&folder, self.home.as_deref()),
-        ))
+        Some(Caption {
+            text: SharedString::from(
+                self.launcher
+                    .lanes_model_note(&folder, self.home.as_deref()),
+            ),
+            tone: CaptionTone::Note,
+            detail: None,
+        })
     }
 
     fn header(&self, cx: &Context<Self>) -> impl IntoElement {
@@ -576,12 +640,20 @@ impl EmptyTabState {
 
     fn render_caption(&self, cx: &Context<Self>) -> impl IntoElement {
         let caption = self.caption();
-        let color = match (&self.catalog_error, &caption) {
-            (Some(_), _) => cx.theme().danger,
-            (None, Some(_)) if !self.catalog => cx.theme().muted_foreground,
+        // The one tone that is not the page's quiet grey: a catalog that could not be read
+        // is worth noticing, and it is not a mistake the person made — amber, not red.
+        let color = match caption.as_ref().map(|caption| caption.tone) {
+            Some(CaptionTone::Warning) => warning_ink(cx.theme()),
             _ => cx.theme().muted_foreground,
         };
-        let tooltip = caption.clone();
+        // What the hover says: the server's own error where there is one, the line itself
+        // otherwise — a note that had to be elided still has to be readable in full.
+        let tooltip = caption.as_ref().map(|caption| {
+            caption
+                .detail
+                .clone()
+                .unwrap_or_else(|| caption.text.clone())
+        });
         div()
             .id(CAPTION_ID)
             .test_support()
@@ -603,7 +675,7 @@ impl EmptyTabState {
                         .build(window, cx)
                 })
             })
-            .children(caption)
+            .children(caption.map(|caption| caption.text))
     }
 
     /// The folder call to action (§7.2): the three choosers add up to one decision, so it is
@@ -1401,8 +1473,29 @@ mod tests {
             .state
             .read(cx)
             .caption()
-            .map(|caption| caption.to_string())
+            .map(|caption| caption.text.to_string())
             .unwrap_or_default()
+    }
+
+    /// What the caption's hover carries, when the line is a summary of something longer.
+    fn caption_detail(cx: &App, tab: &Entity<TabContent>) -> Option<String> {
+        tab.read(cx)
+            .choosers
+            .state
+            .read(cx)
+            .caption()
+            .and_then(|caption| caption.detail)
+            .map(|detail| detail.to_string())
+    }
+
+    /// Whether the caption wears the quiet warning tone rather than the page's muted grey.
+    fn caption_is_warning(cx: &App, tab: &Entity<TabContent>) -> bool {
+        tab.read(cx)
+            .choosers
+            .state
+            .read(cx)
+            .caption()
+            .is_some_and(|caption| caption.tone == CaptionTone::Warning)
     }
 
     #[gpui_kit::test]
@@ -2219,14 +2312,66 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn the_catalog_failure_says_so_where_the_hint_was(cx: &mut TestAppContext) {
+    fn a_catalog_failure_reads_as_one_sentence_and_keeps_the_servers_words_for_the_hover(
+        cx: &mut TestAppContext,
+    ) {
+        // The error a real probe leaves behind: the server's own words, a bearer token and
+        // all. Under a chooser that reads as a broken screen (§9.4).
+        let raw = r#"http 500: The value "Bearer sk-live-9f3c…" is not a model"#;
         let f = open(cx);
         f.act(cx, |window, cx| {
             f.tab.update(cx, |tab, cx| {
-                tab.set_catalog_error(Some("could not start a probe".to_string()), cx)
+                tab.set_catalog_error(Some(raw.to_string()), cx)
             });
             window.render_frame(cx);
-            assert_eq!(caption_text(cx, &f.tab), "could not start a probe");
+
+            let line = caption_text(cx, &f.tab);
+            assert_eq!(
+                line, "Couldn't load the model list — Default models will be used.",
+                "one sentence about what the tab does now"
+            );
+            assert!(
+                !line.contains("Bearer") && !line.contains("500"),
+                "not the server's error dump: {line}"
+            );
+            assert!(
+                caption_is_warning(cx, &f.tab),
+                "and it wears the warning tone, not the danger one"
+            );
+            assert_eq!(
+                caption_detail(cx, &f.tab).as_deref(),
+                Some(raw),
+                "the server's own words are what the hover carries"
+            );
+            // The tab still works: every chooser is usable on Default, and the folder card
+            // is what starts the swarm.
+            assert_eq!(f.tab.read(cx).coordinator_model(cx).as_ref(), "Default");
+            assert_eq!(f.tab.read(cx).lanes_model(cx).as_ref(), "Default");
+            assert_eq!(f.tab.read(cx).workers(cx).as_ref(), "Default");
+            assert!(window.find(FOLDER_ID).visible());
+        });
+    }
+
+    /// A probe can fail while the last catalog is still in the choosers: then the line must
+    /// not claim the list is gone when it is on the screen.
+    #[gpui_kit::test]
+    fn a_failed_refresh_says_the_last_catalog_is_still_in_use(cx: &mut TestAppContext) {
+        let cache = CacheDir::new(REGISTRY);
+        let f = open(cx);
+        f.act(cx, |window, cx| {
+            f.tab.update(cx, |tab, cx| {
+                tab.set_model_cache(&cache.cache(), window, cx);
+                tab.set_catalog_error(Some("http 500: nope".to_string()), cx);
+            });
+            window.render_frame(cx);
+            assert_eq!(
+                caption_text(cx, &f.tab),
+                "Couldn't refresh the model list — using the last one it loaded."
+            );
+            assert!(
+                lanes_options(cx, &f.tab).len() > 1,
+                "the models the cache brought are still in the chooser"
+            );
         });
     }
 }

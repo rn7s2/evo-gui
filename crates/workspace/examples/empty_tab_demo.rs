@@ -4,12 +4,15 @@
 //! cargo run -p workspace --example empty_tab_demo -- --capture <dir>
 //! ```
 //!
-//! Eighteen pictures: the catalog loading, the catalog loaded with a lanes model chosen
-//! (the `swarm.lisp` note under the chooser, on one line and wrapped over two), a history
-//! list of many rows — one of them a very long path — an empty history, and the two states
-//! with no rows yet (scanning, and a scan that failed), the five states in both themes; plus
-//! the three interaction states a still picture cannot show on its own — the folder card's
-//! keyboard focus ring, and the card's and a history row's hover fills.
+//! Twenty-one pictures: the catalog loading and a catalog that could not be loaded (one
+//! sentence, with the server's own error in its tooltip), the catalog loaded with a lanes
+//! model chosen (the `swarm.lisp` note under the chooser, on one line, wrapped over two, and
+//! clamped on the second), a history list of many rows — one of them a very long path — an
+//! empty history, and the two states with no rows yet (scanning, and a scan that failed) —
+//! seven of those states in both themes; plus seven more that a still picture can only show
+//! one of at a time: the note against a folder the app knows and one too long for two lines,
+//! the folder card's and the history list's keyboard focus rings, and the card's and a
+//! history row's hover fills.
 //!
 //! Capture mode drives GPUI's headless renderer, so the pictures do not depend on a window
 //! being on screen (the machine may be locked).
@@ -183,6 +186,24 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     shot(&mut cx, window, dir, "01-loading-light.png")?;
     dark(&mut cx);
     shot(&mut cx, window, dir, "02-loading-dark.png")?;
+    light(&mut cx);
+
+    // 1b. The probe failed: one sentence under the choosers, in the warning tone, with the
+    // server's own error kept for the line's tooltip (and `app.log`) — and every chooser
+    // still usable on Default, so a swarm can still be started.
+    tab.update(&mut cx, |tab, cx| {
+        tab.set_catalog_error(
+            Some(
+                r#"http 500: The value "Bearer sk-live-9f3c…" is not a model the registry knows; \
+                   the userspace probe answered with a page of HTML"#
+                    .to_string(),
+            ),
+            cx,
+        )
+    });
+    shot(&mut cx, window, dir, "18-catalog-error-light.png")?;
+    dark(&mut cx);
+    shot(&mut cx, window, dir, "19-catalog-error-dark.png")?;
     light(&mut cx);
 
     // 2. The cached catalog: the models are in the choosers, and the lanes chooser knows
