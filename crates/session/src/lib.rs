@@ -66,6 +66,7 @@ pub enum LaneStatus { Working, Compacting, Idle, Starting, Down }
 mod cache;
 mod effect;
 mod lanes;
+mod launcher;
 mod model;
 mod readout;
 mod tab;
@@ -74,6 +75,12 @@ mod todos;
 pub use cache::{cache_seed_limits, cache_seed_next_limit, cache_stats_from_journal, cache_totals_from_seed};
 pub use effect::{Effect, RowChanges};
 pub use lanes::{lane_task_label, short_duration, LaneList, LaneRow, SwarmInfo};
+pub use launcher::{
+    coordinator_chooser, history_rows, home_short, lanes_chooser, lanes_model_note, relative_time,
+    swarm_lisp_path, swarm_workers_setting, workers_chooser, Choice, Chooser, ChooserOption,
+    HistoryEntry, HistoryRow, HistorySource, LaunchPlan, Launcher, When, DEFAULT_KEY,
+    NEEDS_EXTENSION_API, WORKERS_MAX,
+};
 pub use model::AgentModel;
 pub use readout::{k_tokens, round_div_half_even, CacheTotals, GoalState, Readout};
 pub use tab::{AgentKey, Changes, StreamStatus, TabModel};
