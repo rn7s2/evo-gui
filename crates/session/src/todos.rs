@@ -39,7 +39,10 @@ pub fn todos_from_json(value: &Value) -> Vec<Todo> {
                 .and_then(Value::as_str)
                 .map(todo_status_from_str)
                 .unwrap_or(TodoStatus::Pending);
-            Some(Todo { text: text.to_string(), status })
+            Some(Todo {
+                text: text.to_string(),
+                status,
+            })
         })
         .collect()
 }

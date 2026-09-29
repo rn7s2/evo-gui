@@ -43,7 +43,9 @@ fn m2_resume() {
         });
 
         drive.shutdown();
-        drive.next(deadline, "Exited", |update| matches!(update, Update::Exited { .. }));
+        drive.next(deadline, "Exited", |update| {
+            matches!(update, Update::Exited { .. })
+        });
         let session = drive.session.clone().expect("/state named the session");
         let pids = drive.pids().to_vec();
         drive.join_and_assert_gone(deadline);
@@ -60,9 +62,16 @@ fn m2_resume() {
     // The sessions directory the scan walks is the temp HOME's — the same one the
     // swarm just wrote to.
     let sessions_dir = fixture.home.join("sessions");
-    assert!(sessions_dir.is_dir(), "{} should exist", sessions_dir.display());
+    assert!(
+        sessions_dir.is_dir(),
+        "{} should exist",
+        sessions_dir.display()
+    );
     let outcome = history::scan(&sessions_dir, &ScanBudget::default());
-    assert!(outcome.files_read >= 1, "the scan read nothing: {outcome:?}");
+    assert!(
+        outcome.files_read >= 1,
+        "the scan read nothing: {outcome:?}"
+    );
 
     let entry = outcome
         .entries
@@ -71,10 +80,18 @@ fn m2_resume() {
         .unwrap_or_else(|| {
             panic!(
                 "the session was not listed as resumable: {:?}",
-                outcome.entries.iter().map(|e| e.session.clone()).collect::<Vec<_>>()
+                outcome
+                    .entries
+                    .iter()
+                    .map(|e| e.session.clone())
+                    .collect::<Vec<_>>()
             )
         });
-    assert_eq!(entry.source, HistorySource::Scanned, "found by the walk, not remembered");
+    assert_eq!(
+        entry.source,
+        HistorySource::Scanned,
+        "found by the walk, not remembered"
+    );
     assert_eq!(entry.lanes, 2, "the record's lane count: {entry:?}");
     assert_eq!(entry.workers, 2, "the record's workers: {entry:?}");
     assert_eq!(
@@ -105,7 +122,12 @@ fn m2_resume() {
     // and this journal is written after the one we mean to flag.
     run_once(&fixture, "second-swarm", 1, "m2 the newer swarm", deadline);
     let scanned = history::scan(&sessions_dir, &ScanBudget::default());
-    assert_eq!(scanned.entries.len(), 2, "both journals: {:?}", scanned.entries);
+    assert_eq!(
+        scanned.entries.len(),
+        2,
+        "both journals: {:?}",
+        scanned.entries
+    );
     let newer = scanned
         .entries
         .iter()
@@ -137,31 +159,51 @@ fn m2_resume() {
     state.save(&desktop).expect("app.json is written");
 
     let merged = history::load_history(&desktop, &sessions_dir, &ScanBudget::default());
-    assert_eq!(merged.len(), 2, "the scan and the recents, deduped: {merged:?}");
+    assert_eq!(
+        merged.len(),
+        2,
+        "the scan and the recents, deduped: {merged:?}"
+    );
     assert_eq!(
         merged[0].session,
         std::path::PathBuf::from(&session_path),
         "the session that was open at the last quit is first: {:?}",
-        merged.iter().map(|e| (&e.session, e.open_at_quit, e.mtime)).collect::<Vec<_>>()
+        merged
+            .iter()
+            .map(|e| (&e.session, e.open_at_quit, e.mtime))
+            .collect::<Vec<_>>()
     );
-    assert!(merged[0].open_at_quit, "and it carries the flag: {:?}", merged[0]);
+    assert!(
+        merged[0].open_at_quit,
+        "and it carries the flag: {:?}",
+        merged[0]
+    );
     assert_eq!(
         merged[0].source,
         HistorySource::Scanned,
         "the scan knew the swarm; the app only added the flag: {:?}",
         merged[0]
     );
-    assert_eq!(merged[0].lanes, 2, "the scan's own row, not a stub: {:?}", merged[0]);
+    assert_eq!(
+        merged[0].lanes, 2,
+        "the scan's own row, not a stub: {:?}",
+        merged[0]
+    );
     assert!(
         merged[0].mtime < merged[1].mtime,
         "the flagged row is the *older* one — the flag is what moved it up"
     );
     assert_eq!(merged[1].session, newer.session);
-    assert!(!merged[1].open_at_quit, "only the tab that was open carries it");
+    assert!(
+        !merged[1].open_at_quit,
+        "only the tab that was open carries it"
+    );
     // What the round trip through app.json really said.
     let stored = AppState::load(&desktop);
     assert!(
-        stored.recent_for(std::path::Path::new(&session_path)).is_some_and(|recent| recent.open_at_quit),
+        stored
+            .recent_for(std::path::Path::new(&session_path))
+            .is_some_and(|recent| recent.open_at_quit),
         "the flag survived the file: {:?}",
         stored.recents
     );
@@ -185,8 +227,10 @@ fn m2_resume() {
     // The earlier conversation is back: the first transcript carries the prompt.
     drive.wait_connected(Agent::Coordinator, deadline);
     drive.wait_model(deadline, "the resumed transcript", |model| {
-        model.coordinator().rows().iter().any(|row| matches!(&row.kind, RowKind::User { text }
-            if text.contains("m2 resume works")))
+        model.coordinator().rows().iter().any(|row| {
+            matches!(&row.kind, RowKind::User { text }
+            if text.contains("m2 resume works"))
+        })
     });
     let rows = row_summary(drive.model.coordinator());
     assert!(
@@ -215,7 +259,10 @@ fn m2_resume() {
         .iter()
         .filter_map(|data| data.get("text").and_then(|t| t.as_str()))
         .collect();
-    assert!(text.contains("m2 second turn"), "the new turn streamed: {text:?}");
+    assert!(
+        text.contains("m2 second turn"),
+        "the new turn streamed: {text:?}"
+    );
 
     // The transcript after the resync carries both turns.
     drive.wait_model(deadline, "both turns in the transcript", |model| {
@@ -230,7 +277,9 @@ fn m2_resume() {
 
     // --- nothing left running ----------------------------------------------
     drive.shutdown();
-    drive.next(deadline, "Exited", |update| matches!(update, Update::Exited { .. }));
+    drive.next(deadline, "Exited", |update| {
+        matches!(update, Update::Exited { .. })
+    });
     drive.join_and_assert_gone(deadline);
 }
 
@@ -251,6 +300,8 @@ fn run_once(fixture: &Fixture, name: &str, workers: u16, prompt: &str, deadline:
         model.activity() == session::Activity::Idle
     });
     drive.shutdown();
-    drive.next(deadline, "Exited", |update| matches!(update, Update::Exited { .. }));
+    drive.next(deadline, "Exited", |update| {
+        matches!(update, Update::Exited { .. })
+    });
     drive.join_and_assert_gone(deadline);
 }

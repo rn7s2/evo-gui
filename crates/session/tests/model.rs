@@ -36,7 +36,11 @@ fn rebuild_pairs_tool_calls_with_their_results() {
     // calls), and one tool result per call.
     let rows = transcript_rows(&model);
     assert!(rows.len() > 10, "rows: {rows:#?}");
-    assert!(matches!(rows[0], RowView::User(_)), "first row: {:#?}", rows[0]);
+    assert!(
+        matches!(rows[0], RowView::User(_)),
+        "first row: {:#?}",
+        rows[0]
+    );
 
     let ids: Vec<u64> = model.rows().iter().map(|row| row.id).collect();
     let mut unique = ids.clone();
@@ -53,11 +57,18 @@ fn rebuild_pairs_tool_calls_with_their_results() {
     assert_eq!(tools.len(), 4, "four tool calls in the capture: {tools:#?}");
     for row in &tools {
         match &row.kind {
-            RowKind::Tool { call_id, name, arguments, result } => {
+            RowKind::Tool {
+                call_id,
+                name,
+                arguments,
+                result,
+            } => {
                 assert!(!call_id.is_empty());
                 assert!(!name.is_empty());
                 assert!(arguments.starts_with('{'), "{name} arguments: {arguments}");
-                let result = result.as_ref().unwrap_or_else(|| panic!("{name} has no result"));
+                let result = result
+                    .as_ref()
+                    .unwrap_or_else(|| panic!("{name} has no result"));
                 assert!(!result.is_error, "{name} result: {result:?}");
                 assert!(!result.content.is_empty());
             }
@@ -85,8 +96,16 @@ fn a_rebuild_starts_a_fresh_id_space_and_bumps_the_revision() {
 
     model.rebuild_from_transcript(&fixture("transcript.json"));
     assert_eq!(model.revision(), revision + 1);
-    assert_eq!(transcript_rows(&model), first, "the same transcript, the same rows");
-    assert_eq!(model.rows().first().map(|row| row.id), Some(1), "ids restart at 1");
+    assert_eq!(
+        transcript_rows(&model),
+        first,
+        "the same transcript, the same rows"
+    );
+    assert_eq!(
+        model.rows().first().map(|row| row.id),
+        Some(1),
+        "ids restart at 1"
+    );
     assert_eq!(model.rows().len(), first.len(), "no duplicate rows");
 }
 
@@ -99,8 +118,14 @@ fn the_event_stream_and_the_transcript_agree() {
     let effect = apply_capture(&mut from_events, "events-coordinator.sse");
     assert!(effect.contains(Effect::ROWS));
     assert!(effect.contains(Effect::RESYNC), "settled asks for a resync");
-    assert!(effect.contains(Effect::TODOS), "todo-changed arrives on this stream");
-    assert!(effect.contains(Effect::LANES), "lane-state events go by on this stream");
+    assert!(
+        effect.contains(Effect::TODOS),
+        "todo-changed arrives on this stream"
+    );
+    assert!(
+        effect.contains(Effect::LANES),
+        "lane-state events go by on this stream"
+    );
 
     let mut from_transcript = AgentModel::new();
     from_transcript.rebuild_from_transcript(&fixture("transcript.json"));
@@ -112,7 +137,10 @@ fn the_event_stream_and_the_transcript_agree() {
     );
 
     // ...and the event-only rows are the ones the transcript cannot carry.
-    assert!(!dim_texts(&from_events).is_empty(), "output lines become dim rows");
+    assert!(
+        !dim_texts(&from_events).is_empty(),
+        "output lines become dim rows"
+    );
     assert!(dim_texts(&from_transcript).is_empty());
 }
 
@@ -129,7 +157,8 @@ fn output_lines_take_the_style_the_server_sent() {
         })
         .collect();
     assert!(
-        dims.iter().any(|(style, text)| *style == DimStyle::Notice && text.starts_with("◆ goal")),
+        dims.iter()
+            .any(|(style, text)| *style == DimStyle::Notice && text.starts_with("◆ goal")),
         "dims: {dims:#?}"
     );
     assert!(
@@ -139,7 +168,10 @@ fn output_lines_take_the_style_the_server_sent() {
     // ...and an output line is the server's text, whole: no prefix names the event it came
     // from, because the reader is reading what evo said, not which event carried it.
     assert!(
-        dims.contains(&(DimStyle::Notice, "◆ goal created: fixture goal: show the goal segment FINISH".to_string())),
+        dims.contains(&(
+            DimStyle::Notice,
+            "◆ goal created: fixture goal: show the goal segment FINISH".to_string()
+        )),
         "dims: {dims:#?}"
     );
 }
@@ -153,8 +185,14 @@ fn a_lane_run_gives_its_todo_list_and_its_tool_pair() {
     assert_eq!(
         model.todos(),
         &[
-            session::Todo { text: "lane step one".into(), status: TodoStatus::InProgress },
-            session::Todo { text: "lane step two".into(), status: TodoStatus::Pending },
+            session::Todo {
+                text: "lane step one".into(),
+                status: TodoStatus::InProgress
+            },
+            session::Todo {
+                text: "lane step two".into(),
+                status: TodoStatus::Pending
+            },
         ]
     );
 
@@ -162,9 +200,12 @@ fn a_lane_run_gives_its_todo_list_and_its_tool_pair() {
         .rows()
         .iter()
         .find_map(|row| match &row.kind {
-            RowKind::Tool { name, arguments, result, .. } if name == "todo" => {
-                Some((arguments.clone(), result.clone()))
-            }
+            RowKind::Tool {
+                name,
+                arguments,
+                result,
+                ..
+            } if name == "todo" => Some((arguments.clone(), result.clone())),
             _ => None,
         })
         .expect("the todo call");
@@ -185,9 +226,19 @@ fn a_report_event_becomes_a_report_row() {
         .rows()
         .iter()
         .find_map(|row| match &row.kind {
-            RowKind::Report { done, evidence, next, blocked, requests } => {
-                Some((done.clone(), evidence.clone(), next.clone(), blocked.clone(), requests.clone()))
-            }
+            RowKind::Report {
+                done,
+                evidence,
+                next,
+                blocked,
+                requests,
+            } => Some((
+                done.clone(),
+                evidence.clone(),
+                next.clone(),
+                blocked.clone(),
+                requests.clone(),
+            )),
             _ => None,
         })
         .expect("a report row");
@@ -203,33 +254,56 @@ fn message_start_and_deltas_build_one_streaming_row() {
     let mut model = AgentModel::new();
     // Seed the readout with a context window, so the usage that ends the message moves
     // the rendered line (that is what the UI has to hear about).
-    model.readout_mut().apply_state(&json!({"context_tokens": 48000, "context_window": 200000}));
+    model
+        .readout_mut()
+        .apply_state(&json!({"context_tokens": 48000, "context_window": 200000}));
     // A turn opening is a step boundary: the clock starts, and this model joined mid-run.
     assert_eq!(
         model.apply_event(1, "turn-start", &json!({"run_id": "r", "turn": 0})),
         Effect::STEP | Effect::ACTIVITY
     );
-    assert_eq!(model.apply_event(2, "message-start", &json!({"run_id": "r", "turn": 0})), Effect::ROWS);
+    assert_eq!(
+        model.apply_event(2, "message-start", &json!({"run_id": "r", "turn": 0})),
+        Effect::ROWS
+    );
     let id = model.streaming_row().expect("a streaming row");
 
-    for (n, text) in ["## head", "ing\n\n"] .iter().enumerate() {
-        assert_eq!(model.apply_event(3 + n as u64, "text-delta", &json!({"text": text})), Effect::ROWS);
+    for (n, text) in ["## head", "ing\n\n"].iter().enumerate() {
+        assert_eq!(
+            model.apply_event(3 + n as u64, "text-delta", &json!({"text": text})),
+            Effect::ROWS
+        );
     }
     let row = model.row(id).expect("the row");
     match &row.kind {
-        RowKind::Assistant { markdown, thinking, streaming, error } => {
-            assert_eq!(markdown, "## heading\n\n", "the whole source so far, ready to render");
+        RowKind::Assistant {
+            markdown,
+            thinking,
+            streaming,
+            error,
+        } => {
+            assert_eq!(
+                markdown, "## heading\n\n",
+                "the whole source so far, ready to render"
+            );
             assert!(thinking.is_empty());
             assert!(*streaming);
             assert!(error.is_none());
         }
         other => panic!("unexpected row: {other:?}"),
     }
-    assert!(row.version >= 3, "every delta bumps the version: {}", row.version);
+    assert!(
+        row.version >= 3,
+        "every delta bumps the version: {}",
+        row.version
+    );
 
     // An empty delta changes nothing at all.
     let version = row.version;
-    assert_eq!(model.apply_event(9, "text-delta", &json!({"text": ""})), Effect::NONE);
+    assert_eq!(
+        model.apply_event(9, "text-delta", &json!({"text": ""})),
+        Effect::NONE
+    );
     assert_eq!(model.row(id).unwrap().version, version);
 
     // The provider's usage re-anchors the context figure: 48211 + 100 + 9700 + 200.
@@ -253,9 +327,21 @@ fn a_tool_only_turn_leaves_no_assistant_row() {
     // message for that, so neither does the model.
     let mut model = AgentModel::new();
     model.apply_event(1, "message-start", &json!({}));
-    assert_eq!(model.rows().len(), 1, "the streaming row exists while it streams");
-    model.apply_event(2, "tool-call-start", &json!({"name": "todo", "id": "toolu_1", "arguments": {}, "arguments_json": "{}"}));
-    model.apply_event(3, "message-end", &json!({"stop_reason": "tool-use", "usage": null, "error": null}));
+    assert_eq!(
+        model.rows().len(),
+        1,
+        "the streaming row exists while it streams"
+    );
+    model.apply_event(
+        2,
+        "tool-call-start",
+        &json!({"name": "todo", "id": "toolu_1", "arguments": {}, "arguments_json": "{}"}),
+    );
+    model.apply_event(
+        3,
+        "message-end",
+        &json!({"stop_reason": "tool-use", "usage": null, "error": null}),
+    );
     assert_eq!(model.rows().len(), 1, "rows: {:#?}", kinds(&model));
     assert!(matches!(model.rows()[0].kind, RowKind::Tool { .. }));
 }
@@ -270,7 +356,9 @@ fn thinking_deltas_accumulate_on_the_open_row() {
     model.apply_event(3, "thinking-delta", &json!({"text": "options"}));
     model.apply_event(4, "text-delta", &json!({"text": "answer"}));
     match &model.rows()[0].kind {
-        RowKind::Assistant { markdown, thinking, .. } => {
+        RowKind::Assistant {
+            markdown, thinking, ..
+        } => {
             assert_eq!(thinking, "weighing options");
             assert_eq!(markdown, "answer");
         }
@@ -289,14 +377,23 @@ fn a_failed_message_keeps_its_error_on_the_row() {
     let mut model = AgentModel::new();
     model.apply_event(1, "message-start", &json!({}));
     model.apply_event(2, "text-delta", &json!({"text": "half a thou"}));
-    let effect = model.apply_event(3, "message-end", &json!({
-        "stop_reason": "error",
-        "usage": {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0},
-        "error": "overloaded_error: Overloaded"
-    }));
+    let effect = model.apply_event(
+        3,
+        "message-end",
+        &json!({
+            "stop_reason": "error",
+            "usage": {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0},
+            "error": "overloaded_error: Overloaded"
+        }),
+    );
     assert_eq!(effect, Effect::ROWS, "a zero usage moves nothing");
     match &model.rows()[0].kind {
-        RowKind::Assistant { markdown, streaming, error, .. } => {
+        RowKind::Assistant {
+            markdown,
+            streaming,
+            error,
+            ..
+        } => {
             assert_eq!(markdown, "half a thou");
             assert!(!streaming);
             assert_eq!(error.as_deref(), Some("overloaded_error: Overloaded"));
@@ -307,11 +404,17 @@ fn a_failed_message_keeps_its_error_on_the_row() {
     // ...and a failed message whose `message-start` this stream never saw still shows up.
     let mut model = AgentModel::new();
     assert_eq!(
-        model.apply_event(1, "message-end", &json!({"stop_reason": "error", "usage": null, "error": "boom"})),
+        model.apply_event(
+            1,
+            "message-end",
+            &json!({"stop_reason": "error", "usage": null, "error": "boom"})
+        ),
         Effect::ROWS
     );
     match &model.rows()[0].kind {
-        RowKind::Assistant { markdown, error, .. } => {
+        RowKind::Assistant {
+            markdown, error, ..
+        } => {
             assert!(markdown.is_empty());
             assert_eq!(error.as_deref(), Some("boom"));
         }
@@ -327,32 +430,59 @@ fn the_step_clock_follows_the_step_boundaries() {
     let mut model = AgentModel::new();
     assert_eq!(model.step_started(), None, "nothing runs yet");
 
-    assert!(model.apply_event_at(1, "run-start", &json!({"run_id": "r", "turn": 3}), 1_000).contains(Effect::STEP));
+    assert!(model
+        .apply_event_at(1, "run-start", &json!({"run_id": "r", "turn": 3}), 1_000)
+        .contains(Effect::STEP));
     assert_eq!(
         model.step_started(),
-        Some(StepClock { turn: 3, event_id: 1, started_at_millis: Some(1_000) })
+        Some(StepClock {
+            turn: 3,
+            event_id: 1,
+            started_at_millis: Some(1_000)
+        })
     );
 
     // A turn opening restarts it, and keeps the turn the event carries.
     model.apply_event_at(2, "turn-start", &json!({"run_id": "r", "turn": 4}), 2_000);
     assert_eq!(
         model.step_started(),
-        Some(StepClock { turn: 4, event_id: 2, started_at_millis: Some(2_000) })
+        Some(StepClock {
+            turn: 4,
+            event_id: 2,
+            started_at_millis: Some(2_000)
+        })
     );
 
     // A message ending inside the step is not a boundary.
-    model.apply_event_at(3, "message-end", &json!({"usage": null, "error": null}), 2_500);
+    model.apply_event_at(
+        3,
+        "message-end",
+        &json!({"usage": null, "error": null}),
+        2_500,
+    );
     assert_eq!(model.step_started().unwrap().event_id, 2);
 
     // A compaction is its own step, and handing the turn back starts the clock again — the
     // TUI calls `begin-step` at both ends for exactly this reason.
-    model.apply_event_at(4, "compaction-start", &json!({"run_id": "r", "turn": 4}), 3_000);
+    model.apply_event_at(
+        4,
+        "compaction-start",
+        &json!({"run_id": "r", "turn": 4}),
+        3_000,
+    );
     assert_eq!(model.step_started().unwrap().event_id, 4);
-    model.apply_event_at(5, "compaction-end", &json!({"run_id": "r", "turn": 4}), 4_000);
+    model.apply_event_at(
+        5,
+        "compaction-end",
+        &json!({"run_id": "r", "turn": 4}),
+        4_000,
+    );
     assert_eq!(model.step_started().unwrap().started_at_millis, Some(4_000));
 
     // The run ending ends the step.
-    assert!(model.apply_event(6, "run-end", &json!({"outcome": "stop"})).contains(Effect::STEP));
+    assert!(model
+        .apply_event(6, "run-end", &json!({"outcome": "stop"}))
+        .contains(Effect::STEP));
     assert_eq!(model.step_started(), None);
 
     // Unstamped: the step is still recorded, without a time for the frontend to count from.
@@ -360,12 +490,20 @@ fn the_step_clock_follows_the_step_boundaries() {
     model.apply_event(1, "turn-start", &json!({"turn": 7}));
     assert_eq!(
         model.step_started(),
-        Some(StepClock { turn: 7, event_id: 1, started_at_millis: None })
+        Some(StepClock {
+            turn: 7,
+            event_id: 1,
+            started_at_millis: None
+        })
     );
 
     // The clock is formatted the way the swarm formats a lane's step age, from the same
     // `short_duration`, so the two columns of the left list count alike.
-    let clock = StepClock { turn: 0, event_id: 1, started_at_millis: Some(1_000) };
+    let clock = StepClock {
+        turn: 0,
+        event_id: 1,
+        started_at_millis: Some(1_000),
+    };
     assert_eq!(clock.elapsed(1_000), Some(std::time::Duration::ZERO));
     assert_eq!(clock.elapsed(3_500).unwrap().as_millis(), 2_500);
     assert_eq!(clock.clock_label(1_000).as_deref(), Some("0s"));
@@ -376,15 +514,25 @@ fn the_step_clock_follows_the_step_boundaries() {
     assert_eq!(clock.elapsed(0), Some(std::time::Duration::ZERO));
     assert_eq!(clock.clock_label(0).as_deref(), Some("0s"));
     // No stamp, no elapsed time — and no label either.
-    let unstamped = StepClock { turn: 0, event_id: 2, started_at_millis: None };
+    let unstamped = StepClock {
+        turn: 0,
+        event_id: 2,
+        started_at_millis: None,
+    };
     assert_eq!(unstamped.elapsed(9_999), None);
     assert_eq!(unstamped.clock_label(9_999), None);
 
     // A restarted server has no step running, and neither does a switched session.
     let mut model = AgentModel::new();
     model.apply_event_at(1, "turn-start", &json!({"turn": 0}), 10);
-    assert!(model.apply_event(2, "hello", &json!({"pid": 9})).contains(Effect::STEP));
-    assert_eq!(model.step_started(), None, "the old process's step is not ours");
+    assert!(model
+        .apply_event(2, "hello", &json!({"pid": 9}))
+        .contains(Effect::STEP));
+    assert_eq!(
+        model.step_started(),
+        None,
+        "the old process's step is not ours"
+    );
     let mut model = AgentModel::new();
     model.apply_event_at(1, "turn-start", &json!({"turn": 0}), 10);
     model.apply_event(2, "session-switched", &json!({"session": "/x.sexp"}));
@@ -413,7 +561,11 @@ fn a_manual_compaction_drives_activity_and_dim_rows() {
         let effect = model.apply_event(*id, kind, data);
         if kind == "task-start" {
             assert_eq!(effect, Effect::ACTIVITY);
-            assert_eq!(model.activity(), Activity::Compacting, "a compact task is compacting");
+            assert_eq!(
+                model.activity(),
+                Activity::Compacting,
+                "a compact task is compacting"
+            );
         }
         if kind == "task-end" {
             // The run is over: idle, and the step it was in is gone.
@@ -428,10 +580,19 @@ fn a_manual_compaction_drives_activity_and_dim_rows() {
     assert_eq!(model.activity(), Activity::Idle);
 
     let dims = dim_texts(&model);
-    assert!(dims.contains(&"Compacting context…".to_string()), "dims: {dims:#?}");
-    assert!(dims.contains(&"Context compacted".to_string()), "dims: {dims:#?}");
+    assert!(
+        dims.contains(&"Compacting context…".to_string()),
+        "dims: {dims:#?}"
+    );
+    assert!(
+        dims.contains(&"Context compacted".to_string()),
+        "dims: {dims:#?}"
+    );
     let failure = model.rows().iter().find_map(|row| match &row.kind {
-        RowKind::Dim { style: DimStyle::Error, text } => Some(text.clone()),
+        RowKind::Dim {
+            style: DimStyle::Error,
+            text,
+        } => Some(text.clone()),
         _ => None,
     });
     assert!(
@@ -454,14 +615,24 @@ fn a_coordinator_run_start_stops_compacting() {
     assert_eq!(model.activity(), Activity::Compacting);
 
     let mut model = AgentModel::new();
-    assert_eq!(model.apply_event(1, "task-start", &json!({"task_id": "t", "kind": "run"})), Effect::ACTIVITY);
+    assert_eq!(
+        model.apply_event(1, "task-start", &json!({"task_id": "t", "kind": "run"})),
+        Effect::ACTIVITY
+    );
     assert_eq!(model.activity(), Activity::Running);
     assert_eq!(
         model.apply_event(2, "run-start", &json!({"run_id": "r", "turn": 0})),
         Effect::STEP,
         "the activity was already running; the step is what changed"
     );
-    assert_eq!(model.apply_event(3, "task-end", &json!({"task_id": "t", "kind": "run", "outcome": "stop"})), Effect::ACTIVITY | Effect::STEP);
+    assert_eq!(
+        model.apply_event(
+            3,
+            "task-end",
+            &json!({"task_id": "t", "kind": "run", "outcome": "stop"})
+        ),
+        Effect::ACTIVITY | Effect::STEP
+    );
     assert_eq!(model.activity(), Activity::Idle);
 }
 
@@ -479,7 +650,10 @@ fn provider_retry_is_a_dim_notice() {
         RowKind::Dim { style, text } => {
             assert_eq!(*style, DimStyle::Notice);
             // The reader's words: no event name, no field name, and the reason is one line.
-            assert_eq!(text, "Retrying provider (2/4) in 1.5 s — overloaded_error: Overloaded");
+            assert_eq!(
+                text,
+                "Retrying provider (2/4) in 1.5 s — overloaded_error: Overloaded"
+            );
         }
         other => panic!("unexpected row: {other:?}"),
     }
@@ -522,13 +696,23 @@ fn provider_retry_is_a_dim_notice() {
 fn a_run_that_ended_badly_gets_an_outcome_row() {
     // `stop` is a run finishing as asked — the turn boundary already says so.
     let mut model = AgentModel::new();
-    assert_eq!(model.apply_event(1, "run-start", &json!({"run_id": "r", "turn": 1})), Effect::STEP | Effect::ACTIVITY);
-    assert!(model.rows().is_empty(), "a run starting is not a row");
     assert_eq!(
-        model.apply_event(2, "run-end", &json!({"outcome": "stop", "run_id": "r", "turn": 1})),
+        model.apply_event(1, "run-start", &json!({"run_id": "r", "turn": 1})),
         Effect::STEP | Effect::ACTIVITY
     );
-    assert!(model.rows().is_empty(), "a clean run end is not a row either");
+    assert!(model.rows().is_empty(), "a run starting is not a row");
+    assert_eq!(
+        model.apply_event(
+            2,
+            "run-end",
+            &json!({"outcome": "stop", "run_id": "r", "turn": 1})
+        ),
+        Effect::STEP | Effect::ACTIVITY
+    );
+    assert!(
+        model.rows().is_empty(),
+        "a clean run end is not a row either"
+    );
 
     // An outcome the event does not carry at all reads as a clean one; `ok` is the older
     // spelling of the same thing.
@@ -553,13 +737,21 @@ fn a_run_that_ended_badly_gets_an_outcome_row() {
     // A failed run names what it failed with: the failing assistant message's error, which
     // is the message whose stop reason *is* the outcome.
     let mut model = AgentModel::new();
-    model.apply_event(1, "message-end", &json!({"stop_reason": "error", "usage": null, "error": "HTTP 529: overloaded"}));
+    model.apply_event(
+        1,
+        "message-end",
+        &json!({"stop_reason": "error", "usage": null, "error": "HTTP 529: overloaded"}),
+    );
     model.apply_event(2, "run-end", &json!({"outcome": "error"}));
-    assert!(model.rows().iter().any(|row| matches!(
-        &row.kind,
-        RowKind::RunOutcome { outcome, text }
-            if outcome == "error" && text == "Run failed: HTTP 529: overloaded"
-    )), "rows: {:?}", model.rows());
+    assert!(
+        model.rows().iter().any(|row| matches!(
+            &row.kind,
+            RowKind::RunOutcome { outcome, text }
+                if outcome == "error" && text == "Run failed: HTTP 529: overloaded"
+        )),
+        "rows: {:?}",
+        model.rows()
+    );
 
     // ..., and a run that failed with nothing to quote still says it failed.
     let mut model = AgentModel::new();
@@ -570,7 +762,10 @@ fn a_run_that_ended_badly_gets_an_outcome_row() {
     )));
 
     // The other two outcomes evo has words for, and one it does not.
-    let cases = [("length", "Run stopped at the length limit"), ("?", "Run ended: ?")];
+    let cases = [
+        ("length", "Run stopped at the length limit"),
+        ("?", "Run ended: ?"),
+    ];
     for (outcome, expected) in cases {
         let mut model = AgentModel::new();
         model.apply_event(1, "run-end", &json!({ "outcome": outcome }));
@@ -588,18 +783,35 @@ fn a_run_that_ended_badly_gets_an_outcome_row() {
 fn resync_events_and_lifecycle() {
     for kind in ["hello", "gap", "session-switched", "settled"] {
         let mut model = AgentModel::new();
-        let data = if kind == "session-switched" { json!({"session": "/x.sexp"}) } else { json!({}) };
-        assert!(model.apply_event(1, kind, &data).contains(Effect::RESYNC), "{kind}");
+        let data = if kind == "session-switched" {
+            json!({"session": "/x.sexp"})
+        } else {
+            json!({})
+        };
+        assert!(
+            model.apply_event(1, kind, &data).contains(Effect::RESYNC),
+            "{kind}"
+        );
     }
     // A `lane-state` event is the tab's, not this agent's.
     let mut model = AgentModel::new();
-    assert_eq!(model.apply_event(1, "lane-state", &json!({"lane": 1, "state": "working"})), Effect::LANES);
+    assert_eq!(
+        model.apply_event(1, "lane-state", &json!({"lane": 1, "state": "working"})),
+        Effect::LANES
+    );
     // An event serve could not map: logged, not rendered.
-    assert_eq!(model.apply_event(1, "unprintable-event", &json!({"original_type": "x"})), Effect::NONE);
+    assert_eq!(
+        model.apply_event(1, "unprintable-event", &json!({"original_type": "x"})),
+        Effect::NONE
+    );
     // Lifecycle and anything newer than this build.
     for kind in ["ready", "shutdown", "bye", "some-future-event"] {
         let mut model = AgentModel::new();
-        assert_eq!(model.apply_event(7, kind, &json!({})), Effect::NONE, "{kind}");
+        assert_eq!(
+            model.apply_event(7, kind, &json!({})),
+            Effect::NONE,
+            "{kind}"
+        );
     }
 }
 
@@ -614,7 +826,12 @@ fn an_orphan_tool_result_still_gets_a_row() {
         Effect::ROWS
     );
     match &model.rows()[0].kind {
-        RowKind::Tool { call_id, name, arguments, result } => {
+        RowKind::Tool {
+            call_id,
+            name,
+            arguments,
+            result,
+        } => {
             assert_eq!(call_id, "toolu_9");
             assert_eq!(name, "bash");
             assert!(arguments.is_empty());
@@ -630,7 +847,11 @@ fn an_orphan_tool_result_still_gets_a_row() {
 #[test]
 fn a_replayed_tool_call_updates_its_row_instead_of_stacking_a_copy() {
     let mut model = AgentModel::new();
-    model.apply_event(1, "tool-call-start", &json!({"name": "bash", "id": "toolu_1", "arguments": {}, "arguments_json": "{}"}));
+    model.apply_event(
+        1,
+        "tool-call-start",
+        &json!({"name": "bash", "id": "toolu_1", "arguments": {}, "arguments_json": "{}"}),
+    );
     model.apply_event(2, "tool-call-start", &json!({"name": "bash", "id": "toolu_1", "arguments": {"command": "ls"}, "arguments_json": "{\"command\": \"ls\"}"}));
     assert_eq!(model.rows().len(), 1);
     match &model.rows()[0].kind {
@@ -674,8 +895,15 @@ fn apply_state_seeds_readout_todos_and_activity() {
     let effect = model.apply_state(&fixture("state-with-goal.json"));
     assert!(effect.contains(Effect::READOUT));
     assert!(effect.contains(Effect::ACTIVITY));
-    assert_eq!(model.activity(), Activity::Running, "the fixture was captured mid-run");
-    assert_eq!(model.readout().goal_label().unwrap(), "goal g-4cb9 (active) 0k");
+    assert_eq!(
+        model.activity(),
+        Activity::Running,
+        "the fixture was captured mid-run"
+    );
+    assert_eq!(
+        model.readout().goal_label().unwrap(),
+        "goal g-4cb9 (active) 0k"
+    );
 
     // A settled session: idle, with the checklist the todo tool left behind.
     let mut idle = AgentModel::new();
@@ -683,7 +911,10 @@ fn apply_state_seeds_readout_todos_and_activity() {
     assert!(effect.contains(Effect::READOUT));
     assert!(effect.contains(Effect::TODOS));
     assert_eq!(idle.activity(), Activity::Idle);
-    assert_eq!(idle.readout().text(), "stub-a · medium · ctx 0k/200k (0%) · goal g-4cb9 (complete) 0k");
+    assert_eq!(
+        idle.readout().text(),
+        "stub-a · medium · ctx 0k/200k (0%) · goal g-4cb9 (complete) 0k"
+    );
     assert_eq!(idle.todos().len(), 3);
     assert_eq!(idle.todos()[0].status, TodoStatus::InProgress);
     assert_eq!(idle.todos()[1].status, TodoStatus::Pending);
@@ -694,13 +925,31 @@ fn apply_state_seeds_readout_todos_and_activity() {
 fn a_todo_change_replaces_the_whole_list() {
     let mut model = AgentModel::new();
     assert_eq!(
-        model.apply_event(1, "todo-changed", &json!({"todos": [{"text": "one", "status": "in_progress"}]})),
+        model.apply_event(
+            1,
+            "todo-changed",
+            &json!({"todos": [{"text": "one", "status": "in_progress"}]})
+        ),
         Effect::TODOS
     );
-    assert_eq!(model.todos()[0].status, TodoStatus::InProgress, "the model's own spelling");
-    assert_eq!(model.apply_event(2, "todo-changed", &json!({"todos": [{"text": "one", "status": "done"}]})), Effect::TODOS);
+    assert_eq!(
+        model.todos()[0].status,
+        TodoStatus::InProgress,
+        "the model's own spelling"
+    );
+    assert_eq!(
+        model.apply_event(
+            2,
+            "todo-changed",
+            &json!({"todos": [{"text": "one", "status": "done"}]})
+        ),
+        Effect::TODOS
+    );
     assert_eq!(model.todos().len(), 1);
     assert_eq!(model.todos()[0].status, TodoStatus::Done);
-    assert_eq!(model.apply_event(3, "todo-changed", &json!({"todos": []})), Effect::TODOS);
+    assert_eq!(
+        model.apply_event(3, "todo-changed", &json!({"todos": []})),
+        Effect::TODOS
+    );
     assert!(model.todos().is_empty());
 }

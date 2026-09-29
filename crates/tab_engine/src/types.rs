@@ -60,6 +60,11 @@ pub struct TabSpec {
     pub env: Vec<(String, String)>,
     /// Variables to drop from the child's environment.
     pub env_remove: Vec<String>,
+    /// The client's patience for an ordinary request (30 s), and for a stream that
+    /// has gone silent (45 s). The app leaves these alone; a test that *stops* a
+    /// server sets them short, so it can assert on the patience itself.
+    pub request_timeout: Duration,
+    pub stream_timeout: Duration,
 }
 
 impl TabSpec {
@@ -82,6 +87,8 @@ impl TabSpec {
             extra_args: Vec::new(),
             env: Vec::new(),
             env_remove: Vec::new(),
+            request_timeout: Duration::from_secs(30),
+            stream_timeout: Duration::from_secs(45),
         }
     }
 
@@ -130,6 +137,14 @@ impl TabSpec {
         self
     }
 
+    /// How long a request and a silent stream get before they are given up on.
+    /// Short in a test that wants to see the giving-up happen.
+    pub fn with_http_timeouts(mut self, request: Duration, stream: Duration) -> Self {
+        self.request_timeout = request;
+        self.stream_timeout = stream;
+        self
+    }
+
     /// The [`ServerConfig`] this tab spawns (§3): the argv, the cwd, the tab
     /// directory, and the environment, exactly as [`swarm_client::Server`] wants.
     pub fn server_config(&self) -> ServerConfig {
@@ -145,6 +160,8 @@ impl TabSpec {
         config.extra_args = self.extra_args.clone();
         config.extra_env = self.env.clone();
         config.env_remove = self.env_remove.clone();
+        config.request_timeout = self.request_timeout;
+        config.stream_timeout = self.stream_timeout;
         config
     }
 }
@@ -200,7 +217,11 @@ impl From<swarm_client::Error> for PostError {
                 not_now: status.is_not_now(),
                 message: status.message().to_owned(),
             },
-            other => PostError { status: None, not_now: false, message: other.to_string() },
+            other => PostError {
+                status: None,
+                not_now: false,
+                message: other.to_string(),
+            },
         }
     }
 }
@@ -227,7 +248,11 @@ pub enum Update {
     /// A whole transcript, as `GET /transcript` returned it: rows are rebuilt
     /// from it (§9.1). `revision` is monotonic per agent — a UI request stamped
     /// with the revision it started at can drop its own late answer.
-    Transcript { agent: Agent, revision: u64, raw: Value },
+    Transcript {
+        agent: Agent,
+        revision: u64,
+        raw: Value,
+    },
     /// `GET /state`, as it arrived (the coordinator only; a lane's state comes
     /// from its events).
     State { revision: u64, raw: Value },
@@ -236,18 +261,28 @@ pub enum Update {
     /// `GET /lanes` — the swarm and its lanes.
     Lanes { raw: Value },
     /// One SSE event, in stream order.
-    Event { agent: Agent, id: Option<i64>, kind: String, data: Value },
+    Event {
+        agent: Agent,
+        id: Option<i64>,
+        kind: String,
+        data: Value,
+    },
     /// The state of an agent's stream.
     Stream { agent: Agent, status: StreamStatus },
     /// The journal's newest `cache-stats` custom entry, or `None` when the walk
     /// of `/journal?limit=20,100,400` found none (§7.3).
     CacheSeed { entry: Option<Value> },
     /// A `POST` finished: the reply envelope, or the typed refusal.
-    PostResult { req_id: ReqId, result: Result<Envelope, PostError> },
+    PostResult {
+        req_id: ReqId,
+        result: Result<Envelope, PostError>,
+    },
     /// The server process died on its own (§3); the engine has stopped.
     ServerGone,
     /// The engine has stopped, and why the server did (§3's ladder).
-    Exited { outcome: swarm_client::ShutdownOutcome },
+    Exited {
+        outcome: swarm_client::ShutdownOutcome,
+    },
 }
 
 #[cfg(test)]
@@ -296,9 +331,19 @@ mod tests {
         assert_eq!(
             config.argv(8421),
             vec![
-                "serve", "--port", "8421", "--token-file", "/tab/token",
-                "--workers", "3", "--model", "m-1", "--resume", "/s.sexp",
-                "--evo", "/bin/evo-agent",
+                "serve",
+                "--port",
+                "8421",
+                "--token-file",
+                "/tab/token",
+                "--workers",
+                "3",
+                "--model",
+                "m-1",
+                "--resume",
+                "/s.sexp",
+                "--evo",
+                "/bin/evo-agent",
             ]
         );
         assert_eq!(config.cwd, std::path::PathBuf::from("/proj"));

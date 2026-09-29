@@ -37,7 +37,13 @@ fn m1_delegation() {
     // the lane's own events then land in its own model.
     drive.select(AgentKey::Lane(1));
     drive.next(deadline, "lane 1's transcript", |update| {
-        matches!(update, tab_engine::Update::Transcript { agent: Agent::Lane(1), .. })
+        matches!(
+            update,
+            tab_engine::Update::Transcript {
+                agent: Agent::Lane(1),
+                ..
+            }
+        )
     });
     drive.wait_connected(Agent::Lane(1), deadline);
 
@@ -52,7 +58,10 @@ fn m1_delegation() {
             { "text": "m1 lane one rest", "status": "pending" },
         ]})
     );
-    drive.prompt(1, format!("CALL delegate {}", json!({ "lane": 1, "task": lane_task })));
+    drive.prompt(
+        1,
+        format!("CALL delegate {}", json!({ "lane": 1, "task": lane_task })),
+    );
 
     // --- the lane works, then goes idle, on the coordinator's own stream -----
     // The left column folds `lane-state`: assert the whole cycle, not just the end.
@@ -61,6 +70,15 @@ fn m1_delegation() {
     });
     drive.wait_model(deadline, "lane 1 idle again", |model| {
         model.lanes().lane(1).map(|row| row.status) == Some(LaneStatus::Idle)
+    });
+    // The row can reach idle a moment before the swarm's idle *announcement* does: a
+    // lane's own `settled` makes the engine read `/lanes` (see
+    // `m1_the_lane_list_follows_a_lane_to_idle`), and that snapshot says idle before
+    // the coordinator's stream carries the event. The cycle below is the stream's, so
+    // wait for the event itself.
+    drive.wait_for_update(deadline, "lane 1 idle on the stream", |update| {
+        matches!(update, Update::Event { agent: Agent::Coordinator, kind, data, .. }
+            if kind == "lane-state" && data["lane"] == 1 && data["state"] == "idle")
     });
     let states = drive.lane_states(1);
     let working = states.iter().position(|state| state == "working");
@@ -92,8 +110,10 @@ fn m1_delegation() {
     // The coordinator: the delegate call as a tool row, completed by the swarm's
     // own answer.
     drive.wait_model(deadline, "the delegate row and its result", |model| {
-        model.coordinator().rows().iter().any(|row| matches!(&row.kind, RowKind::Tool { name, result: Some(_), .. }
-            if name == "delegate"))
+        model.coordinator().rows().iter().any(|row| {
+            matches!(&row.kind, RowKind::Tool { name, result: Some(_), .. }
+            if name == "delegate")
+        })
     });
     let coordinator = drive.model.coordinator();
     let rows = row_summary(coordinator);
@@ -101,9 +121,12 @@ fn m1_delegation() {
         .rows()
         .iter()
         .find_map(|row| match &row.kind {
-            RowKind::Tool { name, arguments, result, .. } if name == "delegate" => {
-                Some((arguments.clone(), result.clone()))
-            }
+            RowKind::Tool {
+                name,
+                arguments,
+                result,
+                ..
+            } if name == "delegate" => Some((arguments.clone(), result.clone())),
             _ => None,
         })
         .unwrap_or_else(|| panic!("no delegate tool row; rows: {rows:?}"));
@@ -112,7 +135,9 @@ fn m1_delegation() {
         "the row carries the task the coordinator gave: {}",
         delegate.0
     );
-    let result = delegate.1.unwrap_or_else(|| panic!("the delegate call has no result; rows: {rows:?}"));
+    let result = delegate
+        .1
+        .unwrap_or_else(|| panic!("the delegate call has no result; rows: {rows:?}"));
     assert!(
         result.content.contains("Delegated to lane 1"),
         "the swarm answered the call: {}",
@@ -132,7 +157,10 @@ fn m1_delegation() {
         "the lane's todo call, with its result: {lane_rows:?}"
     );
     assert_eq!(
-        lane.todos().iter().map(|todo| todo.text.as_str()).collect::<Vec<_>>(),
+        lane.todos()
+            .iter()
+            .map(|todo| todo.text.as_str())
+            .collect::<Vec<_>>(),
         vec!["m1 lane one step", "m1 lane one rest"],
         "the checklist the lane's script left behind"
     );
@@ -149,10 +177,16 @@ fn m1_delegation() {
     drive.wait_model(deadline, "lane 1 working on the report task", |model| {
         model.lanes().lane(1).map(|row| row.status) == Some(LaneStatus::Working)
     });
-    drive.wait_model(deadline, "the lane's report in the coordinator's transcript", |model| {
-        model.coordinator().rows().iter().any(|row| matches!(&row.kind, RowKind::User { text }
-            if text.contains("[lane 1 report]") && text.contains("m1 lane one delivered")))
-    });
+    drive.wait_model(
+        deadline,
+        "the lane's report in the coordinator's transcript",
+        |model| {
+            model.coordinator().rows().iter().any(|row| {
+                matches!(&row.kind, RowKind::User { text }
+            if text.contains("[lane 1 report]") && text.contains("m1 lane one delivered"))
+            })
+        },
+    );
     drive.wait_model(deadline, "lane 1 idle after reporting", |model| {
         model.lanes().lane(1).map(|row| row.status) == Some(LaneStatus::Idle)
     });
@@ -163,9 +197,11 @@ fn m1_delegation() {
     // the event-only row it made is replaced, exactly as an `output` line is.
     drive.wait_model(deadline, "the lane's report call", |model| {
         model.lane_model(1).is_some_and(|lane| {
-            lane.rows().iter().any(|row| matches!(&row.kind,
+            lane.rows().iter().any(|row| {
+                matches!(&row.kind,
                 RowKind::Tool { name, result: Some(result), .. }
-                    if name == "report" && result.content.contains("Delivered to the coordinator")))
+                    if name == "report" && result.content.contains("Delivered to the coordinator"))
+            })
         })
     });
     assert!(
@@ -181,12 +217,16 @@ fn m1_delegation() {
         .iter()
         .filter(|row| matches!(&row.kind, RowKind::Tool { name, .. } if name == "delegate"))
         .count();
-    eprintln!("delegate rows after two prompts: {delegates} (updates since the report attempt: {})",
-        drive.updates().len() - before);
+    eprintln!(
+        "delegate rows after two prompts: {delegates} (updates since the report attempt: {})",
+        drive.updates().len() - before
+    );
 
     // --- and the ladder leaves nothing behind -------------------------------
     drive.shutdown();
-    drive.next(deadline, "Exited", |update| matches!(update, tab_engine::Update::Exited { .. }));
+    drive.next(deadline, "Exited", |update| {
+        matches!(update, tab_engine::Update::Exited { .. })
+    });
     drive.join_and_assert_gone(deadline);
 }
 
@@ -213,7 +253,10 @@ fn m1_the_lane_list_follows_a_lane_to_idle() {
 
     // A lane's own turn, and a slow one: `SLOW` makes the stub stream its answer
     // over seconds, so the row is working for a while rather than for a millisecond.
-    drive.prompt(1, r#"CALL delegate {"lane":1,"task":"SLOW write up what you changed"}"#);
+    drive.prompt(
+        1,
+        r#"CALL delegate {"lane":1,"task":"SLOW write up what you changed"}"#,
+    );
     drive.wait_for_update(deadline, "the lane streaming", |update| {
         matches!(update, Update::Event { agent: Agent::Lane(1), kind, .. } if kind == "text-delta")
     });
@@ -246,17 +289,29 @@ fn m1_the_lane_list_follows_a_lane_to_idle() {
     // swarm's own count at zero. (The old engine read the list at boot and on a
     // launch announcement, so nothing it held could have moved on its own.)
     let mark = drive.updates().len();
-    let read = drive.wait_for_update_since(mark, deadline, "a lane list read after the lane went idle", |update| {
-        matches!(update, Update::Lanes { raw }
+    let read = drive.wait_for_update_since(
+        mark,
+        deadline,
+        "a lane list read after the lane went idle",
+        |update| {
+            matches!(update, Update::Lanes { raw }
             if raw["swarm"]["busy"].as_u64() == Some(0)
                 && raw["lanes"].as_array().into_iter().flatten().any(|lane| {
                     lane["n"] == 1 && lane["state"] == "idle"
                 }))
-    });
-    let Update::Lanes { raw } = read else { unreachable!() };
-    eprintln!("m1: the list came back with busy {}: {}", raw["swarm"]["busy"], raw["lanes"]);
+        },
+    );
+    let Update::Lanes { raw } = read else {
+        unreachable!()
+    };
+    eprintln!(
+        "m1: the list came back with busy {}: {}",
+        raw["swarm"]["busy"], raw["lanes"]
+    );
 
     drive.shutdown();
-    drive.next(deadline, "Exited", |update| matches!(update, Update::Exited { .. }));
+    drive.next(deadline, "Exited", |update| {
+        matches!(update, Update::Exited { .. })
+    });
     drive.join_and_assert_gone(deadline);
 }

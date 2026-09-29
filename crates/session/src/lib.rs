@@ -34,11 +34,27 @@ pub enum RowKind {
     User { text: String },
     /// Assistant message. `markdown` is the whole source so far; UI calls
     /// `TextViewState::set_text(markdown)` whenever `version` changes.
-    Assistant { markdown: String, thinking: String, streaming: bool, error: Option<String> },
+    Assistant {
+        markdown: String,
+        thinking: String,
+        streaming: bool,
+        error: Option<String>,
+    },
     /// One tool call, completed by its result.
-    Tool { call_id: String, name: String, arguments: String, result: Option<ToolResult> },
+    Tool {
+        call_id: String,
+        name: String,
+        arguments: String,
+        result: Option<ToolResult>,
+    },
     /// A lane's `report` event.
-    Report { done: String, evidence: String, next: String, blocked: String, requests: String },
+    Report {
+        done: String,
+        evidence: String,
+        next: String,
+        blocked: String,
+        requests: String,
+    },
     /// `output` lines and status events (compaction, provider-retry, a reconnect...).
     Dim { style: DimStyle, text: String },
     /// A run that ended badly: `run-end` with an outcome that is not a clean stop
@@ -49,24 +65,50 @@ pub enum RowKind {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct ToolResult { pub is_error: bool, pub content: String, pub content_chars: Option<u64> }
+pub struct ToolResult {
+    pub is_error: bool,
+    pub content: String,
+    pub content_chars: Option<u64>,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DimStyle { Dim, Notice, Error, Status }
+pub enum DimStyle {
+    Dim,
+    Notice,
+    Error,
+    Status,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TodoStatus { Pending, InProgress, Done }
+pub enum TodoStatus {
+    Pending,
+    InProgress,
+    Done,
+}
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct Todo { pub text: String, pub status: TodoStatus }
+pub struct Todo {
+    pub text: String,
+    pub status: TodoStatus,
+}
 
 /// Coordinator activity as the composer button sees it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Activity { Idle, Running, Compacting }
+pub enum Activity {
+    Idle,
+    Running,
+    Compacting,
+}
 
 /// Lane list glyphs (§7.3): ● working, ◐ compacting, ○ idle, ◌ starting, ✗ down.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LaneStatus { Working, Compacting, Idle, Starting, Down }
+pub enum LaneStatus {
+    Working,
+    Compacting,
+    Idle,
+    Starting,
+    Down,
+}
 
 mod cache;
 mod effect;
@@ -77,7 +119,9 @@ mod readout;
 mod tab;
 mod todos;
 
-pub use cache::{cache_seed_limits, cache_seed_next_limit, cache_stats_from_journal, cache_totals_from_seed};
+pub use cache::{
+    cache_seed_limits, cache_seed_next_limit, cache_stats_from_journal, cache_totals_from_seed,
+};
 pub use effect::{Effect, RowChanges};
 pub use lanes::{lane_task_label, short_duration, LaneList, LaneRow, SwarmInfo};
 pub use launcher::{
@@ -89,7 +133,7 @@ pub use launcher::{
 pub use model::{AgentModel, StepClock};
 pub use readout::{k_tokens, round_div_half_even, CacheTotals, GoalState, Readout};
 pub use tab::{AgentKey, Changes, StreamStatus, TabModel};
-pub use todos::{todos_from_json, todo_status_from_str};
+pub use todos::{todo_status_from_str, todos_from_json};
 
 impl LaneStatus {
     /// The state vocabulary of a lane (`swarm/state.lisp`: `:starting :idle :working

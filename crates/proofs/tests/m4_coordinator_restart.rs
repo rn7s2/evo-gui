@@ -33,22 +33,33 @@ fn m4_coordinator_restart() {
         matches!(update, Update::Event { agent: Agent::Coordinator, kind, .. } if kind == "settled")
     });
     drive.wait_model(deadline, "the answer in the transcript", |model| {
-        model.coordinator().rows().iter().any(|row| matches!(&row.kind, RowKind::User { text }
-            if text.contains("m4 before the restart")))
+        model.coordinator().rows().iter().any(|row| {
+            matches!(&row.kind, RowKind::User { text }
+            if text.contains("m4 before the restart"))
+        })
     });
 
     let revision_before = drive
         .updates()
         .iter()
         .filter_map(|update| match update {
-            Update::Transcript { agent: Agent::Coordinator, revision, .. } => Some(*revision),
+            Update::Transcript {
+                agent: Agent::Coordinator,
+                revision,
+                ..
+            } => Some(*revision),
             _ => None,
         })
         .max()
         .unwrap_or(0);
-    let coordinator_pid = drive.coordinator_pid.expect("/health named the coordinator");
+    let coordinator_pid = drive
+        .coordinator_pid
+        .expect("/health named the coordinator");
     let swarm_pid = drive.swarm_pid.expect("the engine named the swarm");
-    assert_ne!(coordinator_pid, swarm_pid, "the coordinator is its own process");
+    assert_ne!(
+        coordinator_pid, swarm_pid,
+        "the coordinator is its own process"
+    );
     eprintln!("m4: killing the coordinator {coordinator_pid} (swarm {swarm_pid})");
 
     let killed = unsafe { libc::kill(coordinator_pid as libc::pid_t, libc::SIGKILL) };
@@ -56,10 +67,22 @@ fn m4_coordinator_restart() {
 
     // --- the stream drops and comes back ------------------------------------
     drive.next(deadline, "the stream reconnecting", |update| {
-        matches!(update, Update::Stream { agent: Agent::Coordinator, status: tab_engine::StreamStatus::Reconnecting { .. } })
+        matches!(
+            update,
+            Update::Stream {
+                agent: Agent::Coordinator,
+                status: tab_engine::StreamStatus::Reconnecting { .. }
+            }
+        )
     });
     drive.next(deadline, "the stream back", |update| {
-        matches!(update, Update::Stream { agent: Agent::Coordinator, status: tab_engine::StreamStatus::Connected })
+        matches!(
+            update,
+            Update::Stream {
+                agent: Agent::Coordinator,
+                status: tab_engine::StreamStatus::Connected
+            }
+        )
     });
     // A process the tab has never seen announces itself: `hello`, ids from 1 again.
     let hello = drive.next(deadline, "hello from the restarted coordinator", |update| {
@@ -99,13 +122,21 @@ fn m4_coordinator_restart() {
         .iter()
         .filter(|line| line.starts_with("user:") && line.contains("m4 before the restart"))
         .collect();
-    assert_eq!(before.len(), 1, "the turn before the crash is there exactly once");
+    assert_eq!(
+        before.len(),
+        1,
+        "the turn before the crash is there exactly once"
+    );
     assert!(
         signatures.iter().any(|line| line.starts_with("assistant:")),
         "the answer survived the restart: {signatures:?}"
     );
     // The step the old process was in is not the new process's (§5).
-    assert_eq!(drive.model.coordinator_step_started(), None, "the old step is gone");
+    assert_eq!(
+        drive.model.coordinator_step_started(),
+        None,
+        "the old step is gone"
+    );
 
     // --- and the tab still works --------------------------------------------
     let before = drive.cursor();
@@ -118,8 +149,14 @@ fn m4_coordinator_restart() {
         .iter()
         .filter_map(|data| data.get("text").and_then(|t| t.as_str()))
         .collect();
-    assert!(text.contains("m4 after the restart"), "the new turn streamed: {text:?}");
-    assert!(drive.updates().len() > before, "the engine is still delivering updates");
+    assert!(
+        text.contains("m4 after the restart"),
+        "the new turn streamed: {text:?}"
+    );
+    assert!(
+        drive.updates().len() > before,
+        "the engine is still delivering updates"
+    );
 
     drive.wait_model(deadline, "both turns, once each", |model| {
         let rows = model.coordinator().rows();
@@ -136,6 +173,8 @@ fn m4_coordinator_restart() {
 
     // --- nothing left running ----------------------------------------------
     drive.shutdown();
-    drive.next(deadline, "Exited", |update| matches!(update, Update::Exited { .. }));
+    drive.next(deadline, "Exited", |update| {
+        matches!(update, Update::Exited { .. })
+    });
     drive.join_and_assert_gone(deadline);
 }

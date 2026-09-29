@@ -109,7 +109,13 @@ impl GoalState {
     fn label(&self, run_tokens: u64) -> String {
         let used = self.tokens_used + self.tokens_used_live + run_tokens;
         match self.token_budget {
-            Some(budget) => format!("goal {} ({}) {}/{}", self.id, self.status, k_tokens(used), k_tokens(budget)),
+            Some(budget) => format!(
+                "goal {} ({}) {}/{}",
+                self.id,
+                self.status,
+                k_tokens(used),
+                k_tokens(budget)
+            ),
             None => format!("goal {} ({}) {}", self.id, self.status, k_tokens(used)),
         }
     }
@@ -162,7 +168,8 @@ impl Readout {
         let mut providers: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         if let Some(models) = registry.get("models").and_then(Value::as_array) {
             for model in models {
-                let (Some(id), Some(provider)) = (string_field(model, "id"), string_field(model, "provider"))
+                let (Some(id), Some(provider)) =
+                    (string_field(model, "id"), string_field(model, "provider"))
                 else {
                     continue;
                 };
@@ -249,7 +256,8 @@ impl Readout {
     pub fn context_label(&self) -> String {
         match self.context_window {
             Some(window) => {
-                let percent = round_div_half_even(self.context_tokens * 100, window.max(1)).min(100);
+                let percent =
+                    round_div_half_even(self.context_tokens * 100, window.max(1)).min(100);
                 format!(
                     "ctx {}/{} ({}%)",
                     k_tokens(self.context_tokens),
@@ -272,7 +280,9 @@ impl Readout {
     /// `goal-label`, with the tokens folded since the last `/state` on top of the
     /// kernel's count.
     pub fn goal_label(&self) -> Option<String> {
-        self.goal.as_ref().map(|goal| goal.label(self.goal_run_tokens))
+        self.goal
+            .as_ref()
+            .map(|goal| goal.label(self.goal_run_tokens))
     }
 
     /// The segments the line is made of, in the TUI's order, each already final and

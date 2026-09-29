@@ -111,13 +111,14 @@ pub enum StreamMsg {
         cursor: Option<i64>,
     },
     /// The connection dropped; another attempt follows after `retry_in`.
-    Disconnected {
-        error: String,
-        retry_in: Duration,
-    },
+    Disconnected { error: String, retry_in: Duration },
     /// One event: `id` is the resume cursor, `kind` the event's type, `data` its
     /// JSON payload.
-    Event { id: Option<i64>, kind: String, data: Value },
+    Event {
+        id: Option<i64>,
+        kind: String,
+        data: Value,
+    },
     /// The session behind the stream restarted: refetch state and transcript
     /// (§3, §9.1).
     Reset { reason: ResetReason },
@@ -152,7 +153,13 @@ impl EventStream {
         };
         // A spawn that failed drops `tx`, which closes the channel — a consumer
         // sees the stream end rather than waiting for events that cannot come.
-        EventStream { rx, stop_flag, socket, thread, path }
+        EventStream {
+            rx,
+            stop_flag,
+            socket,
+            thread,
+            path,
+        }
     }
 
     /// The route this stream reads (`/events`, `/lanes/1/events`).
@@ -229,7 +236,12 @@ fn run(
                         Some(known) if known != probe.pid => {
                             server_pid = Some(probe.pid);
                             cursor = Some(0);
-                            if !send(&tx, StreamMsg::Reset { reason: ResetReason::Restarted }) {
+                            if !send(
+                                &tx,
+                                StreamMsg::Reset {
+                                    reason: ResetReason::Restarted,
+                                },
+                            ) {
                                 break;
                             }
                         }
@@ -241,7 +253,12 @@ fn run(
                     if let (Some(ours), Some(server_cursor)) = (cursor, probe.cursor) {
                         if server_cursor < ours {
                             cursor = Some(0);
-                            if !send(&tx, StreamMsg::Reset { reason: ResetReason::IdRegression }) {
+                            if !send(
+                                &tx,
+                                StreamMsg::Reset {
+                                    reason: ResetReason::IdRegression,
+                                },
+                            ) {
                                 break;
                             }
                         }
@@ -250,7 +267,10 @@ fn run(
                 Err(error) => {
                     if !send(
                         &tx,
-                        StreamMsg::Disconnected { error: error.to_string(), retry_in: backoff },
+                        StreamMsg::Disconnected {
+                            error: error.to_string(),
+                            retry_in: backoff,
+                        },
                     ) {
                         break;
                     }
@@ -274,7 +294,10 @@ fn run(
             Err(error) => {
                 if !send(
                     &tx,
-                    StreamMsg::Disconnected { error: error.to_string(), retry_in: backoff },
+                    StreamMsg::Disconnected {
+                        error: error.to_string(),
+                        retry_in: backoff,
+                    },
                 ) {
                     break;
                 }
@@ -301,13 +324,19 @@ fn run(
                         // The server closed, or the socket timed out or died.
                         Ok(None) | Err(_) => break,
                     };
-                    let Some(event) = parser.feed(&line) else { continue };
+                    let Some(event) = parser.feed(&line) else {
+                        continue;
+                    };
                     if let Some(id) = event.id {
                         if let Some(previous) = cursor {
                             if id < previous && !announced_reset {
                                 announced_reset = true;
-                                if !send(&tx, StreamMsg::Reset { reason: ResetReason::IdRegression })
-                                {
+                                if !send(
+                                    &tx,
+                                    StreamMsg::Reset {
+                                        reason: ResetReason::IdRegression,
+                                    },
+                                ) {
                                     break 'outer;
                                 }
                             }
@@ -318,12 +347,24 @@ fn run(
                     let data = serde_json::from_str(&event.data)
                         .unwrap_or_else(|_| Value::String(event.data.clone()));
                     let hello = kind == "hello";
-                    if !send(&tx, StreamMsg::Event { id: event.id, kind, data }) {
+                    if !send(
+                        &tx,
+                        StreamMsg::Event {
+                            id: event.id,
+                            kind,
+                            data,
+                        },
+                    ) {
                         break 'outer;
                     }
                     if hello && !announced_reset {
                         announced_reset = true;
-                        if !send(&tx, StreamMsg::Reset { reason: ResetReason::Hello }) {
+                        if !send(
+                            &tx,
+                            StreamMsg::Reset {
+                                reason: ResetReason::Hello,
+                            },
+                        ) {
                             break 'outer;
                         }
                     }
@@ -416,7 +457,10 @@ mod tests {
     fn the_query_names_the_cursor() {
         assert_eq!(with_since("/events", Some(0)), "/events?since=0");
         assert_eq!(with_since("/events", Some(57)), "/events?since=57");
-        assert_eq!(with_since("/lanes/2/events", Some(1)), "/lanes/2/events?since=1");
+        assert_eq!(
+            with_since("/lanes/2/events", Some(1)),
+            "/lanes/2/events?since=1"
+        );
         // No cursor: tail from now, no query at all.
         assert_eq!(with_since("/events", None), "/events");
     }

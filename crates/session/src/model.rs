@@ -26,7 +26,9 @@ use std::time::Duration;
 use serde_json::Value;
 
 use crate::readout::{string_field, u64_field, CacheTotals, Readout};
-use crate::{todos_from_json, Activity, DimStyle, Effect, Row, RowChanges, RowId, RowKind, Todo, ToolResult};
+use crate::{
+    todos_from_json, Activity, DimStyle, Effect, Row, RowChanges, RowId, RowKind, Todo, ToolResult,
+};
 
 /// When the agent's current step began: one turn of its loop, or one compaction, which the
 /// TUI counts as a step of its own (`src/tui/tui.lisp`'s `begin-step` — called at a turn
@@ -56,7 +58,9 @@ impl StepClock {
     /// (`now_millis` before the stamp — two clocks disagreeing) reads as zero rather than
     /// panicking: a frontend showing `0s` is better than a crash.
     pub fn elapsed(&self, now_millis: u64) -> Option<Duration> {
-        Some(Duration::from_millis(now_millis.saturating_sub(self.started_at_millis?)))
+        Some(Duration::from_millis(
+            now_millis.saturating_sub(self.started_at_millis?),
+        ))
     }
 
     /// The clock as the swarm writes one — `45s`, `3m`, `1h2m`, the same
@@ -229,7 +233,10 @@ impl AgentModel {
                     let call_id = string_field(message, "tool_call_id").unwrap_or_default();
                     let content = join_blocks(message.get("content"), "text", "text");
                     let result = ToolResult {
-                        is_error: message.get("is_error").and_then(Value::as_bool).unwrap_or(false),
+                        is_error: message
+                            .get("is_error")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false),
                         content_chars: Some(content.chars().count() as u64),
                         content,
                     };
@@ -278,13 +285,7 @@ impl AgentModel {
 
     /// [`AgentModel::apply_event`] with the time the tab's I/O layer saw the event, which is
     /// what a step clock counts from.
-    pub fn apply_event_at(
-        &mut self,
-        id: u64,
-        kind: &str,
-        data: &Value,
-        now_millis: u64,
-    ) -> Effect {
+    pub fn apply_event_at(&mut self, id: u64, kind: &str, data: &Value, now_millis: u64) -> Effect {
         self.apply_event_with(id, kind, data, Some(now_millis))
     }
 
@@ -325,7 +326,10 @@ impl AgentModel {
             }
             "tool-result" => {
                 let result = ToolResult {
-                    is_error: data.get("is_error").and_then(Value::as_bool).unwrap_or(false),
+                    is_error: data
+                        .get("is_error")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
                     content: string_field(data, "content").unwrap_or_default(),
                     content_chars: data.get("content_chars").and_then(Value::as_u64),
                 };
@@ -392,7 +396,13 @@ impl AgentModel {
                 let attempt = u64_field(data, "attempt");
                 let max = u64_field(data, "max");
                 let reason = string_field(data, "reason").unwrap_or_default();
-                let reason: String = reason.lines().next().unwrap_or("").chars().take(100).collect();
+                let reason: String = reason
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .chars()
+                    .take(100)
+                    .collect();
                 let mut text = format!("Retrying provider ({attempt}/{max})");
                 if let Some(delay) = data.get("delay").and_then(Value::as_f64) {
                     text.push_str(" in ");
@@ -402,7 +412,10 @@ impl AgentModel {
                     text.push_str(" — ");
                     text.push_str(&reason);
                 }
-                self.push_row(RowKind::Dim { style: DimStyle::Notice, text });
+                self.push_row(RowKind::Dim {
+                    style: DimStyle::Notice,
+                    text,
+                });
                 Effect::ROWS
             }
             "todo-changed" => self.set_todos(todos_from_json(&data["todos"])),
@@ -492,7 +505,11 @@ impl AgentModel {
     fn push_row(&mut self, kind: RowKind) -> RowId {
         let id = self.next_id;
         self.next_id += 1;
-        self.rows.push(Row { id, version: 1, kind });
+        self.rows.push(Row {
+            id,
+            version: 1,
+            kind,
+        });
         self.dirty_rows.push(id);
         id
     }
@@ -541,7 +558,9 @@ impl AgentModel {
     /// outcome, and its `error-message` rides along).
     fn last_error(&self) -> Option<&str> {
         self.rows.iter().rev().find_map(|row| match &row.kind {
-            RowKind::Assistant { error: Some(error), .. } if !error.is_empty() => Some(error.as_str()),
+            RowKind::Assistant {
+                error: Some(error), ..
+            } if !error.is_empty() => Some(error.as_str()),
             _ => None,
         })
     }
@@ -599,7 +618,12 @@ impl AgentModel {
                 id
             }
         };
-        if let Some(RowKind::Assistant { markdown, streaming, .. }) = self.row_mut(id).map(|row| &mut row.kind) {
+        if let Some(RowKind::Assistant {
+            markdown,
+            streaming,
+            ..
+        }) = self.row_mut(id).map(|row| &mut row.kind)
+        {
             markdown.push_str(text);
             *streaming = true;
         }
@@ -622,7 +646,8 @@ impl AgentModel {
                 id
             }
         };
-        if let Some(RowKind::Assistant { thinking, .. }) = self.row_mut(id).map(|row| &mut row.kind) {
+        if let Some(RowKind::Assistant { thinking, .. }) = self.row_mut(id).map(|row| &mut row.kind)
+        {
             thinking.push_str(text);
         }
         self.touch(id);
@@ -641,13 +666,21 @@ impl AgentModel {
                 .unwrap_or_default(),
         };
         if call_id.is_empty() {
-            self.push_row(RowKind::Tool { call_id, name, arguments, result: None });
+            self.push_row(RowKind::Tool {
+                call_id,
+                name,
+                arguments,
+                result: None,
+            });
             return;
         }
         if let Some(existing) = self.tool_rows.get(&call_id).copied() {
             // A repeat (a replayed stream): update that row instead of stacking a copy.
-            if let Some(RowKind::Tool { name: row_name, arguments: row_args, .. }) =
-                self.row_mut(existing).map(|row| &mut row.kind)
+            if let Some(RowKind::Tool {
+                name: row_name,
+                arguments: row_args,
+                ..
+            }) = self.row_mut(existing).map(|row| &mut row.kind)
             {
                 *row_name = name;
                 *row_args = arguments;
@@ -655,7 +688,12 @@ impl AgentModel {
             self.touch(existing);
             return;
         }
-        let id = self.push_row(RowKind::Tool { call_id: call_id.clone(), name, arguments, result: None });
+        let id = self.push_row(RowKind::Tool {
+            call_id: call_id.clone(),
+            name,
+            arguments,
+            result: None,
+        });
         self.tool_rows.insert(call_id, id);
     }
 
@@ -665,8 +703,11 @@ impl AgentModel {
     fn complete_tool_call(&mut self, call_id: &str, name: String, result: ToolResult) {
         match self.tool_rows.get(call_id).copied() {
             Some(id) => {
-                if let Some(RowKind::Tool { result: slot, name: row_name, .. }) =
-                    self.row_mut(id).map(|row| &mut row.kind)
+                if let Some(RowKind::Tool {
+                    result: slot,
+                    name: row_name,
+                    ..
+                }) = self.row_mut(id).map(|row| &mut row.kind)
                 {
                     if row_name.is_empty() {
                         *row_name = name;
@@ -715,10 +756,17 @@ impl AgentModel {
             })),
             None => None,
         };
-        let mut effect = if readout_changed { Effect::READOUT } else { Effect::NONE };
+        let mut effect = if readout_changed {
+            Effect::READOUT
+        } else {
+            Effect::NONE
+        };
         if let Some(id) = id {
-            if let Some(RowKind::Assistant { streaming, error: slot, .. }) =
-                self.row_mut(id).map(|row| &mut row.kind)
+            if let Some(RowKind::Assistant {
+                streaming,
+                error: slot,
+                ..
+            }) = self.row_mut(id).map(|row| &mut row.kind)
             {
                 *streaming = false;
                 if error.is_some() {

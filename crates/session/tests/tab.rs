@@ -9,7 +9,8 @@ mod common;
 use common::{fixture, sse_events};
 use serde_json::json;
 use session::{
-    Activity, AgentKey, Changes, LaneStatus, RowChanges, RowKind, StreamStatus, TabModel, TodoStatus,
+    Activity, AgentKey, Changes, LaneStatus, RowChanges, RowKind, StreamStatus, TabModel,
+    TodoStatus,
 };
 use std::time::Duration;
 
@@ -53,7 +54,10 @@ fn a_coordinator_run_drives_the_whole_tab() {
     tab.on_registry(&fixture("registry.json"));
     let changes = tab.on_state(&fixture("state.json"));
     assert!(changes.readout, "the readout is seeded from /state");
-    assert!(!changes.activity, "state.json is idle and a fresh model is idle too");
+    assert!(
+        !changes.activity,
+        "state.json is idle and a fresh model is idle too"
+    );
     assert!(tab.on_lanes(&fixture("lanes.json")).lanes);
 
     // The transcript, stamped revision 1.
@@ -67,7 +71,10 @@ fn a_coordinator_run_drives_the_whole_tab() {
     assert!(changes.lanes, "lane-state events reach the lane list");
     assert!(changes.todos.contains(&COORDINATOR), "todo-changed");
     assert!(changes.activity, "task-start/task-end move the activity");
-    assert!(changes.needs_resync.contains(&COORDINATOR), "settled asks for a resync");
+    assert!(
+        changes.needs_resync.contains(&COORDINATOR),
+        "settled asks for a resync"
+    );
     assert!(
         !changes.readout,
         "the capture's requests are 15 tokens of a 200k window: the line does not move, so \
@@ -93,7 +100,11 @@ fn a_coordinator_run_drives_the_whole_tab() {
         &json!({ "usage": { "input": 48211, "output": 100, "cache_read": 9700, "cache_write": 200 } }),
     );
     assert!(changes.readout);
-    assert!(tab.readout_text().contains("58k/200k (29%) · 17% cached"), "line: {}", tab.readout_text());
+    assert!(
+        tab.readout_text().contains("58k/200k (29%) · 17% cached"),
+        "line: {}",
+        tab.readout_text()
+    );
     assert_ne!(tab.readout_text(), before);
 
     // The goal the run created reaches the line the way it always does: a resync's
@@ -132,7 +143,10 @@ fn a_changed_row_is_named_not_the_whole_transcript() {
     tab.on_event(COORDINATOR, 1, "message-start", &json!({}));
     let streaming = tab.coordinator().streaming_row().expect("a streaming row");
     let changes = tab.on_event(COORDINATOR, 2, "text-delta", &json!({ "text": "hello" }));
-    assert_eq!(changes.rows_for(COORDINATOR), Some(&RowChanges::Changed(vec![streaming])));
+    assert_eq!(
+        changes.rows_for(COORDINATOR),
+        Some(&RowChanges::Changed(vec![streaming]))
+    );
     assert!(!changes.rows_for(COORDINATOR).unwrap().is_rebuilt());
 
     // A delta that carries nothing is no change at all.
@@ -140,11 +154,29 @@ fn a_changed_row_is_named_not_the_whole_transcript() {
     assert!(changes.is_empty());
 
     // A tool result completes a row the stream opened earlier.
-    tab.on_event(COORDINATOR, 4, "message-end", &json!({ "usage": null, "error": null }));
-    tab.on_event(COORDINATOR, 5, "tool-call-start", &json!({ "name": "bash", "id": "t1", "arguments_json": "{}" }));
+    tab.on_event(
+        COORDINATOR,
+        4,
+        "message-end",
+        &json!({ "usage": null, "error": null }),
+    );
+    tab.on_event(
+        COORDINATOR,
+        5,
+        "tool-call-start",
+        &json!({ "name": "bash", "id": "t1", "arguments_json": "{}" }),
+    );
     let call = tab.coordinator().rows().last().expect("the tool row").id;
-    let changes = tab.on_event(COORDINATOR, 6, "tool-result", &json!({ "name": "bash", "id": "t1", "content": "ok" }));
-    assert_eq!(changes.rows_for(COORDINATOR), Some(&RowChanges::Changed(vec![call])));
+    let changes = tab.on_event(
+        COORDINATOR,
+        6,
+        "tool-result",
+        &json!({ "name": "bash", "id": "t1", "content": "ok" }),
+    );
+    assert_eq!(
+        changes.rows_for(COORDINATOR),
+        Some(&RowChanges::Changed(vec![call]))
+    );
 }
 
 /// §9.1: a late transcript from an older revision must not overwrite a newer one.
@@ -154,7 +186,8 @@ fn a_stale_transcript_is_dropped() {
     // Revision 7 arrives first (the display symbols, a later fetch).
     let rev7 = json!({ "messages": [{ "role": "user", "content": [{ "type": "text", "text": "seven" }] }] });
     assert_eq!(
-        tab.on_transcript(COORDINATOR, 7, &rev7).rows_for(COORDINATOR),
+        tab.on_transcript(COORDINATOR, 7, &rev7)
+            .rows_for(COORDINATOR),
         Some(&RowChanges::Rebuilt)
     );
     let rows = tab.coordinator().rows().len();
@@ -162,7 +195,10 @@ fn a_stale_transcript_is_dropped() {
     // An answer to an older request lands late: dropped, and the rows are untouched.
     let stale = json!({ "messages": [{ "role": "user", "content": [{ "type": "text", "text": "stale" }] }] });
     let changes = tab.on_transcript(COORDINATOR, 6, &stale);
-    assert!(changes.is_empty(), "a stale answer changes nothing: {changes:?}");
+    assert!(
+        changes.is_empty(),
+        "a stale answer changes nothing: {changes:?}"
+    );
     assert_eq!(tab.coordinator().rows().len(), rows);
     match &tab.selected_rows()[0].kind {
         RowKind::User { text } => assert_eq!(text, "seven"),
@@ -172,13 +208,17 @@ fn a_stale_transcript_is_dropped() {
     // The same revision again is a duplicate, not news: the I/O layer's revisions are
     // monotone per agent, so applying it twice would only rebuild the same rows.
     let changes = tab.on_transcript(COORDINATOR, 7, &rev7);
-    assert!(changes.is_empty(), "an equal revision is a duplicate: {changes:?}");
+    assert!(
+        changes.is_empty(),
+        "an equal revision is a duplicate: {changes:?}"
+    );
     assert_eq!(tab.coordinator().rows().len(), rows);
 
     // A newer one applies.
     let rev8 = json!({ "messages": [{ "role": "user", "content": [{ "type": "text", "text": "eight" }] }] });
     assert_eq!(
-        tab.on_transcript(COORDINATOR, 8, &rev8).rows_for(COORDINATOR),
+        tab.on_transcript(COORDINATOR, 8, &rev8)
+            .rows_for(COORDINATOR),
         Some(&RowChanges::Rebuilt)
     );
     match &tab.selected_rows()[0].kind {
@@ -195,8 +235,13 @@ fn hello_after_a_restart_keeps_one_set_of_rows() {
     let mut tab = TabModel::new();
     // The lane's stream is the simplest complete log: ids 1..N, a tool call, todos.
     feed(&mut tab, lane(1), "lane1-events.sse");
-    let first_rows: Vec<RowKind> =
-        tab.lane_model(1).expect("the lane's model").rows().iter().map(|row| row.kind.clone()).collect();
+    let first_rows: Vec<RowKind> = tab
+        .lane_model(1)
+        .expect("the lane's model")
+        .rows()
+        .iter()
+        .map(|row| row.kind.clone())
+        .collect();
     assert!(!first_rows.is_empty());
 
     // The old server's transcript was stamped 9; the restarted one answers with its own
@@ -204,15 +249,27 @@ fn hello_after_a_restart_keeps_one_set_of_rows() {
     tab.on_transcript(lane(1), 9, &fixture("transcript-empty.json"));
     assert!(tab.lane_model(1).unwrap().rows().is_empty());
     let changes = tab.on_event(lane(1), 1, "hello", &json!({ "pid": 4242 }));
-    assert!(changes.needs_resync.contains(&lane(1)), "hello refetches this agent");
+    assert!(
+        changes.needs_resync.contains(&lane(1)),
+        "hello refetches this agent"
+    );
     let changes = tab.on_transcript(lane(1), 1, &fixture("lane1-transcript.json"));
-    assert!(changes.rows_for(lane(1)).unwrap().is_rebuilt(), "the fresh transcript applies");
+    assert!(
+        changes.rows_for(lane(1)).unwrap().is_rebuilt(),
+        "the fresh transcript applies"
+    );
 
     // The restarted server replays the same log, ids 1..N again: a second set of rows, no
     // id handed out twice within the fresh space.
     let changes = feed(&mut tab, lane(1), "lane1-events.sse");
     assert!(changes.rows_for(lane(1)).is_some());
-    let ids: Vec<u64> = tab.lane_model(1).unwrap().rows().iter().map(|row| row.id).collect();
+    let ids: Vec<u64> = tab
+        .lane_model(1)
+        .unwrap()
+        .rows()
+        .iter()
+        .map(|row| row.id)
+        .collect();
     let mut unique = ids.clone();
     unique.sort_unstable();
     unique.dedup();
@@ -288,8 +345,18 @@ fn lane_down_reason_comes_from_the_lanes_own_output_rows() {
         "text": "✗ lane 1 cannot use its model st-1: its API :openai-completions is not in the lane"
     }));
     // Work goes on after the error; the reason stays the error line, not the newest line.
-    tab.on_event(lane(1), 2, "task-start", &json!({ "task_id": "t", "kind": "run" }));
-    tab.on_event(lane(1), 3, "output", &json!({ "style": "dim", "text": "queued" }));
+    tab.on_event(
+        lane(1),
+        2,
+        "task-start",
+        &json!({ "task_id": "t", "kind": "run" }),
+    );
+    tab.on_event(
+        lane(1),
+        3,
+        "output",
+        &json!({ "style": "dim", "text": "queued" }),
+    );
     // The coordinator relays what the lane said, prefixed with the lane it is about.
     tab.on_event(COORDINATOR, 1, "output", &json!({
         "style": "error",
@@ -299,9 +366,14 @@ fn lane_down_reason_comes_from_the_lanes_own_output_rows() {
     assert_eq!(tab.lane_down_reason(1), None, "the lane is not down yet");
 
     // The lane goes down (a lane-state on the coordinator's stream).
-    let changes = tab.on_event(COORDINATOR, 2, "lane-state", &json!({
-        "lane": 1, "state": "down", "task": null, "goal": null, "restarts": 0, "pid": null
-    }));
+    let changes = tab.on_event(
+        COORDINATOR,
+        2,
+        "lane-state",
+        &json!({
+            "lane": 1, "state": "down", "task": null, "goal": null, "restarts": 0, "pid": null
+        }),
+    );
     assert!(changes.lanes);
     let row = tab.lanes().lane(1).unwrap();
     assert_eq!(row.status, LaneStatus::Down);
@@ -313,8 +385,16 @@ fn lane_down_reason_comes_from_the_lanes_own_output_rows() {
     );
 
     // The newest error line of the winning source is the one shown.
-    tab.on_event(lane(1), 4, "output", &json!({ "style": "error", "text": "✗ lane 1: second failure" }));
-    assert_eq!(tab.lane_down_reason(1).as_deref(), Some("✗ lane 1: second failure"));
+    tab.on_event(
+        lane(1),
+        4,
+        "output",
+        &json!({ "style": "error", "text": "✗ lane 1: second failure" }),
+    );
+    assert_eq!(
+        tab.lane_down_reason(1).as_deref(),
+        Some("✗ lane 1: second failure")
+    );
 
     // ...but once the swarm says what happened to the lane, *that* is the reason: a
     // restarted lane complains about its own fresh state (no model registered yet),
@@ -333,20 +413,37 @@ fn lane_down_reason_comes_from_the_lanes_own_output_rows() {
         "the swarm's account outranks what the lane said about itself"
     );
     // Even with the lane's noise arriving later still.
-    tab.on_event(lane(1), 6, "output", &json!({
-        "style": "error",
-        "text": "✗ No model is configured — set one in init.lisp"
-    }));
+    tab.on_event(
+        lane(1),
+        6,
+        "output",
+        &json!({
+            "style": "error",
+            "text": "✗ No model is configured — set one in init.lisp"
+        }),
+    );
     assert!(tab
         .lane_down_reason(1)
         .is_some_and(|reason| reason.contains("crashed and was restarted")));
 
     // Back up: the row is not down any more, and nothing is claimed about it.
-    tab.on_event(COORDINATOR, 4, "lane-state", &json!({
-        "lane": 1, "state": "idle", "task": null, "goal": null, "restarts": 1, "pid": 2
-    }));
-    assert_eq!(tab.lanes().lane(1).map(|row| row.status), Some(LaneStatus::Idle));
-    assert_eq!(tab.lane_down_reason(1), None, "a lane that is up has no reason");
+    tab.on_event(
+        COORDINATOR,
+        4,
+        "lane-state",
+        &json!({
+            "lane": 1, "state": "idle", "task": null, "goal": null, "restarts": 1, "pid": 2
+        }),
+    );
+    assert_eq!(
+        tab.lanes().lane(1).map(|row| row.status),
+        Some(LaneStatus::Idle)
+    );
+    assert_eq!(
+        tab.lane_down_reason(1),
+        None,
+        "a lane that is up has no reason"
+    );
 
     // A lane whose own transcript is not loaded falls back to the coordinator's line about
     // it — the only evidence the tab has. It is down first: a reason needs a red row.
@@ -356,18 +453,28 @@ fn lane_down_reason_comes_from_the_lanes_own_output_rows() {
         None,
         "the coordinator has said nothing about lane 2"
     );
-    tab.on_event(COORDINATOR, 5, "output", &json!({
-        "style": "error",
-        "text": "[lane 2] is down: its process exited. restart_lane brings it back."
-    }));
+    tab.on_event(
+        COORDINATOR,
+        5,
+        "output",
+        &json!({
+            "style": "error",
+            "text": "[lane 2] is down: its process exited. restart_lane brings it back."
+        }),
+    );
     assert_eq!(
         tab.lane_down_reason(2),
         None,
         "lane 2 is not down: nothing is shown for a lane that is up"
     );
-    tab.on_event(COORDINATOR, 6, "lane-state", &json!({
-        "lane": 2, "state": "down", "task": null, "goal": null, "restarts": 0, "pid": null
-    }));
+    tab.on_event(
+        COORDINATOR,
+        6,
+        "lane-state",
+        &json!({
+            "lane": 2, "state": "down", "task": null, "goal": null, "restarts": 0, "pid": null
+        }),
+    );
     assert_eq!(
         tab.lane_down_reason(2).as_deref(),
         Some("[lane 2] is down: its process exited. restart_lane brings it back.")
@@ -375,14 +482,24 @@ fn lane_down_reason_comes_from_the_lanes_own_output_rows() {
 
     // A lane whose own transcript has no error keeps the fallback too.
     tab.select(lane(3));
-    tab.on_event(lane(3), 1, "output", &json!({ "style": "dim", "text": "just talking" }));
+    tab.on_event(
+        lane(3),
+        1,
+        "output",
+        &json!({ "style": "dim", "text": "just talking" }),
+    );
     assert_eq!(tab.lane_down_reason(3), None);
 
     // `[lane 1]` is not `[lane 10]`: the match is the whole bracket token.
-    tab.on_event(COORDINATOR, 7, "output", &json!({
-        "style": "error",
-        "text": "[lane 10] is down: its process exited. restart_lane brings it back."
-    }));
+    tab.on_event(
+        COORDINATOR,
+        7,
+        "output",
+        &json!({
+            "style": "error",
+            "text": "[lane 10] is down: its process exited. restart_lane brings it back."
+        }),
+    );
     assert!(
         tab.lane_down_reason(1).is_none(),
         "lane 10's line is not lane 1's, and lane 1 is up"
@@ -399,15 +516,25 @@ fn lane_down_reason_comes_from_the_lanes_own_output_rows() {
 #[test]
 fn a_lane_that_failed_to_start_says_so() {
     let mut tab = TabModel::new();
-    let changes = tab.on_event(COORDINATOR, 1, "lane-state", &json!({
-        "lane": 1, "state": "down", "task": null, "goal": null, "restarts": 0, "pid": null
-    }));
+    let changes = tab.on_event(
+        COORDINATOR,
+        1,
+        "lane-state",
+        &json!({
+            "lane": 1, "state": "down", "task": null, "goal": null, "restarts": 0, "pid": null
+        }),
+    );
     assert!(changes.lanes);
     assert_eq!(tab.lane_down_reason(1), None, "nothing has been said yet");
-    tab.on_event(COORDINATOR, 2, "output", &json!({
-        "style": "error",
-        "text": "[lane 1] failed to start — see /tmp/swarm/lane-1/lane.log"
-    }));
+    tab.on_event(
+        COORDINATOR,
+        2,
+        "output",
+        &json!({
+            "style": "error",
+            "text": "[lane 1] failed to start — see /tmp/swarm/lane-1/lane.log"
+        }),
+    );
     assert_eq!(
         tab.lane_down_reason(1).as_deref(),
         Some("[lane 1] failed to start — see /tmp/swarm/lane-1/lane.log")
@@ -421,9 +548,14 @@ fn a_lane_that_failed_to_start_says_so() {
 #[test]
 fn a_down_reason_survives_a_resync() {
     let mut tab = TabModel::new();
-    tab.on_event(COORDINATOR, 1, "lane-state", &json!({
-        "lane": 1, "state": "down", "task": null, "goal": null, "restarts": 0, "pid": null
-    }));
+    tab.on_event(
+        COORDINATOR,
+        1,
+        "lane-state",
+        &json!({
+            "lane": 1, "state": "down", "task": null, "goal": null, "restarts": 0, "pid": null
+        }),
+    );
     tab.on_event(COORDINATOR, 2, "output", &json!({
         "style": "error",
         "text": "[lane 1] crashed and was restarted by its supervisor (pid 1 → 2); its session was resumed and it was re-initialized."
@@ -432,10 +564,18 @@ fn a_down_reason_survives_a_resync() {
 
     // The resync: the rows are rebuilt from a transcript, and the `output` line is not
     // in it (`Dim` rows are events, not messages).
-    tab.on_transcript(COORDINATOR, 1, &json!({"messages": [
-        { "role": "user", "content": [ { "type": "text", "text": "delegate this" } ] },
-    ]}));
-    assert!(tab.coordinator().rows().iter().all(|row| !matches!(row.kind, RowKind::Dim { .. })));
+    tab.on_transcript(
+        COORDINATOR,
+        1,
+        &json!({"messages": [
+            { "role": "user", "content": [ { "type": "text", "text": "delegate this" } ] },
+        ]}),
+    );
+    assert!(tab
+        .coordinator()
+        .rows()
+        .iter()
+        .all(|row| !matches!(row.kind, RowKind::Dim { .. })));
     assert_eq!(
         tab.lane_down_reason(1).as_deref(),
         Some(reason.as_str()),
@@ -443,9 +583,14 @@ fn a_down_reason_survives_a_resync() {
     );
 
     // The lane comes up: the row is not red, and the reason goes with it.
-    tab.on_event(COORDINATOR, 3, "lane-state", &json!({
-        "lane": 1, "state": "idle", "task": null, "goal": null, "restarts": 1, "pid": 2
-    }));
+    tab.on_event(
+        COORDINATOR,
+        3,
+        "lane-state",
+        &json!({
+            "lane": 1, "state": "idle", "task": null, "goal": null, "restarts": 1, "pid": 2
+        }),
+    );
     assert_eq!(tab.lane_down_reason(1), None);
 }
 
@@ -458,37 +603,65 @@ fn the_stream_badge_tracks_reconnecting() {
     assert!(tab.on_stream(lane(1), StreamStatus::Connected).is_empty());
 
     // A drop: the badge changes, and the retry delay comes through.
-    let changes = tab.on_stream(lane(1), StreamStatus::Reconnecting { retry_in: Duration::from_millis(500) });
+    let changes = tab.on_stream(
+        lane(1),
+        StreamStatus::Reconnecting {
+            retry_in: Duration::from_millis(500),
+        },
+    );
     assert_eq!(changes.stream, std::collections::BTreeSet::from([lane(1)]));
     assert_eq!(
         tab.stream_status(lane(1)),
-        StreamStatus::Reconnecting { retry_in: Duration::from_millis(500) }
+        StreamStatus::Reconnecting {
+            retry_in: Duration::from_millis(500)
+        }
     );
     assert!(tab.is_reconnecting(lane(1)));
     assert!(!tab.is_reconnecting(COORDINATOR), "the badge is per agent");
 
     // A different delay is news; the same one is not.
-    assert!(
-        tab.on_stream(lane(1), StreamStatus::Reconnecting { retry_in: Duration::from_secs(2) })
-            .stream
-            .contains(&lane(1))
-    );
-    assert!(tab.on_stream(lane(1), StreamStatus::Reconnecting { retry_in: Duration::from_secs(2) }).is_empty());
-    assert!(tab.on_stream(lane(1), StreamStatus::Connected).stream.contains(&lane(1)));
+    assert!(tab
+        .on_stream(
+            lane(1),
+            StreamStatus::Reconnecting {
+                retry_in: Duration::from_secs(2)
+            }
+        )
+        .stream
+        .contains(&lane(1)));
+    assert!(tab
+        .on_stream(
+            lane(1),
+            StreamStatus::Reconnecting {
+                retry_in: Duration::from_secs(2)
+            }
+        )
+        .is_empty());
+    assert!(tab
+        .on_stream(lane(1), StreamStatus::Connected)
+        .stream
+        .contains(&lane(1)));
 }
 
 #[test]
 fn a_cache_seed_lands_in_the_readout() {
     let mut tab = TabModel::new();
     tab.on_state(&fixture("state-final.json"));
-    assert!(!tab.readout_text().contains("cached"), "the capture's journal is all input");
+    assert!(
+        !tab.readout_text().contains("cached"),
+        "the capture's journal is all input"
+    );
 
     // The seed can arrive as the whole /journal body…
     let seed = json!({ "entries": [
         { "type": "custom", "key": "cache-stats", "data": { "input": 300, "cache_read": 9700, "cache_write": 0 } }
     ]});
     assert!(tab.on_cache_seed(Some(&seed)).readout);
-    assert!(tab.readout_text().contains("97% cached"), "line: {}", tab.readout_text());
+    assert!(
+        tab.readout_text().contains("97% cached"),
+        "line: {}",
+        tab.readout_text()
+    );
 
     // …as the entry itself…
     let mut tab = TabModel::new();
@@ -500,7 +673,12 @@ fn a_cache_seed_lands_in_the_readout() {
     // …or as the totals object alone.
     let mut tab = TabModel::new();
     tab.on_state(&fixture("state-final.json"));
-    assert!(tab.on_cache_seed(Some(&json!({ "input": 0, "cache_read": 95, "cache_write": 5 }))).readout);
+    assert!(
+        tab.on_cache_seed(Some(
+            &json!({ "input": 0, "cache_read": 95, "cache_write": 5 })
+        ))
+        .readout
+    );
     assert!(tab.readout_text().contains("95% cached"));
 
     // "Not found, grow the limit": nothing to seed, and live totals are not cleared.
@@ -508,7 +686,9 @@ fn a_cache_seed_lands_in_the_readout() {
     tab.on_state(&fixture("state-final.json"));
     tab.on_cache_seed(Some(&seed));
     let line = tab.readout_text();
-    assert!(tab.on_cache_seed(Some(&fixture("journal-empty.json"))).is_empty());
+    assert!(tab
+        .on_cache_seed(Some(&fixture("journal-empty.json")))
+        .is_empty());
     assert!(tab.on_cache_seed(None).is_empty());
     assert_eq!(tab.readout_text(), line);
 }
@@ -533,7 +713,10 @@ fn a_reset_refetches_every_agent_that_is_loaded() {
     // The revision gates are gone: the new numbering starts wherever it likes.
     let changes = tab.on_transcript(lane(1), 1, &fixture("lane1-transcript.json"));
     assert_eq!(changes.rows_for(lane(1)), Some(&RowChanges::Rebuilt));
-    assert!(tab.on_transcript(COORDINATOR, 1, &fixture("transcript.json")).rows_for(COORDINATOR).is_some());
+    assert!(tab
+        .on_transcript(COORDINATOR, 1, &fixture("transcript.json"))
+        .rows_for(COORDINATOR)
+        .is_some());
 }
 
 /// `compact-result` is a **TUI-internal** event, not a server one: `src/tui/tui.lisp` pushes
@@ -551,18 +734,35 @@ fn a_tui_internal_event_is_not_a_server_event() {
         "compact-result",
         &json!({ "task-id": "t", "outcome": "error", "text": "Nothing to compact" }),
     );
-    assert!(changes.is_empty(), "unknown events are ignored: {changes:?}");
+    assert!(
+        changes.is_empty(),
+        "unknown events are ignored: {changes:?}"
+    );
 
     // What the server does send for a failed compaction (capture: events-compact.sse): the
     // error line becomes a row, and the task ends.
     let mut tab = TabModel::new();
     let changes = feed(&mut tab, COORDINATOR, "events-compact.sse");
-    assert!(matches!(changes.rows_for(COORDINATOR), Some(RowChanges::Changed(_))));
-    let error = tab.coordinator().rows().iter().find_map(|row| match &row.kind {
-        RowKind::Dim { style: session::DimStyle::Error, text } => Some(text.clone()),
-        _ => None,
-    });
-    assert!(error.is_some_and(|text| text.starts_with("✗ compact:")), "rows: {:?}", tab.coordinator().rows());
+    assert!(matches!(
+        changes.rows_for(COORDINATOR),
+        Some(RowChanges::Changed(_))
+    ));
+    let error = tab
+        .coordinator()
+        .rows()
+        .iter()
+        .find_map(|row| match &row.kind {
+            RowKind::Dim {
+                style: session::DimStyle::Error,
+                text,
+            } => Some(text.clone()),
+            _ => None,
+        });
+    assert!(
+        error.is_some_and(|text| text.starts_with("✗ compact:")),
+        "rows: {:?}",
+        tab.coordinator().rows()
+    );
 }
 
 /// The step clock the tab hands to a frontend: `on_event_at` carries the arrival time in,
@@ -572,7 +772,13 @@ fn the_step_clock_is_stamped_by_the_caller() {
     let mut tab = TabModel::new();
     assert_eq!(tab.coordinator_step_started(), None);
 
-    let changes = tab.on_event_at(COORDINATOR, 1, "run-start", &json!({"run_id": "r", "turn": 2}), 5_000);
+    let changes = tab.on_event_at(
+        COORDINATOR,
+        1,
+        "run-start",
+        &json!({"run_id": "r", "turn": 2}),
+        5_000,
+    );
     assert!(changes.step.contains(&COORDINATOR));
     let clock = tab.coordinator_step_started().expect("a step");
     assert_eq!(clock.turn, 2);
@@ -583,17 +789,32 @@ fn the_step_clock_is_stamped_by_the_caller() {
     let changes = tab.on_event_at(lane(1), 1, "turn-start", &json!({"turn": 0}), 6_000);
     assert_eq!(changes.step, std::collections::BTreeSet::from([lane(1)]));
     assert_eq!(tab.coordinator_step_started().unwrap().event_id, 1);
-    assert_eq!(tab.lane_model(1).unwrap().step_started().unwrap().started_at_millis, Some(6_000));
+    assert_eq!(
+        tab.lane_model(1)
+            .unwrap()
+            .step_started()
+            .unwrap()
+            .started_at_millis,
+        Some(6_000)
+    );
 
     // Without a stamp the step is still announced and recorded — the frontend starts its own
     // clock when this arrives.
     let changes = tab.on_event(COORDINATOR, 2, "turn-start", &json!({"turn": 3}));
     assert!(changes.step.contains(&COORDINATOR));
     let clock = tab.coordinator_step_started().unwrap();
-    assert_eq!((clock.turn, clock.event_id, clock.started_at_millis), (3, 2, None));
+    assert_eq!(
+        (clock.turn, clock.event_id, clock.started_at_millis),
+        (3, 2, None)
+    );
 
     // The run ending ends the clock.
-    let changes = tab.on_event(COORDINATOR, 3, "task-end", &json!({"task_id": "t", "kind": "run"}));
+    let changes = tab.on_event(
+        COORDINATOR,
+        3,
+        "task-end",
+        &json!({"task_id": "t", "kind": "run"}),
+    );
     assert!(changes.step.contains(&COORDINATOR));
     assert_eq!(tab.coordinator_step_started(), None);
 }
@@ -622,20 +843,35 @@ fn the_lane_row_formats_as_the_swarm_does() {
     let short = "lane step one";
     assert_eq!(session::lane_task_label(short), short);
     let sixty: String = "a".repeat(60);
-    assert_eq!(session::lane_task_label(&sixty), sixty, "60 characters is not truncated");
+    assert_eq!(
+        session::lane_task_label(&sixty),
+        sixty,
+        "60 characters is not truncated"
+    );
     let sixty_one: String = "a".repeat(61);
-    assert_eq!(session::lane_task_label(&sixty_one), format!("{}…", "a".repeat(60)));
+    assert_eq!(
+        session::lane_task_label(&sixty_one),
+        format!("{}…", "a".repeat(60))
+    );
     assert_eq!(session::lane_task_label("two\nlines"), "two lines");
 
     // A real lane task from the capture, longer than 60 characters.
     let list = session::LaneList::from_lanes(&fixture("lanes-lane1-working.json"));
     let lane1 = list.lane(1).unwrap();
     let label = lane1.task_label().expect("a task");
-    assert_eq!(label.chars().count(), 61, "60 characters plus the ellipsis: {label}");
+    assert_eq!(
+        label.chars().count(),
+        61,
+        "60 characters plus the ellipsis: {label}"
+    );
     assert!(label.ends_with('…'));
     assert!(label.starts_with("DELAY3 CALL todo"));
     assert_eq!(lane1.step_clock().as_deref(), Some("0s"));
-    assert_eq!(list.lane(2).unwrap().step_clock(), None, "an idle lane has no step clock");
+    assert_eq!(
+        list.lane(2).unwrap().step_clock(),
+        None,
+        "an idle lane has no step clock"
+    );
 }
 
 /// The event stream and the transcript are the same session, so a tab that rebuilt from

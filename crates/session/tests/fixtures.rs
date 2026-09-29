@@ -67,11 +67,18 @@ const REQUIRED: &[&str] = &[
 fn every_capture_is_present_and_parses() {
     for name in REQUIRED {
         let path = fixture_path(name);
-        assert!(path.exists(), "missing fixture {name} — regenerate: python3 crates/session/tests/capture_fixtures.py");
+        assert!(
+            path.exists(),
+            "missing fixture {name} — regenerate: python3 crates/session/tests/capture_fixtures.py"
+        );
         let text = fixture_text(name);
-        assert!(text.ends_with('\n'), "{name} does not end in a newline: it may be truncated");
+        assert!(
+            text.ends_with('\n'),
+            "{name} does not end in a newline: it may be truncated"
+        );
         if name.ends_with(".json") {
-            let value: Value = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let value: Value =
+                serde_json::from_str(&text).unwrap_or_else(|e| panic!("{name}: {e}"));
             assert!(!value.is_null(), "{name} is null");
         }
     }
@@ -82,21 +89,37 @@ fn every_capture_is_present_and_parses() {
 /// looking at one session, not two.
 #[test]
 fn the_json_and_sse_event_captures_agree() {
-    for stem in ["events-coordinator", "events-compact", "events-shutdown", "events-session-switched", "events-user-input", "lane1-events", "lane2-events"] {
+    for stem in [
+        "events-coordinator",
+        "events-compact",
+        "events-shutdown",
+        "events-session-switched",
+        "events-user-input",
+        "lane1-events",
+        "lane2-events",
+    ] {
         let from_json: Vec<(u64, String, Value)> = fixture(&format!("{stem}.json"))
             .as_array()
             .unwrap_or_else(|| panic!("{stem}.json is not an array"))
             .iter()
             .map(|event| {
                 (
-                    event["id"].as_u64().unwrap_or_else(|| panic!("{stem}: event without an id")),
-                    event["event"].as_str().unwrap_or_else(|| panic!("{stem}: event without a name")).to_string(),
+                    event["id"]
+                        .as_u64()
+                        .unwrap_or_else(|| panic!("{stem}: event without an id")),
+                    event["event"]
+                        .as_str()
+                        .unwrap_or_else(|| panic!("{stem}: event without a name"))
+                        .to_string(),
                     event["data"].clone(),
                 )
             })
             .collect();
         let from_sse = sse_events(&format!("{stem}.sse"));
         assert!(!from_json.is_empty(), "{stem}: empty capture");
-        assert_eq!(from_json, from_sse, "{stem}: the two captures describe different events");
+        assert_eq!(
+            from_json, from_sse,
+            "{stem}: the two captures describe different events"
+        );
     }
 }

@@ -32,7 +32,10 @@ impl Token {
         let text = std::fs::read_to_string(path)?;
         let trimmed = text.trim();
         if trimmed.is_empty() {
-            return Err(Error::Config(format!("token file {} is still empty", path.display())));
+            return Err(Error::Config(format!(
+                "token file {} is still empty",
+                path.display()
+            )));
         }
         Ok(Token(trimmed.to_owned()))
     }
@@ -107,13 +110,19 @@ impl HttpClient {
     /// The same server, with a different patience — a `/shutdown` is asked for
     /// with a short one, so a wedged server reaches the next rung of the ladder.
     pub fn with_timeout(&self, timeout: Duration) -> HttpClient {
-        HttpClient { timeout, ..self.clone() }
+        HttpClient {
+            timeout,
+            ..self.clone()
+        }
     }
 
     /// The patience for an idle long-lived stream: serve keeps one alive with a
     /// `: keepalive` comment every 15 s, so a silence past this is a dead socket.
     pub fn with_stream_timeout(&self, timeout: Duration) -> HttpClient {
-        HttpClient { stream_timeout: timeout, ..self.clone() }
+        HttpClient {
+            stream_timeout: timeout,
+            ..self.clone()
+        }
     }
 
     pub fn host(&self) -> &str {
@@ -202,7 +211,11 @@ impl HttpClient {
         let mut reader = BufReader::new(stream);
         let (status, headers) = read_head(&mut reader, timeout)?;
         let body = read_body(&mut reader, &headers)?;
-        Ok(HttpResponse { status, headers, body })
+        Ok(HttpResponse {
+            status,
+            headers,
+            body,
+        })
     }
 
     pub fn get(&self, path: &str) -> Result<HttpResponse> {
@@ -243,7 +256,10 @@ pub struct HttpResponse {
 impl HttpResponse {
     pub fn header(&self, name: &str) -> Option<&str> {
         let want = name.to_ascii_lowercase();
-        self.headers.iter().find(|(n, _)| *n == want).map(|(_, v)| v.as_str())
+        self.headers
+            .iter()
+            .find(|(n, _)| *n == want)
+            .map(|(_, v)| v.as_str())
     }
 
     pub fn is_success(&self) -> bool {
@@ -322,7 +338,9 @@ fn read_head(reader: &mut impl BufRead, timeout: Duration) -> Result<(u16, Vec<(
     loop {
         let mut raw = Vec::new();
         if reader.read_until(b'\n', &mut raw)? == 0 {
-            return Err(Error::Protocol("the response headers were cut short".into()));
+            return Err(Error::Protocol(
+                "the response headers were cut short".into(),
+            ));
         }
         let text = String::from_utf8_lossy(&raw);
         let text = text.trim_end_matches(['\r', '\n']);
@@ -339,7 +357,10 @@ fn read_head(reader: &mut impl BufRead, timeout: Duration) -> Result<(u16, Vec<(
 
 fn read_body(reader: &mut impl BufRead, headers: &[(String, String)]) -> Result<Vec<u8>> {
     let value = |name: &str| {
-        headers.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str())
+        headers
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.as_str())
     };
     if let Some(encoding) = value("transfer-encoding") {
         if encoding.to_ascii_lowercase().contains("chunked") {

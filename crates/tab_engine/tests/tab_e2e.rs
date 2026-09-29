@@ -22,7 +22,9 @@ use tab_engine::{Agent, Command, ShutdownReport, StreamStatus, TabEngine, TabSpe
 static SWARM: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn one_swarm() -> std::sync::MutexGuard<'static, ()> {
-    SWARM.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    SWARM
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn fixture(workers: u16) -> Fixture {
@@ -33,7 +35,11 @@ fn fixture(workers: u16) -> Fixture {
         bins.swarm.display(),
         bins.agent.display()
     );
-    Fixture::new(HarnessConfig { workers, ..Default::default() }).expect("the fixture should come up")
+    Fixture::new(HarnessConfig {
+        workers,
+        ..Default::default()
+    })
+    .expect("the fixture should come up")
 }
 
 /// The tab spec a [`Fixture`] describes: its project, its tab directory, and the
@@ -61,7 +67,11 @@ struct Updates {
 
 impl Updates {
     fn new(rx: Receiver<Update>) -> Updates {
-        Updates { rx, all: Vec::new(), cursor: 0 }
+        Updates {
+            rx,
+            all: Vec::new(),
+            cursor: 0,
+        }
     }
 
     fn pump(&mut self) {
@@ -119,9 +129,12 @@ impl Updates {
         self.all
             .iter()
             .filter_map(|update| match update {
-                Update::Event { agent: a, id, kind: k, data } if *a == agent && k == kind => {
-                    Some((*id, data.clone()))
-                }
+                Update::Event {
+                    agent: a,
+                    id,
+                    kind: k,
+                    data,
+                } if *a == agent && k == kind => Some((*id, data.clone())),
                 _ => None,
             })
             .collect()
@@ -148,8 +161,16 @@ fn kind_of(update: &Update) -> &'static str {
 
 fn lane_state_is(updates: &Updates, lane: u64, state: &str) -> bool {
     updates.all.iter().any(|update| match update {
-        Update::Event { agent: Agent::Coordinator, kind, data, .. } if kind == "lane-state" => {
-            let n = data.get("lane").or_else(|| data.get("n")).and_then(Value::as_u64);
+        Update::Event {
+            agent: Agent::Coordinator,
+            kind,
+            data,
+            ..
+        } if kind == "lane-state" => {
+            let n = data
+                .get("lane")
+                .or_else(|| data.get("n"))
+                .and_then(Value::as_u64);
             n == Some(lane) && data.get("state").and_then(Value::as_str) == Some(state)
         }
         _ => false,
@@ -188,20 +209,30 @@ fn boot_assembles_the_view() {
 
     updates.next(deadline, |u| matches!(u, Update::Booting));
     let ready = updates.next(deadline, |u| matches!(u, Update::Ready { .. }));
-    let Update::Ready { health, pid, port } = ready else { unreachable!() };
+    let Update::Ready { health, pid, port } = ready else {
+        unreachable!()
+    };
     assert_eq!(health.name.as_deref(), Some("evo-swarm"), "{health:?}");
     assert!(health.has_feature("swarm"), "{health:?}");
     assert!(pid > 0 && port > 0, "{health:?} {pid} {port}");
 
     let registry = updates.next(deadline, |u| matches!(u, Update::Registry { .. }));
-    let Update::Registry { raw } = registry else { unreachable!() };
+    let Update::Registry { raw } = registry else {
+        unreachable!()
+    };
     assert!(
-        raw["models"].as_array().unwrap().iter().any(|m| m["id"] == STUB_MODEL),
+        raw["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["id"] == STUB_MODEL),
         "{raw}"
     );
 
     let lanes = updates.next(deadline, |u| matches!(u, Update::Lanes { .. }));
-    let Update::Lanes { raw } = lanes else { unreachable!() };
+    let Update::Lanes { raw } = lanes else {
+        unreachable!()
+    };
     assert_eq!(raw["lanes"].as_array().unwrap().len(), 2, "{raw}");
     assert_eq!(raw["swarm"]["workers"].as_u64(), Some(2), "{raw}");
     // Lanes are started by the coordinator and are idle within a moment; the
@@ -211,15 +242,24 @@ fn boot_assembles_the_view() {
 
     let transcript = updates.next(deadline, |u| matches!(u, Update::Transcript { .. }));
     match transcript {
-        Update::Transcript { agent: Agent::Coordinator, revision, raw } => {
+        Update::Transcript {
+            agent: Agent::Coordinator,
+            revision,
+            raw,
+        } => {
             assert_eq!(revision, 1);
             assert!(raw["messages"].as_array().unwrap().is_empty(), "{raw}");
         }
-        other => panic!("expected the coordinator's transcript, got {}", kind_of(&other)),
+        other => panic!(
+            "expected the coordinator's transcript, got {}",
+            kind_of(&other)
+        ),
     }
 
     let state = updates.next(deadline, |u| matches!(u, Update::State { .. }));
-    let Update::State { revision, raw } = state else { unreachable!() };
+    let Update::State { revision, raw } = state else {
+        unreachable!()
+    };
     assert_eq!(revision, 1);
     assert_eq!(raw["status"].as_str(), Some("idle"), "{raw}");
     assert_eq!(raw["model"].as_str(), Some(STUB_MODEL), "{raw}");
@@ -227,19 +267,30 @@ fn boot_assembles_the_view() {
     // The cache seed arrives; without `340-cache-stats.lisp` in the temp HOME
     // there is no entry, which is the "extension absent" case.
     let seed = updates.next(deadline, |u| matches!(u, Update::CacheSeed { .. }));
-    let Update::CacheSeed { entry } = seed else { unreachable!() };
+    let Update::CacheSeed { entry } = seed else {
+        unreachable!()
+    };
     if let Some(entry) = entry {
         assert_eq!(entry["key"].as_str(), Some("cache-stats"), "{entry}");
     }
 
     // The live stream: Connected, then lane-state events as the lanes start.
     updates.next(deadline, |u| {
-        matches!(u, Update::Stream { status: StreamStatus::Connected, .. })
+        matches!(
+            u,
+            Update::Stream {
+                status: StreamStatus::Connected,
+                ..
+            }
+        )
     });
 
     // A refetch command is a fresh view at a higher revision.
     assert!(handle.send(Command::Refetch(Agent::Coordinator)));
-    let refetched = updates.next(deadline, |u| matches!(u, Update::Transcript { revision, .. } if *revision >= 2));
+    let refetched = updates.next(
+        deadline,
+        |u| matches!(u, Update::Transcript { revision, .. } if *revision >= 2),
+    );
     assert!(matches!(refetched, Update::Transcript { revision, .. } if revision >= 2));
 
     handle.join();
@@ -260,18 +311,31 @@ fn prompt_streams_and_settles_with_a_resync() {
     assert!(handle.prompt(7, "SLOW hello from the engine"));
     let posted = updates.next(deadline, |u| matches!(u, Update::PostResult { .. }));
     match posted {
-        Update::PostResult { req_id, result: Ok(envelope) } => {
+        Update::PostResult {
+            req_id,
+            result: Ok(envelope),
+        } => {
             assert_eq!(req_id, 7);
             assert!(envelope.ok);
-            assert_eq!(envelope.data.get("queued"), Some(&Value::Bool(true)), "{envelope:?}");
+            assert_eq!(
+                envelope.data.get("queued"),
+                Some(&Value::Bool(true)),
+                "{envelope:?}"
+            );
             assert!(envelope.task.is_some(), "{envelope:?}");
         }
         other => panic!("the prompt should have succeeded, got {}", kind_of(&other)),
     }
 
     // The run: message-start, the deltas, message-end, settled.
-    updates.next(deadline, |u| matches!(u, Update::Event { kind, .. } if kind == "message-start"));
-    let last_delta = updates.next(deadline, |u| matches!(u, Update::Event { kind, .. } if kind == "settled"));
+    updates.next(
+        deadline,
+        |u| matches!(u, Update::Event { kind, .. } if kind == "message-start"),
+    );
+    let last_delta = updates.next(
+        deadline,
+        |u| matches!(u, Update::Event { kind, .. } if kind == "settled"),
+    );
     assert!(matches!(last_delta, Update::Event { kind, .. } if kind == "settled"));
 
     let text: String = updates
@@ -279,20 +343,36 @@ fn prompt_streams_and_settles_with_a_resync() {
         .iter()
         .filter_map(|(_, data)| data.get("text").and_then(Value::as_str))
         .collect();
-    assert!(text.starts_with("slow0 slow1 "), "streamed text was {text:?}");
-    assert!(text.contains("slow59"), "the whole message arrived: {text:?}");
+    assert!(
+        text.starts_with("slow0 slow1 "),
+        "streamed text was {text:?}"
+    );
+    assert!(
+        text.contains("slow59"),
+        "the whole message arrived: {text:?}"
+    );
 
     let usage = updates
         .events(Agent::Coordinator, "message-end")
         .first()
         .and_then(|(_, data)| data.get("usage").cloned())
         .expect("message-end carries usage");
-    assert!(usage.get("input").and_then(Value::as_u64).is_some(), "{usage}");
+    assert!(
+        usage.get("input").and_then(Value::as_u64).is_some(),
+        "{usage}"
+    );
 
     // `settled` resyncs: a second transcript + state, revision 2.
-    let transcript = updates.next(deadline, |u| matches!(u, Update::Transcript { revision, .. } if *revision >= 2));
+    let transcript = updates.next(
+        deadline,
+        |u| matches!(u, Update::Transcript { revision, .. } if *revision >= 2),
+    );
     match transcript {
-        Update::Transcript { agent: Agent::Coordinator, revision, raw } => {
+        Update::Transcript {
+            agent: Agent::Coordinator,
+            revision,
+            raw,
+        } => {
             assert!(revision >= 2);
             let messages = raw["messages"].as_array().unwrap();
             assert_eq!(messages.len(), 2, "{raw}");
@@ -300,7 +380,10 @@ fn prompt_streams_and_settles_with_a_resync() {
         }
         other => panic!("expected a resync transcript, got {}", kind_of(&other)),
     }
-    let state = updates.next(deadline, |u| matches!(u, Update::State { revision, .. } if *revision >= 2));
+    let state = updates.next(
+        deadline,
+        |u| matches!(u, Update::State { revision, .. } if *revision >= 2),
+    );
     assert!(matches!(state, Update::State { .. }));
 
     handle.join();
@@ -320,36 +403,89 @@ fn watching_a_lane_switches_the_single_stream() {
 
     // --- watch lane 1 --------------------------------------------------------
     assert!(handle.watch_lane(Some(1)));
-    let transcript = updates.next(deadline, |u| matches!(u, Update::Transcript { agent: Agent::Lane(1), .. }));
+    let transcript = updates.next(deadline, |u| {
+        matches!(
+            u,
+            Update::Transcript {
+                agent: Agent::Lane(1),
+                ..
+            }
+        )
+    });
     assert!(
         matches!(transcript, Update::Transcript { revision: 1, .. }),
         "a lane's first transcript is its first revision: {transcript:?}"
     );
-    updates.next(deadline, |u| matches!(u, Update::Stream { agent: Agent::Lane(1), status: StreamStatus::Connected }));
+    updates.next(deadline, |u| {
+        matches!(
+            u,
+            Update::Stream {
+                agent: Agent::Lane(1),
+                status: StreamStatus::Connected
+            }
+        )
+    });
 
     // Delegate work to lane 1 and watch its events arrive.
-    assert!(handle.prompt(1, r#"CALL delegate {"lane":1,"task":"engine lane one work"}"#));
-    updates.next(deadline, |u| matches!(u, Update::Event { agent: Agent::Lane(1), kind, .. } if kind == "text-delta"));
+    assert!(handle.prompt(
+        1,
+        r#"CALL delegate {"lane":1,"task":"engine lane one work"}"#
+    ));
+    updates.next(
+        deadline,
+        |u| matches!(u, Update::Event { agent: Agent::Lane(1), kind, .. } if kind == "text-delta"),
+    );
     // The coordinator's stream carries the lane-state transition the lane list folds.
     wait_lane_state(&mut updates, 1, "working", deadline);
 
     // --- switch to lane 2 ----------------------------------------------------
     assert!(handle.watch_lane(Some(2)));
-    updates.next(deadline, |u| matches!(u, Update::Transcript { agent: Agent::Lane(2), .. }));
-    updates.next(deadline, |u| matches!(u, Update::Stream { agent: Agent::Lane(2), status: StreamStatus::Connected }));
+    updates.next(deadline, |u| {
+        matches!(
+            u,
+            Update::Transcript {
+                agent: Agent::Lane(2),
+                ..
+            }
+        )
+    });
+    updates.next(deadline, |u| {
+        matches!(
+            u,
+            Update::Stream {
+                agent: Agent::Lane(2),
+                status: StreamStatus::Connected
+            }
+        )
+    });
     let after_switch = updates.len();
 
     // Lane 1 runs again, delegated while we watch lane 2: its events must NOT
     // reach us — the old stream is closed.
     let t = now();
-    assert!(handle.prompt(2, r#"CALL delegate {"lane":1,"task":"engine lane one again"}"#));
-    updates.next(deadline, |u| matches!(u, Update::Event { agent: Agent::Coordinator, kind, .. } if kind == "settled"));
+    assert!(handle.prompt(
+        2,
+        r#"CALL delegate {"lane":1,"task":"engine lane one again"}"#
+    ));
+    updates.next(
+        deadline,
+        |u| matches!(u, Update::Event { agent: Agent::Coordinator, kind, .. } if kind == "settled"),
+    );
     assert!(
-        fixture.stub.find("lane 1", "engine lane one again", t).is_some(),
+        fixture
+            .stub
+            .find("lane 1", "engine lane one again", t)
+            .is_some(),
         "lane 1 should have run again (the assertion is otherwise vacuous)"
     );
     assert!(
-        !updates.since(after_switch).iter().any(|u| matches!(u, Update::Event { agent: Agent::Lane(1), .. })),
+        !updates.since(after_switch).iter().any(|u| matches!(
+            u,
+            Update::Event {
+                agent: Agent::Lane(1),
+                ..
+            }
+        )),
         "a lane-1 event arrived after the stream was switched away"
     );
 
@@ -359,7 +495,13 @@ fn watching_a_lane_switches_the_single_stream() {
     std::thread::sleep(Duration::from_millis(500));
     updates.pump();
     assert!(
-        !updates.since(after_unwatch).iter().any(|u| matches!(u, Update::Event { agent: Agent::Lane(_), .. })),
+        !updates.since(after_unwatch).iter().any(|u| matches!(
+            u,
+            Update::Event {
+                agent: Agent::Lane(_),
+                ..
+            }
+        )),
         "a lane event arrived after unwatching"
     );
 
@@ -380,9 +522,13 @@ fn refusals_come_back_typed() {
 
     // 409: `/steer` with nothing running.
     assert!(handle.steer(1, "is anyone there?"));
-    let refused = updates.next(deadline, |u| matches!(u, Update::PostResult { req_id: 1, .. }));
+    let refused = updates.next(deadline, |u| {
+        matches!(u, Update::PostResult { req_id: 1, .. })
+    });
     match refused {
-        Update::PostResult { result: Err(error), .. } => {
+        Update::PostResult {
+            result: Err(error), ..
+        } => {
             assert_eq!(error.status, Some(409), "{error:?}");
             assert!(error.not_now, "{error:?}");
             assert!(error.message.contains("no run to steer"), "{error:?}");
@@ -392,9 +538,13 @@ fn refusals_come_back_typed() {
 
     // 400: an empty prompt.
     assert!(handle.prompt(2, ""));
-    let empty = updates.next(deadline, |u| matches!(u, Update::PostResult { req_id: 2, .. }));
+    let empty = updates.next(deadline, |u| {
+        matches!(u, Update::PostResult { req_id: 2, .. })
+    });
     match empty {
-        Update::PostResult { result: Err(error), .. } => {
+        Update::PostResult {
+            result: Err(error), ..
+        } => {
             assert_eq!(error.status, Some(400), "{error:?}");
             assert!(!error.not_now, "{error:?}");
         }
@@ -403,7 +553,9 @@ fn refusals_come_back_typed() {
 
     // `/interrupt` with nothing to interrupt is *not* a refusal.
     assert!(handle.interrupt(3));
-    let interrupted = updates.next(deadline, |u| matches!(u, Update::PostResult { req_id: 3, .. }));
+    let interrupted = updates.next(deadline, |u| {
+        matches!(u, Update::PostResult { req_id: 3, .. })
+    });
     assert!(
         matches!(interrupted, Update::PostResult { result: Ok(_), .. }),
         "interrupt with nothing running should still succeed"
@@ -422,15 +574,26 @@ fn shutdown_leaves_no_process() {
     let deadline = Instant::now() + Duration::from_secs(150);
 
     let ready = updates.next(deadline, |u| matches!(u, Update::Ready { .. }));
-    let Update::Ready { pid, .. } = ready else { unreachable!() };
+    let Update::Ready { pid, .. } = ready else {
+        unreachable!()
+    };
     assert!(swarm_client::process_alive(pid));
 
     assert!(handle.shutdown());
     let exited = updates.next(deadline, |u| matches!(u, Update::Exited { .. }));
-    let Update::Exited { outcome } = exited else { unreachable!() };
-    assert_ne!(outcome, swarm_client::ShutdownOutcome::Killed, "{outcome:?}");
+    let Update::Exited { outcome } = exited else {
+        unreachable!()
+    };
+    assert_ne!(
+        outcome,
+        swarm_client::ShutdownOutcome::Killed,
+        "{outcome:?}"
+    );
     handle.join();
-    assert!(!swarm_client::process_alive(pid), "the swarm process is gone");
+    assert!(
+        !swarm_client::process_alive(pid),
+        "the swarm process is gone"
+    );
 }
 
 /// #6 — a server that never comes up carries its log tail (§3).
@@ -454,7 +617,10 @@ fn boot_failure_carries_the_log_tail() {
     let failed = updates.next(deadline, |u| matches!(u, Update::BootFailed { .. }));
     match failed {
         Update::BootFailed { message, log_tail } => {
-            assert!(log_tail.contains("Unknown argument"), "log tail was {log_tail:?} ({message})");
+            assert!(
+                log_tail.contains("Unknown argument"),
+                "log tail was {log_tail:?} ({message})"
+            );
         }
         other => panic!("expected a boot failure, got {}", kind_of(&other)),
     }
@@ -472,16 +638,25 @@ fn a_restarted_coordinator_resyncs() {
     let deadline = Instant::now() + Duration::from_secs(240);
 
     let ready = updates.next(deadline, |u| matches!(u, Update::Ready { .. }));
-    let Update::Ready { health, pid, .. } = ready else { unreachable!() };
+    let Update::Ready { health, pid, .. } = ready else {
+        unreachable!()
+    };
     updates.wait_connected(Agent::Coordinator, deadline);
     // The coordinator runs as its supervisor's child, so its pid is not the
     // process this tab started.
-    assert_ne!(health.pid, pid, "the coordinator should be a separate process");
+    assert_ne!(
+        health.pid, pid,
+        "the coordinator should be a separate process"
+    );
     let revision_before = updates
         .all
         .iter()
         .filter_map(|u| match u {
-            Update::Transcript { agent: Agent::Coordinator, revision, .. } => Some(*revision),
+            Update::Transcript {
+                agent: Agent::Coordinator,
+                revision,
+                ..
+            } => Some(*revision),
             _ => None,
         })
         .max()
@@ -493,10 +668,22 @@ fn a_restarted_coordinator_resyncs() {
 
     // The stream drops, then comes back...
     updates.next(deadline, |u| {
-        matches!(u, Update::Stream { agent: Agent::Coordinator, status: StreamStatus::Reconnecting { .. } })
+        matches!(
+            u,
+            Update::Stream {
+                agent: Agent::Coordinator,
+                status: StreamStatus::Reconnecting { .. }
+            }
+        )
     });
     updates.next(deadline, |u| {
-        matches!(u, Update::Stream { agent: Agent::Coordinator, status: StreamStatus::Connected })
+        matches!(
+            u,
+            Update::Stream {
+                agent: Agent::Coordinator,
+                status: StreamStatus::Connected
+            }
+        )
     });
     // ...and the view is refetched with a higher revision.
     let resynced = updates.next(deadline, |u| {
@@ -522,7 +709,9 @@ fn a_dead_server_is_reported() {
     let deadline = Instant::now() + Duration::from_secs(150);
 
     let ready = updates.next(deadline, |u| matches!(u, Update::Ready { .. }));
-    let Update::Ready { pid, .. } = ready else { unreachable!() };
+    let Update::Ready { pid, .. } = ready else {
+        unreachable!()
+    };
     updates.wait_connected(Agent::Coordinator, deadline);
 
     // The supervisor puts itself and everything it starts in one process group
@@ -538,7 +727,10 @@ fn a_dead_server_is_reported() {
     while swarm_client::process_alive(pid) && Instant::now() < gone {
         std::thread::sleep(Duration::from_millis(50));
     }
-    assert!(!swarm_client::process_alive(pid), "the swarm process is gone");
+    assert!(
+        !swarm_client::process_alive(pid),
+        "the swarm process is gone"
+    );
     handle.join();
 }
 
@@ -560,7 +752,9 @@ fn a_handle_stops_within_a_second_while_booting() {
 
     let (mut handle, rx) = TabEngine::start(TabSpec::new(&script, &project, dir.path()));
     let mut updates = Updates::new(rx);
-    updates.next(Instant::now() + Duration::from_secs(20), |u| matches!(u, Update::Booting));
+    updates.next(Instant::now() + Duration::from_secs(20), |u| {
+        matches!(u, Update::Booting)
+    });
     // Let readiness polling get going.
     std::thread::sleep(Duration::from_millis(300));
 
@@ -569,16 +763,25 @@ fn a_handle_stops_within_a_second_while_booting() {
     handle.join();
     let took = started.elapsed();
     eprintln!("aborted boot took {took:?}");
-    assert!(took < Duration::from_secs(2), "the aborted boot took {took:?}");
+    assert!(
+        took < Duration::from_secs(2),
+        "the aborted boot took {took:?}"
+    );
 
     updates.pump();
     assert!(
-        !updates.all.iter().any(|u| matches!(u, Update::BootFailed { .. })),
+        !updates
+            .all
+            .iter()
+            .any(|u| matches!(u, Update::BootFailed { .. })),
         "an aborted boot is not a failure to show: {:?}",
         updates.all.iter().map(kind_of).collect::<Vec<_>>()
     );
     assert!(
-        updates.all.iter().any(|u| matches!(u, Update::Exited { .. })),
+        updates
+            .all
+            .iter()
+            .any(|u| matches!(u, Update::Exited { .. })),
         "the tab says it stopped"
     );
     assert!(!running(&script), "the slow server is gone");
@@ -595,8 +798,11 @@ fn the_catalog_probe_learns_registry_and_kernel_apis() {
     let home = dir.join("home");
     std::fs::create_dir_all(&home).expect("temp home");
     // The model the userspace probe should find, registered as init.lisp does.
-    std::fs::write(home.join("init.lisp"), swarm_client::harness::stub_init_lisp(1, "catalog-model"))
-        .expect("write init.lisp");
+    std::fs::write(
+        home.join("init.lisp"),
+        swarm_client::harness::stub_init_lisp(1, "catalog-model"),
+    )
+    .expect("write init.lisp");
     let probe_dir = dir.join("probe");
 
     let updates = catalog::learn_with(
@@ -604,29 +810,45 @@ fn the_catalog_probe_learns_registry_and_kernel_apis() {
         &probe_dir,
         vec![("EVO_HOME".to_owned(), home.to_string_lossy().into_owned())],
     );
-    let update = updates
-        .recv_blocking()
-        .expect("the probe should answer");
+    let update = updates.recv_blocking().expect("the probe should answer");
     match update {
-        CatalogUpdate::Done { registry, kernel_apis } => {
+        CatalogUpdate::Done {
+            registry,
+            kernel_apis,
+        } => {
             let models = registry["models"].as_array().expect("models");
             assert!(
                 models.iter().any(|model| model["id"] == "catalog-model"),
                 "the userspace registry should carry the init.lisp model: {registry}"
             );
             assert!(
-                registry["apis"].as_array().unwrap().iter().any(|api| api == "anthropic-messages"),
+                registry["apis"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|api| api == "anthropic-messages"),
                 "{registry}"
             );
             let apis = kernel_apis.expect("the --no-userspace probe should have answered");
-            assert!(apis.iter().any(|api| api == "anthropic-messages"), "{apis:?}");
+            assert!(
+                apis.iter().any(|api| api == "anthropic-messages"),
+                "{apis:?}"
+            );
         }
-        CatalogUpdate::Failed { message, log_tail } => panic!("catalog failed: {message}\n{log_tail}"),
+        CatalogUpdate::Failed { message, log_tail } => {
+            panic!("catalog failed: {message}\n{log_tail}")
+        }
     }
 
     // Both probes stopped the ladder's way: it removes the token it wrote.
-    assert!(!probe_dir.join("userspace/token").exists(), "the userspace probe kept its token");
-    assert!(!probe_dir.join("kernel/token").exists(), "the kernel probe kept its token");
+    assert!(
+        !probe_dir.join("userspace/token").exists(),
+        "the userspace probe kept its token"
+    );
+    assert!(
+        !probe_dir.join("kernel/token").exists(),
+        "the kernel probe kept its token"
+    );
 }
 
 /// #11 — every tab stops at once (§3, §9.8).
@@ -649,8 +871,14 @@ fn shutdown_all_stops_every_tab() {
         tab_engine::shutdown_all(vec![first_handle, second_handle], Duration::from_secs(60));
     assert!(report.all_exited(), "{report:?}");
     assert_eq!(report.exited.len(), 2, "{report:?}");
-    assert!(!swarm_client::process_alive(first_pid), "the first swarm is gone");
-    assert!(!swarm_client::process_alive(second_pid), "the second swarm is gone");
+    assert!(
+        !swarm_client::process_alive(first_pid),
+        "the first swarm is gone"
+    );
+    assert!(
+        !swarm_client::process_alive(second_pid),
+        "the second swarm is gone"
+    );
 }
 
 /// #12 — the lane list is read again when a lane's launch announcement says it is
@@ -721,9 +949,16 @@ fn a_lane_shown_while_it_is_down_fills_its_rows_when_it_returns() {
     // Lane 1 runs something first, so its transcript has rows to come back with —
     // and so a transcript that arrives empty cannot pass for the real thing.
     let t = now();
-    assert!(handle.prompt(1, r#"CALL delegate {"lane":1,"task":"engine lane one pre-crash"}"#));
+    assert!(handle.prompt(
+        1,
+        r#"CALL delegate {"lane":1,"task":"engine lane one pre-crash"}"#
+    ));
     let ran = Instant::now() + Duration::from_secs(120);
-    while fixture.stub.find("lane 1", "engine lane one pre-crash", t).is_none() {
+    while fixture
+        .stub
+        .find("lane 1", "engine lane one pre-crash", t)
+        .is_none()
+    {
         assert!(Instant::now() < ran, "lane 1 never ran the delegated task");
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -739,20 +974,40 @@ fn a_lane_shown_while_it_is_down_fills_its_rows_when_it_returns() {
     std::thread::sleep(Duration::from_millis(750));
     updates.pump();
     assert!(
-        !updates
-            .since(before)
-            .iter()
-            .any(|u| matches!(u, Update::Transcript { agent: Agent::Lane(1), .. })),
+        !updates.since(before).iter().any(|u| matches!(
+            u,
+            Update::Transcript {
+                agent: Agent::Lane(1),
+                ..
+            }
+        )),
         "the lane's server is down, so there are no rows to fetch yet"
     );
 
     // Its supervisor brings it back, its stream connects, and *that* is when the
     // rows arrive — as the lane's first revision, since no view of it was ever read.
-    let transcript = updates.next(deadline, |u| matches!(u, Update::Transcript { agent: Agent::Lane(1), .. }));
+    let transcript = updates.next(deadline, |u| {
+        matches!(
+            u,
+            Update::Transcript {
+                agent: Agent::Lane(1),
+                ..
+            }
+        )
+    });
     match &transcript {
-        Update::Transcript { agent: Agent::Lane(1), revision, raw } => {
-            assert_eq!(*revision, 1, "a revision means a view was read: {transcript:?}");
-            let messages = raw["messages"].as_array().expect("a transcript carries messages");
+        Update::Transcript {
+            agent: Agent::Lane(1),
+            revision,
+            raw,
+        } => {
+            assert_eq!(
+                *revision, 1,
+                "a revision means a view was read: {transcript:?}"
+            );
+            let messages = raw["messages"]
+                .as_array()
+                .expect("a transcript carries messages");
             assert!(!messages.is_empty(), "the resumed lane's own rows: {raw}");
         }
         other => panic!("expected lane 1's transcript, got {}", kind_of(other)),
@@ -784,6 +1039,99 @@ fn lane_pid(updates: &mut Updates, deadline: Instant, lane: u64) -> u32 {
     }
 }
 
+/// #14 — a server that goes silent is noticed, and a `POST` does not hold the tab.
+///
+/// `SIGSTOP` is not a crash: the swarm is alive and answers nothing at all — no
+/// keepalives, no replies — so the only thing that can end the tab's belief that it
+/// is connected is the client's own patience. Two of them, independent: the stream's
+/// (no bytes for the stream timeout ⇒ reconnecting) and the request's (no reply for
+/// the request timeout ⇒ the `POST` comes back as an error). The `POST` runs on a
+/// thread of its own, so the stream's news reaches the UI *while* the `POST` is still
+/// waiting — which is what the order of the two updates below says, with the stream's
+/// patience deliberately far shorter than the request's.
+#[test]
+fn a_silent_swarm_is_noticed_while_a_post_waits() {
+    let _guard = one_swarm();
+    let fixture = fixture(2);
+    let spec = spec(&fixture, 2).with_http_timeouts(Duration::from_secs(6), Duration::from_secs(1));
+    let (mut handle, rx) = TabEngine::start(spec);
+    let mut updates = Updates::new(rx);
+    let deadline = Instant::now() + Duration::from_secs(120);
+
+    let pid = ready_pid(&mut updates, deadline);
+    updates.wait_connected(Agent::Coordinator, deadline);
+
+    // Freeze it: every process this test started, and nothing else.
+    let stopped = unsafe { libc::killpg(pid as libc::pid_t, libc::SIGSTOP) };
+    assert_eq!(stopped, 0, "could not stop the swarm");
+
+    // A turn typed at a frozen swarm: the POST goes out and nothing comes back.
+    assert!(handle.prompt(1, "the frozen swarm cannot take this"));
+
+    let reconnecting = updates.next(deadline, |u| {
+        matches!(
+            u,
+            Update::Stream {
+                agent: Agent::Coordinator,
+                status: StreamStatus::Reconnecting { .. }
+            }
+        )
+    });
+    assert!(matches!(reconnecting, Update::Stream { .. }));
+
+    // …and the request ends as a typed failure rather than hanging.
+    let posted = updates.next(deadline, |u| matches!(u, Update::PostResult { .. }));
+    match posted {
+        Update::PostResult { req_id, result } => {
+            assert_eq!(req_id, 1);
+            let error = result.expect_err("a POST nobody answered is not a success");
+            eprintln!("the frozen POST said: {error:?}");
+            assert!(
+                error.status.is_none(),
+                "a silence is not a status: {error:?}"
+            );
+        }
+        other => panic!("expected a post result, got {}", kind_of(&other)),
+    }
+
+    // Which came first: the stream's notice, while the POST was still waiting. Had
+    // the POST been issued on the engine's own loop, its answer would have landed
+    // before the stream's queued message was ever looked at.
+    let stream_at = updates
+        .all
+        .iter()
+        .position(|u| {
+            matches!(
+                u,
+                Update::Stream {
+                    agent: Agent::Coordinator,
+                    status: StreamStatus::Reconnecting { .. }
+                }
+            )
+        })
+        .expect("the stream gave up");
+    let post_at = updates
+        .all
+        .iter()
+        .position(|u| matches!(u, Update::PostResult { .. }))
+        .expect("the POST came back");
+    assert!(
+        stream_at < post_at,
+        "the stream's news arrived while the POST was still waiting"
+    );
+
+    // Let it breathe, then leave the ladder to do its work.
+    unsafe { libc::killpg(pid as libc::pid_t, libc::SIGCONT) };
+    handle.shutdown();
+    updates.next(deadline, |u| matches!(u, Update::Exited { .. }));
+    let gone = Instant::now() + Duration::from_secs(60);
+    while swarm_client::process_alive(pid) && Instant::now() < gone {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(!swarm_client::process_alive(pid), "the swarm is gone");
+    handle.join();
+}
+
 fn ready_pid(updates: &mut Updates, deadline: Instant) -> u32 {
     match updates.next(deadline, |u| matches!(u, Update::Ready { .. })) {
         Update::Ready { pid, .. } => pid,
@@ -793,7 +1141,11 @@ fn ready_pid(updates: &mut Updates, deadline: Instant) -> u32 {
 
 /// Whether a process whose command line names PATH is running.
 fn running(path: &Path) -> bool {
-    let Ok(output) = std::process::Command::new("pgrep").arg("-f").arg(path).output() else {
+    let Ok(output) = std::process::Command::new("pgrep")
+        .arg("-f")
+        .arg(path)
+        .output()
+    else {
         // No pgrep: the timing assertion above is the real evidence.
         return false;
     };

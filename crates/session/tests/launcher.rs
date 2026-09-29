@@ -24,7 +24,11 @@ fn kernel_apis(registry: &serde_json::Value) -> serde_json::Value {
 }
 
 fn labels(chooser: &Chooser) -> Vec<&str> {
-    chooser.options.iter().map(|option| option.label.as_str()).collect()
+    chooser
+        .options
+        .iter()
+        .map(|option| option.label.as_str())
+        .collect()
 }
 
 fn entry(path: &str, folder: &str, when: When) -> HistoryEntry {
@@ -48,14 +52,25 @@ fn the_coordinator_chooser_lists_every_model_after_default() {
     assert_eq!(labels(&chooser), vec!["Default", "stub-a", "stub-b"]);
     assert_eq!(chooser.options[0].key, DEFAULT_KEY);
     assert_eq!(chooser.options[0].detail, "evo's own default");
-    assert!(!chooser.uncertain, "the coordinator can use whatever its registry lists");
+    assert!(
+        !chooser.uncertain,
+        "the coordinator can use whatever its registry lists"
+    );
     assert!(chooser.options.iter().all(|option| option.available));
-    assert!(chooser.options.iter().all(|option| option.unavailable_reason.is_none()));
+    assert!(chooser
+        .options
+        .iter()
+        .all(|option| option.unavailable_reason.is_none()));
 
-    let stub_a = chooser.option("stub-a@stub").expect("the key names id and provider");
+    let stub_a = chooser
+        .option("stub-a@stub")
+        .expect("the key names id and provider");
     assert_eq!(stub_a.label, "stub-a");
     assert_eq!(stub_a.detail, "200k ctx · vision · effort low–max");
-    assert_eq!(stub_a.model(), Some(("stub-a".to_string(), "stub".to_string())));
+    assert_eq!(
+        stub_a.model(),
+        Some(("stub-a".to_string(), "stub".to_string()))
+    );
     assert!(stub_a.available && stub_a.unavailable_reason.is_none());
 
     // Sorted by provider then id, and detail follows the registry's own fields.
@@ -72,13 +87,19 @@ fn the_coordinator_chooser_lists_every_model_after_default() {
 #[test]
 fn an_id_under_two_providers_names_its_provider() {
     let chooser = coordinator_chooser(&fixture("registry-two-providers.json"));
-    assert_eq!(labels(&chooser), vec!["Default", "stub-a (stub)", "stub-a (stub2)"]);
+    assert_eq!(
+        labels(&chooser),
+        vec!["Default", "stub-a (stub)", "stub-a (stub2)"]
+    );
     assert_eq!(
         chooser.options[1].model(),
         Some(("stub-a".to_string(), "stub".to_string())),
         "the two options are distinct models, not a duplicate"
     );
-    assert_eq!(chooser.options[2].model(), Some(("stub-a".to_string(), "stub2".to_string())));
+    assert_eq!(
+        chooser.options[2].model(),
+        Some(("stub-a".to_string(), "stub2".to_string()))
+    );
     assert_ne!(chooser.options[1].key, chooser.options[2].key);
 }
 
@@ -105,12 +126,22 @@ fn the_coordinator_offers_only_the_registration_a_bare_id_reaches() {
     );
 
     let chooser = coordinator_chooser(&registry);
-    assert_eq!(labels(&chooser), vec!["Default", "stub-a (stub)", "stub-a (stub2)"]);
-    let reached = chooser.option("stub-a@stub").expect("the first registration");
+    assert_eq!(
+        labels(&chooser),
+        vec!["Default", "stub-a (stub)", "stub-a (stub2)"]
+    );
+    let reached = chooser
+        .option("stub-a@stub")
+        .expect("the first registration");
     assert!(reached.available && reached.unavailable_reason.is_none());
-    assert_eq!(reached.model(), Some(("stub-a".to_string(), "stub".to_string())));
+    assert_eq!(
+        reached.model(),
+        Some(("stub-a".to_string(), "stub".to_string()))
+    );
 
-    let other = chooser.option("stub-a@stub2").expect("the second registration is still listed");
+    let other = chooser
+        .option("stub-a@stub2")
+        .expect("the second registration is still listed");
     assert!(!other.available, "a bare id never reaches it");
     assert_eq!(
         other.unavailable_reason.as_deref(),
@@ -133,14 +164,21 @@ fn the_coordinator_offers_only_the_registration_a_bare_id_reaches() {
     );
 
     // Nothing else is affected: an unambiguous id, and the one-provider capture, stay whole.
-    assert!(coordinator_chooser(&fixture("registry.json")).models().all(|option| option.available));
+    assert!(coordinator_chooser(&fixture("registry.json"))
+        .models()
+        .all(|option| option.available));
 
     // The lanes chooser is untouched (§9.6 writes the provider into swarm.lisp, so every
     // registration is its own choice there), and the labels keep naming the provider.
     let lanes = lanes_chooser(&registry, Some(&kernel_apis(&registry)));
-    assert_eq!(labels(&lanes), vec!["Default", "stub-a (stub)", "stub-a (stub2)"]);
+    assert_eq!(
+        labels(&lanes),
+        vec!["Default", "stub-a (stub)", "stub-a (stub2)"]
+    );
     assert!(
-        lanes.models().all(|option| option.available && option.unavailable_reason.is_none()),
+        lanes
+            .models()
+            .all(|option| option.available && option.unavailable_reason.is_none()),
         "lanes: {:?}",
         lanes.options
     );
@@ -174,10 +212,19 @@ fn the_lanes_chooser_measures_models_against_the_kernel_api_set() {
     let gpt = chooser.option("gpt-9@openai").expect("gpt-9");
     assert!(!gpt.available);
     assert_eq!(gpt.unavailable_reason.as_deref(), Some(NEEDS_EXTENSION_API));
-    assert_eq!(gpt.detail, "1M ctx · vision · effort low", "a whole million reads 1M, and a single effort level has no range");
-    assert!(chooser.option("mystery@acme").is_some_and(|option| !option.available),
-        "a model that names no API cannot be checked, so a lane is not promised it");
-    assert!(chooser.option("stub-a@stub").is_some_and(|option| option.available));
+    assert_eq!(
+        gpt.detail, "1M ctx · vision · effort low",
+        "a whole million reads 1M, and a single effort level has no range"
+    );
+    assert!(
+        chooser
+            .option("mystery@acme")
+            .is_some_and(|option| !option.available),
+        "a model that names no API cannot be checked, so a lane is not promised it"
+    );
+    assert!(chooser
+        .option("stub-a@stub")
+        .is_some_and(|option| option.available));
     assert_eq!(
         chooser.option("stub-a@stub").unwrap().detail,
         "200k ctx · vision · effort low–max"
@@ -187,7 +234,9 @@ fn the_lanes_chooser_measures_models_against_the_kernel_api_set() {
     // its availability is unverified (§9.4).
     let unknown = lanes_chooser(&registry, None);
     assert!(unknown.uncertain);
-    assert!(unknown.models().all(|option| option.available && option.unavailable_reason.is_none()));
+    assert!(unknown
+        .models()
+        .all(|option| option.available && option.unavailable_reason.is_none()));
     // A null `apis` is "no probe has said", not "no API exists".
     let null = lanes_chooser(&registry, Some(&json!(null)));
     assert!(null.uncertain);
@@ -234,7 +283,9 @@ fn the_detail_shows_windows_the_way_evos_picker_does() {
         .collect();
     let chooser = coordinator_chooser(&json!({ "models": models }));
     for (window, expected) in windows {
-        let option = chooser.option(&format!("m{}@stub", window)).expect("every model is listed");
+        let option = chooser
+            .option(&format!("m{}@stub", window))
+            .expect("every model is listed");
         assert_eq!(option.detail, format!("{} ctx", expected), "{window}");
     }
 
@@ -254,7 +305,10 @@ fn the_workers_chooser_spans_one_to_sixty_four() {
     assert_eq!(chooser.options[1].key, "1");
     assert_eq!(chooser.options.last().unwrap().key, "64");
     assert!(chooser.options.iter().all(|option| option.available));
-    assert!(chooser.options.iter().all(|option| option.model().is_none()));
+    assert!(chooser
+        .options
+        .iter()
+        .all(|option| option.model().is_none()));
 
     // The configured value is what Default means, so the label says it: `Default (6)`
     // (§7.2's row 3, where Default = evo's own `:swarm-workers`, else 6).
@@ -274,11 +328,23 @@ fn the_configured_swarm_workers_comes_from_the_registry_settings() {
     // The capture's settings carry only the model; `:swarm-workers` appears once a project
     // or the user sets it (`docs/swarm.md`), and crosses the wire as `swarm_workers`.
     assert_eq!(swarm_workers_setting(&fixture("registry.json")), None);
-    assert_eq!(swarm_workers_setting(&json!({ "settings": { "swarm_workers": 6 } })), Some(6));
-    assert_eq!(swarm_workers_setting(&json!({ "settings": { "swarm_workers": null } })), None);
-    assert_eq!(swarm_workers_setting(&json!({ "settings": { "swarm_workers": 0 } })), None);
-    assert_eq!(swarm_workers_setting(&json!({ "settings": { "swarm_workers": 99 } })), Some(99),
-        "outside the chooser's 1–64 range, but still what Default would mean");
+    assert_eq!(
+        swarm_workers_setting(&json!({ "settings": { "swarm_workers": 6 } })),
+        Some(6)
+    );
+    assert_eq!(
+        swarm_workers_setting(&json!({ "settings": { "swarm_workers": null } })),
+        None
+    );
+    assert_eq!(
+        swarm_workers_setting(&json!({ "settings": { "swarm_workers": 0 } })),
+        None
+    );
+    assert_eq!(
+        swarm_workers_setting(&json!({ "settings": { "swarm_workers": 99 } })),
+        Some(99),
+        "outside the chooser's 1–64 range, but still what Default would mean"
+    );
     assert_eq!(swarm_workers_setting(&json!({ "settings": {} })), None);
     assert_eq!(swarm_workers_setting(&json!({})), None);
 }
@@ -288,7 +354,11 @@ fn the_configured_swarm_workers_comes_from_the_registry_settings() {
 #[test]
 fn the_plan_passes_only_what_was_chosen() {
     let mut tab = Launcher::new();
-    assert_eq!(tab.plan(), LaunchPlan::default(), "an untouched tab passes nothing");
+    assert_eq!(
+        tab.plan(),
+        LaunchPlan::default(),
+        "an untouched tab passes nothing"
+    );
     assert_eq!(tab.selected_key(Choice::Coordinator), DEFAULT_KEY);
 
     assert!(tab.set_registry(&fixture("registry.json")));
@@ -311,8 +381,14 @@ fn the_plan_passes_only_what_was_chosen() {
     // choosers come from `/registry`, so a key that is not there selects nothing.
     assert!(!tab.select(Choice::Coordinator, "stub-b@stub"));
     assert!(!tab.select(Choice::Coordinator, "not-a-model"));
-    assert_eq!(tab.plan().model, Some(("stub-b".to_string(), "stub".to_string())));
-    assert_eq!(tab.selected(Choice::Coordinator).unwrap().key, "stub-b@stub");
+    assert_eq!(
+        tab.plan().model,
+        Some(("stub-b".to_string(), "stub".to_string()))
+    );
+    assert_eq!(
+        tab.selected(Choice::Coordinator).unwrap().key,
+        "stub-b@stub"
+    );
 
     // Back to Default: nothing is passed.
     assert!(tab.select(Choice::Coordinator, DEFAULT_KEY));
@@ -332,15 +408,24 @@ fn the_plan_passes_only_what_was_chosen() {
     // when the option itself is gone.
     assert!(tab.set_registry(&fixture("registry.json")));
     assert!(tab.select(Choice::Lanes, "stub-b@stub"));
-    assert!(!tab.set_registry(&fixture("registry.json")), "the same catalog is not a change");
+    assert!(
+        !tab.set_registry(&fixture("registry.json")),
+        "the same catalog is not a change"
+    );
     assert_eq!(tab.selected_key(Choice::Lanes), "stub-b@stub");
-    assert_eq!(tab.plan().lanes_model, Some(("stub-b".to_string(), "stub".to_string())));
+    assert_eq!(
+        tab.plan().lanes_model,
+        Some(("stub-b".to_string(), "stub".to_string()))
+    );
 }
 
 #[test]
 fn the_empty_tab_reports_which_updates_changed_it() {
     let mut tab = Launcher::new();
-    assert!(tab.set_registry(&fixture("registry.json")), "the first registry is news");
+    assert!(
+        tab.set_registry(&fixture("registry.json")),
+        "the first registry is news"
+    );
 
     // A probe registry is both halves at once: the catalog and the kernel's API set.
     let mut probe = Launcher::new();
@@ -358,7 +443,10 @@ fn the_empty_tab_reports_which_updates_changed_it() {
     assert!(tab.lanes().uncertain);
     assert!(tab.set_kernel_apis(Some(&kernel_apis(&fixture("registry.json")))));
     assert!(!tab.lanes().uncertain);
-    assert!(tab.set_kernel_apis(None), "forgetting the set is a change too");
+    assert!(
+        tab.set_kernel_apis(None),
+        "forgetting the set is a change too"
+    );
 
     // The configured worker count is a change once, and Default keeps meaning it.
     let mut tab = Launcher::new();
@@ -372,7 +460,10 @@ fn the_empty_tab_reports_which_updates_changed_it() {
 
 #[test]
 fn the_note_names_the_folders_swarm_lisp() {
-    assert_eq!(swarm_lisp_path("/Users/me/coding/foo"), "/Users/me/coding/foo/.evo/swarm.lisp");
+    assert_eq!(
+        swarm_lisp_path("/Users/me/coding/foo"),
+        "/Users/me/coding/foo/.evo/swarm.lisp"
+    );
     assert_eq!(
         swarm_lisp_path("/Users/me/coding/foo/"),
         "/Users/me/coding/foo/.evo/swarm.lisp",
@@ -396,12 +487,25 @@ fn the_note_names_the_folders_swarm_lisp() {
 
 #[test]
 fn paths_shorten_around_the_home_directory_only() {
-    assert_eq!(home_short("/Users/me/coding/foo", Some("/Users/me")), "~/coding/foo");
+    assert_eq!(
+        home_short("/Users/me/coding/foo", Some("/Users/me")),
+        "~/coding/foo"
+    );
     assert_eq!(home_short("/Users/me", Some("/Users/me")), "~");
-    assert_eq!(home_short("/Users/me/", Some("/Users/me/")), "~/", "as written, minus the home");
-    assert_eq!(home_short("/Users/melanie/x", Some("/Users/me")), "/Users/melanie/x",
-        "a sibling whose name merely starts with the home path is left alone");
-    assert_eq!(home_short("/other/place", Some("/Users/me")), "/other/place");
+    assert_eq!(
+        home_short("/Users/me/", Some("/Users/me/")),
+        "~/",
+        "as written, minus the home"
+    );
+    assert_eq!(
+        home_short("/Users/melanie/x", Some("/Users/me")),
+        "/Users/melanie/x",
+        "a sibling whose name merely starts with the home path is left alone"
+    );
+    assert_eq!(
+        home_short("/other/place", Some("/Users/me")),
+        "/other/place"
+    );
     assert_eq!(home_short("/Users/me/x", None), "/Users/me/x");
 }
 
@@ -410,7 +514,11 @@ fn paths_shorten_around_the_home_directory_only() {
 #[test]
 fn history_rows_merge_by_session_newest_first() {
     let now = 1790683200; // 2026-09-29T12:00:00Z
-    let mut scanned = entry("/sessions/a.sexp", "/Users/me/coding/foo", When::Epoch(now - 2 * 3600));
+    let mut scanned = entry(
+        "/sessions/a.sexp",
+        "/Users/me/coding/foo",
+        When::Epoch(now - 2 * 3600),
+    );
     scanned.lanes = Some(4);
     scanned.lanes_model = Some("claude-4".to_string());
     scanned.source = HistorySource::Scan;
@@ -418,20 +526,34 @@ fn history_rows_merge_by_session_newest_first() {
     // The same session from the app's own recents: same path, and it knows the model the
     // scan could not (and no lane count) — and, unlike the scan, that the tab was open when
     // the app last quit.
-    let mut recent = entry("/sessions/a.sexp", "/Users/me/coding/foo", When::Epoch(now - 2 * 3600));
+    let mut recent = entry(
+        "/sessions/a.sexp",
+        "/Users/me/coding/foo",
+        When::Epoch(now - 2 * 3600),
+    );
     recent.coordinator_model = Some("gpt-5".to_string());
     recent.source = HistorySource::Recent;
     recent.open_at_quit = true;
 
     // Another session, older, and a third whose header timestamp is an RFC3339 string.
-    let mut older = entry("/sessions/b.sexp", "/Users/me/coding/bar/", When::Text("2026-09-27T09:00:00Z".into()));
+    let mut older = entry(
+        "/sessions/b.sexp",
+        "/Users/me/coding/bar/",
+        When::Text("2026-09-27T09:00:00Z".into()),
+    );
     older.lanes = Some(1);
-    let third = entry("/sessions/c.sexp", "/Users/me/coding/baz", When::Text("2026-09-29T11:59:30Z".into()));
+    let third = entry(
+        "/sessions/c.sexp",
+        "/Users/me/coding/baz",
+        When::Text("2026-09-29T11:59:30Z".into()),
+    );
 
     let rows = history_rows(&[scanned, older, recent, third], now, 0, Some("/Users/me"));
     assert_eq!(rows.len(), 3, "the duplicate session is one row");
     assert_eq!(
-        rows.iter().map(|row| row.title.as_str()).collect::<Vec<_>>(),
+        rows.iter()
+            .map(|row| row.title.as_str())
+            .collect::<Vec<_>>(),
         vec!["baz", "foo", "bar"],
         "newest first, and a `just now` row leads"
     );
@@ -454,8 +576,15 @@ fn history_rows_merge_by_session_newest_first() {
     assert_eq!(foo.subtitle, "~/coding/foo");
     assert_eq!(foo.meta, "4 lanes · 2h ago · coordinator: gpt-5");
     assert_eq!(foo.session_path, "/sessions/a.sexp");
-    assert_eq!(foo.folder, "/Users/me/coding/foo", "the absolute folder comes with the row");
-    assert_eq!(foo.source, HistorySource::Scan, "the newest entry's source is the row's");
+    assert_eq!(
+        foo.folder, "/Users/me/coding/foo",
+        "the absolute folder comes with the row"
+    );
+    assert_eq!(
+        foo.source,
+        HistorySource::Scan,
+        "the newest entry's source is the row's"
+    );
     // Both models survive the merge: the scan knew the lanes', the app's own recents the
     // coordinator's.
     assert_eq!(foo.coordinator_model.as_deref(), Some("gpt-5"));
@@ -470,9 +599,18 @@ fn history_rows_merge_by_session_newest_first() {
     );
 
     let bar = &rows[2];
-    assert_eq!(bar.title, "bar", "a trailing separator is not part of the name");
-    assert_eq!(bar.meta, "1 lane · 2d ago", "`lane` is singular for one, and no model is known");
-    assert!(!bar.open_at_quit, "the scan alone cannot know it was open at quit");
+    assert_eq!(
+        bar.title, "bar",
+        "a trailing separator is not part of the name"
+    );
+    assert_eq!(
+        bar.meta, "1 lane · 2d ago",
+        "`lane` is singular for one, and no model is known"
+    );
+    assert!(
+        !bar.open_at_quit,
+        "the scan alone cannot know it was open at quit"
+    );
     // The RFC3339 header timestamp reads back as the same instant, at the offset asked for.
     assert_eq!(
         bar.tooltip,
@@ -483,14 +621,30 @@ fn history_rows_merge_by_session_newest_first() {
 #[test]
 fn a_history_entry_with_no_usable_time_sorts_last_and_says_nothing() {
     let now = 1790683200;
-    let mut unknown = entry("/sessions/x.sexp", "/Users/me/coding/x", When::Text("not a timestamp".into()));
+    let mut unknown = entry(
+        "/sessions/x.sexp",
+        "/Users/me/coding/x",
+        When::Text("not a timestamp".into()),
+    );
     unknown.lanes = Some(2);
-    let known = entry("/sessions/y.sexp", "/Users/me/coding/y", When::Epoch(now - 30));
+    let known = entry(
+        "/sessions/y.sexp",
+        "/Users/me/coding/y",
+        When::Epoch(now - 30),
+    );
     let rows = history_rows(&[unknown, known], now, 0, Some("/Users/me"));
-    assert_eq!(rows[0].title, "y", "a session with a time sorts above one without");
-    assert_eq!(rows[1].meta, "2 lanes", "the unknown time is left out entirely");
-    assert_eq!(rows[1].tooltip, "/Users/me/coding/x · x.sexp · 2 lanes",
-        "and the tooltip says nothing about the time either");
+    assert_eq!(
+        rows[0].title, "y",
+        "a session with a time sorts above one without"
+    );
+    assert_eq!(
+        rows[1].meta, "2 lanes",
+        "the unknown time is left out entirely"
+    );
+    assert_eq!(
+        rows[1].tooltip, "/Users/me/coding/x · x.sexp · 2 lanes",
+        "and the tooltip says nothing about the time either"
+    );
 }
 
 #[test]
@@ -557,7 +711,11 @@ fn the_rows_read_in_the_callers_own_offset() {
     assert_eq!(relative_time(earlier, midnight, 0), "2d ago");
     assert_eq!(relative_time(earlier, midnight, 8 * 3600), "yesterday");
     // ...and the same holds through the meta line.
-    let mut session = entry("/sessions/a.sexp", "/Users/me/coding/foo", When::Epoch(earlier));
+    let mut session = entry(
+        "/sessions/a.sexp",
+        "/Users/me/coding/foo",
+        When::Epoch(earlier),
+    );
     session.lanes = Some(2);
     let utc = history_rows(std::slice::from_ref(&session), midnight, 0, None);
     let perth = history_rows(std::slice::from_ref(&session), midnight, 8 * 3600, None);
@@ -583,19 +741,40 @@ fn when_reads_both_shapes_evo_hands_out() {
     assert_eq!(When::Epoch(1790673944).epoch_seconds(), Some(1790673944));
     assert_eq!(When::from(1790673944).epoch_seconds(), Some(1790673944));
     assert_eq!(When::from(header).epoch_seconds(), Some(1790673944));
-    assert_eq!(When::from(header.to_string()).epoch_seconds(), Some(1790673944));
+    assert_eq!(
+        When::from(header.to_string()).epoch_seconds(),
+        Some(1790673944)
+    );
 
     // Seconds and a fractional part, and an offset that is not UTC: RFC3339 allows both,
     // and both have to mean the same instant.
-    assert_eq!(When::Text(format!("{}.500Z", &header[..19])).epoch_seconds(), Some(1790673944));
-    assert_eq!(When::Text("2026-09-29T11:25:44+02:00".into()).epoch_seconds(), Some(1790673944));
-    assert_eq!(When::Text("2026-09-29T04:25:44-05:00".into()).epoch_seconds(), Some(1790673944));
+    assert_eq!(
+        When::Text(format!("{}.500Z", &header[..19])).epoch_seconds(),
+        Some(1790673944)
+    );
+    assert_eq!(
+        When::Text("2026-09-29T11:25:44+02:00".into()).epoch_seconds(),
+        Some(1790673944)
+    );
+    assert_eq!(
+        When::Text("2026-09-29T04:25:44-05:00".into()).epoch_seconds(),
+        Some(1790673944)
+    );
 
     // The epoch itself, and a leap day.
-    assert_eq!(When::Text("1970-01-01T00:00:00Z".into()).epoch_seconds(), Some(0));
+    assert_eq!(
+        When::Text("1970-01-01T00:00:00Z".into()).epoch_seconds(),
+        Some(0)
+    );
     // A space where RFC3339 wants a `T` is what a hand-written header may look like.
-    assert_eq!(When::Text("2026-09-29 09:25:44Z".into()).epoch_seconds(), Some(1790673944));
-    assert_eq!(When::Text("2000-02-29T12:00:00Z".into()).epoch_seconds(), Some(951825600));
+    assert_eq!(
+        When::Text("2026-09-29 09:25:44Z".into()).epoch_seconds(),
+        Some(1790673944)
+    );
+    assert_eq!(
+        When::Text("2000-02-29T12:00:00Z".into()).epoch_seconds(),
+        Some(951825600)
+    );
 
     // Anything else is not a timestamp, and the row then says nothing about the time.
     for bad in [

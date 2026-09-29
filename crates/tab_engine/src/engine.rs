@@ -67,7 +67,12 @@ impl TabEngine {
             .name(format!("tab-engine {}", folder.display()))
             .spawn(move || run(spec, engine_mailbox, inbox, updates))
             .ok();
-        let handle = EngineHandle { mailbox, thread, folder, shutdown_requested: false };
+        let handle = EngineHandle {
+            mailbox,
+            thread,
+            folder,
+            shutdown_requested: false,
+        };
         (handle, updates_rx)
     }
 }
@@ -93,12 +98,17 @@ impl EngineHandle {
 
     /// Send a command. `false` means the engine is already gone.
     pub fn send(&self, command: Command) -> bool {
-        self.mailbox.send_blocking(Inbound::Command(command)).is_ok()
+        self.mailbox
+            .send_blocking(Inbound::Command(command))
+            .is_ok()
     }
 
     /// `POST /prompt`.
     pub fn prompt(&self, req_id: ReqId, text: impl Into<String>) -> bool {
-        self.send(Command::Prompt { req_id, text: text.into() })
+        self.send(Command::Prompt {
+            req_id,
+            text: text.into(),
+        })
     }
 
     /// `POST /interrupt`.
@@ -109,7 +119,10 @@ impl EngineHandle {
     /// `POST /steer`. Tests and diagnostics only — a UI turn goes through
     /// [`EngineHandle::prompt`] (§14.7), which the server queues itself.
     pub fn steer(&self, req_id: ReqId, text: impl Into<String>) -> bool {
-        self.send(Command::Steer { req_id, text: text.into() })
+        self.send(Command::Steer {
+            req_id,
+            text: text.into(),
+        })
     }
 
     /// Refetch a view (rows + state).
@@ -131,14 +144,19 @@ impl EngineHandle {
 
     /// Whether the engine thread is still running.
     pub fn is_running(&self) -> bool {
-        self.thread.as_ref().map(|thread| !thread.is_finished()).unwrap_or(false)
+        self.thread
+            .as_ref()
+            .map(|thread| !thread.is_finished())
+            .unwrap_or(false)
     }
 
     /// Stop the tab and wait for the engine thread to finish — for a caller that
     /// wants to see [`Update::Exited`] before it returns.
     pub fn join(mut self) {
         if !self.shutdown_requested {
-            let _ = self.mailbox.send_blocking(Inbound::Command(Command::Shutdown));
+            let _ = self
+                .mailbox
+                .send_blocking(Inbound::Command(Command::Shutdown));
         }
         self.shutdown_requested = true;
         if let Some(thread) = self.thread.take() {
@@ -216,7 +234,9 @@ impl Drop for EngineHandle {
     fn drop(&mut self) {
         if !self.shutdown_requested {
             // Never leave a server behind: the engine never stops on its own.
-            let _ = self.mailbox.send_blocking(Inbound::Command(Command::Shutdown));
+            let _ = self
+                .mailbox
+                .send_blocking(Inbound::Command(Command::Shutdown));
         }
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
@@ -231,11 +251,29 @@ enum Inbound {
     /// because the other variants are small and a `Server` is not.
     Booted(Box<std::result::Result<Server, swarm_client::Error>>),
     Command(Command),
-    Stream { agent: Agent, msg: StreamMsg },
+    Stream {
+        agent: Agent,
+        msg: StreamMsg,
+    },
     /// The deferred lane-list read is due ([`Engine::arm_lanes_refetch`]). It
     /// carries no state: whether it is still wanted is the engine's to decide when
     /// it arrives, so a timer that outlived its episode is simply ignored.
     LanesDue,
+    /// A `POST` came back — or gave up — on the thread it was issued from
+    /// ([`Engine::post_off_loop`]). The engine's loop never waits for one: a server
+    /// that is there but silent answers nothing for a whole request timeout, and the
+    /// stream's own news (a dropped connection, a lane that moved) must reach the UI
+    /// while that is still going on.
+    Posted {
+        req_id: ReqId,
+        result: Result<swarm_client::Envelope, PostError>,
+    },
+    /// A lane list came back (or did not) from the thread that asked for it
+    /// ([`Engine::ask_lanes`]): `None` is a read that failed, which says nothing
+    /// about the lanes and must not be mistaken for one that did.
+    LanesFetched {
+        raw: Option<Value>,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -314,7 +352,10 @@ impl Drop for LiveStream {
 /// Tag every message from one stream with its agent and hand it to the engine.
 fn forward(receiver: Receiver<StreamMsg>, mailbox: Sender<Inbound>, agent: Agent) {
     while let Ok(msg) = receiver.recv_blocking() {
-        if mailbox.send_blocking(Inbound::Stream { agent, msg }).is_err() {
+        if mailbox
+            .send_blocking(Inbound::Stream { agent, msg })
+            .is_err()
+        {
             break;
         }
     }
@@ -329,19 +370,30 @@ struct Streams {
 
 impl Streams {
     fn new(mailbox: Sender<Inbound>) -> Streams {
-        Streams { mailbox, coordinator: None, lane: None }
+        Streams {
+            mailbox,
+            coordinator: None,
+            lane: None,
+        }
     }
 
     fn start_coordinator(&mut self, client: &Client, since: Option<i64>) {
         self.stop_coordinator();
         let target = StreamTarget::coordinator(client, since);
-        self.coordinator = Some(LiveStream::start(target, Agent::Coordinator, self.mailbox.clone()));
+        self.coordinator = Some(LiveStream::start(
+            target,
+            Agent::Coordinator,
+            self.mailbox.clone(),
+        ));
     }
 
     fn start_lane(&mut self, client: &Client, n: u32, since: Option<i64>) {
         self.stop_lane();
         let target = StreamTarget::lane(client, n, since);
-        self.lane = Some((n, LiveStream::start(target, Agent::Lane(n), self.mailbox.clone())));
+        self.lane = Some((
+            n,
+            LiveStream::start(target, Agent::Lane(n), self.mailbox.clone()),
+        ));
     }
 
     fn stop_coordinator(&mut self) {
@@ -380,6 +432,9 @@ struct Engine {
     /// and how many follow-ups the current "a lane is starting" episode has spent.
     lanes_due: Option<Instant>,
     lanes_tries: u32,
+    /// Whether a lane-list read is out with the server already: one at a time, so a
+    /// server that is slow to answer is not asked again on top of itself.
+    lanes_fetching: bool,
 }
 
 fn run(spec: TabSpec, mailbox: Sender<Inbound>, inbox: Receiver<Inbound>, updates: Sender<Update>) {
@@ -394,6 +449,7 @@ fn run(spec: TabSpec, mailbox: Sender<Inbound>, inbox: Receiver<Inbound>, update
         lane_states: HashMap::new(),
         lanes_due: None,
         lanes_tries: 0,
+        lanes_fetching: false,
     };
 
     engine.send(Update::Booting);
@@ -428,7 +484,11 @@ impl Engine {
         if let Ok(registry) = client.registry() {
             self.send(Update::Registry { raw: registry.raw });
         }
-        self.fetch_lanes(client);
+        // The assembly's own read, before the transcript: the boot has just waited
+        // out a server that is up, and the lane list belongs in the same first frame
+        // (the tab draws it above the transcript). Everything after boot goes through
+        // `ask_lanes` instead — a read the loop does not wait for.
+        self.fetch_lanes_now(client);
         // The snapshot is read while the lanes are booting (`starting`), and what
         // they come up as is a transition no event carries (see `LANES_DEBOUNCE`):
         // schedule the read that says.
@@ -441,12 +501,56 @@ impl Engine {
         self.streams.start_coordinator(client, cursor);
     }
 
-    /// `GET /lanes`, sent to the UI and remembered: what each lane's state was is
-    /// what later tells a `lane-state` whether the lane it names is coming up.
-    fn fetch_lanes(&mut self, client: &Client) {
+    /// `GET /lanes` here and now, for [`Engine::assemble`] alone: the boot's own
+    /// first frame, where the lane list is drawn with the transcript it was read
+    /// beside.
+    fn fetch_lanes_now(&mut self, client: &Client) {
         if let Ok(lanes) = client.lanes() {
             self.remember_lane_states(&lanes.raw);
             self.send(Update::Lanes { raw: lanes.raw });
+        }
+    }
+
+    /// Ask `GET /lanes` on a thread of its own; the answer comes back as
+    /// [`Inbound::LanesFetched`] and is folded there.
+    ///
+    /// A read on the engine's own loop would hold everything else — the stream's
+    /// `Disconnected`, a lane's `settled` — for as long as the server made it wait,
+    /// and a server that has stopped answering makes it wait out the whole request
+    /// timeout. That is the difference between the tab noticing within its 45 s
+    /// stream patience and the tab noticing half a minute later (§9.7). One read is
+    /// in flight at a time: an answer that is already on its way is as fresh as the
+    /// one being asked for.
+    fn ask_lanes(&mut self, client: &Client) {
+        if self.lanes_fetching {
+            return;
+        }
+        self.lanes_fetching = true;
+        let mailbox = self.mailbox.clone();
+        let client = client.clone();
+        let _ = thread::Builder::new()
+            .name("tab-engine-lanes-fetch".to_owned())
+            .spawn(move || {
+                let raw = client.lanes().ok().map(|lanes| lanes.raw);
+                let _ = mailbox.send_blocking(Inbound::LanesFetched { raw });
+            });
+    }
+
+    /// A lane list came back. What each lane's state was is what later tells a
+    /// `lane-state` whether the lane it names is coming up; and while some lane is
+    /// still `starting`, one more look is armed ([`LANES_FOLLOWUPS`] of them) — but
+    /// only after a read that *answered*: a failed one says nothing about the lanes,
+    /// so following it up would be asking again with nothing new to go on.
+    fn lanes_fetched(&mut self, raw: Option<Value>) {
+        self.lanes_fetching = false;
+        let Some(raw) = raw else { return };
+        self.remember_lane_states(&raw);
+        self.send(Update::Lanes { raw });
+        if self.lanes_coming_up() && self.lanes_tries < LANES_FOLLOWUPS {
+            self.lanes_tries += 1;
+            self.arm_lanes_refetch();
+        } else {
+            self.lanes_tries = 0;
         }
     }
 
@@ -503,23 +607,18 @@ impl Engine {
         let mailbox = self.mailbox.clone();
         // One thread, one wake-up: the engine's own loop stays a blocking receive,
         // so a deferred read costs no polling (§2.5).
-        let _ = thread::Builder::new().name("tab-engine-lanes".to_owned()).spawn(move || {
-            thread::sleep(LANES_DEBOUNCE);
-            let _ = mailbox.send_blocking(Inbound::LanesDue);
-        });
+        let _ = thread::Builder::new()
+            .name("tab-engine-lanes".to_owned())
+            .spawn(move || {
+                thread::sleep(LANES_DEBOUNCE);
+                let _ = mailbox.send_blocking(Inbound::LanesDue);
+            });
     }
 
-    /// The deferred read, now due: send the list, and — while some lane is still
-    /// `starting` — arm one more look, up to [`LANES_FOLLOWUPS`] of them. Anything
-    /// else (every lane up, or a lane that went down instead) ends the episode.
+    /// The deferred read, now due: ask for the list. Whether another look follows is
+    /// [`Engine::lanes_fetched`]'s decision, once this one has answered.
     fn lanes_followup(&mut self, client: &Client) {
-        self.fetch_lanes(client);
-        if self.lanes_coming_up() && self.lanes_tries < LANES_FOLLOWUPS {
-            self.lanes_tries += 1;
-            self.arm_lanes_refetch();
-        } else {
-            self.lanes_tries = 0;
-        }
+        self.ask_lanes(client);
     }
 
     /// The main loop: commands from the UI and messages from the streams, until
@@ -528,7 +627,12 @@ impl Engine {
     /// messages, until shutdown or the server's death. Nothing here polls — the one
     /// read this loop schedules for later (the deferred lane-list read, see
     /// [`Engine::arm_lanes_refetch`]) arrives as a message of its own.
-    fn run_loop(&mut self, inbox: &Receiver<Inbound>, cancel: BootCancel, boot: Option<JoinHandle<()>>) {
+    fn run_loop(
+        &mut self,
+        inbox: &Receiver<Inbound>,
+        cancel: BootCancel,
+        boot: Option<JoinHandle<()>>,
+    ) {
         let mut boot = boot;
         let mut server: Option<Server> = None;
         let mut booting = true;
@@ -584,7 +688,9 @@ impl Engine {
                         cancel.cancel();
                         continue;
                     }
-                    let Some(server) = server.as_mut() else { continue };
+                    let Some(server) = server.as_mut() else {
+                        continue;
+                    };
                     // Stop the streams first, so nothing more arrives while the
                     // ladder runs.
                     self.streams.stop_all();
@@ -592,22 +698,34 @@ impl Engine {
                     return self.exit(outcome);
                 }
                 Inbound::Command(command) => {
-                    let Some(server) = server.as_mut() else { continue };
+                    let Some(server) = server.as_mut() else {
+                        continue;
+                    };
                     let client = server.client().clone();
                     self.command(&client, command);
+                }
+                Inbound::Posted { req_id, result } => {
+                    self.post_result(req_id, result);
+                }
+                Inbound::LanesFetched { raw } => {
+                    self.lanes_fetched(raw);
                 }
                 Inbound::LanesDue => {
                     // A deferred lane-list read came due. `due` says whether it is
                     // still the one this episode wants; it is cleared either way.
                     let due = self.lanes_due.take();
-                    let Some(server) = server.as_ref() else { continue };
+                    let Some(server) = server.as_ref() else {
+                        continue;
+                    };
                     if due.is_some_and(|at| Instant::now() >= at) {
                         let client = server.client().clone();
                         self.lanes_followup(&client);
                     }
                 }
                 Inbound::Stream { agent, msg } => {
-                    let Some(server) = server.as_mut() else { continue };
+                    let Some(server) = server.as_mut() else {
+                        continue;
+                    };
                     let client = server.client().clone();
                     if self.stream_message(server, &client, agent, msg) == Liveness::Gone {
                         self.want_shutdown = true;
@@ -650,21 +768,46 @@ impl Engine {
     fn command(&mut self, client: &Client, command: Command) {
         match command {
             Command::Prompt { req_id, text } => {
-                let result = client.prompt(&text).map_err(PostError::from);
-                self.post_result(req_id, result);
+                let client = client.clone();
+                self.post_off_loop(req_id, move || client.prompt(&text));
             }
             Command::Steer { req_id, text } => {
-                let result = client.steer(&text).map_err(PostError::from);
-                self.post_result(req_id, result);
+                let client = client.clone();
+                self.post_off_loop(req_id, move || client.steer(&text));
             }
             Command::Interrupt { req_id } => {
-                let result = client.interrupt().map_err(PostError::from);
-                self.post_result(req_id, result);
+                let client = client.clone();
+                self.post_off_loop(req_id, move || client.interrupt());
             }
             Command::Refetch(agent) => self.resync(client, agent, false),
             Command::WatchLane(lane) => self.watch_lane(client, lane),
             Command::Shutdown => {}
         }
+    }
+
+    /// Issue a `POST` on a thread of its own and let its answer come back as
+    /// [`Inbound::Posted`].
+    ///
+    /// The loop must not wait for the server: while a request is outstanding — and
+    /// the server may be silent for the whole request timeout — the stream could be
+    /// telling the tab that the connection is gone, or that a lane moved, and none of
+    /// that would reach anyone until the loop came back (§9.2, §9.7: the tab's
+    /// "sending" state and its reconnect notice are the same view of a server that
+    /// stopped answering).
+    ///
+    /// The thread is short-lived and joined by nobody: a tab closed while a request
+    /// is in flight drops the mailbox, and the thread ends when the request does.
+    fn post_off_loop<F>(&self, req_id: ReqId, call: F)
+    where
+        F: FnOnce() -> Result<swarm_client::Envelope, swarm_client::Error> + Send + 'static,
+    {
+        let mailbox = self.mailbox.clone();
+        let _ = thread::Builder::new()
+            .name("tab-engine-post".to_owned())
+            .spawn(move || {
+                let result = call().map_err(PostError::from);
+                let _ = mailbox.send_blocking(Inbound::Posted { req_id, result });
+            });
     }
 
     fn post_result(&self, req_id: ReqId, result: Result<swarm_client::Envelope, PostError>) {
@@ -691,24 +834,37 @@ impl Engine {
                 }
                 let revision = self.revisions.next(agent);
                 if let Some(transcript) = transcript {
-                    self.send(Update::Transcript { agent, revision, raw: transcript.raw });
+                    self.send(Update::Transcript {
+                        agent,
+                        revision,
+                        raw: transcript.raw,
+                    });
                 }
                 if let Some(state) = state {
-                    self.send(Update::State { revision, raw: state.raw });
+                    self.send(Update::State {
+                        revision,
+                        raw: state.raw,
+                    });
                 }
                 if lanes {
-                    self.fetch_lanes(client);
+                    self.ask_lanes(client);
                 }
             }
             Agent::Lane(n) => {
-                let Ok(transcript) = client.lane_transcript(n, None) else { return };
+                let Ok(transcript) = client.lane_transcript(n, None) else {
+                    return;
+                };
                 let revision = self.revisions.next(agent);
-                self.send(Update::Transcript { agent, revision, raw: transcript.raw });
+                self.send(Update::Transcript {
+                    agent,
+                    revision,
+                    raw: transcript.raw,
+                });
                 if lanes {
                     // A lane's run ending (`settled` on the lane's own stream, which
                     // is the one the tab watches) moves what `/lanes` reports about
                     // it: whether it is busy, and for how long it has been.
-                    self.fetch_lanes(client);
+                    self.ask_lanes(client);
                 }
             }
         }
@@ -721,7 +877,9 @@ impl Engine {
             match client.journal(Some(limit)) {
                 Ok(journal) => {
                     if let Some(entry) = journal.newest_custom(CACHE_STATS_KEY) {
-                        self.send(Update::CacheSeed { entry: Some(entry.clone()) });
+                        self.send(Update::CacheSeed {
+                            entry: Some(entry.clone()),
+                        });
                         return;
                     }
                 }
@@ -768,7 +926,9 @@ impl Engine {
         let mut todo: Option<(Option<i64>, Value)> = None;
         let mut seen = 0usize;
         while let Ok(Some(line)) = connection.read_line() {
-            let Some(event) = parser.feed(&line) else { continue };
+            let Some(event) = parser.feed(&line) else {
+                continue;
+            };
             if let Some(id) = event.id {
                 last_id = Some(id);
             }
@@ -803,7 +963,10 @@ impl Engine {
     ) -> Liveness {
         match msg {
             StreamMsg::Connected { .. } => {
-                self.send(Update::Stream { agent, status: StreamStatus::Connected });
+                self.send(Update::Stream {
+                    agent,
+                    status: StreamStatus::Connected,
+                });
                 let again = match agent {
                     Agent::Coordinator => std::mem::replace(&mut self.coordinator_connected, true),
                     Agent::Lane(_) => std::mem::replace(&mut self.lane_connected, true),
@@ -862,7 +1025,12 @@ impl Engine {
                     "gap" | "session-switched" => Some(false),
                     _ => None,
                 };
-                self.send(Update::Event { agent, id, kind, data });
+                self.send(Update::Event {
+                    agent,
+                    id,
+                    kind,
+                    data,
+                });
                 if let Some(lanes) = resync {
                     self.resync(client, agent, lanes);
                 }
@@ -895,6 +1063,7 @@ mod tests {
             lane_states: HashMap::new(),
             lanes_due: None,
             lanes_tries: 0,
+            lanes_fetching: false,
         };
         engine.lane_states.insert(1, "idle".to_owned());
         engine.lane_states.insert(2, "idle".to_owned());
@@ -908,8 +1077,14 @@ mod tests {
     fn a_lane_state_that_moves_asks_for_the_list() {
         let mut engine = dormant();
         engine.note_lane_state(&json!({ "lane": 1, "state": "working" }));
-        assert!(engine.lanes_due.is_some(), "a lane going working asks for the list");
-        assert_eq!(engine.lane_states.get(&1).map(String::as_str), Some("working"));
+        assert!(
+            engine.lanes_due.is_some(),
+            "a lane going working asks for the list"
+        );
+        assert_eq!(
+            engine.lane_states.get(&1).map(String::as_str),
+            Some("working")
+        );
 
         let mut engine = dormant();
         engine.note_lane_state(&json!({ "lane": 2, "state": "idle" }));
@@ -926,14 +1101,20 @@ mod tests {
         engine.note_lane_state(&json!({ "lane": 2, "state": "starting" }));
         assert_eq!(engine.lanes_tries, 0, "a new launch is a new episode");
         assert!(engine.lanes_due.is_some());
-        assert_eq!(engine.lane_states.get(&2).map(String::as_str), Some("starting"));
+        assert_eq!(
+            engine.lane_states.get(&2).map(String::as_str),
+            Some("starting")
+        );
 
         // …and the follow-ups stop once no lane is starting.
         let mut engine = dormant();
         engine.note_lane_state(&json!({ "lane": 2, "state": "starting" }));
         assert!(engine.lanes_coming_up());
         engine.note_lane_state(&json!({ "lane": 2, "state": "idle" }));
-        assert!(!engine.lanes_coming_up(), "the episode is over when the lane is up");
+        assert!(
+            !engine.lanes_coming_up(),
+            "the episode is over when the lane is up"
+        );
     }
 
     /// One read per debounce window: a boot's per-lane announcements — or a lane
@@ -946,6 +1127,10 @@ mod tests {
         let due = engine.lanes_due.expect("a read is pending");
         engine.note_lane_state(&json!({ "lane": 2, "state": "starting" }));
         engine.arm_lanes_refetch();
-        assert_eq!(engine.lanes_due, Some(due), "the pending read is the one that happens");
+        assert_eq!(
+            engine.lanes_due,
+            Some(due),
+            "the pending read is the one that happens"
+        );
     }
 }

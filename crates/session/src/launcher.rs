@@ -114,7 +114,9 @@ impl Chooser {
 
     /// The models this chooser offers, Default excluded.
     pub fn models(&self) -> impl Iterator<Item = &ChooserOption> {
-        self.options.iter().filter(|option| option.key != DEFAULT_KEY)
+        self.options
+            .iter()
+            .filter(|option| option.key != DEFAULT_KEY)
     }
 }
 
@@ -298,7 +300,10 @@ pub fn workers_chooser(swarm_workers: Option<u16>) -> Chooser {
         model_id: None,
         provider: None,
     }));
-    Chooser { options, uncertain: false }
+    Chooser {
+        options,
+        uncertain: false,
+    }
 }
 
 /// The configured `:swarm-workers` from a `/registry` body's `settings` — evo's own default
@@ -335,7 +340,8 @@ fn model_options(
     // order, which is registration order.
     let mut by_id: Vec<(String, Vec<String>)> = Vec::new();
     for model in models {
-        let (Some(id), Some(provider)) = (string_field(model, "id"), string_field(model, "provider"))
+        let (Some(id), Some(provider)) =
+            (string_field(model, "id"), string_field(model, "provider"))
         else {
             continue;
         };
@@ -358,13 +364,19 @@ fn model_options(
 
     let apis: Option<Vec<String>> = kernel_apis.map(|apis| {
         apis.as_array()
-            .map(|apis| apis.iter().filter_map(Value::as_str).map(str::to_string).collect())
+            .map(|apis| {
+                apis.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
             .unwrap_or_default()
     });
 
     let mut options: Vec<ChooserOption> = Vec::with_capacity(models.len());
     for model in models {
-        let (Some(id), Some(provider)) = (string_field(model, "id"), string_field(model, "provider"))
+        let (Some(id), Some(provider)) =
+            (string_field(model, "id"), string_field(model, "provider"))
         else {
             continue;
         };
@@ -563,7 +575,10 @@ pub fn history_rows(
 
     let mut merged: Vec<HistoryEntry> = Vec::with_capacity(ordered.len());
     for entry in ordered {
-        match merged.iter_mut().find(|row| row.session_path == entry.session_path) {
+        match merged
+            .iter_mut()
+            .find(|row| row.session_path == entry.session_path)
+        {
             // The same session from both lists (the scan and the app's own recents): one
             // row, carrying what either of them knew. The newer one is the base, so its
             // time is the one shown.
@@ -588,7 +603,12 @@ pub fn history_rows(
         .collect()
 }
 
-fn history_row(entry: &HistoryEntry, now: i64, offset_seconds: i32, home: Option<&str>) -> HistoryRow {
+fn history_row(
+    entry: &HistoryEntry,
+    now: i64,
+    offset_seconds: i32,
+    home: Option<&str>,
+) -> HistoryRow {
     HistoryRow {
         title: base_name(&entry.folder),
         subtitle: home_short(&entry.folder, home),
@@ -630,14 +650,26 @@ fn tooltip_line(entry: &HistoryEntry, offset_seconds: i32) -> String {
     if entry.open_at_quit {
         parts.push("open at last quit".to_string());
     }
-    if let Some(model) = entry.coordinator_model.as_deref().filter(|model| !model.is_empty()) {
+    if let Some(model) = entry
+        .coordinator_model
+        .as_deref()
+        .filter(|model| !model.is_empty())
+    {
         parts.push(format!("coordinator: {}", model));
     }
-    if let Some(model) = entry.lanes_model.as_deref().filter(|model| !model.is_empty()) {
+    if let Some(model) = entry
+        .lanes_model
+        .as_deref()
+        .filter(|model| !model.is_empty())
+    {
         parts.push(format!("lanes: {}", model));
     }
     if let Some(lanes) = entry.lanes {
-        parts.push(format!("{} lane{}", lanes, if lanes == 1 { "" } else { "s" }));
+        parts.push(format!(
+            "{} lane{}",
+            lanes,
+            if lanes == 1 { "" } else { "s" }
+        ));
     }
     parts.join(" · ")
 }
@@ -667,7 +699,12 @@ fn absolute_time(when: i64, offset_seconds: i32) -> String {
 fn offset_label(offset_seconds: i32) -> String {
     let sign = if offset_seconds < 0 { '-' } else { '+' };
     let magnitude = offset_seconds.unsigned_abs();
-    format!("{}{:02}:{:02}", sign, magnitude / 3600, (magnitude % 3600) / 60)
+    format!(
+        "{}{:02}:{:02}",
+        sign,
+        magnitude / 3600,
+        (magnitude % 3600) / 60
+    )
 }
 
 /// The meta line: what is known about the session, unknown parts left out.
@@ -680,7 +717,11 @@ fn meta_line(
 ) -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Some(lanes) = lanes {
-        parts.push(format!("{} lane{}", lanes, if *lanes == 1 { "" } else { "s" }));
+        parts.push(format!(
+            "{} lane{}",
+            lanes,
+            if *lanes == 1 { "" } else { "s" }
+        ));
     }
     if let Some(when) = when {
         parts.push(relative_time(when, now, offset_seconds));
@@ -741,8 +782,9 @@ pub fn relative_time(when: i64, now: i64, offset_seconds: i32) -> String {
     }
 }
 
-const MONTHS: [&str; 12] =
-    ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const MONTHS: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
 
 /// Seconds since the epoch as a UTC calendar date.
 fn civil_from_epoch(seconds: i64) -> (i64, u32, u32) {
@@ -761,7 +803,11 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100); // [0, 365]
     let month_index = (5 * day_of_year + 2) / 153; // [0, 11], March is 0
     let day = (day_of_year - (153 * month_index + 2) / 5 + 1) as u32; // [1, 31]
-    let month = if month_index < 10 { month_index + 3 } else { month_index - 9 } as u32;
+    let month = if month_index < 10 {
+        month_index + 3
+    } else {
+        month_index - 9
+    } as u32;
     (if month <= 2 { year + 1 } else { year }, month, day)
 }
 
@@ -810,7 +856,9 @@ fn parse_rfc3339(text: &str) -> Option<i64> {
     }
     let mut rest = text.get(19..).unwrap_or("");
     if let Some(fraction) = rest.strip_prefix('.') {
-        let digits = fraction.find(|c: char| !c.is_ascii_digit()).unwrap_or(fraction.len());
+        let digits = fraction
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(fraction.len());
         if digits == 0 {
             return None;
         }

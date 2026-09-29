@@ -13,7 +13,10 @@ use serde_json::Value;
 use session::{AgentModel, Effect};
 
 pub fn fixture_path(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests").join("fixtures").join(name)
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join(name)
 }
 
 pub fn fixture_text(name: &str) -> String {
@@ -25,7 +28,8 @@ pub fn fixture_text(name: &str) -> String {
 /// One fixture as JSON.
 pub fn fixture(name: &str) -> Value {
     let text = fixture_text(name);
-    serde_json::from_str(&text).unwrap_or_else(|error| panic!("fixture {name} is not JSON: {error}"))
+    serde_json::from_str(&text)
+        .unwrap_or_else(|error| panic!("fixture {name} is not JSON: {error}"))
 }
 
 /// One SSE capture as `(id, event, data)` in the order the server sent them.
@@ -46,7 +50,11 @@ pub fn sse_events(name: &str) -> Vec<(u64, String, Value)> {
                     .take()
                     .map(|data| serde_json::from_str(&data).unwrap_or(Value::Null))
                     .unwrap_or(Value::Null);
-                events.push((id.take().expect("every captured event has an id"), kind, data));
+                events.push((
+                    id.take().expect("every captured event has an id"),
+                    kind,
+                    data,
+                ));
             }
             id = None;
             continue;
@@ -79,28 +87,61 @@ pub fn apply_capture(model: &mut AgentModel, name: &str) -> Effect {
 #[derive(Clone, Debug, PartialEq)]
 pub enum RowView {
     User(String),
-    Assistant { markdown: String, thinking: String, error: Option<String> },
-    Tool { name: String, arguments: String, result: Option<(bool, String)> },
-    Report { done: String, evidence: String, next: String, blocked: String, requests: String },
+    Assistant {
+        markdown: String,
+        thinking: String,
+        error: Option<String>,
+    },
+    Tool {
+        name: String,
+        arguments: String,
+        result: Option<(bool, String)>,
+    },
+    Report {
+        done: String,
+        evidence: String,
+        next: String,
+        blocked: String,
+        requests: String,
+    },
     Dim(String),
-    RunOutcome { outcome: String, text: String },
+    RunOutcome {
+        outcome: String,
+        text: String,
+    },
 }
 
 impl RowView {
     pub fn of(row: &session::Row) -> RowView {
         match &row.kind {
             session::RowKind::User { text } => RowView::User(text.clone()),
-            session::RowKind::Assistant { markdown, thinking, error, .. } => RowView::Assistant {
+            session::RowKind::Assistant {
+                markdown,
+                thinking,
+                error,
+                ..
+            } => RowView::Assistant {
                 markdown: markdown.clone(),
                 thinking: thinking.clone(),
                 error: error.clone(),
             },
-            session::RowKind::Tool { name, arguments, result, .. } => RowView::Tool {
+            session::RowKind::Tool {
+                name,
+                arguments,
+                result,
+                ..
+            } => RowView::Tool {
                 name: name.clone(),
                 arguments: arguments.clone(),
                 result: result.as_ref().map(|r| (r.is_error, r.content.clone())),
             },
-            session::RowKind::Report { done, evidence, next, blocked, requests } => RowView::Report {
+            session::RowKind::Report {
+                done,
+                evidence,
+                next,
+                blocked,
+                requests,
+            } => RowView::Report {
                 done: done.clone(),
                 evidence: evidence.clone(),
                 next: next.clone(),

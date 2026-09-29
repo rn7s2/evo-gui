@@ -40,9 +40,16 @@ fn m3_lane_down_up() {
         .lane(1)
         .and_then(|row| row.pid)
         .expect("lane 1 has a pid") as i32;
-    let coordinator_pid = drive.coordinator_pid.expect("/health named the coordinator") as i32;
+    let coordinator_pid = drive
+        .coordinator_pid
+        .expect("/health named the coordinator") as i32;
     assert_ne!(lane_pid, coordinator_pid, "the lane is its own process");
-    let restarts_before = drive.model.lanes().lane(1).map(|row| row.restarts).unwrap_or(0);
+    let restarts_before = drive
+        .model
+        .lanes()
+        .lane(1)
+        .map(|row| row.restarts)
+        .unwrap_or(0);
     assert_eq!(restarts_before, 0, "a fresh swarm has restarted nothing");
     eprintln!("m3: killing lane 1's process {lane_pid}");
 
@@ -54,10 +61,14 @@ fn m3_lane_down_up() {
     // The swarm publishes the state as its lane watcher sees the stream end
     // (`swarm/lanes.lisp`'s `recover-lane`) — the row is red from here until the
     // lane is up again.
-    drive.wait_for_update(deadline, "a lane-state event saying lane 1 is down", |update| {
-        matches!(update, tab_engine::Update::Event { agent: Agent::Coordinator, kind, data, .. }
+    drive.wait_for_update(
+        deadline,
+        "a lane-state event saying lane 1 is down",
+        |update| {
+            matches!(update, tab_engine::Update::Event { agent: Agent::Coordinator, kind, data, .. }
             if kind == "lane-state" && data["lane"] == 1 && data["state"] == "down")
-    });
+        },
+    );
     drive.wait_model(deadline, "lane 1 down", |model| {
         model.lanes().lane(1).map(|row| row.status) == Some(LaneStatus::Down)
     });
@@ -75,7 +86,9 @@ fn m3_lane_down_up() {
         _ => unreachable!(),
     };
     assert!(
-        recovered["pid"].as_u64().is_some_and(|pid| pid as i32 != lane_pid),
+        recovered["pid"]
+            .as_u64()
+            .is_some_and(|pid| pid as i32 != lane_pid),
         "the lane came back as a new process: {recovered}"
     );
     let states = drive.lane_states(1);
@@ -106,16 +119,21 @@ fn m3_lane_down_up() {
                     .as_str()
                     .is_some_and(|text| text.contains("[lane 1] crashed and was restarted"))
         })
-        .unwrap_or_else(|| panic!("no restart announcement among {} output lines", outputs.len()));
+        .unwrap_or_else(|| {
+            panic!(
+                "no restart announcement among {} output lines",
+                outputs.len()
+            )
+        });
     eprintln!("m3: the swarm said {}", outputs[announcement]["text"]);
     // ...and the restarted lane's own complaint about its fresh state ("no model is
     // configured yet", until the swarm re-runs its baseline) comes *after* it:
     // that ordering is what `session::TabModel::lane_down_reason` prefers the
     // announcement for.
     let complaint = outputs.iter().position(|data| {
-        data["text"]
-            .as_str()
-            .is_some_and(|text| text.contains("[lane 1]") && text.contains("No model is configured"))
+        data["text"].as_str().is_some_and(|text| {
+            text.contains("[lane 1]") && text.contains("No model is configured")
+        })
     });
     assert!(
         complaint.is_none_or(|complaint| announcement < complaint),
@@ -133,7 +151,10 @@ fn m3_lane_down_up() {
     // A restarted lane is told apart from a lane that was never up: `restarts` is
     // the counter the left column's tooltip shows.
     let tooltip = drive.model.lanes().lane(1).expect("lane 1").tooltip();
-    assert!(tooltip.contains("restart"), "the row says it restarted: {tooltip:?}");
+    assert!(
+        tooltip.contains("restart"),
+        "the row says it restarted: {tooltip:?}"
+    );
     // ...and the row is no longer red, so nothing is claimed about it any more.
     assert_eq!(
         drive.model.lane_down_reason(1),
@@ -144,24 +165,43 @@ fn m3_lane_down_up() {
     // --- work still reaches it ----------------------------------------------
     // The lane is re-initialized, so it can be given work again: the coordinator
     // delegates, and the lane's own stream shows it running.
-    drive.prompt(1, format!("CALL delegate {}", serde_json::json!({
-        "lane": 1, "task": "SLOW m3 lane one after the restart"
-    })));
-    drive.wait_event_where(deadline, Agent::Lane(1), "text-delta", "the restarted lane working", |_| true);
+    drive.prompt(
+        1,
+        format!(
+            "CALL delegate {}",
+            serde_json::json!({
+                "lane": 1, "task": "SLOW m3 lane one after the restart"
+            })
+        ),
+    );
+    drive.wait_event_where(
+        deadline,
+        Agent::Lane(1),
+        "text-delta",
+        "the restarted lane working",
+        |_| true,
+    );
     drive.wait_model(deadline, "lane 1 idle after its new task", |model| {
         model.lanes().lane(1).map(|row| row.status) == Some(LaneStatus::Idle)
     });
     assert!(
-        fixture.stub.find("lane 1", "m3 lane one after the restart", 0.0).is_some(),
+        fixture
+            .stub
+            .find("lane 1", "m3 lane one after the restart", 0.0)
+            .is_some(),
         "the restarted lane really ran the task"
     );
     assert!(
-        row_summary(drive.model.coordinator()).iter().any(|row| row.starts_with("tool:delegate")),
+        row_summary(drive.model.coordinator())
+            .iter()
+            .any(|row| row.starts_with("tool:delegate")),
         "the coordinator's delegate row is there"
     );
 
     // --- nothing left running ----------------------------------------------
     drive.shutdown();
-    drive.next(deadline, "Exited", |update| matches!(update, tab_engine::Update::Exited { .. }));
+    drive.next(deadline, "Exited", |update| {
+        matches!(update, tab_engine::Update::Exited { .. })
+    });
     drive.join_and_assert_gone(deadline);
 }

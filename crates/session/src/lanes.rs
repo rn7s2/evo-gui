@@ -76,7 +76,9 @@ impl LaneRow {
     /// row that kept one after an event said the lane went idle would be showing a
     /// clock the swarm itself has stopped.
     pub fn step_clock(&self) -> Option<String> {
-        self.is_busy().then(|| self.step_age.map(short_duration)).flatten()
+        self.is_busy()
+            .then(|| self.step_age.map(short_duration))
+            .flatten()
     }
 
     /// The task as the left column shows it: one line, truncated. The swarm truncates the
@@ -111,9 +113,17 @@ impl LaneRow {
         if let Some(branch) = self.branch.as_deref() {
             line.push_str(&format!(" ({})", branch));
         }
-        line.push_str(&format!(" · {} {}", self.reports, plural(self.reports, "report")));
+        line.push_str(&format!(
+            " · {} {}",
+            self.reports,
+            plural(self.reports, "report")
+        ));
         if self.restarts > 0 {
-            line.push_str(&format!(" · {} {}", self.restarts, plural(self.restarts, "restart")));
+            line.push_str(&format!(
+                " · {} {}",
+                self.restarts,
+                plural(self.restarts, "restart")
+            ));
         }
         if let Some(pid) = self.pid {
             line.push_str(&format!(" · pid {}", pid));
@@ -154,7 +164,10 @@ pub fn short_duration(seconds: u64) -> String {
 /// leaves a `\r` alone, and this follows it rather than quietly differing.
 pub fn lane_task_label(task: &str) -> String {
     const CHARS: usize = 60;
-    let one_line: String = task.chars().map(|c| if c == '\n' { ' ' } else { c }).collect();
+    let one_line: String = task
+        .chars()
+        .map(|c| if c == '\n' { ' ' } else { c })
+        .collect();
     if one_line.chars().count() <= CHARS {
         return one_line;
     }
@@ -228,7 +241,10 @@ impl LaneList {
                 });
                 self.lanes.sort_by_key(|row| row.n);
                 inserted = true;
-                self.lanes.iter_mut().find(|row| row.n == n).expect("just inserted")
+                self.lanes
+                    .iter_mut()
+                    .find(|row| row.n == n)
+                    .expect("just inserted")
             }
         };
         let before = row.clone();
@@ -275,7 +291,10 @@ fn swarm_info(value: &Value) -> Option<SwarmInfo> {
         cwd: string_field(value, "cwd").unwrap_or_default(),
         workers: u64_field(value, "workers"),
         busy: u64_field(value, "busy"),
-        stopping: value.get("stopping").and_then(Value::as_bool).unwrap_or(false),
+        stopping: value
+            .get("stopping")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
     })
 }
 

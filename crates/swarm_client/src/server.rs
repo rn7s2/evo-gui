@@ -145,6 +145,16 @@ pub struct ServerConfig {
     pub ready_timeout: Duration,
     /// Readiness poll interval (§3: 100 ms).
     pub poll: Duration,
+    /// How long an ordinary request may take before it is given up on (§6: 30 s).
+    ///
+    /// A server that is *there* but answering nothing — a stopped process, a wedged
+    /// one — is what this is for: without it a `POST` waits for ever, and the tab
+    /// that issued it has nothing to show. Tests that stop a server shorten it, so
+    /// the patience itself is what they assert on.
+    pub request_timeout: Duration,
+    /// How long an SSE stream may go with no bytes at all before it is considered
+    /// gone (§6: 45 s, against `serve`'s 15 s keepalive).
+    pub stream_timeout: Duration,
     /// How long a clean `POST /shutdown` gets before `SIGTERM` (§3: 10 s).
     pub shutdown_grace: Duration,
     /// How long `SIGTERM` gets before `SIGKILL` (§3: 5 s).
@@ -172,6 +182,8 @@ impl ServerConfig {
             readiness: Readiness::swarm(),
             ready_timeout: Duration::from_secs(90),
             poll: Duration::from_millis(100),
+            request_timeout: Duration::from_secs(30),
+            stream_timeout: Duration::from_secs(45),
             shutdown_grace: Duration::from_secs(10),
             term_grace: Duration::from_secs(5),
         }
@@ -196,6 +208,13 @@ impl ServerConfig {
 
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.model = Some(model.into());
+        self
+    }
+
+    /// The client's patience: how long a request and a silent stream may take.
+    pub fn with_http_timeouts(mut self, request: Duration, stream: Duration) -> Self {
+        self.request_timeout = request;
+        self.stream_timeout = stream;
         self
     }
 
@@ -382,7 +401,13 @@ impl Server {
                 port = port_from_log(&log_tail(&cfg.log_path, 400));
             }
             if let (Some(token), Some(port)) = (token.clone(), port) {
-                let probe = client.get_or_insert_with(|| Client::loopback(port, token.clone()));
+                let probe = client.get_or_insert_with(|| {
+                    // The client the tab keeps: this is where the app's patience
+                    // comes from, not from a constant somewhere in the engine.
+                    Client::loopback(port, token.clone())
+                        .with_timeout(cfg.request_timeout)
+                        .with_stream_timeout(cfg.stream_timeout)
+                });
                 // A short patience for the probe alone: the client kept for the
                 // app answers with its normal timeout.
                 if let Ok(health) = probe.with_timeout(PROBE_TIMEOUT).health() {
@@ -585,12 +610,35 @@ fn signal_group(pid: u32, signal: i32) {
     }
 }
 
-/// Whether a process is still there (`kill(pid, 0)`), for tests and for a tab
-/// that wants to be sure its server left.
+/// Whether a process is still **running**, for tests and for a tab that wants to
+/// be sure its server left.
+///
+/// `kill(pid, 0)` alone is not the answer: a child of ours that has exited but has
+/// not been reaped is a zombie, and the kernel says it exists while nothing is
+/// running behind it. The app spawns its own swarms, so that case is the common
+/// one — a tab stopping its server would keep reporting it alive until something
+/// waited on it.
+///
+/// So our own children are asked for their status (`waitpid(WNOHANG)`, which also
+/// reaps them: "it exited" is the answer, and it is a final one), and anything
+/// that is not our child — a pid from `/lanes`, another process's — is asked the
+/// other way.
 pub fn process_alive(pid: u32) -> bool {
     if pid == 0 {
         return false;
     }
+    let mut status: libc::c_int = 0;
+    let waited = unsafe { libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG) };
+    if waited == pid as libc::pid_t {
+        // Our child, and this is where it ended.
+        return false;
+    }
+    if waited == 0 {
+        // Our child, still running.
+        return true;
+    }
+    // Not our child (ECHILD), or a pid we may not wait on: the kernel is the only
+    // one who can say.
     let alive = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0;
     if alive {
         return true;
@@ -685,6 +733,33 @@ pub fn log_tail(path: &Path, lines: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_exited_child_is_not_alive() {
+        // A child that has exited and has not been reaped is a zombie: `kill(pid, 0)`
+        // says it exists, and nothing is running behind it. That is the shape of a
+        // swarm the app spawned and stopped, so the moment it exits is the moment it
+        // has to answer "gone".
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("a child to watch");
+        let pid = child.id();
+        assert!(process_alive(pid), "a running child is alive");
+        child.kill().expect("kill the child");
+        // Deliberately not reaped yet: this is the zombie window.
+        assert!(
+            !process_alive(pid),
+            "an exited child is gone, not a zombie to report as running"
+        );
+        let _ = child.wait();
+
+        // Anything that is not our child is asked the kernel instead.
+        assert!(process_alive(std::process::id()), "ourselves");
+        assert!(!process_alive(u32::MAX), "a pid that does not exist");
+        assert!(!process_alive(0), "and 0 is never a process");
+    }
 
     #[test]
     fn argv_is_the_documented_one() {

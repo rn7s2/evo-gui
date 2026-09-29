@@ -32,10 +32,8 @@ pub mod catalog;
 mod engine;
 mod types;
 
-pub use engine::{EngineHandle, ShutdownReport, TabEngine, shutdown_all};
-pub use types::{
-    Agent, Command, PostError, ReqId, StreamStatus, TabSpec, Update,
-};
+pub use engine::{shutdown_all, EngineHandle, ShutdownReport, TabEngine};
+pub use types::{Agent, Command, PostError, ReqId, StreamStatus, TabSpec, Update};
 
 // Re-exported so the UI can read the payloads an [`Update`] carries without
 // depending on `swarm_client` directly.

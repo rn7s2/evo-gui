@@ -188,11 +188,15 @@ impl TabModel {
     }
 
     pub fn selected_rows(&self) -> &[Row] {
-        self.agent_model(self.selected).map(|model| model.rows()).unwrap_or(&[])
+        self.agent_model(self.selected)
+            .map(|model| model.rows())
+            .unwrap_or(&[])
     }
 
     pub fn selected_todos(&self) -> &[Todo] {
-        self.agent_model(self.selected).map(|model| model.todos()).unwrap_or(&[])
+        self.agent_model(self.selected)
+            .map(|model| model.todos())
+            .unwrap_or(&[])
     }
 
     /// The coordinator's readout — the §7.3 status line the composer renders.
@@ -299,7 +303,11 @@ impl TabModel {
     /// that overtook it, and an equal one is the same answer twice, so neither changes
     /// anything (the tab's I/O layer numbers these monotonically per agent).
     pub fn on_transcript(&mut self, agent: AgentKey, revision: u64, transcript: &Value) -> Changes {
-        if self.transcript_revisions.get(&agent).is_some_and(|last| revision <= *last) {
+        if self
+            .transcript_revisions
+            .get(&agent)
+            .is_some_and(|last| revision <= *last)
+        {
             return Changes::default();
         }
         self.transcript_revisions.insert(agent, revision);
@@ -319,12 +327,18 @@ impl TabModel {
     pub fn on_registry(&mut self, registry: &Value) -> Changes {
         let before = self.coordinator.readout().text();
         self.coordinator.readout_mut().apply_registry(registry);
-        Changes { readout: self.coordinator.readout().text() != before, ..Changes::default() }
+        Changes {
+            readout: self.coordinator.readout().text() != before,
+            ..Changes::default()
+        }
     }
 
     /// `GET /lanes` — the whole lane list.
     pub fn on_lanes(&mut self, lanes: &Value) -> Changes {
-        Changes { lanes: self.lanes.apply_lanes(lanes), ..Changes::default() }
+        Changes {
+            lanes: self.lanes.apply_lanes(lanes),
+            ..Changes::default()
+        }
     }
 
     /// One SSE event of AGENT's stream.
@@ -357,7 +371,9 @@ impl TabModel {
         data: &Value,
         arrival: Option<u64>,
     ) -> Changes {
-        let effect = self.model_mut(agent).apply_event_with(id, kind, data, arrival);
+        let effect = self
+            .model_mut(agent)
+            .apply_event_with(id, kind, data, arrival);
         // The restarted server is a new event log whose ids start again at 1 (§3): the
         // transcript revision this agent last accepted belongs to the old numbering, so
         // drop it rather than refuse the fresh transcript as stale.
@@ -411,7 +427,10 @@ impl TabModel {
         };
         let before = self.coordinator.readout().text();
         self.coordinator.readout_mut().set_cache_totals(totals);
-        Changes { readout: self.coordinator.readout().text() != before, ..Changes::default() }
+        Changes {
+            readout: self.coordinator.readout().text() != before,
+            ..Changes::default()
+        }
     }
 
     /// The stream badge for AGENT (§9.7).
@@ -420,7 +439,10 @@ impl TabModel {
             return Changes::default();
         }
         self.streams.insert(agent, status);
-        Changes { stream: BTreeSet::from([agent]), ..Changes::default() }
+        Changes {
+            stream: BTreeSet::from([agent]),
+            ..Changes::default()
+        }
     }
 
     /// The I/O layer's `Reset`: the view is not trustworthy any more, so every agent is
@@ -432,7 +454,9 @@ impl TabModel {
         self.transcript_revisions.clear();
         let mut changes = Changes::default();
         changes.needs_resync.insert(AgentKey::Coordinator);
-        changes.needs_resync.extend(self.lane_models.keys().map(|n| AgentKey::Lane(*n)));
+        changes
+            .needs_resync
+            .extend(self.lane_models.keys().map(|n| AgentKey::Lane(*n)));
         changes
     }
 
@@ -504,9 +528,10 @@ fn is_down_announcement(text: &str) -> bool {
 /// The newest error line of one agent's transcript whose text passes `want`.
 fn last_error_line_where(model: &AgentModel, want: impl Fn(&str) -> bool) -> Option<String> {
     model.rows().iter().rev().find_map(|row| match &row.kind {
-        RowKind::Dim { style: DimStyle::Error, text } if !text.is_empty() && want(text) => {
-            Some(text.clone())
-        }
+        RowKind::Dim {
+            style: DimStyle::Error,
+            text,
+        } if !text.is_empty() && want(text) => Some(text.clone()),
         _ => None,
     })
 }

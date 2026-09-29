@@ -46,7 +46,10 @@ pub enum CatalogUpdate {
 /// inherits this process's environment, so it reads the same `HOME`, `init.lisp`
 /// and extensions the app does; `probe_dir` is where the probes keep their
 /// tokens and logs.
-pub fn learn(agent_bin: impl Into<PathBuf>, probe_dir: impl Into<PathBuf>) -> Receiver<CatalogUpdate> {
+pub fn learn(
+    agent_bin: impl Into<PathBuf>,
+    probe_dir: impl Into<PathBuf>,
+) -> Receiver<CatalogUpdate> {
     learn_with(agent_bin, probe_dir, Vec::new())
 }
 
@@ -139,10 +142,13 @@ fn run_probe(
         message: error.to_string(),
         log_tail: error.log_tail().unwrap_or_default().to_owned(),
     })?;
-    let registry = server.client().registry().map_err(|error| CatalogUpdate::Failed {
-        message: error.to_string(),
-        log_tail: server.log_tail(40),
-    });
+    let registry = server
+        .client()
+        .registry()
+        .map_err(|error| CatalogUpdate::Failed {
+            message: error.to_string(),
+            log_tail: server.log_tail(40),
+        });
     // However the read went, the probe does not stay running.
     let _ = server.shutdown();
     registry

@@ -28,7 +28,9 @@ pub use swarm_client::process_alive;
 /// construction.
 pub fn one_swarm() -> std::sync::MutexGuard<'static, ()> {
     static SWARM: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    SWARM.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    SWARM
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// The hermetic environment: a temp `HOME` whose `init.lisp` registers the stub
@@ -42,7 +44,11 @@ pub fn fixture(workers: u16) -> Fixture {
         bins.swarm.display(),
         bins.agent.display()
     );
-    Fixture::new(HarnessConfig { workers, ..Default::default() }).expect("the fixture should come up")
+    Fixture::new(HarnessConfig {
+        workers,
+        ..Default::default()
+    })
+    .expect("the fixture should come up")
 }
 
 /// The tab spec a [`Fixture`] describes: its project, its tab directory, and the
@@ -162,7 +168,11 @@ impl Drive {
             _ => {}
         }
         match update {
-            Update::Transcript { agent, revision, raw } => {
+            Update::Transcript {
+                agent,
+                revision,
+                raw,
+            } => {
                 self.model.on_transcript(agent_key(*agent), *revision, raw);
             }
             Update::State { revision, raw } => {
@@ -179,14 +189,21 @@ impl Drive {
             Update::Lanes { raw } => {
                 self.model.on_lanes(raw);
             }
-            Update::Event { agent, id, kind, data } => {
+            Update::Event {
+                agent,
+                id,
+                kind,
+                data,
+            } => {
                 let id = id.unwrap_or_default().max(0) as u64;
                 // The event is stamped with when the tab saw it, which is what the
                 // step clock counts from (§7.3).
-                self.model.on_event_at(agent_key(*agent), id, kind, data, now_millis());
+                self.model
+                    .on_event_at(agent_key(*agent), id, kind, data, now_millis());
             }
             Update::Stream { agent, status } => {
-                self.model.on_stream(agent_key(*agent), stream_status(*status));
+                self.model
+                    .on_stream(agent_key(*agent), stream_status(*status));
             }
             Update::CacheSeed { entry } => {
                 self.model.on_cache_seed(entry.as_ref());
@@ -197,7 +214,12 @@ impl Drive {
 
     /// The next update, from the cursor, that matches — consuming it. Panics with
     /// what it saw when the deadline passes first.
-    pub fn next(&mut self, deadline: Instant, what: &str, pred: impl Fn(&Update) -> bool) -> Update {
+    pub fn next(
+        &mut self,
+        deadline: Instant,
+        what: &str,
+        pred: impl Fn(&Update) -> bool,
+    ) -> Update {
         loop {
             self.pump();
             if let Some(offset) = self.log[self.cursor..].iter().position(&pred) {
@@ -250,14 +272,19 @@ impl Drive {
     ) -> Update {
         loop {
             self.pump();
-            if let Some(found) = self.log[from.min(self.log.len())..].iter().find(|update| pred(update))
+            if let Some(found) = self.log[from.min(self.log.len())..]
+                .iter()
+                .find(|update| pred(update))
             {
                 return found.clone();
             }
             assert!(
                 Instant::now() < deadline,
                 "no {what} before the deadline; saw {:?}",
-                self.log[from.min(self.log.len())..].iter().map(kind_of).collect::<Vec<_>>()
+                self.log[from.min(self.log.len())..]
+                    .iter()
+                    .map(kind_of)
+                    .collect::<Vec<_>>()
             );
             std::thread::sleep(Duration::from_millis(25));
         }
@@ -274,9 +301,12 @@ impl Drive {
         self.log
             .iter()
             .filter_map(|update| match update {
-                Update::Event { agent: Agent::Coordinator, kind, data, .. }
-                    if kind == "lane-state" && data["lane"].as_u64() == Some(lane) =>
-                {
+                Update::Event {
+                    agent: Agent::Coordinator,
+                    kind,
+                    data,
+                    ..
+                } if kind == "lane-state" && data["lane"].as_u64() == Some(lane) => {
                     data["state"].as_str().map(str::to_string)
                 }
                 _ => None,
@@ -308,12 +338,7 @@ impl Drive {
 
     /// Wait for the model itself to say something — a lane that went down, a row
     /// that arrived — rather than for one update. `what` is the failure message.
-    pub fn wait_model(
-        &mut self,
-        deadline: Instant,
-        what: &str,
-        pred: impl Fn(&TabModel) -> bool,
-    ) {
+    pub fn wait_model(&mut self, deadline: Instant, what: &str, pred: impl Fn(&TabModel) -> bool) {
         loop {
             self.pump();
             if pred(&self.model) {
@@ -322,7 +347,12 @@ impl Drive {
             assert!(
                 Instant::now() < deadline,
                 "never became {what}; lanes: {:?}",
-                self.model.lanes().lanes.iter().map(|row| (row.n, row.state.clone())).collect::<Vec<_>>()
+                self.model
+                    .lanes()
+                    .lanes
+                    .iter()
+                    .map(|row| (row.n, row.state.clone()))
+                    .collect::<Vec<_>>()
             );
             std::thread::sleep(Duration::from_millis(25));
         }
@@ -339,13 +369,7 @@ impl Drive {
     }
 
     /// Wait for one SSE event of AGENT's stream.
-    pub fn wait_event(
-        &mut self,
-        deadline: Instant,
-        agent: Agent,
-        kind: &str,
-        data: &Value,
-    ) {
+    pub fn wait_event(&mut self, deadline: Instant, agent: Agent, kind: &str, data: &Value) {
         self.next(deadline, kind, |update| {
             matches!(update, Update::Event { agent: a, kind: k, .. } if *a == agent && k == kind)
         });
@@ -376,9 +400,12 @@ impl Drive {
         self.log
             .iter()
             .filter_map(|update| match update {
-                Update::Event { agent: a, kind: k, data, .. } if *a == agent && k == kind => {
-                    Some(data.clone())
-                }
+                Update::Event {
+                    agent: a,
+                    kind: k,
+                    data,
+                    ..
+                } if *a == agent && k == kind => Some(data.clone()),
                 _ => None,
             })
             .collect()
@@ -390,9 +417,12 @@ impl Drive {
         self.log[from.min(self.log.len())..]
             .iter()
             .filter_map(|update| match update {
-                Update::Event { agent: a, kind: k, data, .. } if *a == agent && k == kind => {
-                    Some(data.clone())
-                }
+                Update::Event {
+                    agent: a,
+                    kind: k,
+                    data,
+                    ..
+                } if *a == agent && k == kind => Some(data.clone()),
                 _ => None,
             })
             .collect()
@@ -411,10 +441,13 @@ impl Drive {
     pub fn wait_lanes_idle(&mut self, deadline: Instant, lanes: usize) {
         self.wait_model(deadline, "the lanes up and idle", |model| {
             model.lanes().lanes.len() == lanes
-                && model.lanes().lanes.iter().all(|row| row.status == session::LaneStatus::Idle)
+                && model
+                    .lanes()
+                    .lanes
+                    .iter()
+                    .all(|row| row.status == session::LaneStatus::Idle)
         });
     }
-
 
     pub fn updates(&self) -> &[Update] {
         &self.log
@@ -453,7 +486,10 @@ impl Drive {
     pub fn select(&mut self, agent: AgentKey) {
         self.model.select(agent);
         let handle = self.handle.as_ref().expect("the engine is still running");
-        assert!(handle.watch_lane(agent.lane()), "the engine watched the lane");
+        assert!(
+            handle.watch_lane(agent.lane()),
+            "the engine watched the lane"
+        );
     }
 
     pub fn shutdown(&mut self) {
@@ -470,7 +506,11 @@ impl Drive {
         let pids = self.pids();
         assert!(!pids.is_empty(), "the proof never learned a pid to check");
         loop {
-            let alive: Vec<u32> = pids.iter().copied().filter(|pid| process_alive(*pid)).collect();
+            let alive: Vec<u32> = pids
+                .iter()
+                .copied()
+                .filter(|pid| process_alive(*pid))
+                .collect();
             if alive.is_empty() {
                 return;
             }
@@ -535,10 +575,20 @@ pub fn kind_of(update: &Update) -> &'static str {
 pub fn signature(row: &session::Row) -> String {
     match &row.kind {
         session::RowKind::User { text } => format!("user:{text}"),
-        session::RowKind::Assistant { markdown, thinking, error, .. } => {
+        session::RowKind::Assistant {
+            markdown,
+            thinking,
+            error,
+            ..
+        } => {
             format!("assistant:{markdown}:{thinking}:{error:?}")
         }
-        session::RowKind::Tool { call_id, name, arguments, .. } => {
+        session::RowKind::Tool {
+            call_id,
+            name,
+            arguments,
+            ..
+        } => {
             format!("tool:{call_id}:{name}:{arguments}")
         }
         session::RowKind::Report { done, .. } => format!("report:{done}"),
@@ -554,7 +604,9 @@ pub fn row_summary(model: &session::AgentModel) -> Vec<String> {
         .iter()
         .map(|row| match &row.kind {
             session::RowKind::User { text } => format!("user:{}", clip(text, 60)),
-            session::RowKind::Assistant { markdown, .. } => format!("assistant:{}", clip(markdown, 60)),
+            session::RowKind::Assistant { markdown, .. } => {
+                format!("assistant:{}", clip(markdown, 60))
+            }
             session::RowKind::Tool { name, result, .. } => {
                 format!("tool:{name}{}", if result.is_some() { "✓" } else { "" })
             }
@@ -568,7 +620,10 @@ pub fn row_summary(model: &session::AgentModel) -> Vec<String> {
 }
 
 pub fn clip(text: &str, chars: usize) -> String {
-    let one_line: String = text.chars().map(|c| if c == '\n' { ' ' } else { c }).collect();
+    let one_line: String = text
+        .chars()
+        .map(|c| if c == '\n' { ' ' } else { c })
+        .collect();
     if one_line.chars().count() <= chars {
         one_line
     } else {

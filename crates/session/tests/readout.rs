@@ -11,7 +11,10 @@ mod common;
 
 use common::{fixture, sse_events};
 use serde_json::json;
-use session::{cache_seed_limits, cache_seed_next_limit, cache_stats_from_journal, AgentModel, CacheTotals, Readout};
+use session::{
+    cache_seed_limits, cache_seed_next_limit, cache_stats_from_journal, AgentModel, CacheTotals,
+    Readout,
+};
 
 #[test]
 fn the_captured_session_reads_as_the_tui_would_draw_it() {
@@ -22,13 +25,27 @@ fn the_captured_session_reads_as_the_tui_would_draw_it() {
     // The journal's `cache-stats` entry is all input, no cache: the segment stays hidden,
     // the same rule the extension applies.
     let totals = cache_stats_from_journal(&fixture("journal.json")).expect("the capture has one");
-    assert_eq!(totals, CacheTotals { input: 100, cache_read: 0, cache_write: 0 });
+    assert_eq!(
+        totals,
+        CacheTotals {
+            input: 100,
+            cache_read: 0,
+            cache_write: 0
+        }
+    );
     readout.set_cache_totals(totals);
 
-    assert_eq!(readout.model_label().as_deref(), Some("stub-a"), "one provider, bare id");
+    assert_eq!(
+        readout.model_label().as_deref(),
+        Some("stub-a"),
+        "one provider, bare id"
+    );
     assert_eq!(readout.context_label(), "ctx 0k/200k (0%)");
     assert_eq!(readout.cache_label(), None);
-    assert_eq!(readout.goal_label().as_deref(), Some("goal g-4cb9 (complete) 0k"));
+    assert_eq!(
+        readout.goal_label().as_deref(),
+        Some("goal g-4cb9 (complete) 0k")
+    );
     assert_eq!(
         readout.text(),
         "stub-a · medium · ctx 0k/200k (0%) · goal g-4cb9 (complete) 0k"
@@ -54,7 +71,9 @@ fn a_model_id_under_two_providers_names_the_live_one() {
     readout.apply_state(&fixture("state-two-providers.json"));
     assert_eq!(readout.model_label().as_deref(), Some("stub-a (stub)"));
     assert!(
-        readout.text().starts_with("stub-a (stub) · medium · ctx 0k/200k (0%)"),
+        readout
+            .text()
+            .starts_with("stub-a (stub) · medium · ctx 0k/200k (0%)"),
         "line: {}",
         readout.text()
     );
@@ -63,10 +82,22 @@ fn a_model_id_under_two_providers_names_the_live_one() {
 /// `(format nil "~dk" (round n 1000))` — CL `round` goes half to even.
 #[test]
 fn k_figures_round_half_to_even() {
-    let cases = [(0u64, "0k"), (499, "0k"), (500, "0k"), (999, "1k"), (1500, "2k"), (2500, "2k"), (3500, "4k"), (48211, "48k"), (936000, "936k")];
+    let cases = [
+        (0u64, "0k"),
+        (499, "0k"),
+        (500, "0k"),
+        (999, "1k"),
+        (1500, "2k"),
+        (2500, "2k"),
+        (3500, "4k"),
+        (48211, "48k"),
+        (936000, "936k"),
+    ];
     for (tokens, expected) in cases {
         let mut readout = Readout::new();
-        readout.apply_state(&json!({ "model": "m", "context_tokens": tokens, "context_window": 4000000 }));
+        readout.apply_state(
+            &json!({ "model": "m", "context_tokens": tokens, "context_window": 4000000 }),
+        );
         // The k figures only: the percent rides the same `round`, but its value for
         // these inputs is not what this test is about (48211 of 4000k is 1%, not 0%).
         let figure = readout.context_label();
@@ -81,7 +112,10 @@ fn the_context_segment_shows_the_spec_line() {
     let mut readout = Readout::new();
     readout.apply_state(&json!({ "model": "ark-deepseek-v4.1-flash", "thinking": "max", "context_tokens": 48211, "context_window": 936000 }));
     assert_eq!(readout.context_label(), "ctx 48k/936k (5%)");
-    assert_eq!(readout.text(), "ark-deepseek-v4.1-flash · max · ctx 48k/936k (5%)");
+    assert_eq!(
+        readout.text(),
+        "ark-deepseek-v4.1-flash · max · ctx 48k/936k (5%)"
+    );
 
     // No window: the count alone.
     let mut readout = Readout::new();
@@ -108,12 +142,16 @@ fn a_missing_model_or_thinking_is_hidden() {
     assert_eq!(readout.text(), "ctx 48k/200k (24%)");
 
     let mut readout = Readout::new();
-    readout.apply_state(&json!({ "model": "m", "thinking": "", "context_tokens": 0, "context_window": null }));
+    readout.apply_state(
+        &json!({ "model": "m", "thinking": "", "context_tokens": 0, "context_window": null }),
+    );
     assert_eq!(readout.text(), "m · ctx 0k");
 
     // The effort level is lower-cased, as `tui-thinking-label` does.
     let mut readout = Readout::new();
-    readout.apply_state(&json!({ "model": "m", "thinking": "XHigh", "context_tokens": 0, "context_window": null }));
+    readout.apply_state(
+        &json!({ "model": "m", "thinking": "XHigh", "context_tokens": 0, "context_window": null }),
+    );
     assert_eq!(readout.text(), "m · xhigh · ctx 0k");
 }
 
@@ -121,18 +159,57 @@ fn a_missing_model_or_thinking_is_hidden() {
 fn the_cache_segment_needs_cache_activity() {
     let mut readout = Readout::new();
     for (totals, expected) in [
-        (CacheTotals { input: 0, cache_read: 0, cache_write: 0 }, None),
+        (
+            CacheTotals {
+                input: 0,
+                cache_read: 0,
+                cache_write: 0,
+            },
+            None,
+        ),
         // Input alone is not cache activity.
-        (CacheTotals { input: 100, cache_read: 0, cache_write: 0 }, None),
+        (
+            CacheTotals {
+                input: 100,
+                cache_read: 0,
+                cache_write: 0,
+            },
+            None,
+        ),
         // The spec's example: 97% of 10000.
-        (CacheTotals { input: 0, cache_read: 9700, cache_write: 300 }, Some("97% cached")),
+        (
+            CacheTotals {
+                input: 0,
+                cache_read: 9700,
+                cache_write: 300,
+            },
+            Some("97% cached"),
+        ),
         // A write with no read is cache activity too, and reads as 0%.
-        (CacheTotals { input: 95, cache_read: 0, cache_write: 5 }, Some("0% cached")),
-        (CacheTotals { input: 0, cache_read: 5, cache_write: 5 }, Some("50% cached")),
+        (
+            CacheTotals {
+                input: 95,
+                cache_read: 0,
+                cache_write: 5,
+            },
+            Some("0% cached"),
+        ),
+        (
+            CacheTotals {
+                input: 0,
+                cache_read: 5,
+                cache_write: 5,
+            },
+            Some("50% cached"),
+        ),
     ] {
         readout.set_cache_totals(totals);
         readout.apply_state(&json!({ "model": "m", "context_tokens": 0, "context_window": null }));
-        assert_eq!(readout.cache_label().as_deref(), expected, "totals {totals:?}");
+        assert_eq!(
+            readout.cache_label().as_deref(),
+            expected,
+            "totals {totals:?}"
+        );
     }
 }
 
@@ -145,22 +222,38 @@ fn the_goal_segment_follows_the_tui_rule() {
         "goal": { "goal_id": "a1b2c3d4", "objective": "ship", "status": "active",
                   "token_budget": 50000, "tokens_used": 4000, "tokens_used_live": 8000 }
     }));
-    assert_eq!(readout.goal_label().as_deref(), Some("goal a1b2c3d4 (active) 12k/50k"));
-    assert_eq!(readout.text(), "m · ctx 0k · goal a1b2c3d4 (active) 12k/50k");
+    assert_eq!(
+        readout.goal_label().as_deref(),
+        Some("goal a1b2c3d4 (active) 12k/50k")
+    );
+    assert_eq!(
+        readout.text(),
+        "m · ctx 0k · goal a1b2c3d4 (active) 12k/50k"
+    );
 
     // The budget half appears only when the goal has one — and a budget of zero is still
     // a budget: Lisp's `(and budget …)` is false only for NIL, never for 0.
     for (goal, expected) in [
-        (json!({ "goal_id": "g", "status": "active", "token_budget": null, "tokens_used": 0, "tokens_used_live": 0 }),
-         "goal g (active) 0k"),
-        (json!({ "goal_id": "g", "status": "active", "token_budget": 0, "tokens_used": 0, "tokens_used_live": 0 }),
-         "goal g (active) 0k/0k"),
-        (json!({ "goal_id": "g", "status": "paused", "token_budget": 1500, "tokens_used": 500, "tokens_used_live": 1000 }),
-         "goal g (paused) 2k/2k"),
+        (
+            json!({ "goal_id": "g", "status": "active", "token_budget": null, "tokens_used": 0, "tokens_used_live": 0 }),
+            "goal g (active) 0k",
+        ),
+        (
+            json!({ "goal_id": "g", "status": "active", "token_budget": 0, "tokens_used": 0, "tokens_used_live": 0 }),
+            "goal g (active) 0k/0k",
+        ),
+        (
+            json!({ "goal_id": "g", "status": "paused", "token_budget": 1500, "tokens_used": 500, "tokens_used_live": 1000 }),
+            "goal g (paused) 2k/2k",
+        ),
     ] {
         let mut readout = Readout::new();
         readout.apply_state(&json!({ "model": "m", "goal": goal }));
-        assert_eq!(readout.goal_label().as_deref(), Some(expected), "goal {goal}");
+        assert_eq!(
+            readout.goal_label().as_deref(),
+            Some(expected),
+            "goal {goal}"
+        );
     }
 
     // No goal: the segment is gone.
@@ -180,13 +273,23 @@ fn a_message_end_moves_the_line_with_the_run() {
         "context_window": 936000,
         "goal": { "goal_id": "a1b2c3d4", "status": "active", "token_budget": 50000, "tokens_used": 0, "tokens_used_live": 0 }
     }));
-    assert_eq!(readout.text(), "ark-deepseek-v4.1-flash · max · ctx 0k/936k (0%) · goal a1b2c3d4 (active) 0k/50k");
+    assert_eq!(
+        readout.text(),
+        "ark-deepseek-v4.1-flash · max · ctx 0k/936k (0%) · goal a1b2c3d4 (active) 0k/50k"
+    );
 
     assert!(readout.fold_message_end(&json!({
         "usage": { "input": 48211, "output": 100, "cache_read": 9700, "cache_write": 200 }
     })));
     assert_eq!(readout.context_tokens(), 58211);
-    assert_eq!(readout.cache_totals(), CacheTotals { input: 48211, cache_read: 9700, cache_write: 200 });
+    assert_eq!(
+        readout.cache_totals(),
+        CacheTotals {
+            input: 48211,
+            cache_read: 9700,
+            cache_write: 200
+        }
+    );
     assert_eq!(
         readout.text(),
         "ark-deepseek-v4.1-flash · max · ctx 58k/936k (6%) · 17% cached · goal a1b2c3d4 (active) 58k/50k"
@@ -220,7 +323,11 @@ fn segments_are_the_five_the_spec_names_in_order() {
         "context_window": 936000,
         "goal": { "goal_id": "g", "status": "active", "token_budget": 50000, "tokens_used": 12000, "tokens_used_live": 0 }
     }));
-    readout.set_cache_totals(CacheTotals { input: 300, cache_read: 9700, cache_write: 0 });
+    readout.set_cache_totals(CacheTotals {
+        input: 300,
+        cache_read: 9700,
+        cache_write: 0,
+    });
     assert_eq!(
         readout.segments(),
         vec![
@@ -240,12 +347,23 @@ fn the_cache_seed_comes_from_the_newest_journal_entry() {
     assert_eq!(cache_seed_limits(), &[20, 100, 400]);
     assert_eq!(cache_seed_next_limit(20), Some(100));
     assert_eq!(cache_seed_next_limit(100), Some(400));
-    assert_eq!(cache_seed_next_limit(400), None, "run out of limits: no extension installed");
+    assert_eq!(
+        cache_seed_next_limit(400),
+        None,
+        "run out of limits: no extension installed"
+    );
     assert_eq!(cache_seed_next_limit(7), None);
 
     // The capture's last entry: ten folds of the same session, `input` only.
     let totals = cache_stats_from_journal(&fixture("journal.json")).unwrap();
-    assert_eq!(totals, CacheTotals { input: 100, cache_read: 0, cache_write: 0 });
+    assert_eq!(
+        totals,
+        CacheTotals {
+            input: 100,
+            cache_read: 0,
+            cache_write: 0
+        }
+    );
 
     // The newest entry wins, not the first: a session that was resumed holds several.
     let journal = json!({ "entries": [
@@ -255,14 +373,23 @@ fn the_cache_seed_comes_from_the_newest_journal_entry() {
     ]});
     assert_eq!(
         cache_stats_from_journal(&journal),
-        Some(CacheTotals { input: 100, cache_read: 9700, cache_write: 200 })
+        Some(CacheTotals {
+            input: 100,
+            cache_read: 9700,
+            cache_write: 200
+        })
     );
 
     // A session that never used the extension: the load entry only.
-    assert_eq!(cache_stats_from_journal(&fixture("journal-empty.json")), None);
+    assert_eq!(
+        cache_stats_from_journal(&fixture("journal-empty.json")),
+        None
+    );
     // …and an entry with no usable data is not a seed either.
     assert_eq!(
-        cache_stats_from_journal(&json!({ "entries": [ { "type": "custom", "key": "cache-stats" } ] })),
+        cache_stats_from_journal(
+            &json!({ "entries": [ { "type": "custom", "key": "cache-stats" } ] })
+        ),
         None
     );
     assert_eq!(cache_stats_from_journal(&json!({ "entries": [] })), None);
@@ -273,7 +400,11 @@ fn the_cache_seed_comes_from_the_newest_journal_entry() {
     // 4-entry reply holds it — the 20-entry ask (`cache_seed_limits()[0]`) already does.
     assert_eq!(
         cache_stats_from_journal(&fixture("journal-limit4.json")),
-        Some(CacheTotals { input: 100, cache_read: 0, cache_write: 0 })
+        Some(CacheTotals {
+            input: 100,
+            cache_read: 0,
+            cache_write: 0
+        })
     );
     // The same session with the whole path is the same seed: growing the limit never
     // changes what the segment shows, it only re-sends more of the journal.
@@ -288,9 +419,17 @@ fn the_cache_seed_comes_from_the_newest_journal_entry() {
 #[test]
 fn a_seeded_cache_figure_shows_up_in_the_line() {
     let mut model = AgentModel::new();
-    model.readout_mut().set_cache_totals(CacheTotals { input: 300, cache_read: 9700, cache_write: 0 });
+    model.readout_mut().set_cache_totals(CacheTotals {
+        input: 300,
+        cache_read: 9700,
+        cache_write: 0,
+    });
     model.apply_state(&fixture("state-final.json"));
-    assert!(model.readout().text().contains("97% cached"), "line: {}", model.readout().text());
+    assert!(
+        model.readout().text().contains("97% cached"),
+        "line: {}",
+        model.readout().text()
+    );
 }
 
 /// The whole capture, one event at a time: the readout the UI ends up with is the one the
@@ -313,8 +452,18 @@ fn folding_the_capture_agrees_with_the_state_the_server_reports() {
     }
     let state = fixture("state-final.json");
     let folded = model.readout();
-    assert_eq!(folded.context_tokens(), state["context_tokens"].as_u64().unwrap());
+    assert_eq!(
+        folded.context_tokens(),
+        state["context_tokens"].as_u64().unwrap()
+    );
     let journal = cache_stats_from_journal(&fixture("journal.json")).unwrap();
-    assert_eq!(folded.cache_totals(), journal, "the folded totals are the journal's own running totals");
-    assert_eq!(folded.goal_label().as_deref(), Some("goal g-4cb9 (complete) 0k"));
+    assert_eq!(
+        folded.cache_totals(),
+        journal,
+        "the folded totals are the journal's own running totals"
+    );
+    assert_eq!(
+        folded.goal_label().as_deref(),
+        Some("goal g-4cb9 (complete) 0k")
+    );
 }
