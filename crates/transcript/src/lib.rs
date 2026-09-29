@@ -41,13 +41,15 @@ use std::ops::Range;
 
 use gpui_kit::base::TextViewState;
 use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
-use gpui_kit::component::ActiveTheme as _;
-use gpui_kit::component::Sizable as _;
+use gpui_kit::component::{v_flex, ActiveTheme as _, Icon, IconName, Sizable as _};
 use gpui_kit::{
-    App, AppContext as _, Context, Entity, IntoElement, Render, StyleRefinement, Styled as _,
+    div, px, AnyElement, App, AppContext as _, Context, Entity, InteractiveElement as _,
+    IntoElement, ParentElement as _, Render, StyleRefinement, Styled as _, TestSupportExt as _,
     Window,
 };
-use session::{Row, RowId, RowKind, Todo};
+use session::{AgentKey, Row, RowId, RowKind, Todo};
+
+use crate::style::Palette;
 
 /// The data the row renderer reads.
 ///
@@ -151,6 +153,9 @@ pub struct TranscriptView {
     data: Entity<TranscriptData>,
     scroller: Entity<MessageScrollerState>,
     todos: Vec<Todo>,
+    /// Whose transcript this is. An empty transcript says different things to
+    /// the coordinator's reader and to a lane's.
+    agent: AgentKey,
 }
 
 impl TranscriptView {
@@ -170,7 +175,23 @@ impl TranscriptView {
             }),
             scroller,
             todos: Vec::new(),
+            agent: AgentKey::Coordinator,
         }
+    }
+
+    /// Whose transcript this view shows.
+    pub fn agent(&self) -> AgentKey {
+        self.agent
+    }
+
+    /// Tell the view whose transcript it shows: what an empty one says depends
+    /// on it (§7.3).
+    pub fn set_agent(&mut self, agent: AgentKey, cx: &mut Context<Self>) {
+        if self.agent == agent {
+            return;
+        }
+        self.agent = agent;
+        cx.notify();
     }
 
     /// The revision of the last accepted update.
@@ -350,11 +371,77 @@ impl TranscriptView {
     }
 }
 
+/// What an empty transcript says, per agent: the coordinator's view invites a
+/// request and carries the app's mark; a lane's says it has nothing to do yet.
+///
+/// Apart from the element so the wording is testable on its own.
+fn empty_note(agent: AgentKey) -> (String, Option<&'static str>) {
+    match agent {
+        AgentKey::Coordinator => (
+            "Ask the coordinator to get started".to_string(),
+            Some("It plans the work and hands tasks to its lanes."),
+        ),
+        AgentKey::Lane(n) => (format!("Lane {n} hasn't been given work yet."), None),
+    }
+}
+
+/// The transcript before its first row: a quiet, centred invitation, with
+/// nothing else in the column (§7.3).
+fn empty_state(agent: AgentKey, palette: &Palette) -> AnyElement {
+    let (note, detail) = empty_note(agent);
+    let mut column = v_flex()
+        .size_full()
+        .justify_center()
+        .items_center()
+        .gap_2()
+        .px_6()
+        .text_center();
+
+    // The mark belongs to the coordinator's view: it is the app talking about
+    // itself. A lane's note is about that lane.
+    if agent == AgentKey::Coordinator {
+        column = column.child(
+            Icon::new(IconName::Asterisk)
+                .size(px(22.))
+                .text_color(palette.muted_foreground),
+        );
+    }
+
+    column = column.child(
+        div()
+            .text_size(palette.font_size)
+            .text_color(palette.foreground)
+            .child(note),
+    );
+    if let Some(detail) = detail {
+        column = column.child(
+            div()
+                .text_size(palette.font_size - px(2.))
+                .text_color(palette.muted_foreground)
+                .child(detail),
+        );
+    }
+
+    // The id names the state, and a lane's carries its number: the two are
+    // addressable apart.
+    match agent {
+        AgentKey::Coordinator => column.id("transcript-empty"),
+        AgentKey::Lane(n) => column.id(("transcript-empty-lane", n as u64)),
+    }
+    .test_support()
+    .into_any_element()
+}
+
 impl Render for TranscriptView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let data = self.data.clone();
         let view = cx.weak_entity();
         let theme = cx.theme().clone();
+
+        // Nothing to scroll yet: an empty transcript is a state of its own.
+        if self.data.read(cx).rows.is_empty() {
+            return empty_state(self.agent, &Palette::from_app(cx));
+        }
 
         MessageScroller::new(
             "transcript",
@@ -381,5 +468,6 @@ impl Render for TranscriptView {
         .with_jump_button_label("Jump to latest")
         .size_full()
         .min_h_0()
+        .into_any_element()
     }
 }

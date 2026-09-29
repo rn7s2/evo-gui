@@ -15,11 +15,12 @@ use std::time::Duration;
 use gpui_kit::base::Easing;
 use gpui_kit::component::text::{TextView, TextViewMotion};
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{Icon, IconName};
+use gpui_kit::component::{h_flex, Icon, IconName};
 use gpui_kit::TestSupportExt as _;
 use gpui_kit::{
-    div, px, AnyElement, App, ElementId, FontWeight, InteractiveElement as _, IntoElement,
-    ParentElement as _, Pixels, StatefulInteractiveElement as _, Styled as _, WeakEntity,
+    div, px, Animation, AnimationExt as _, AnyElement, App, ElementId, FontWeight,
+    InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
+    StatefulInteractiveElement as _, Styled as _, WeakEntity,
 };
 use serde_json::Value;
 use session::{DimStyle, Row, RowId, RowKind, ToolResult};
@@ -66,6 +67,17 @@ const STATUS_SIZE: Pixels = px(12.);
 const PAYLOAD_LINE_HEIGHT: f32 = 1.45;
 /// Width of the label column of a report row.
 const REPORT_LABEL_WIDTH: Pixels = px(66.);
+
+/// The waiting pips that hold an assistant row's place between `message-start`
+/// and the first delta: one cycle of the pulse, and how long each pip is.
+const DOT_CYCLE: Duration = Duration::from_millis(1_200);
+const DOT_SIZE: Pixels = px(5.);
+/// Where each pip is in the cycle: a third of it apart, so the three read as one
+/// pulse travelling along the row rather than three separate blinks.
+pub(crate) const DOT_PHASES: [f32; 3] = [0., 1. / 3., 2. / 3.];
+/// The floor of a pip's fade. A pip is always visible: the row says the message
+/// is on its way, it does not blink at the reader.
+pub(crate) const DOT_INK_FLOOR: f32 = 0.25;
 
 /// The motion a streaming assistant row is rendered with.
 pub(crate) fn stream_motion() -> TextViewMotion {
@@ -149,12 +161,13 @@ pub(crate) fn render_row(
         RowKind::Assistant {
             markdown,
             thinking,
+            streaming,
             error,
-            ..
         } => assistant_row(
             row.id,
             markdown,
             thinking,
+            *streaming,
             error.as_deref(),
             data,
             cx,
@@ -246,10 +259,14 @@ fn user_row(id: RowId, text: &str, palette: &Palette) -> AnyElement {
 
 /// An assistant message: the retained markdown document, its optional thinking
 /// text, and the error that ended it, if any.
+///
+/// A message that has started but has not sent a word yet has no document to
+/// show — [`waiting_dots`] holds its place until the first delta arrives.
 fn assistant_row(
     id: RowId,
     markdown: &str,
     thinking: &str,
+    streaming: bool,
     error: Option<&str>,
     data: &TranscriptData,
     cx: &App,
@@ -263,21 +280,25 @@ fn assistant_row(
         .flex_col()
         .gap_2();
 
-    row = match data.documents.get(&id) {
-        // The retained document: never recreated per delta, `set_text` extends it.
-        Some(document) => row.child(
-            TextView::new(document)
-                .style(text_style(cx))
-                .motion(stream_motion()),
-        ),
-        // Unreachable while every assistant row gets a document on the way in;
-        // fall back to the source rather than dropping the message.
-        None => row.child(
-            div()
-                .text_color(palette.muted_foreground)
-                .child(markdown.to_string()),
-        ),
-    };
+    if streaming && markdown.trim().is_empty() {
+        row = row.child(waiting_dots(id, palette));
+    } else {
+        row = match data.documents.get(&id) {
+            // The retained document: never recreated per delta, `set_text` extends it.
+            Some(document) => row.child(
+                TextView::new(document)
+                    .style(text_style(cx))
+                    .motion(stream_motion()),
+            ),
+            // Unreachable while every assistant row gets a document on the way in;
+            // fall back to the source rather than dropping the message.
+            None => row.child(
+                div()
+                    .text_color(palette.muted_foreground)
+                    .child(markdown.to_string()),
+            ),
+        };
+    }
 
     if data.show_thinking && !thinking.is_empty() {
         row = row.child(
@@ -316,6 +337,44 @@ fn assistant_row(
     }
 
     row.test_support().into_any_element()
+}
+
+/// The pips that hold an assistant row's place between a message starting and
+/// its first delta.
+///
+/// They sit at a text line's height, so the transcript does not jump when the
+/// first word lands, and they are drawn through
+/// [`AnimationExt::with_animation`], which stands still under
+/// [`App::reduce_motion`] rather than scheduling frames.
+fn waiting_dots(id: RowId, palette: &Palette) -> AnyElement {
+    let ink = palette.muted_foreground;
+    h_flex()
+        .id(("transcript-waiting", id))
+        .items_center()
+        .gap_1()
+        .py(px(8.))
+        .test_support()
+        .with_animation(
+            ("transcript-waiting-pulse", id),
+            Animation::new(DOT_CYCLE).repeat(),
+            move |pips, delta| {
+                pips.children(DOT_PHASES.map(|phase| {
+                    div()
+                        .size(DOT_SIZE)
+                        .rounded_full()
+                        .bg(ink.alpha(dot_ink(delta, phase)))
+                }))
+            },
+        )
+        .into_any_element()
+}
+
+/// How lit a pip is at `delta` through the cycle, `phase` behind the first one:
+/// a triangle wave, up in the middle of its turn and dim at its ends.
+pub(crate) fn dot_ink(delta: f32, phase: f32) -> f32 {
+    let turn = (delta + phase).rem_euclid(1.);
+    let swell = 1. - ((turn - 0.5).abs() * 2.);
+    DOT_INK_FLOOR + (1. - DOT_INK_FLOOR) * swell
 }
 
 /// A tool call: one compact line — `name · ok|error|running` — that opens onto

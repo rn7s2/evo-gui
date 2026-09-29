@@ -916,3 +916,157 @@ fn markdown_tables_use_the_sideways_scrolling_layout(cx: &mut TestAppContext) {
         );
     });
 }
+
+/// What an empty transcript says, and how lit a pip of the waiting row is.
+#[test]
+fn an_empty_transcript_invites_the_coordinator() {
+    let (note, detail) = crate::empty_note(session::AgentKey::Coordinator);
+    assert_eq!(note, "Ask the coordinator to get started");
+    assert_eq!(
+        detail,
+        Some("It plans the work and hands tasks to its lanes.")
+    );
+
+    let (note, detail) = crate::empty_note(session::AgentKey::Lane(2));
+    assert_eq!(note, "Lane 2 hasn't been given work yet.");
+    assert_eq!(detail, None);
+
+    // Every pip is visible at every point of the cycle, and the three are out of
+    // step with each other: the row pulses rather than blinking.
+    let at = |delta: f32| crate::rows::dot_ink(delta, 0.);
+    assert_eq!(
+        at(0.),
+        crate::rows::DOT_INK_FLOOR + (1. - crate::rows::DOT_INK_FLOOR) * 0.
+    );
+    assert!((at(0.5) - 1.).abs() < f32::EPSILON, "a pip peaks mid-turn");
+    assert!(at(0.) < at(0.25) && at(0.25) < at(0.5));
+    for phase in crate::rows::DOT_PHASES {
+        for step in 0..12 {
+            let ink = crate::rows::dot_ink(step as f32 / 12., phase);
+            assert!(
+                (crate::rows::DOT_INK_FLOOR..=1.).contains(&ink),
+                "a pip is never invisible: {ink} at step {step}, phase {phase}"
+            );
+        }
+    }
+}
+
+#[gpui_kit::test]
+fn a_fresh_tab_shows_the_invitation_and_a_lane_shows_its_own_note(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (host, cx) = cx.add_window_view(|_window, cx| TranscriptHost::new(cx));
+
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        assert!(
+            window.try_find("transcript-empty").is_some(),
+            "a transcript with no rows shows the invitation"
+        );
+        assert!(
+            window.try_find(("transcript-empty-lane", 3u64)).is_none(),
+            "and not a lane's note"
+        );
+
+        // Centred in the column, and quiet: it is not a row of the transcript.
+        let bounds = window.find("transcript-empty").bounds();
+        let window_bounds = window.bounds();
+        let centre = bounds.center().y;
+        let area = window_bounds.center().y;
+        assert!(
+            (centre - area).abs() < px(40.),
+            "the invitation is centred in the transcript area: {bounds:?} in {window_bounds:?}"
+        );
+    });
+
+    // A lane's view says so, and names the lane.
+    host.update(cx, |host, cx| {
+        host.transcript.update(cx, |view, cx| {
+            view.set_agent(session::AgentKey::Lane(3), cx)
+        });
+    });
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        let lane = window.find(("transcript-empty-lane", 3u64)).bounds();
+        assert!(
+            lane.size.width > px(300.),
+            "the note spans the column: {lane:?}"
+        );
+        assert!(
+            window.try_find("transcript-empty").is_none(),
+            "a lane's empty transcript is not the coordinator's"
+        );
+    });
+
+    // The first row replaces it.
+    host.update(cx, |host, cx| {
+        host.transcript.update(cx, |view, cx| {
+            view.upsert(1, user(1, 1, "hello"), cx);
+        });
+    });
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        assert!(
+            window.try_find("transcript-empty").is_none()
+                && window.try_find(("transcript-empty-lane", 3u64)).is_none(),
+            "the empty state goes away when the first row arrives"
+        );
+        assert!(window.try_find(("transcript-user", 1u64)).is_some());
+    });
+}
+
+#[gpui_kit::test]
+fn a_waiting_message_shows_pips_until_its_first_delta(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (host, cx) = cx.add_window_view(|_window, cx| TranscriptHost::new(cx));
+
+    // `message-start`, and nothing else yet: the row holds its place with pips.
+    host.update(cx, |host, cx| {
+        host.transcript.update(cx, |view, cx| {
+            view.upsert(1, assistant(1, 1, ""), cx);
+        });
+    });
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        let pips = window.find(("transcript-waiting", 1u64));
+        assert!(
+            pips.bounds().size.height > px(15.),
+            "the pips sit at about a line's height, so nothing jumps when the text lands: {:?}",
+            pips.bounds()
+        );
+        assert!(
+            window.try_find("transcript-empty").is_none(),
+            "a message that has started is not an empty transcript"
+        );
+    });
+
+    // The first delta: the text takes over from the pips, in the same row.
+    host.update(cx, |host, cx| {
+        host.transcript.update(cx, |view, cx| {
+            view.upsert(1, assistant(1, 2, "Hello"), cx);
+        });
+    });
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        assert!(
+            window.try_find(("transcript-waiting", 1u64)).is_none(),
+            "the first delta retires the pips"
+        );
+        assert!(window.try_find(("transcript-assistant", 1u64)).is_some());
+    });
+
+    // Somebody who asked for less motion still gets the row: `with_animation`
+    // stops the pulse, it does not take the pips away.
+    cx.update(|_, cx: &mut App| cx.set_reduce_motion(true));
+    host.update(cx, |host, cx| {
+        host.transcript.update(cx, |view, cx| {
+            view.replace(2, vec![assistant(1, 3, "")], cx);
+        });
+    });
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        assert!(
+            window.try_find(("transcript-waiting", 1u64)).is_some(),
+            "a row that is waiting is drawn with or without motion"
+        );
+    });
+}

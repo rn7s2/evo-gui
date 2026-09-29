@@ -29,10 +29,11 @@ const MAX_ROWS: usize = 8;
 /// The input is a card: a chat input, not a form field.
 const INPUT_RADIUS: Pixels = px(10.);
 const INPUT_BORDER: Pixels = px(1.);
-/// The focus ring: a band around the card, in the accent, while the caret is in
-/// the input.
+/// The focus ring: a band around the card, in the focus colour, while the caret
+/// is in the input. The band is a wash, not a second outline — the card marks
+/// focus with one hairline, and this is the soft edge around it.
 const FOCUS_RING: Pixels = px(3.);
-const FOCUS_RING_INK: f32 = 0.18;
+const FOCUS_RING_INK: f32 = 0.12;
 
 /// What the input is for, and the two keys that submit it.
 ///
@@ -299,13 +300,15 @@ impl Render for Composer {
         let readout = self.readout_element(cx);
         let button = self.action_button(cx);
         // The caret is what "focused" means here: the ring belongs to the card,
-        // which the input does not own.
+        // which the input does not own. Focus is the theme's focus colour, and
+        // only a hairline of it: the band around the card carries the weight.
         let focused = self
             .input
             .read(cx)
             .presentation()
             .focus_handle()
             .is_focused(window);
+        let edge = if focused { theme.ring } else { theme.border };
 
         // The composer is the top of its column (§7.3): the input, its status
         // row, and nothing below them — the column's height belongs to the tab
@@ -318,30 +321,24 @@ impl Render for Composer {
             .on_action(cx.listener(Self::interrupt_action))
             .child(
                 // A chat input: a rounded card with one hairline edge, and the
-                // hint that this is where a message is typed — the accent, as a
-                // ring around the card, while the caret is in it. The input
-                // draws none of this itself, so the card can round further than
-                // the theme's default radius and pad the text by the size's own
-                // 12px without a second inset around it.
+                // hint that this is where a message is typed — the focus
+                // colour, as a soft band around the card while the caret is in
+                // it. The input draws none of this itself, so the card can
+                // round further than the theme's default radius and pad the
+                // text by the size's own 12px without a second inset around it.
                 div()
                     .w_full()
                     .min_w_0()
                     .rounded(INPUT_RADIUS + FOCUS_RING)
                     .p(FOCUS_RING)
-                    .when(focused, |this| {
-                        this.bg(theme.primary.alpha(FOCUS_RING_INK))
-                    })
+                    .when(focused, |this| this.bg(theme.ring.alpha(FOCUS_RING_INK)))
                     .child(
                         div()
                             .w_full()
                             .min_w_0()
                             .rounded(INPUT_RADIUS)
                             .border(INPUT_BORDER)
-                            .border_color(if focused {
-                                theme.primary
-                            } else {
-                                theme.border
-                            })
+                            .border_color(edge)
                             .bg(theme.input_background())
                             .child(
                                 Textarea::new(&self.input)
@@ -498,9 +495,13 @@ mod tests {
                 button
             );
             assert_eq!(button.size.height, ACTION_HEIGHT);
-            assert!(
-                readout.right() <= button.left(),
-                "the readout runs into the button: {readout:?} vs {button:?}"
+            // The readout is the row's flexible cell: it takes every pixel left
+            // over from the button, so a long status line is elided by the
+            // button's own gap and not by slack in the layout.
+            assert_eq!(
+                button.left() - readout.right(),
+                px(8.),
+                "the readout stops short of the action: {readout:?} vs {button:?}"
             );
 
             // The rest of the column is empty: the composer owns the top of it,

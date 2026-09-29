@@ -14,6 +14,11 @@
 //! — opened so their arguments and results read as a key/value list rather than
 //! as the JSON they arrived in.
 //!
+//! The last stages are the states before any of that: a fresh tab, where the
+//! transcript invites the reader to ask for something; a lane with no work yet;
+//! and an assistant message that has started without sending a word, which holds
+//! its place with the waiting pips.
+//!
 //! ```sh
 //! cargo run --example transcript_demo                    # live window
 //! cargo run --example transcript_demo -- --capture <dir> # render the stream to PNGs
@@ -36,7 +41,7 @@ use gpui_kit::{
     HeadlessAppContext, InputEvent as _, IntoElement, MouseMoveEvent, ParentElement as _, Render,
     ScrollDelta, ScrollWheelEvent, Styled as _, Task, Window, WindowBounds, WindowOptions,
 };
-use session::{DimStyle, Row, RowId, RowKind, Todo, TodoStatus, ToolResult};
+use session::{AgentKey, DimStyle, Row, RowId, RowKind, Todo, TodoStatus, ToolResult};
 
 use transcript::{TodoPanel, TranscriptView};
 
@@ -83,6 +88,15 @@ const TOOL_ARGUMENTS_SHOT: &str = "15-tool-arguments-expanded.png";
 const DARK_TOOL_ARGUMENTS_SHOT: &str = "16-dark-tool-arguments-expanded.png";
 /// The todo panel while its list scrolls, with the thumb the panel draws.
 const TODO_SCROLLBAR_SHOT: &str = "17-todo-panel-scrollbar.png";
+/// A tab that has done nothing yet: the transcript's own invitation.
+const FRESH_TAB_SHOT: &str = "18-fresh-tab-invitation.png";
+/// The same column showing a lane that has not been given work.
+const LANE_EMPTY_SHOT: &str = "19-lane-with-no-work.png";
+/// A message that has started and not sent a word yet.
+const WAITING_SHOT: &str = "20-message-waiting.png";
+/// The invitation and the waiting pips in the dark theme.
+const DARK_FRESH_TAB_SHOT: &str = "21-dark-fresh-tab-invitation.png";
+const DARK_WAITING_SHOT: &str = "22-dark-message-waiting.png";
 
 const ASSISTANT_ID: RowId = 2;
 const SECOND_ASSISTANT_ID: RowId = 21;
@@ -496,9 +510,19 @@ impl Demo {
         demo
     }
 
+    /// The same root with nothing in it: no rows and no todos, the way a tab
+    /// looks before its first turn.
+    fn blank(cx: &mut Context<Self>) -> Self {
+        Self {
+            transcript: cx.new(|cx| TranscriptView::new(cx)),
+            stream: None,
+        }
+    }
+
     /// The same root without the stream task; a capture drives the deltas.
     fn staged(cx: &mut Context<Self>) -> Self {
-        let transcript = cx.new(|cx| TranscriptView::new(cx));
+        let demo = Self::blank(cx);
+        let transcript = demo.transcript.clone();
 
         transcript.update(cx, |view, cx| {
             view.replace(
@@ -512,10 +536,7 @@ impl Demo {
             view.set_todos(todos(), cx);
         });
 
-        Self {
-            transcript,
-            stream: None,
-        }
+        demo
     }
 
     /// Stream the assistant message, then finish the turn with its tool,
@@ -794,6 +815,34 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     // The panel's thumb, while the list is away from its top.
     shot(&mut cx, window, dir, TODO_SCROLLBAR_SHOT)?;
 
+    // A fresh tab: nothing has happened yet, so the transcript is the
+    // invitation (§7.3) — and the same column for a lane with no work.
+    let (blank, blank_demo) = open_blank_window(&mut cx, WINDOW_SIZE)?;
+    shot(&mut cx, blank, dir, FRESH_TAB_SHOT)?;
+
+    blank_demo.update(&mut cx, |demo, cx| {
+        demo.transcript
+            .update(cx, |view, cx| view.set_agent(AgentKey::Lane(3), cx));
+    });
+    shot(&mut cx, blank, dir, LANE_EMPTY_SHOT)?;
+
+    // And a coordinator's message that has started without sending a word: the
+    // pips hold its place until the first delta.
+    blank_demo.update(&mut cx, |demo, cx| {
+        demo.transcript.update(cx, |view, cx| {
+            view.set_agent(AgentKey::Coordinator, cx);
+            view.replace(
+                1,
+                vec![
+                    user_row(1, "What changed in the transcript crate?"),
+                    assistant_row(2, "", true),
+                ],
+                cx,
+            );
+        });
+    });
+    shot(&mut cx, blank, dir, WAITING_SHOT)?;
+
     // What an expanded tool row shows: the calls' own JSON as a key/value list,
     // a multi-line value as a block, and both shapes of result.
     let (tools, tools_demo) = open_capture_window(&mut cx, CAPTURE_SIZE)?;
@@ -857,7 +906,42 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     // And the open tool rows in the dark theme.
     shot(&mut cx, tools, dir, DARK_TOOL_ARGUMENTS_SHOT)?;
 
+    // The states before a transcript has anything in it, in the dark.
+    blank_demo.update(&mut cx, |demo, cx| {
+        demo.transcript.update(cx, |view, cx| {
+            view.replace(2, Vec::new(), cx);
+        });
+    });
+    shot(&mut cx, blank, dir, DARK_FRESH_TAB_SHOT)?;
+
+    blank_demo.update(&mut cx, |demo, cx| {
+        demo.transcript.update(cx, |view, cx| {
+            view.replace(
+                2,
+                vec![
+                    user_row(1, "What changed in the transcript crate?"),
+                    assistant_row(2, "", true),
+                ],
+                cx,
+            );
+        });
+    });
+    shot(&mut cx, blank, dir, DARK_WAITING_SHOT)?;
+
     Ok(())
+}
+
+/// The same capture window on a tab that has done nothing yet.
+fn open_blank_window(
+    cx: &mut HeadlessAppContext,
+    size: (f32, f32),
+) -> Result<(AnyWindowHandle, Entity<Demo>), Box<dyn std::error::Error>> {
+    let (handle, demo) = cx.update(|cx| {
+        gpui_kit::open_window(window_options(size, false), cx, |_window, cx| {
+            cx.new(|cx| Demo::blank(cx))
+        })
+    })?;
+    Ok((handle.into(), demo))
 }
 
 fn open_capture_window(

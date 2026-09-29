@@ -241,6 +241,9 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     set_activity(&mut cx, window, &demo, Activity::Idle)?;
     set_readout(&mut cx, window, &demo, READOUT)?;
     clear_draft(&mut cx, window, &demo)?;
+    // Clearing the draft needs the caret, so the input is focused now: an idle
+    // empty composer is the one with nothing focused in it.
+    blur_input(&mut cx, window)?;
     shot(&mut cx, window, dir, DARK_IDLE_EMPTY_SHOT)?;
 
     type_draft(&mut cx, window, &demo)?;
@@ -289,6 +292,15 @@ fn clear_draft(
         window.press("cmd-a", cx);
         window.press("backspace", cx);
     })?;
+    Ok(())
+}
+
+/// Take the caret back out of the input, as clicking away from it does.
+fn blur_input(
+    cx: &mut HeadlessAppContext,
+    window: AnyWindowHandle,
+) -> Result<(), Box<dyn std::error::Error>> {
+    cx.update_window(window, |_, window, cx| window.blur(cx))?;
     Ok(())
 }
 
