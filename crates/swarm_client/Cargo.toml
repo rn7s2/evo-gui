@@ -3,4 +3,20 @@ name = "swarm_client"
 version.workspace = true
 edition.workspace = true
 
+[features]
+default = ["test-harness"]
+# The reusable real-server test harness (`harness`): a temp HOME whose init.lisp
+# registers a stub provider, plus a live `evo-swarm serve` with scripted lanes.
+# On by default so `cargo test -p swarm_client` runs the end-to-end tests;
+# other crates enable it in dev-dependencies.
+test-harness = []
+
 [dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-channel = "2"
+libc = "0.2"
+
+[[test]]
+name = "swarm_e2e"
+required-features = ["test-harness"]

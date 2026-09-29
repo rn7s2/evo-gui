@@ -1,0 +1,17 @@
+{
+  "ok": true,
+  "status": 200,
+  "error": null,
+  "output": [
+    {
+      "style": "dim",
+      "text": "new session"
+    }
+  ],
+  "data": {
+    "session": "/var/folders/5d/bgm58_l51j52vqz4v7jrdfch0000gn/T/evo-fixtures-8yp1mnc3/home/sessions/-private-var-folders-5d-bgm58_l51j52vqz4v7jrdfch0000gn-T-evo-fixtures-8yp1mnc3-proj/20260929T092553Z_90eee30ba943180c.sexp"
+  },
+  "choices": null,
+  "cursor": 93,
+  "task": null
+}

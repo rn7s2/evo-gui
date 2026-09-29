@@ -8,3 +8,6 @@ name = "evo-desktop"
 path = "src/main.rs"
 
 [dependencies]
+gpui-kit = { workspace = true }
+anyhow = { workspace = true }
+workspace = { path = "../workspace" }

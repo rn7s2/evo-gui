@@ -1,0 +1,72 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "CALL report {\"done\":\"lane 2 finished the fixture work\",\"evidence\":\"lane2-transcript.json\",\"next\":\"nothing\",\"blocked\":\"\",\"requests\":\"none\"}"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "api": "anthropic-messages",
+      "provider": "stub",
+      "model": "stub-a",
+      "stop_reason": "tool-use",
+      "usage": {
+        "input": 10,
+        "output": 5,
+        "cache_read": 0,
+        "cache_write": 0
+      },
+      "content": [
+        {
+          "type": "tool-call",
+          "id": "toolu_10",
+          "name": "report",
+          "arguments": {
+            "done": "lane 2 finished the fixture work",
+            "evidence": "lane2-transcript.json",
+            "next": "nothing",
+            "blocked": "",
+            "requests": "none"
+          },
+          "arguments_json": "{\"done\": \"lane 2 finished the fixture work\", \"evidence\": \"lane2-transcript.json\", \"next\": \"nothing\", \"blocked\": \"\", \"requests\": \"none\"}"
+        }
+      ]
+    },
+    {
+      "role": "tool-result",
+      "tool_call_id": "toolu_10",
+      "tool_name": "report",
+      "is_error": null,
+      "content": [
+        {
+          "type": "text",
+          "text": "Delivered to the coordinator."
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "api": "anthropic-messages",
+      "provider": "stub",
+      "model": "stub-a",
+      "stop_reason": "stop",
+      "usage": {
+        "input": 10,
+        "output": 5,
+        "cache_read": 0,
+        "cache_write": 0
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "tool done"
+        }
+      ]
+    }
+  ]
+}

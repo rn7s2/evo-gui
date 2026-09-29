@@ -1,0 +1,16 @@
+{
+  "ok": true,
+  "status": 200,
+  "error": null,
+  "output": [],
+  "data": null,
+  "choices": null,
+  "cursor": 95,
+  "task": {
+    "id": "64ce858e",
+    "kind": "compact",
+    "started": 3999662754,
+    "age": 0,
+    "step_age": 0
+  }
+}

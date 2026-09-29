@@ -1,0 +1,6 @@
+: evo-swarm events after 101
+
+id: 102
+event: user-input
+data: {"type":"user-input","text":"fixture user-input"}
+

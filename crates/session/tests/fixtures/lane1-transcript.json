@@ -1,0 +1,77 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "DELAY3 CALL todo {\"items\":[{\"text\":\"lane step one\",\"status\":\"in-progress\"},{\"text\":\"lane step two\",\"status\":\"pending\"}]}"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "api": "anthropic-messages",
+      "provider": "stub",
+      "model": "stub-a",
+      "stop_reason": "tool-use",
+      "usage": {
+        "input": 10,
+        "output": 5,
+        "cache_read": 0,
+        "cache_write": 0
+      },
+      "content": [
+        {
+          "type": "tool-call",
+          "id": "toolu_6",
+          "name": "todo",
+          "arguments": {
+            "items": [
+              {
+                "text": "lane step one",
+                "status": "in-progress"
+              },
+              {
+                "text": "lane step two",
+                "status": "pending"
+              }
+            ]
+          },
+          "arguments_json": "{\"items\": [{\"text\": \"lane step one\", \"status\": \"in-progress\"}, {\"text\": \"lane step two\", \"status\": \"pending\"}]}"
+        }
+      ]
+    },
+    {
+      "role": "tool-result",
+      "tool_call_id": "toolu_6",
+      "tool_name": "todo",
+      "is_error": null,
+      "content": [
+        {
+          "type": "text",
+          "text": "Todo list updated: 2 items (0 done, 1 in progress).\n◐ lane step one\n☐ lane step two\n"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "api": "anthropic-messages",
+      "provider": "stub",
+      "model": "stub-a",
+      "stop_reason": "stop",
+      "usage": {
+        "input": 10,
+        "output": 5,
+        "cache_read": 0,
+        "cache_write": 0
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "tool done"
+        }
+      ]
+    }
+  ]
+}

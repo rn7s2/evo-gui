@@ -1,0 +1,21 @@
+{
+  "status": "idle",
+  "task": null,
+  "turn": 0,
+  "cursor": 95,
+  "model": "stub-a",
+  "provider": "stub",
+  "model_ready": true,
+  "thinking": "medium",
+  "language": "en",
+  "context_tokens": 0,
+  "context_window": 200000,
+  "goal": null,
+  "todos": [],
+  "jobs": null,
+  "session": "/var/folders/5d/bgm58_l51j52vqz4v7jrdfch0000gn/T/evo-fixtures-8yp1mnc3/home/sessions/-private-var-folders-5d-bgm58_l51j52vqz4v7jrdfch0000gn-T-evo-fixtures-8yp1mnc3-proj/20260929T092553Z_90eee30ba943180c.sexp",
+  "session_id": "90eee30ba943180c",
+  "session_started": null,
+  "leaf": "8df48c8d",
+  "pending_input": null
+}

@@ -1,0 +1,10 @@
+[
+  {
+    "id": 102,
+    "event": "user-input",
+    "data": {
+      "type": "user-input",
+      "text": "fixture user-input"
+    }
+  }
+]

@@ -1,0 +1,29 @@
+{
+  "ok": true,
+  "status": 200,
+  "error": null,
+  "output": [
+    {
+      "style": "notice",
+      "text": "◆ goal created: fixture goal: show the goal segment FINISH"
+    }
+  ],
+  "data": {
+    "goal": {
+      "goal_id": "g-4cb9",
+      "objective": "fixture goal: show the goal segment FINISH",
+      "status": "active",
+      "token_budget": null,
+      "tokens_used": 0
+    }
+  },
+  "choices": null,
+  "cursor": 4,
+  "task": {
+    "id": "bf8de4e2",
+    "kind": "run",
+    "started": 3999662744,
+    "age": 0,
+    "step_age": 0
+  }
+}

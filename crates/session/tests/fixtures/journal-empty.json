@@ -1,0 +1,51 @@
+{
+  "path": "/var/folders/5d/bgm58_l51j52vqz4v7jrdfch0000gn/T/evo-fixtures-8yp1mnc3/home/sessions/-private-var-folders-5d-bgm58_l51j52vqz4v7jrdfch0000gn-T-evo-fixtures-8yp1mnc3-proj/20260929T092544Z_89991c7caa021b51.sexp",
+  "header": {
+    "type": "session",
+    "version": 1,
+    "id": "89991c7caa021b51",
+    "cwd": "/private/var/folders/5d/bgm58_l51j52vqz4v7jrdfch0000gn/T/evo-fixtures-8yp1mnc3/proj/",
+    "timestamp": "2026-09-29T09:25:44Z"
+  },
+  "leaf": "15e7c55f",
+  "entries": [
+    {
+      "type": "load",
+      "id": "d6bc34b1",
+      "parent_id": null,
+      "timestamp": "2026-09-29T09:25:44Z",
+      "path": "/private/var/folders/5d/bgm58_l51j52vqz4v7jrdfch0000gn/T/evo-fixtures-8yp1mnc3/home/extensions/340-cache-stats.lisp",
+      "reason": "boot"
+    },
+    {
+      "type": "custom",
+      "id": "15e7c55f",
+      "parent_id": "d6bc34b1",
+      "timestamp": "2026-09-29T09:25:44Z",
+      "key": "swarm",
+      "data": {
+        "id": "20260929T092544-fc3c",
+        "dir": "/var/folders/5d/bgm58_l51j52vqz4v7jrdfch0000gn/T/evo-fixtures-8yp1mnc3/home/swarm/20260929T092544-fc3c/",
+        "workers": 2,
+        "lanes": [
+          {
+            "n": 1,
+            "cwd": "/private/var/folders/5d/bgm58_l51j52vqz4v7jrdfch0000gn/T/evo-fixtures-8yp1mnc3/proj/",
+            "worktree": null,
+            "branch": null,
+            "task": null,
+            "extra_forms": []
+          },
+          {
+            "n": 2,
+            "cwd": "/private/var/folders/5d/bgm58_l51j52vqz4v7jrdfch0000gn/T/evo-fixtures-8yp1mnc3/proj/",
+            "worktree": null,
+            "branch": null,
+            "task": null,
+            "extra_forms": []
+          }
+        ]
+      }
+    }
+  ]
+}
