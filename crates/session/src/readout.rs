@@ -147,7 +147,9 @@ impl Readout {
         self.provider = string_field(state, "provider").filter(|s| !s.is_empty());
         self.thinking = string_field(state, "thinking").filter(|s| !s.is_empty());
         self.context_tokens = u64_field(state, "context_tokens");
-        self.context_window = optional_u64(state, "context_window").filter(|w| *w > 0);
+        // A window of 0 is still a window in Lisp's truthiness, and the TUI prints it as
+        // one (`context-label`): only a null/missing window hides the `/<window>` half.
+        self.context_window = optional_u64(state, "context_window");
         self.goal = GoalState::from_json(&state["goal"]);
         // The kernel's goal token count in this reply already covers what we folded,
         // so folding on top of it would double-count.

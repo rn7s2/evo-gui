@@ -1,0 +1,220 @@
+//! The lane list: `GET /lanes` plus the coordinator stream's `lane-state` events.
+//!
+//! The captures are real: `lanes.json` is the swarm before any lane was given work,
+//! `lanes-lane1-working.json` is it with lane 1 in a step, `lanes-final.json` is it at rest
+//! with both lanes keeping the task they last ran. The `lane-state` events come from the
+//! same session's `events-coordinator.sse`.
+
+mod common;
+
+use common::{fixture, sse_events};
+use serde_json::json;
+use session::{LaneList, LaneStatus};
+
+#[test]
+fn a_captured_lanes_reply_holds_the_swarm_and_its_lanes() {
+    let list = LaneList::from_lanes(&fixture("lanes.json"));
+    let swarm = list.swarm.as_ref().expect("the swarm object");
+    assert_eq!(swarm.id, "20260929T092544-fc3c");
+    assert_eq!(swarm.workers, 2);
+    assert_eq!(swarm.busy, 0);
+    assert!(!swarm.stopping, "the capture's `stopping` is null, which is not stopping");
+    assert!(swarm.cwd.ends_with('/'), "cwd: {}", swarm.cwd);
+
+    assert_eq!(list.lanes.len(), 2);
+    for (index, row) in list.lanes.iter().enumerate() {
+        assert_eq!(row.n, index as u64 + 1);
+        assert_eq!(row.status, LaneStatus::Idle);
+        assert_eq!(row.state, "idle");
+        // A lane that has never been given work carries no task and no clocks.
+        assert_eq!(row.task, None);
+        assert_eq!(row.task_age, None);
+        assert_eq!(row.step_age, None);
+        assert_eq!(row.restarts, 0);
+        assert_eq!(row.reports, 0);
+        assert_eq!(row.goal_status, None);
+        assert!(row.pid.is_some(), "a brought-up lane knows its pid");
+        assert_eq!(row.glyph(), '○');
+    }
+    assert_eq!(list.busy(), 0, "the swarm's own busy count");
+}
+
+#[test]
+fn a_working_lane_carries_its_task_and_its_clocks() {
+    let list = LaneList::from_lanes(&fixture("lanes-lane1-working.json"));
+    assert_eq!(list.busy(), 1);
+
+    let lane1 = list.lane(1).expect("lane 1");
+    assert_eq!(lane1.status, LaneStatus::Working);
+    assert!(lane1.is_busy());
+    assert_eq!(lane1.glyph(), '●');
+    assert!(lane1.task.as_deref().unwrap().starts_with("DELAY3 CALL todo"));
+    assert_eq!(lane1.task_age, Some(0), "seconds in the task");
+    assert_eq!(lane1.step_age, Some(0), "seconds in the current step");
+
+    // The idle lane beside it has its pid but no step.
+    let lane2 = list.lane(2).expect("lane 2");
+    assert_eq!(lane2.status, LaneStatus::Idle);
+    assert_eq!(lane2.step_age, None);
+}
+
+#[test]
+fn an_idle_lane_keeps_the_task_it_last_ran() {
+    // The swarm leaves `task` in place when a lane goes idle (`lanes.lisp`), so the left
+    // column can still say what the lane did.
+    let list = LaneList::from_lanes(&fixture("lanes-final.json"));
+    assert_eq!(list.busy(), 0);
+    let lane1 = list.lane(1).unwrap();
+    assert_eq!(lane1.status, LaneStatus::Idle);
+    assert!(lane1.task.as_deref().unwrap().starts_with("DELAY3 CALL todo"));
+    assert_eq!(lane1.task_age, Some(8));
+    let lane2 = list.lane(2).unwrap();
+    let task = lane2.task.as_deref().expect("lane 2's task");
+    assert!(task.starts_with("CALL report {\"done\":\"lane 2 finished the fixture work\""), "task: {task}");
+    assert_eq!(lane2.reports, 1, "lane 2 filed one report");
+}
+
+/// The state vocabulary (`swarm/state.lisp`: `:starting :idle :working :compacting :down
+/// :stopped`) and the swarm TUI's own glyphs (`swarm/tui.lisp`: everything else is ✗).
+#[test]
+fn every_lane_state_maps_to_the_swarms_own_glyph() {
+    for (state, status, glyph) in [
+        ("starting", LaneStatus::Starting, '◌'),
+        ("idle", LaneStatus::Idle, '○'),
+        ("working", LaneStatus::Working, '●'),
+        ("compacting", LaneStatus::Compacting, '◐'),
+        ("down", LaneStatus::Down, '✗'),
+        ("stopped", LaneStatus::Down, '✗'),
+        ("something-new", LaneStatus::Down, '✗'),
+    ] {
+        assert_eq!(LaneStatus::from_state(state), status, "{state}");
+        assert_eq!(LaneStatus::from_state(state).glyph(), glyph, "{state}");
+    }
+}
+
+#[test]
+fn a_lane_state_event_updates_its_row() {
+    let mut list = LaneList::from_lanes(&fixture("lanes.json"));
+
+    // Lane 1 is given work (id 36 of the capture).
+    assert!(list.apply_lane_state(&json!({
+        "type": "lane-state", "lane": 1, "state": "working",
+        "task": "DELAY3 CALL todo {\"items\":[]}", "goal": null, "restarts": 0, "pid": 87897
+    })));
+    let lane1 = list.lane(1).unwrap();
+    assert_eq!(lane1.status, LaneStatus::Working);
+    assert_eq!(lane1.state, "working");
+    assert_eq!(lane1.task.as_deref(), Some("DELAY3 CALL todo {\"items\":[]}"));
+    assert_eq!(lane1.pid, Some(87897));
+
+    // The same event again changes nothing.
+    assert!(!list.apply_lane_state(&json!({
+        "type": "lane-state", "lane": 1, "state": "working",
+        "task": "DELAY3 CALL todo {\"items\":[]}", "goal": null, "restarts": 0, "pid": 87897
+    })));
+
+    // Back to idle with the task kept, as the swarm publishes it (id 46).
+    assert!(list.apply_lane_state(&json!({
+        "type": "lane-state", "lane": 1, "state": "idle",
+        "task": "DELAY3 CALL todo {\"items\":[]}", "goal": null, "restarts": 0, "pid": 87897
+    })));
+    assert_eq!(list.lane(1).unwrap().status, LaneStatus::Idle);
+    assert_eq!(list.lane(1).unwrap().task.as_deref(), Some("DELAY3 CALL todo {\"items\":[]}"));
+
+    // A lane-state carries no clocks, so the ones a /lanes reply gave are untouched.
+    let mut list = LaneList::from_lanes(&fixture("lanes-lane1-working.json"));
+    list.apply_lane_state(&json!({ "lane": 1, "state": "compacting", "task": "x", "goal": null, "restarts": 0, "pid": 1 }));
+    assert_eq!(list.lane(1).unwrap().status, LaneStatus::Compacting);
+    assert_eq!(list.lane(1).unwrap().step_age, Some(0), "the step clock stays from /lanes");
+}
+
+#[test]
+fn a_lane_state_for_an_unseen_lane_adds_a_starting_row() {
+    let mut list = LaneList::from_lanes(&fixture("lanes.json"));
+    assert!(list.apply_lane_state(&json!({ "lane": 3, "state": "starting", "task": null, "goal": null, "restarts": 0, "pid": null })));
+    assert_eq!(list.lanes.len(), 3);
+    let lane3 = list.lane(3).expect("the new lane");
+    assert_eq!(lane3.status, LaneStatus::Starting);
+    assert_eq!(lane3.task, None);
+    assert_eq!(lane3.pid, None);
+    // Rows stay ordered by lane number.
+    let numbers: Vec<u64> = list.lanes.iter().map(|row| row.n).collect();
+    assert_eq!(numbers, vec![1, 2, 3]);
+
+    // An event with no lane number is not a lane.
+    assert!(!list.apply_lane_state(&json!({ "state": "working" })));
+    assert_eq!(list.lanes.len(), 3);
+}
+
+#[test]
+fn a_lane_state_goal_is_reduced_to_its_status() {
+    let mut list = LaneList::from_lanes(&fixture("lanes.json"));
+    // `lane-state` carries the goal's status alone (`swarm/api.lisp`).
+    list.apply_lane_state(&json!({ "lane": 1, "state": "idle", "task": null, "goal": "active", "restarts": 0, "pid": 1 }));
+    assert_eq!(list.lane(1).unwrap().goal_status.as_deref(), Some("active"));
+
+    // `/lanes` carries the lane's cached goal plist; the status is what the list shows.
+    let list = LaneList::from_lanes(&json!({
+        "swarm": { "id": "s", "workers": 1, "busy": 0 },
+        "lanes": [ { "n": 1, "state": "idle",
+                     "goal": { "goal_id": "g-1", "status": "complete", "tokens_used": 15 },
+                     "restarts": 3, "reports": 2 } ]
+    }));
+    let lane = list.lane(1).unwrap();
+    assert_eq!(lane.goal_status.as_deref(), Some("complete"));
+    assert_eq!(lane.restarts, 3);
+    assert_eq!(lane.reports, 2);
+
+    // A null goal is no goal at all, and a restart is a restart the list carries up.
+    let mut list = LaneList::from_lanes(&fixture("lanes.json"));
+    assert!(list.apply_lane_state(&json!({ "lane": 2, "state": "down", "task": null, "goal": null, "restarts": 2, "pid": 87894 })));
+    assert_eq!(list.lane(2).unwrap().goal_status, None);
+    assert_eq!(list.lane(2).unwrap().restarts, 2);
+    assert_eq!(list.lane(2).unwrap().status, LaneStatus::Down);
+    assert_eq!(list.lane(2).unwrap().glyph(), '✗');
+}
+
+#[test]
+fn apply_lanes_replaces_wholesale_and_says_when_it_changed() {
+    let mut list = LaneList::new();
+    assert!(list.apply_lanes(&fixture("lanes.json")));
+    assert!(
+        !list.apply_lanes(&fixture("lanes.json")),
+        "the same reply changes nothing, so the UI need not redraw"
+    );
+    assert!(list.apply_lanes(&fixture("lanes-lane1-working.json")));
+    assert_eq!(list.lane(1).unwrap().status, LaneStatus::Working);
+    // A later reply that drops a lane drops the row too: `GET /lanes` is the whole list.
+    assert!(list.apply_lanes(&json!({ "swarm": { "id": "s", "workers": 1, "busy": 0 }, "lanes": [] })));
+    assert!(list.lanes.is_empty());
+}
+
+/// The coordinator's own stream carries every lane's state, so the left column follows the
+/// whole swarm from the one stream the tab already holds.
+#[test]
+fn the_coordinator_stream_drives_the_whole_lane_list() {
+    let mut list = LaneList::new();
+    let mut lane_states = 0;
+    let mut changed = 0;
+    for (_, kind, data) in sse_events("events-coordinator.sse") {
+        if kind != "lane-state" {
+            continue;
+        }
+        lane_states += 1;
+        if list.apply_lane_state(&data) {
+            changed += 1;
+        }
+    }
+    // Every `lane-state` in the capture is a real change — `maybe-publish-lane-state`
+    // publishes on a change and only then — and they are the two lanes the swarm has.
+    assert!(lane_states > 0, "the capture carries lane-state events");
+    assert_eq!(changed, lane_states);
+    let numbers: Vec<u64> = list.lanes.iter().map(|row| row.n).collect();
+    assert_eq!(numbers, vec![1, 2]);
+    // The capture ends with both lanes back at idle, each still holding its task.
+    for row in &list.lanes {
+        assert_eq!(row.status, LaneStatus::Idle, "lane {}", row.n);
+        assert!(row.task.is_some(), "lane {}", row.n);
+        assert!(row.pid.is_some());
+    }
+}

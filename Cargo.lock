@@ -6645,6 +6645,7 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
+ "swarm_client",
 ]
 
 [[package]]
@@ -6743,6 +6744,10 @@ dependencies = [
  "core-foundation-sys",
  "libc",
 ]
+
+[[package]]
+name = "tab_engine"
+version = "0.1.0"
 
 [[package]]
 name = "taffy"

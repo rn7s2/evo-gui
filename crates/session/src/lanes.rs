@@ -100,12 +100,14 @@ impl LaneList {
     }
 
     /// One `lane-state` event (coordinator stream): the lane's state, task, goal status,
-    /// restarts and pid — no clocks, which only `/lanes` reports. Returns whether
-    /// anything changed; a lane the list has never seen is added.
+    /// restarts and pid — no clocks, which only `/lanes` reports. Returns whether the
+    /// list changed; a lane the list has never seen is added (which is itself a change,
+    /// even when the event's values are the ones a fresh row starts with).
     pub fn apply_lane_state(&mut self, data: &Value) -> bool {
         let Some(n) = optional_u64(data, "lane") else {
             return false;
         };
+        let mut inserted = false;
         let row = match self.lanes.iter_mut().find(|row| row.n == n) {
             Some(row) => row,
             None => {
@@ -126,6 +128,7 @@ impl LaneList {
                     goal_status: None,
                 });
                 self.lanes.sort_by_key(|row| row.n);
+                inserted = true;
                 self.lanes.iter_mut().find(|row| row.n == n).expect("just inserted")
             }
         };
@@ -140,7 +143,7 @@ impl LaneList {
         row.restarts = u64_field(data, "restarts");
         row.pid = optional_u64(data, "pid");
         row.goal_status = goal_status(data.get("goal"));
-        *row != before
+        inserted || *row != before
     }
 
     pub fn lane(&self, n: u64) -> Option<&LaneRow> {

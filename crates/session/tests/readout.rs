@@ -67,7 +67,11 @@ fn k_figures_round_half_to_even() {
     for (tokens, expected) in cases {
         let mut readout = Readout::new();
         readout.apply_state(&json!({ "model": "m", "context_tokens": tokens, "context_window": 4000000 }));
-        assert_eq!(readout.context_label(), format!("ctx {expected}/4000k (0%)"), "tokens {tokens}");
+        // The k figures only: the percent rides the same `round`, but its value for
+        // these inputs is not what this test is about (48211 of 4000k is 1%, not 0%).
+        let figure = readout.context_label();
+        let figure = figure.split(" (").next().unwrap().to_string();
+        assert_eq!(figure, format!("ctx {expected}/4000k"), "tokens {tokens}");
     }
 }
 
@@ -88,6 +92,12 @@ fn the_context_segment_shows_the_spec_line() {
     let mut readout = Readout::new();
     readout.apply_state(&json!({ "model": "m", "context_tokens": 5000, "context_window": 1000 }));
     assert_eq!(readout.context_label(), "ctx 5k/1k (100%)");
+
+    // A window of zero is a window: Lisp's `(if window …)` is false only for NIL, and the
+    // `(max 1 window)` divisor is what keeps the percent finite.
+    let mut readout = Readout::new();
+    readout.apply_state(&json!({ "model": "m", "context_tokens": 5000, "context_window": 0 }));
+    assert_eq!(readout.context_label(), "ctx 5k/0k (100%)");
 }
 
 #[test]
@@ -257,6 +267,20 @@ fn the_cache_seed_comes_from_the_newest_journal_entry() {
     );
     assert_eq!(cache_stats_from_journal(&json!({ "entries": [] })), None);
     assert_eq!(cache_stats_from_journal(&json!({})), None);
+
+    // The seed walk is bounded by the limit, and the capture shows why growing it is
+    // usually unnecessary: the newest entry sits at the *leaf* end of the path, so even a
+    // 4-entry reply holds it — the 20-entry ask (`cache_seed_limits()[0]`) already does.
+    assert_eq!(
+        cache_stats_from_journal(&fixture("journal-limit4.json")),
+        Some(CacheTotals { input: 100, cache_read: 0, cache_write: 0 })
+    );
+    // The same session with the whole path is the same seed: growing the limit never
+    // changes what the segment shows, it only re-sends more of the journal.
+    assert_eq!(
+        cache_stats_from_journal(&fixture("journal-limit40.json")),
+        cache_stats_from_journal(&fixture("journal.json"))
+    );
 }
 
 /// The seeded totals ride the same readout the UI renders: a session whose journal says
@@ -272,20 +296,25 @@ fn a_seeded_cache_figure_shows_up_in_the_line() {
 /// The whole capture, one event at a time: the readout the UI ends up with is the one the
 /// same session's `/state` describes (a live fold never disagrees with a resync on the
 /// figures both of them carry).
+///
+/// No journal seed here on purpose: the capture is the session from its first event, and
+/// the journal's running totals are the folds of *those same* `message-end`s (10 × input
+/// 10 = the entry's 100). Seeding them as well would count every request twice — which is
+/// exactly the double-count the real flow avoids, because a tab seeds from the journal and
+/// then folds only the events that arrive after its cursor.
 #[test]
 fn folding_the_capture_agrees_with_the_state_the_server_reports() {
     let mut model = AgentModel::new();
-    model.readout_mut().set_cache_totals(cache_stats_from_journal(&fixture("journal.json")).unwrap());
+    // The resync the tab starts from — `/state` (goal, window, status) and, later,
+    // `/transcript` — then the events of the same session, one at a time.
+    model.apply_state(&fixture("state-final.json"));
     for (id, kind, data) in sse_events("events-coordinator.sse") {
         model.apply_event(id, &kind, &data);
     }
     let state = fixture("state-final.json");
     let folded = model.readout();
     assert_eq!(folded.context_tokens(), state["context_tokens"].as_u64().unwrap());
-    assert_eq!(
-        folded.cache_totals(),
-        CacheTotals { input: 100, cache_read: 0, cache_write: 0 },
-        "the folded totals are the journal's own running totals"
-    );
+    let journal = cache_stats_from_journal(&fixture("journal.json")).unwrap();
+    assert_eq!(folded.cache_totals(), journal, "the folded totals are the journal's own running totals");
     assert_eq!(folded.goal_label().as_deref(), Some("goal g-4cb9 (complete) 0k"));
 }

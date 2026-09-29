@@ -163,7 +163,7 @@ fn a_lane_run_gives_its_todo_list_and_its_tool_pair() {
         })
         .expect("the todo call");
     assert!(tool.0.contains("lane step one"), "arguments: {}", tool.0);
-    assert_eq!(tool.1.expect("a result").is_error, false);
+    assert!(!tool.1.expect("a result").is_error);
 
     // The lane's own text, appended from its deltas.
     assert!(transcript_rows(&model)
