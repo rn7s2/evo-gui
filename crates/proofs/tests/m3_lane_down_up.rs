@@ -3,7 +3,9 @@
 //!
 //! The lane runs under evo's in-binary supervisor (`src/cli/supervisor.lisp`): the
 //! `evo-agent serve` the swarm launched re-spawns itself as the child and restarts
-//! it with `--resume` after a crash. So the proof kills only the lane's own pid —
+//! it with `--resume` after a crash. The lane has *worked* before it dies, and its
+//! event log begins again at 1 with the new process — so what the tab's stream makes
+//! of the restart is the whole point of the last third of this proof. So the proof kills only the lane's own pid —
 //! the one `GET /lanes` reports, which is the supervised child — and the swarm's
 //! lane watcher (`swarm/lanes.lisp`'s `recover-lane`) notices the new process,
 //! re-initializes the lane, counts a restart, and tells the coordinator.
@@ -30,6 +32,51 @@ fn m3_lane_down_up() {
     // The coordinator says who its lanes are; one of them is watched here so its
     // own model is loaded (the reason a down row shows prefers the lane's account).
     drive.select(AgentKey::Lane(1));
+
+    // --- the lane works first -----------------------------------------------
+    // A lane's own run is what moves the cursor its stream resumes from — and a lane's
+    // event log belongs to its *process*: the restarted lane below begins again at 1
+    // (`serve/events.lisp`), so a stream still holding this run's cursor would sit
+    // silent until the new log grew past it. The first task is a long one (SLOW streams
+    // the whole message) and the one after the restart is short, so the new log cannot
+    // reach this cursor by itself: what the proof sees arriving afterwards is the
+    // reopen, not luck.
+    drive.prompt(
+        1,
+        format!(
+            "CALL delegate {}",
+            serde_json::json!({
+                "lane": 1, "task": "SLOW m3 lane one before the restart"
+            })
+        ),
+    );
+    drive.wait_event_where(
+        deadline,
+        Agent::Lane(1),
+        "text-delta",
+        "the lane working before the crash",
+        |_| true,
+    );
+    // Past the first run's own end, so the wait after the restart cannot be satisfied
+    // by an event the first run left in the log.
+    drive.next(deadline, "the first run to settle on the lane's own stream", |update| {
+        matches!(update, Update::Event { agent: Agent::Lane(1), kind, .. } if kind == "settled")
+    });
+    let first_run_deltas = drive.events(Agent::Lane(1), "text-delta").len();
+    assert!(
+        first_run_deltas > 20,
+        "the first run is what leaves a cursor behind: {first_run_deltas} deltas"
+    );
+    assert!(
+        fixture
+            .stub
+            .find("lane 1", "m3 lane one before the restart", 0.0)
+            .is_some(),
+        "lane 1 ran the task before the crash"
+    );
+    drive.wait_model(deadline, "lane 1 idle after its first task", |model| {
+        model.lanes().lane(1).map(|row| row.status) == Some(LaneStatus::Idle)
+    });
 
     // The pid the swarm reports for lane 1 — the supervised child under evo's
     // in-binary supervisor, the process whose death the supervisor notices and the
@@ -168,15 +215,18 @@ fn m3_lane_down_up() {
         "a lane that is up has no reason"
     );
 
-    // --- work still reaches it ----------------------------------------------
+    // --- work still reaches it, and its events still arrive -----------------
     // The lane is re-initialized, so it can be given work again: the coordinator
-    // delegates, and the lane's own stream shows it running.
+    // delegates, and the lane's own stream shows it running. This is the assertion the
+    // stale cursor would fail: the new process's ids are far below the cursor the first
+    // run left, so only the reopened stream (no cursor at all, `reopen_lane`) delivers
+    // them.
     drive.prompt(
         1,
         format!(
             "CALL delegate {}",
             serde_json::json!({
-                "lane": 1, "task": "SLOW m3 lane one after the restart"
+                "lane": 1, "task": "m3 lane one after the restart"
             })
         ),
     );
@@ -186,6 +236,11 @@ fn m3_lane_down_up() {
         "text-delta",
         "the restarted lane working",
         |_| true,
+    );
+    let second_run_deltas = drive.events(Agent::Lane(1), "text-delta").len() - first_run_deltas;
+    assert!(
+        second_run_deltas > 0,
+        "the restarted lane's own events arrived"
     );
     drive.wait_model(deadline, "lane 1 idle after its new task", |model| {
         model.lanes().lane(1).map(|row| row.status) == Some(LaneStatus::Idle)

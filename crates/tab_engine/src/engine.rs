@@ -550,6 +550,10 @@ struct Engine {
     /// snapshot and every `lane-state` event). It is what decides whether a
     /// `lane-state` names a lane that is coming up.
     lane_states: HashMap<u32, String>,
+    /// The process each lane's events come from, as `/lanes` and `lane-state` named it.
+    /// A *different* pid is a new process, with a new event log (ids begin again at 1),
+    /// so the watched lane's stream has to be opened again ([`Engine::reopen_lane`]).
+    lane_pids: HashMap<u32, u64>,
     /// When the deferred lane-list refetch is due — `None` when none is pending —
     /// and how many follow-ups the current "a lane is starting" episode has spent.
     lanes_due: Option<Instant>,
@@ -572,6 +576,7 @@ fn run(spec: TabSpec, mailbox: Sender<Inbound>, inbox: Receiver<Inbound>, update
         watch: None,
         watch_requests: 0,
         lane_states: HashMap::new(),
+        lane_pids: HashMap::new(),
         lanes_due: None,
         lanes_tries: 0,
         lanes_fetching: false,
@@ -664,7 +669,7 @@ impl Engine {
     /// beside.
     fn fetch_lanes_now(&mut self, client: &Client) {
         if let Ok(lanes) = client.lanes() {
-            self.remember_lane_states(&lanes.raw);
+            self.remember_lane_states(client, &lanes.raw);
             self.send(Update::Lanes { raw: lanes.raw });
         }
     }
@@ -699,10 +704,10 @@ impl Engine {
     /// still `starting`, one more look is armed ([`LANES_FOLLOWUPS`] of them) — but
     /// only after a read that *answered*: a failed one says nothing about the lanes,
     /// so following it up would be asking again with nothing new to go on.
-    fn lanes_fetched(&mut self, raw: Option<Value>) {
+    fn lanes_fetched(&mut self, client: &Client, raw: Option<Value>) {
         self.lanes_fetching = false;
         let Some(raw) = raw else { return };
-        self.remember_lane_states(&raw);
+        self.remember_lane_states(client, &raw);
         self.send(Update::Lanes { raw });
         if self.lanes_coming_up() && self.lanes_tries < LANES_FOLLOWUPS {
             self.lanes_tries += 1;
@@ -712,12 +717,47 @@ impl Engine {
         }
     }
 
-    fn remember_lane_states(&mut self, raw: &Value) {
+    fn remember_lane_states(&mut self, client: &Client, raw: &Value) {
         for lane in raw["lanes"].as_array().into_iter().flatten() {
-            if let (Some(n), Some(state)) = (lane["n"].as_u64(), lane["state"].as_str()) {
-                self.lane_states.insert(n as u32, state.to_owned());
+            let Some(n) = lane["n"].as_u64().map(|n| n as u32) else {
+                continue;
+            };
+            if let Some(state) = lane["state"].as_str() {
+                self.lane_states.insert(n, state.to_owned());
+            }
+            if self.note_lane_pid(n, lane["pid"].as_u64()) {
+                self.reopen_lane(client, n);
             }
         }
+    }
+
+    /// Remember the process a lane's events come from, as `/lanes` or a `lane-state`
+    /// named it. Returns whether this is a *new* process behind the lane the tab is
+    /// showing, which is a stream to open again ([`Engine::reopen_lane`]).
+    ///
+    /// A lane's event log is its process's: a restarted lane's ids begin again at 1
+    /// (`serve/events.lisp`), so a stream resuming from the dead process's cursor — or
+    /// reconnecting with a `Last-Event-ID` pointing into it — would sit silent until the
+    /// new log grew past that number. Nothing else says so: the lane's own serve is only
+    /// reachable through the swarm's relay (§9.3 forbids reading its token or URL), so
+    /// the pid the lane list reports is what tells the two processes apart. A null pid (a
+    /// lane that is starting or down reports none) says nothing about the process and is
+    /// ignored, so the change is still visible when the lane comes back.
+    fn note_lane_pid(&mut self, n: u32, pid: Option<u64>) -> bool {
+        let Some(pid) = pid else {
+            return false;
+        };
+        let replaced = matches!(self.lane_pids.insert(n, pid), Some(previous) if previous != pid);
+        replaced && self.watch.is_some_and(|(_, lane)| lane == n)
+    }
+
+    /// Open the watched lane's stream again — from no cursor at all — and read its rows
+    /// again: the process behind it is a new one (§9.1's refetch after a restart, seen
+    /// through the lane list rather than through a reset).
+    fn reopen_lane(&mut self, client: &Client, n: u32) {
+        self.lane_connected = false;
+        self.resync(client, Agent::Lane(n), false);
+        self.streams.start_lane(client, n, None);
     }
 
     /// Whether the list the UI holds has a lane that is still coming up — the one
@@ -736,7 +776,7 @@ impl Engine {
     /// * a lane that comes up `idle` is announced by nobody at all (see
     ///   `LANES_DEBOUNCE`), so a `starting` event needs the read that says what it
     ///   became.
-    fn note_lane_state(&mut self, data: &Value) {
+    fn note_lane_state(&mut self, client: &Client, data: &Value) {
         let (Some(n), Some(state)) = (
             data.get("lane").and_then(Value::as_u64).map(|n| n as u32),
             data.get("state").and_then(Value::as_str),
@@ -747,6 +787,11 @@ impl Engine {
             // A lane is being launched: follow it up (see `LANES_FOLLOWUPS`) as well
             // as asking once.
             self.lanes_tries = 0;
+        }
+        // A lane that comes back is a new process under the same number: the watched
+        // lane's stream belongs to the one that is gone.
+        if self.note_lane_pid(n, data.get("pid").and_then(Value::as_u64)) {
+            self.reopen_lane(client, n);
         }
         self.arm_lanes_refetch();
         self.lane_states.insert(n, state.to_owned());
@@ -878,7 +923,11 @@ impl Engine {
                     self.post_result(req_id, result);
                 }
                 Inbound::LanesFetched { raw } => {
-                    self.lanes_fetched(raw);
+                    let Some(server) = server.as_ref() else {
+                        continue;
+                    };
+                    let client = server.client().clone();
+                    self.lanes_fetched(&client, raw);
                 }
                 Inbound::Resynced {
                     agent,
@@ -1242,7 +1291,7 @@ impl Engine {
                 // it says a lane is starting, ask `/lanes` again shortly (see
                 // `LANES_DEBOUNCE` — a lane's coming up idle is never announced).
                 if agent == Agent::Coordinator && kind == "lane-state" {
-                    self.note_lane_state(&data);
+                    self.note_lane_state(client, &data);
                 }
                 // `settled` is a run finishing — the coordinator's or the watched
                 // lane's — and a natural moment to re-read the lane list: `/lanes`
@@ -1354,6 +1403,7 @@ mod tests {
             watch: None,
             watch_requests: 0,
             lane_states: HashMap::new(),
+            lane_pids: HashMap::new(),
             lanes_due: None,
             lanes_tries: 0,
             lanes_fetching: false,
@@ -1369,7 +1419,7 @@ mod tests {
     #[test]
     fn a_lane_state_that_moves_asks_for_the_list() {
         let mut engine = dormant();
-        engine.note_lane_state(&json!({ "lane": 1, "state": "working" }));
+        engine.note_lane_state(&nowhere(), &json!({ "lane": 1, "state": "working" }));
         assert!(
             engine.lanes_due.is_some(),
             "a lane going working asks for the list"
@@ -1380,7 +1430,7 @@ mod tests {
         );
 
         let mut engine = dormant();
-        engine.note_lane_state(&json!({ "lane": 2, "state": "idle" }));
+        engine.note_lane_state(&nowhere(), &json!({ "lane": 2, "state": "idle" }));
         assert!(engine.lanes_due.is_some(), "so does one going idle");
     }
 
@@ -1391,7 +1441,7 @@ mod tests {
     fn a_launch_announcement_starts_the_follow_ups() {
         let mut engine = dormant();
         engine.lanes_tries = 7;
-        engine.note_lane_state(&json!({ "lane": 2, "state": "starting" }));
+        engine.note_lane_state(&nowhere(), &json!({ "lane": 2, "state": "starting" }));
         assert_eq!(engine.lanes_tries, 0, "a new launch is a new episode");
         assert!(engine.lanes_due.is_some());
         assert_eq!(
@@ -1401,9 +1451,9 @@ mod tests {
 
         // …and the follow-ups stop once no lane is starting.
         let mut engine = dormant();
-        engine.note_lane_state(&json!({ "lane": 2, "state": "starting" }));
+        engine.note_lane_state(&nowhere(), &json!({ "lane": 2, "state": "starting" }));
         assert!(engine.lanes_coming_up());
-        engine.note_lane_state(&json!({ "lane": 2, "state": "idle" }));
+        engine.note_lane_state(&nowhere(), &json!({ "lane": 2, "state": "idle" }));
         assert!(
             !engine.lanes_coming_up(),
             "the episode is over when the lane is up"
@@ -1416,15 +1466,21 @@ mod tests {
     #[test]
     fn one_read_per_debounce_window() {
         let mut engine = dormant();
-        engine.note_lane_state(&json!({ "lane": 1, "state": "starting" }));
+        engine.note_lane_state(&nowhere(), &json!({ "lane": 1, "state": "starting" }));
         let due = engine.lanes_due.expect("a read is pending");
-        engine.note_lane_state(&json!({ "lane": 2, "state": "starting" }));
+        engine.note_lane_state(&nowhere(), &json!({ "lane": 2, "state": "starting" }));
         engine.arm_lanes_refetch();
         assert_eq!(
             engine.lanes_due,
             Some(due),
             "the pending read is the one that happens"
         );
+    }
+
+    /// A client for a server that is not there: what the lane-list decisions are asked
+    /// about never reads anything (no lane in these tests is the watched one).
+    fn nowhere() -> Client {
+        Client::loopback(1, swarm_client::Token::new("test"))
     }
 
     /// Everything the engine has sent so far.
@@ -1434,6 +1490,42 @@ mod tests {
             all.push(update);
         }
         all
+    }
+
+    /// A lane's event log belongs to its process: a *different* pid behind the lane the
+    /// tab is showing is the one stream to open again (§9.3), and a lane that reports no
+    /// pid — one that is starting or down — says nothing about the process, so the change
+    /// is still visible when the lane comes back.
+    #[test]
+    fn a_lane_that_comes_back_as_a_new_process_is_a_stream_to_open_again() {
+        let (mut engine, _updates) = dormant_engine();
+        assert!(
+            !engine.note_lane_pid(1, Some(400)),
+            "the first pid is no change"
+        );
+        assert!(
+            !engine.note_lane_pid(1, Some(400)),
+            "nor is the same one again"
+        );
+        assert!(
+            !engine.note_lane_pid(2, Some(500)),
+            "a lane the tab is not showing has no stream to reopen"
+        );
+
+        engine.watch = Some((1, 2));
+        assert!(
+            engine.note_lane_pid(2, Some(501)),
+            "a new process behind it"
+        );
+        assert!(!engine.note_lane_pid(2, None), "a lane with no pid yet");
+        assert!(
+            engine.note_lane_pid(2, Some(502)),
+            "…and the change still shows when it is back"
+        );
+        assert!(
+            !engine.note_lane_pid(1, Some(401)),
+            "lane 1 is not the watched one"
+        );
     }
 
     /// A view that came back is emitted at one fresh revision — the rows and the

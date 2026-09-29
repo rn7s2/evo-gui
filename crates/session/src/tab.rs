@@ -333,12 +333,19 @@ impl TabModel {
         }
     }
 
-    /// `GET /lanes` — the whole lane list.
-    pub fn on_lanes(&mut self, lanes: &Value) -> Changes {
+    /// `GET /lanes` — the whole lane list, each row's step age stamped as observed at
+    /// `now_millis` so the clock counts on between reads ([`LaneRow::step_clock_at`]).
+    /// `None` leaves the rows unstamped: their clocks stand where the swarm left them.
+    pub fn on_lanes_at(&mut self, lanes: &Value, now_millis: Option<u64>) -> Changes {
         Changes {
-            lanes: self.lanes.apply_lanes(lanes),
+            lanes: self.lanes.apply_lanes_at(lanes, now_millis),
             ..Changes::default()
         }
+    }
+
+    /// `GET /lanes` — the whole lane list, with no moment to stamp its clocks with.
+    pub fn on_lanes(&mut self, lanes: &Value) -> Changes {
+        self.on_lanes_at(lanes, None)
     }
 
     /// One SSE event of AGENT's stream.
@@ -385,7 +392,9 @@ impl TabModel {
         // coordinator's: the tab's left column follows every lane from the one stream it
         // already holds (§9.3).
         if agent == AgentKey::Coordinator && kind == "lane-state" {
-            changes.lanes = self.lanes.apply_lane_state(data);
+            // Stamped with the moment the tab saw the event: a lane that enters a step
+            // here starts its clock at zero from that moment (§7.3).
+            changes.lanes = self.lanes.apply_lane_state_at(data, arrival);
             // A lane that is no longer down has nothing said about it any more.
             if data.get("state").and_then(Value::as_str) != Some("down") {
                 if let Some(n) = data.get("lane").and_then(Value::as_u64) {
@@ -413,7 +422,7 @@ impl TabModel {
         if !is_down_announcement(text) {
             return;
         }
-        if let Some(n) = lane_of_line(text) {
+        if let Some((n, _, _)) = crate::model::lane_prefix(text) {
             self.lane_announcements.insert(n, text.to_owned());
         }
     }
@@ -502,17 +511,6 @@ impl TabModel {
 /// sent it — the agent's own account of what went wrong.
 fn last_error_line(model: &AgentModel) -> Option<String> {
     last_error_line_where(model, |_| true)
-}
-
-/// The lane a `[lane N]` line is about: the swarm's own prefix for what it says on
-/// behalf of a lane (`swarm/lanes.lisp`'s `tell-coordinator`). `None` when the line
-/// names no lane.
-fn lane_of_line(text: &str) -> Option<u32> {
-    const PREFIX: &str = "[lane ";
-    let start = text.find(PREFIX)? + PREFIX.len();
-    let rest = &text[start..];
-    let end = rest.find(']')?;
-    rest[..end].trim().parse().ok()
 }
 
 /// Whether a lane's line is the swarm's own account of it going down — the two

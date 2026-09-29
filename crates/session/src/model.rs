@@ -940,7 +940,7 @@ fn lane_row(text: &str) -> Option<RowKind> {
 /// `[lane N] body` or `[lane N report] body`: which lane, whether it is a report, and
 /// the body. `None` for anything else — a sentence that opens with `[lane ` is the
 /// reader's own, since it carries no number evo could have written.
-fn lane_prefix(text: &str) -> Option<(u32, bool, &str)> {
+pub(crate) fn lane_prefix(text: &str) -> Option<(u32, bool, &str)> {
     let rest = text.strip_prefix("[lane ")?;
     let (head, rest) = rest.split_once(']')?;
     let (number, report) = match head.strip_suffix(" report") {

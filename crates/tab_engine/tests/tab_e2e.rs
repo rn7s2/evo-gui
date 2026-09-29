@@ -497,7 +497,16 @@ fn watching_a_lane_switches_the_single_stream() {
     let after_switch = updates.len();
 
     // Lane 1 runs again, delegated while we watch lane 2: its events must NOT
-    // reach us — the old stream is closed.
+    // reach us — the old stream is closed. It has to be *idle* for the swarm to take
+    // the delegate (`swarm/lanes.lisp`), and its first run is short: wait for the
+    // lane-state that says it is done before asking for the second.
+    updates.next(deadline, |u| {
+        matches!(
+            u,
+            Update::Event { agent: Agent::Coordinator, kind, data, .. }
+                if kind == "lane-state" && data["lane"] == 1 && data["state"] == "idle"
+        )
+    });
     let t = now();
     assert!(handle.prompt(
         2,

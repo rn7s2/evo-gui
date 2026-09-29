@@ -11,6 +11,106 @@ use common::{fixture, sse_events};
 use serde_json::json;
 use session::{LaneList, LaneStatus};
 
+/// §7.3: the step clock keeps moving between reads.
+///
+/// `GET /lanes` reports a step *age*, not a step start, so the row remembers when it saw
+/// that age (`step_age_at_millis`) and the clock counts on from there. Without that, a
+/// lane running for five minutes sat at `0s` for all five — which is exactly the number
+/// the clock exists to tell apart from a wedged lane.
+#[test]
+fn a_step_clock_counts_on_from_the_moment_the_age_was_seen() {
+    let seen = 1_700_000_000_000u64;
+    let list = LaneList::from_lanes_at(&fixture("lanes-lane1-working.json"), Some(seen));
+    let lane1 = list.lane(1).expect("lane 1");
+    assert_eq!(lane1.step_age, Some(0), "the swarm's own number");
+    assert_eq!(lane1.step_age_at_millis, Some(seen));
+    assert_eq!(lane1.step_clock_at(seen).as_deref(), Some("0s"));
+    assert_eq!(lane1.step_clock_at(seen + 45_000).as_deref(), Some("45s"));
+    assert_eq!(lane1.step_clock_at(seen + 180_000).as_deref(), Some("3m"));
+    assert_eq!(
+        lane1.step_clock_at(seen + 3_780_000).as_deref(),
+        Some("1h3m")
+    );
+    // The age itself is still there for a reader with no moment to count from.
+    assert_eq!(lane1.step_clock().as_deref(), Some("0s"));
+
+    // An idle lane has no step clock, stamped or not.
+    assert_eq!(list.lane(2).unwrap().step_clock_at(seen + 45_000), None);
+
+    // A read nobody stamped counts from nothing: the age stands where the swarm left it.
+    let unstamped = LaneList::from_lanes(&fixture("lanes-lane1-working.json"));
+    let lane1 = unstamped.lane(1).unwrap();
+    assert_eq!(lane1.step_age_at_millis, None);
+    assert_eq!(lane1.step_clock_at(seen + 45_000).as_deref(), Some("0s"));
+
+    // A stamp ahead of `now` (two clocks disagreeing) reads as the reported age, not as
+    // half a century.
+    assert_eq!(
+        list.lane(1)
+            .unwrap()
+            .step_clock_at(seen - 60_000)
+            .as_deref(),
+        Some("0s")
+    );
+}
+
+/// A `lane-state` names the new step and carries no age: a lane that *enters* working or
+/// compacting starts its clock at zero from the moment the event was seen, and the
+/// lane-list read the engine schedules behind every such event corrects it to the swarm's
+/// own number. A step already under way keeps the age and the moment it has — a task or
+/// goal change publishes a `lane-state` too, which is the same step, and re-stamping there
+/// would freeze the clock it is meant to move.
+#[test]
+fn a_lane_state_that_enters_a_step_starts_its_clock() {
+    let seen = 1_700_000_000_000u64;
+    let mut list = LaneList::from_lanes_at(&fixture("lanes.json"), Some(seen));
+    assert_eq!(
+        list.lane(1).unwrap().step_age,
+        None,
+        "an idle lane has none"
+    );
+
+    assert!(list.apply_lane_state_at(
+        &json!({ "lane": 1, "state": "working", "task": "x", "goal": null, "restarts": 0, "pid": 1 }),
+        Some(seen),
+    ));
+    let lane1 = list.lane(1).unwrap();
+    assert_eq!(lane1.step_age, Some(0), "the step begins here");
+    assert_eq!(lane1.step_age_at_millis, Some(seen));
+    assert_eq!(lane1.step_clock_at(seen + 12_000).as_deref(), Some("12s"));
+
+    // A task change mid-step: the clock counts from the read, not from the event.
+    let mut list = LaneList::from_lanes_at(&fixture("lanes-lane1-working.json"), Some(seen));
+    let read_age = list.lane(1).unwrap().step_age;
+    assert!(list.apply_lane_state_at(
+        &json!({ "lane": 1, "state": "working", "task": "another", "goal": null, "restarts": 0, "pid": 1 }),
+        Some(seen + 30_000),
+    ));
+    let lane1 = list.lane(1).unwrap();
+    assert_eq!(lane1.step_age, read_age, "the step went on");
+    assert_eq!(
+        lane1.step_age_at_millis,
+        Some(seen),
+        "counted from the read"
+    );
+    assert_eq!(lane1.step_clock_at(seen + 30_000).as_deref(), Some("30s"));
+
+    // Idle and working again is a new step, from the moment it started.
+    let mut list = LaneList::from_lanes_at(&fixture("lanes-lane1-working.json"), Some(seen));
+    list.apply_lane_state_at(
+        &json!({ "lane": 1, "state": "idle", "task": "x", "goal": null, "restarts": 0, "pid": 1 }),
+        Some(seen + 90_000),
+    );
+    list.apply_lane_state_at(
+        &json!({ "lane": 1, "state": "working", "task": "x", "goal": null, "restarts": 0, "pid": 1 }),
+        Some(seen + 100_000),
+    );
+    let lane1 = list.lane(1).unwrap();
+    assert_eq!(lane1.step_age, Some(0), "a new step starts at zero");
+    assert_eq!(lane1.step_age_at_millis, Some(seen + 100_000));
+    assert_eq!(lane1.step_clock_at(seen + 105_000).as_deref(), Some("5s"));
+}
+
 #[test]
 fn a_captured_lanes_reply_holds_the_swarm_and_its_lanes() {
     let list = LaneList::from_lanes(&fixture("lanes.json"));

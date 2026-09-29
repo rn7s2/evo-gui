@@ -118,6 +118,8 @@ fn lane_row(step: usize, lane: u32, status: LaneStatus) -> LaneRow {
         // The clock only moves while the lane is working, which is what makes a slow step
         // visible.
         step_age: busy.then(|| u64::from(lane) * 41 + (step as u64) * 7),
+        // The demo moves its own clock by regenerating the rows: no stamp to count from.
+        step_age_at_millis: None,
         pid: Some(4020 + u64::from(lane)),
         worktree: lane
             .is_multiple_of(2)

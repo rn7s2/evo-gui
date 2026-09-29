@@ -819,6 +819,46 @@ fn the_step_clock_is_stamped_by_the_caller() {
     assert_eq!(tab.coordinator_step_started(), None);
 }
 
+/// The lane step clock is stamped by the caller the same way: a `/lanes` read carries the
+/// moment the tab applied it, and a `lane-state` that starts a step the moment the event
+/// arrived — so the left column's clock counts on between reads (§7.3).
+#[test]
+fn the_lane_step_clock_is_stamped_by_the_caller() {
+    let seen = 1_700_000_000_000u64;
+
+    let mut tab = TabModel::new();
+    tab.on_lanes_at(&fixture("lanes-lane1-working.json"), Some(seen));
+    let lane1 = tab.lanes().lane(1).expect("lane 1").clone();
+    assert_eq!(lane1.step_age_at_millis, Some(seen));
+    assert_eq!(lane1.step_clock_at(seen + 61_000).as_deref(), Some("1m"));
+
+    // Without the stamp the clock stands where the swarm left it; a frontend with its own
+    // clock is what `Changes::step` is for, not this.
+    let mut tab = TabModel::new();
+    tab.on_lanes(&fixture("lanes-lane1-working.json"));
+    let lane1 = tab.lanes().lane(1).expect("lane 1").clone();
+    assert_eq!(lane1.step_age_at_millis, None);
+    assert_eq!(lane1.step_clock_at(seen + 61_000).as_deref(), Some("0s"));
+
+    // A lane-state that enters a step is stamped with the moment the tab saw it.
+    let mut tab = TabModel::new();
+    tab.on_lanes_at(&fixture("lanes.json"), Some(seen));
+    assert!(
+        tab.on_event_at(
+            COORDINATOR,
+            36,
+            "lane-state",
+            &json!({ "lane": 1, "state": "working", "task": "x", "goal": null, "restarts": 0, "pid": 1 }),
+            seen + 5_000,
+        )
+        .lanes
+    );
+    let lane1 = tab.lanes().lane(1).expect("lane 1").clone();
+    assert_eq!(lane1.step_age, Some(0));
+    assert_eq!(lane1.step_age_at_millis, Some(seen + 5_000));
+    assert_eq!(lane1.step_clock_at(seen + 25_000).as_deref(), Some("20s"));
+}
+
 /// The lane row's two formatters, against the swarm's own (`short-duration` and the
 /// `lane-status-line` truncation), checked value for value with Common Lisp's `floor` and
 /// `length`.

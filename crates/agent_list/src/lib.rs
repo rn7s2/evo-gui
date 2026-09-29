@@ -708,6 +708,8 @@ mod tests {
             // A working lane has a step clock; anything else has already stopped.
             step_age: matches!(status, LaneStatus::Working | LaneStatus::Compacting)
                 .then(|| 41 * n),
+            // No moment to stamp it with: the clock is the age `/lanes` reported.
+            step_age_at_millis: None,
             pid: Some(4000 + n),
             worktree: None,
             branch: None,

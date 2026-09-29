@@ -4,9 +4,9 @@
 One Engine per tab on its own thread, driven by `Inbound`, emitting `Update`. Rules (each a fixed bug):
 1. No HTTP on the loop: POSTs run on `tab-engine-post` threads (`Inbound::Posted`), lane-list reads on
    `tab-engine-lanes-fetch` (one in flight, `Inbound::LanesFetched`), resyncs (`/transcript` + `/state`,
-   on the `tab-engine-fetch` thread) as `Inbound::Resynced`, a lane's two seed reads (its rows and the
-   bounded todo replay, `tab-engine-lane-seed`) as `Inbound::LaneSeeded`, and assembly's view + journal
-   walk (`tab-engine-assemble`) as `Inbound::Assembled`. A resync on the loop held the stream's own
+   on the `tab-engine-fetch` thread) as `Inbound::Resynced`, a lane's seed reads (`tab-engine-lane-seed`)
+   as `Inbound::LaneSeeded` (its rows) and `Inbound::LaneTodo` (the bounded todo replay), and assembly's
+   view + journal walk (`tab-engine-assemble`) as `Inbound::Assembled`. A resync on the loop held the stream's own
    `Disconnected`/`settled` behind a silent server for a whole request timeout.
    Two synchronous reads are left, both in `assemble` and both before the stream opens
    (`client.registry()` and `fetch_lanes_now`) so the first frame has its registry and lane list; the
@@ -17,10 +17,18 @@ One Engine per tab on its own thread, driven by `Inbound`, emitting `Update`. Ru
    revision and stales nothing — `Revisions::get == 0` still means "no view of this lane was ever
    read", which is what tells a lane's first connect to read its rows.
 3. `WatchLane` carries an episode number: a seed that comes back after a newer `WatchLane` is dropped
-   (its stream would belong to a lane the tab is no longer showing).
-4. A stop during boot sets `want_shutdown` + `cancel.cancel()`; the `Booted(Ok)` arm must honour it
+   (its stream would belong to a lane the tab is no longer showing). The lane's *rows* hold its stream
+   back; the bounded todo replay is read afterwards, on the same seed thread, and reported apart
+   (`Inbound::LaneTodo`) — the replay reads a live log, and a lane put to work while the watch was still
+   reading had its first run swallowed by a replay the tab never sees the events of, while the stream
+   then resumed *past* it. The lane's stream tails live (`since = None`).
+4. A lane's event log belongs to its process: a *different* pid for the watched lane (`/lanes` or a
+   `lane-state`) is a new log whose ids begin again at 1, so the stream is opened again from no cursor
+   (`Engine::reopen_lane`) and the rows read again. Without it the stream sat silent until the new log
+   grew past the dead process's cursor (proven in m3, whose lane runs *before* it dies).
+5. A stop during boot sets `want_shutdown` + `cancel.cancel()`; the `Booted(Ok)` arm must honour it
    (ladder + exit, no Ready, no assemble) — losing that race hung the tab and leaked the swarm.
-5. The lane list is re-read on a `lane-state` event, a watched lane's first connect, and after
+6. The lane list is re-read on a `lane-state` event, a watched lane's first connect, and after
    `settled` (500 ms debounce; follow-ups only after a read that answered) — the swarm never
    announces a lane coming up idle.
 Tests: `CARGO_TARGET_DIR=target/tab_engine cargo test -p tab_engine` (real swarms, serialized).
@@ -29,7 +37,14 @@ Tests: `CARGO_TARGET_DIR=target/tab_engine cargo test -p tab_engine` (real swarm
 Pure model (`TabModel`/`AgentModel`/`LaneList`), no I/O. `lane_down_reason` says nothing unless the
 lane is Down and prefers the swarm's own account (kept in `lane_announcements`, since a settled
 resync rebuilds rows without output lines); `LaneList::busy()` counts rows; `step_clock()` only for
-working/compacting; a run outcome folds the identical error output row before it.
+working/compacting, `step_clock_at(now)` for the ticking one; a run outcome folds the identical error
+output row before it.
+The lane step clock: `/lanes` reports a step *age*, not a step start, so `apply_lanes_at(body, now)` /
+`apply_lane_state_at(data, now)` stamp when the age was seen (`LaneRow::step_age_at_millis`) and
+`LaneRow::step_clock_at(now_millis)` counts on from there (a `lane-state` that moves a lane *into*
+working starts the clock at 0 from that stamp); the un-stamped `apply_lanes`/`apply_lane_state` and
+`step_clock()` are the "as reported" pair a caller with no clock keeps. `TabModel::on_lanes_at` and
+`on_event_at` (the lane-state branch) are the stamped paths.
 `CARGO_TARGET_DIR=target/session cargo test -p session`.
 
 ## swarm_client
