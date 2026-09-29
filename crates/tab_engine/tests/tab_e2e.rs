@@ -650,6 +650,44 @@ fn shutdown_all_stops_every_tab() {
     assert!(!swarm_client::process_alive(second_pid), "the second swarm is gone");
 }
 
+/// #12 — the lane list is read again when a lane's launch announcement says it is
+/// still `starting`.
+///
+/// The swarm publishes `starting` when it launches a lane and then never announces
+/// that the lane came up (`swarm/lanes.lisp`'s `sync-lane-state :announce nil`), so a
+/// client that only folds events shows every lane as `starting` (◌) for the rest of
+/// the session — the assembly snapshot is read while they boot.
+#[test]
+fn a_lane_that_came_up_is_read_back_idle() {
+    let _guard = one_swarm();
+    let fixture = fixture(2);
+    let (handle, rx) = TabEngine::start(spec(&fixture, 2));
+    let mut updates = Updates::new(rx);
+    let deadline = Instant::now() + Duration::from_secs(150);
+
+    updates.wait_connected(Agent::Coordinator, deadline);
+
+    // An idle list arrives: both lanes up, which the assembly snapshot did not say.
+    let idle = updates.next(deadline, |update| match update {
+        Update::Lanes { raw } => raw["lanes"].as_array().is_some_and(|lanes| {
+            lanes.len() == 2 && lanes.iter().all(|lane| lane["state"] == "idle")
+        }),
+        _ => false,
+    });
+    assert!(matches!(idle, Update::Lanes { .. }));
+
+    // It is a *second* read, not the first: the engine asked again after the launch
+    // announcement rather than the snapshot happening to catch them idle.
+    let reads = updates
+        .all
+        .iter()
+        .filter(|update| matches!(update, Update::Lanes { .. }))
+        .count();
+    assert!(reads >= 2, "the lane list was read {reads} time(s)");
+
+    handle.join();
+}
+
 fn ready_pid(updates: &mut Updates, deadline: Instant) -> u32 {
     match updates.next(deadline, |u| matches!(u, Update::Ready { .. })) {
         Update::Ready { pid, .. } => pid,
