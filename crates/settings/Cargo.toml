@@ -4,3 +4,10 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+gpui-kit = { workspace = true }
+store = { path = "../store" }
+rfd = "0.17"
+
+[dev-dependencies]
+gpui-kit = { workspace = true, features = ["test-support"] }
+image = "0.25"

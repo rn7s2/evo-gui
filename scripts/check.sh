@@ -61,7 +61,7 @@ esac
 # Every crate in the workspace, in the order the gate runs them: the pure-Rust
 # ones first (seconds), then the proof crate (four real swarms, ~50s), then the
 # two that build gpui.
-CRATES=(swarm_client tab_engine store session transcript composer agent_list proofs workspace evo-desktop)
+CRATES=(swarm_client tab_engine store session transcript composer agent_list settings proofs workspace evo-desktop)
 
 # The target directory a crate's tests use. `crates/app` is the `evo-desktop`
 # package and builds in `target/app`, as the lanes do.
