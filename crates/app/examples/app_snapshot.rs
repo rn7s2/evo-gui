@@ -16,6 +16,9 @@
 //!
 //! Captures use GPUI's headless renderer, so no window opens on screen — the
 //! machine may be locked — and every state is rendered twice: light and dark.
+//! `--scale 1` saves them the size of the window (1600x1000 pixels) instead of
+//! the renderer's own 3200x2000, and `--only 07,08` draws just the states whose
+//! names it lists, taking the earlier ones without saving them.
 //!
 //! The run leaves nothing behind: the fixture, the scripted model and the
 //! journals live under one temp directory, the tabs' engines are stopped the way
@@ -106,19 +109,26 @@ cargo run -p evo-desktop --example app_snapshot -- --capture docs/screens
 That is the whole plan; the rest is waiting for the report.
 ";
 
-/// The scripted model, written into the temp directory and pointed at with
-/// `EVO_STUB_MESSAGES`. It speaks the same minimal Anthropic SSE the shipped
-/// `evo-agent/tests/stub-messages.py` does (that file is the contract; this one
-/// adds the rules the pictures need) and answers from the last user turn:
+/// The scripted model, written into the temp directory and registered by the
+/// fixture's `init.lisp` as provider `:stub`. It speaks the same minimal Anthropic
+/// SSE the shipped `evo-agent/tests/stub-messages.py` does (that file is the
+/// contract; this one adds the rules the pictures need) and answers from the last
+/// user turn:
 ///
-/// * `CALL <tool> {json}` → one tool call with that JSON;
-/// * `TODOS` → one `todo` call with [`TODO_ITEMS`];
-/// * `SLOW` / `SHOW` → [`MARKDOWN`], 40 deltas or three;
-/// * a tool result → a line, or the markdown when the turn asked for it;
+/// * `CALL <tool> {json}` → one tool call with that JSON, on a turn that carries
+///   no tool result yet — so every swarm in the run delegates on its own first
+///   turn;
+/// * `TODOS` → one `todo` call with [`TODO_ITEMS`], to a lane;
+/// * `SLOW` / `SHOW` → [`MARKDOWN`], 40 deltas or three; `BIG` → the same
+///   document eight times over, to cross a context window on purpose;
+/// * `FAIL` → half a sentence and no terminal event: the provider dies,
+///   the kernel retries, and the run ends badly;
 /// * anything else → `ok: <the first 40 characters>`.
 ///
-/// A streamed reply pauses before its `message_end`, so a capture can catch the
-/// whole document while the row is still streaming.
+/// It reports usage in the same measure the kernel estimates context in
+/// (chars/4), which is what lets `09`'s compaction fire, and a streamed reply
+/// pauses before its `message_end`, so a capture can catch the whole document
+/// while the row is still streaming.
 const STUB_MODEL_PY: &str = r####"#!/usr/bin/env python3
 """The scripted model the app captures talk to (written by app_snapshot.rs)."""
 
@@ -157,7 +167,6 @@ TODO_ITEMS = [
 TAIL_PAUSE = 8.0
 
 # The coordinator delegates once, whatever order the swarm puts its turn in.
-DELEGATED = [False]
 
 
 def call_from(text):
@@ -294,10 +303,11 @@ class Handler(BaseHTTPRequestHandler):
             reply = "The checklist is in the panel above."
         elif role == "lane" and "TODOS" in newest:
             tool = ("todo", {"items": TODO_ITEMS})
-        elif not DELEGATED[0] and call_from(text):
-            # The coordinator's own turn: the delegation, once.
+        elif not has_result and call_from(text):
+            # The coordinator's opening turn: the delegation.  Keyed on there
+            # being no tool result yet rather than on a global, so every swarm
+            # in the run delegates on its own first turn.
             tool = call_from(text)
-            DELEGATED[0] = True
         elif "BIG" in newest:
             chunks = 8
         elif "SLOW" in newest:
@@ -556,7 +566,9 @@ fn capture(dir: &Path, scale: f32, only: &[String]) -> Result<(), Box<dyn std::e
     wait_running(&mut cx, &second, "the second swarm")?;
 
     click(&mut cx, window, "tab-add")?;
-    view.update(&mut cx, |view, cx| view.select_tab(0, cx));
+    cx.update_window(window, |_, window, cx| {
+        view.update(cx, |view, cx| view.select_tab(0, window, cx));
+    })?;
     prompt(&mut cx, window, &first, "SHOW the rollout plan")?;
     wait_until(&mut cx, |cx| {
         text_chars(cx, &first) * 10 >= MARKDOWN.chars().count() * 9
@@ -624,7 +636,9 @@ fn capture(dir: &Path, scale: f32, only: &[String]) -> Result<(), Box<dyn std::e
     //    (§9.7): the lane list's reconnecting badge. The server is stopped, not
     //    killed — a killed one would fail the tab instead — and started again
     //    after the pictures.
-    view.update(&mut cx, |view, cx| view.select_tab(0, cx));
+    cx.update_window(window, |_, window, cx| {
+        view.update(cx, |view, cx| view.select_tab(0, window, cx));
+    })?;
     // The badge belongs to the coordinator's row, so show its own transcript
     // under it.
     select_main(&mut cx, window, &first)?;
@@ -659,7 +673,9 @@ fn capture(dir: &Path, scale: f32, only: &[String]) -> Result<(), Box<dyn std::e
     launch(&mut cx, window, &last, &dashboard, 1)?;
     wait_running(&mut cx, &last, "the dashboard swarm")?;
     let last_index = view.read_with(&cx, |view, _| view.tabs().len().saturating_sub(1));
-    view.update(&mut cx, |view, cx| view.select_tab(last_index, cx));
+    cx.update_window(window, |_, window, cx| {
+        view.update(cx, |view, cx| view.select_tab(last_index, window, cx));
+    })?;
     println!("[state] {} tabs, the strip scrolled to the last", last_index + 1);
     if shot_here("07-tab-strip") {
         both_themes(&mut cx, window, dir, "07-tab-strip", screens)?;
@@ -682,50 +698,56 @@ fn capture(dir: &Path, scale: f32, only: &[String]) -> Result<(), Box<dyn std::e
         "CALL delegate {\"lane\":1,\"task\":\"SLOW: walk the narrow layout and report everything \
          that overlaps or clips\"}",
     )?;
-    select_lane(&mut cx, narrow_window, &narrow_tab, 1)?;
-    wait_within(&mut cx, 60, |cx| text_chars(cx, &narrow_tab) > 40);
-    println!("[state] the narrow window, mid-run");
+    // Wait for the delegation to land and a lane to pick it up: the picture is
+    // of work in progress, not of the tab the prompt was queued in. When nothing
+    // was handed out, the coordinator is the one with a transcript, so that is
+    // what the window shows.
+    let delegated = wait_within(&mut cx, 45, |cx| delegate_row(cx, &narrow_tab).is_some());
+    let busy = wait_within(&mut cx, 20, |cx| {
+        (1..=2).any(|n| lane_working(cx, &narrow_tab, n))
+    });
+    if busy {
+        select_lane(&mut cx, narrow_window, &narrow_tab, 1)?;
+    }
+    let writing = wait_within(&mut cx, 40, |cx| text_chars(cx, &narrow_tab) > 160);
+    println!(
+        "[state] the narrow window, mid-run (delegated: {delegated}, lane busy: {busy}, \
+         writing: {writing})"
+    );
+    if !writing {
+        for row in row_dump(&cx, &narrow_tab) {
+            println!("[rows] {row}");
+        }
+    }
     if shot_here("08-narrow-1000x700") {
         both_themes(&mut cx, narrow_window, dir, "08-narrow-1000x700", narrow)?;
     }
 
-    // 9. A run that ended badly, with the status rows a stalled run leaves: the
-    //    compaction a full context forces, and the provider retries before the
-    //    kernel gives up (§5). Its own tab, on the registration whose window is
-    //    small enough to cross the compaction line in one turn.
+    // 9. A run that ended badly: the compaction a full context forces, the
+    //    provider retries as it dies, and the outcome row it ends on (§5, §9.5).
+    //    Its own tab, on the registration whose window is small enough to cross
+    //    the compaction line after a turn's worth of usage is reported.
     let bad = open_tab(&mut cx, window, &view)?;
     let bad_folder = work.join("evo-desktop-visual-review-deep-context");
     std::fs::create_dir_all(&bad_folder)?;
     launch_with(&mut cx, window, &bad, &bad_folder, 1, Some((SMALL_MODEL, "stub")))?;
     wait_running(&mut cx, &bad, "the deep-context swarm")?;
     prompt(&mut cx, window, &bad, "BIG SHOW the whole plan again, at length")?;
-    let started = wait_within(&mut cx, 60, |cx| text_chars(cx, &bad) > 400);
-    println!(
-        "[state] big document started: {started} ({} chars, state {:?})",
-        text_chars(&cx, &bad),
-        bad.read_with(&cx, |tab, _| format!("{:?}", tab.state()))
-    );
-    for row in row_dump(&cx, &bad) {
-        println!("[rows] {row}");
-    }
-    for swarm in swarm_details(&config.root) {
-        println!("[procs] {swarm}");
-    }
     let whole = wait_within(&mut cx, 60, |cx| {
         text_chars(cx, &bad) > MARKDOWN.chars().count() * 3
     });
-    println!("[state] big document whole: {whole} ({} chars)", text_chars(&cx, &bad));
+    println!("[state] the document the context is measured against: {whole}");
     wait_within(&mut cx, 60, |cx| !working(cx, &bad));
-    // The next turn opens with a compaction: the context no longer fits.
+    // The next turn opens with the compaction: the context no longer fits.
     prompt(&mut cx, window, &bad, "keep going")?;
-    let compacted = wait_within(&mut cx, 60, |cx| dim_row(cx, &bad, "compacted").is_some());
-    println!("[state] compaction status row: {compacted}");
-    wait_within(&mut cx, 30, |cx| !working(cx, &bad));
+    wait_within(&mut cx, 60, |cx| !working(cx, &bad));
     prompt(&mut cx, window, &bad, "FAIL: the provider is down")?;
-    wait_until(&mut cx, |cx| run_outcome(cx, &bad).is_some())?;
-    println!("[state] a run that ended badly");
-    for row in row_dump(&cx, &bad) {
-        println!("[rows] {row}");
+    let compacted = wait_within(&mut cx, 90, |cx| dim_row(cx, &bad, "compacted").is_some());
+    let retried = wait_within(&mut cx, 60, |cx| dim_row(cx, &bad, "retrying").is_some());
+    let ended = wait_within(&mut cx, 90, |cx| run_outcome(cx, &bad).is_some());
+    println!("[state] compaction row: {compacted}, retry row: {retried}, outcome row: {ended}");
+    if let Some(outcome) = run_outcome(&cx, &bad) {
+        println!("[state] the run says: {}", outcome.lines().next().unwrap_or(""));
     }
     if shot_here("09-bad-run") {
         both_themes(&mut cx, window, dir, "09-bad-run", screens)?;
@@ -881,12 +903,19 @@ fn prompt(
     text: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     cx.update_window(window, |_, window, cx| {
+        // A window that is not the active one gets no keystrokes: the examples
+        // that open a second window have to say which one is being typed into.
+        window.activate_window();
         tab.update(cx, |tab, cx| {
             let composer = tab.composer().clone();
             composer.update(cx, |composer, cx| composer.focus_input(window, cx));
         });
         window.input(text, cx);
         window.press("enter", cx);
+        // The composer hands the draft on from its own key handler, which runs
+        // when the window draws — a wait that only pumps tasks would sit on a
+        // prompt that has not been posted yet.
+        window.render_frame(cx);
     })?;
     Ok(())
 }
@@ -1058,10 +1087,15 @@ fn resample(path: &Path, screens: Screens) -> Result<bool, Box<dyn std::error::E
 }
 
 /// Open a tab the way the `+` button and ⌘T do — `WorkspaceView::add_tab` — and
-/// hand its engine to the background stop at once: the strip keeps the folder's
-/// name as the tab's title, and ten more live swarms are not worth what they
-/// cost. Not a click: with the strip overflowing, the button itself scrolls out
-/// of the viewport and a click would fail.
+/// hand its engine to the background stop: the strip keeps the folder's name as
+/// the tab's title, and ten more live swarms are not worth what they cost. Not a
+/// click: with the strip overflowing, the button itself scrolls out of the
+/// viewport and a click would fail.
+///
+/// The stop waits for the tab to answer `/health` first: a swarm stopped while
+/// it is still booting keeps running — the shutdown ladder has no port to post
+/// `/shutdown` to yet, and the processes the server left behind outlive both the
+/// engine and the tab.
 fn open_tab_and_stop(
     cx: &mut HeadlessAppContext,
     window: AnyWindowHandle,
@@ -1072,6 +1106,12 @@ fn open_tab_and_stop(
     let tab = view.read_with(&*cx, |view, _| view.tabs().last().cloned());
     let Some(tab) = tab else { return Ok(()) };
     launch(cx, window, &tab, folder, 1)?;
+    let up = wait_within(cx, 60, |cx| {
+        matches!(tab.read_with(cx, |tab, _| tab.state().clone()), TabState::Running { .. })
+    });
+    if !up {
+        println!("[skip] a tab for the strip never answered /health — not stopped");
+    }
     let mut handle = None;
     cx.update_window(window, |_, _window, cx| {
         handle = tab.update(cx, |tab, cx| tab.take_engine(cx));
@@ -1116,6 +1156,44 @@ fn wait_within(
     }
 }
 
+/// The shown transcript's rows, one line each, cut short: for reading a run that
+/// stalled somewhere out of sight.
+fn row_dump(cx: &HeadlessAppContext, tab: &Entity<workspace::TabContent>) -> Vec<String> {
+    tab.read_with(cx, |tab, cx| {
+        tab.transcript()
+            .map(|view| {
+                view.read(cx)
+                    .rows(cx)
+                    .iter()
+                    .map(|row| {
+                        let (kind, text): (&str, String) = match &row.kind {
+                            RowKind::User { text } => ("user", text.to_string()),
+                            RowKind::Assistant { markdown, streaming, .. } => (
+                                "assistant",
+                                format!("{}{markdown}", if *streaming { "*" } else { "" }),
+                            ),
+                            RowKind::Tool { name, result, .. } => (
+                                "tool",
+                                if result.is_some() {
+                                    format!("{name} -> result")
+                                } else {
+                                    format!("{name} (no result)")
+                                },
+                            ),
+                            RowKind::Report { done, .. } => ("report", done.to_string()),
+                            RowKind::Dim { text, .. } => ("dim", text.to_string()),
+                            RowKind::RunOutcome { text, .. } => ("outcome", text.to_string()),
+                        };
+                        let head: String =
+                            text.lines().next().unwrap_or("").chars().take(60).collect();
+                        format!("{kind} {head}")
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    })
+}
+
 /// A dim/status row whose text contains `needle` (case-insensitive): the
 /// compaction rows, which no transcript message carries.
 fn dim_row(cx: &HeadlessAppContext, tab: &Entity<workspace::TabContent>, needle: &str) -> Option<String> {
@@ -1130,38 +1208,6 @@ fn dim_row(cx: &HeadlessAppContext, tab: &Entity<workspace::TabContent>, needle:
     })
 }
 
-/// The shown transcript's rows, one line each: for reading a failed run's log.
-fn row_dump(cx: &HeadlessAppContext, tab: &Entity<workspace::TabContent>) -> Vec<String> {
-    tab.read_with(cx, |tab, cx| {
-        tab.transcript()
-            .map(|view| {
-                view.read(cx)
-                    .rows(cx)
-                    .iter()
-                    .map(|row| {
-                        let text = match &row.kind {
-                            RowKind::User { text } => format!("user {}", first(&text)),
-                            RowKind::Assistant { markdown, streaming, .. } => {
-                                format!("assistant{}{}", if *streaming { "*" } else { "" }, first(markdown))
-                            }
-                            RowKind::Tool { name, result, .. } => {
-                                format!("tool {name} result={}", result.is_some())
-                            }
-                            RowKind::Report { done, .. } => format!("report {}", first(done)),
-                            RowKind::Dim { text, .. } => format!("dim {}", first(text)),
-                            RowKind::RunOutcome { text, .. } => format!("outcome {}", first(text)),
-                        };
-                        text
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    })
-}
-
-fn first(text: &str) -> String {
-    text.lines().next().unwrap_or("").chars().take(50).collect()
-}
 
 /// The row a bad run leaves: `run-end` with an outcome that is not a clean stop.
 fn run_outcome(cx: &HeadlessAppContext, tab: &Entity<workspace::TabContent>) -> Option<String> {
@@ -1247,33 +1293,6 @@ fn reconnecting(cx: &HeadlessAppContext, tab: &Entity<workspace::TabContent>) ->
 
 // --- the swarm processes ------------------------------------------------------
 
-/// Every live swarm under `root`, as pid + folder + model: for reading a run's
-/// process state out of its log.
-fn swarm_details(root: &Root) -> Vec<String> {
-    let needle = root.tabs_dir().display().to_string();
-    let output = std::process::Command::new("ps")
-        .args(["-ww", "-o", "pid=", "-o", "command=", "-ax"])
-        .output()
-        .expect("ps");
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter(|line| line.contains(&needle))
-        .map(|line| {
-            let tab = line
-                .split("--token-file ")
-                .nth(1)
-                .and_then(|rest| Path::new(rest).parent())
-                .and_then(Path::file_name)
-                .map(|name| name.to_string_lossy().into_owned());
-            let model = line.split("--model ").nth(1).and_then(|rest| rest.split(' ').next());
-            format!(
-                "tab={} model={}",
-                tab.as_deref().unwrap_or("?"),
-                model.unwrap_or("-")
-            )
-        })
-        .collect()
-}
 
 /// The pids under `root` whose command line names one of its tab tokens, with
 /// the tab directory each one is serving.
