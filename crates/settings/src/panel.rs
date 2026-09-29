@@ -34,9 +34,9 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    div, px, App, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable as _,
-    IntoElement, KeyDownEvent, Render, Role, SharedString, Subscription, TestSupportExt as _,
-    WeakEntity, Window,
+    div, px, relative, App, Context, DismissEvent, Entity, EventEmitter, FocusHandle,
+    Focusable as _, IntoElement, KeyDownEvent, Render, Role, SharedString, Subscription,
+    TestSupportExt as _, WeakEntity, Window,
 };
 use store::{Binaries, Theme as StoredTheme};
 
@@ -68,7 +68,19 @@ const LABEL_WIDTH: gpui_kit::Pixels = px(96.);
 /// The gap between a label column and its control, and the height that centers a label
 /// against the field beside it.
 const LABEL_GAP: gpui_kit::Pixels = px(12.);
-const FIELD_HEIGHT: gpui_kit::Pixels = px(32.);
+const FIELD_HEIGHT: gpui_kit::Pixels = px(38.);
+
+/// The dialog's small type: the status lines and the note, one line each. The size is the
+/// one the lane list uses for its own small type, and the leading is tighter than the default
+/// — room *between* the dialog's rows is worth more than leading inside them.
+const SMALL_TEXT: gpui_kit::Pixels = px(12.);
+const LINE_HEIGHT: f32 = 1.2;
+
+/// The path field's focus edge, the same one the composer's input wears (§7.3): one hairline
+/// in the focus colour while the caret is in the field, and a soft wash around it. The input
+/// itself draws neither, so the app's two text controls mark focus the same way.
+const FIELD_RING: gpui_kit::Pixels = px(3.);
+const FIELD_RING_INK: f32 = 0.12;
 
 /// How long a path field waits before a process is started for it. Typing a path is a burst
 /// of keystrokes; only the last of them is worth a `--version`, and this is the pause that
@@ -513,16 +525,37 @@ impl SettingsPanel {
         v_flex()
             .gap_1()
             .child(div().text_lg().font_semibold().child(TITLE))
-            .child(div().text_sm().text_color(muted).child(SUBTITLE))
+            .child(
+                div()
+                    .text_sm()
+                    .line_height(relative(LINE_HEIGHT))
+                    .text_color(muted)
+                    .child(SUBTITLE),
+            )
     }
 
     /// One binary: what it is called, the path, the button that fills it, and what the path
     /// turns out to be — the label column and the field row the empty tab's choosers use
     /// (§7.2), so a second dialog in this app looks like the first.
-    fn binary_row(&self, binary: Binary, cx: &mut Context<Self>) -> impl IntoElement {
+    fn binary_row(
+        &self,
+        binary: Binary,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let field = self.fields[binary.ix()].clone();
         let check = self.checks[binary.ix()].clone();
         let name = binary.name();
+        // The caret is what "focused" means for a field: the edge belongs to the card around
+        // it, which the input does not own.
+        let focused = field
+            .read(cx)
+            .presentation()
+            .focus_handle()
+            .is_focused(window);
+        let (radius, ring) = (cx.theme().radius, cx.theme().ring);
+        let edge = if focused { ring } else { cx.theme().border };
+        let field_bg = cx.theme().input_background();
         // The row's verdict belongs in what the field says it is: the label is what a screen
         // reader reads when the field takes the keyboard, and the line below is only paint.
         let label = if check.is_problem() {
@@ -535,38 +568,59 @@ impl SettingsPanel {
         } else {
             cx.theme().muted_foreground
         };
-        h_flex().items_start().gap_3().child(row_label(name)).child(
-            v_flex()
-                .flex_1()
-                .min_w_0()
-                .gap_1()
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .items_center()
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .child(Input::new(&field).id(binary.path_id()).aria_label(label)),
-                        )
-                        .child(
-                            Button::new(binary.choose_id())
-                                .label(CHOOSE_LABEL)
-                                .on_click(cx.listener(move |panel, _, window, cx| {
-                                    panel.choose(binary, window, cx)
-                                })),
-                        ),
-                )
-                .child(
-                    div()
-                        .id(binary.status_id())
-                        .test_support()
-                        .text_xs()
-                        .text_color(status_color)
-                        .child(check.text().to_owned()),
-                ),
-        )
+        h_flex()
+            .items_start()
+            .gap(LABEL_GAP)
+            .child(row_label(name, Some(FIELD_HEIGHT)))
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_1()
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .rounded(radius + FIELD_RING)
+                                    .p(FIELD_RING)
+                                    .when(focused, |this| this.bg(ring.alpha(FIELD_RING_INK)))
+                                    .child(
+                                        div()
+                                            .rounded(radius)
+                                            .border_1()
+                                            .border_color(edge)
+                                            .bg(field_bg)
+                                            .child(
+                                                Input::new(&field)
+                                                    .id(binary.path_id())
+                                                    .aria_label(label)
+                                                    .appearance(false)
+                                                    .bordered(false)
+                                                    .focus_bordered(false),
+                                            ),
+                                    ),
+                            )
+                            .child(
+                                Button::new(binary.choose_id())
+                                    .label(CHOOSE_LABEL)
+                                    .on_click(cx.listener(move |panel, _, window, cx| {
+                                        panel.choose(binary, window, cx)
+                                    })),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id(binary.status_id())
+                            .test_support()
+                            .text_xs()
+                            .text_color(status_color)
+                            .child(check.text().to_owned()),
+                    ),
+            )
     }
 
     /// The theme, as three choices in a row: what the app draws with, from the next tab on.
@@ -584,9 +638,11 @@ impl SettingsPanel {
             cx.theme().transparent
         };
         h_flex()
-            .items_start()
+            // The theme row's control is the bar itself, so its label centers against that
+            // rather than against the height of a path field's card.
+            .items_center()
             .gap(LABEL_GAP)
-            .child(row_label(THEME_LABEL))
+            .child(row_label(THEME_LABEL, None))
             .child(
                 div()
                     .id(THEME_ID)
@@ -624,7 +680,8 @@ impl SettingsPanel {
     /// The note that says what a change does not do: a running tab keeps its own.
     fn note(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
-            .text_xs()
+            .text_size(SMALL_TEXT)
+            .line_height(relative(LINE_HEIGHT))
             .text_color(cx.theme().muted_foreground)
             .child(NOTE)
     }
@@ -666,10 +723,10 @@ impl SettingsPanel {
 
 /// A row's label column: the fixed width that lines the fields up, and the height that
 /// centers a label against the field beside it.
-fn row_label(text: &'static str) -> impl IntoElement {
+fn row_label(text: &'static str, height: Option<gpui_kit::Pixels>) -> impl IntoElement {
     div()
         .w(LABEL_WIDTH)
-        .h(FIELD_HEIGHT)
+        .when_some(height, |this, height| this.h(height))
         .flex()
         .items_center()
         .justify_end()
@@ -697,7 +754,7 @@ impl Render for SettingsPanel {
             .test_support()
             .w(px(PANEL_SIZE.0))
             .min_h(px(PANEL_SIZE.1))
-            .p_4()
+            .p_3p5()
             .gap_2()
             .bg(cx.theme().popover)
             .border_1()
@@ -707,8 +764,8 @@ impl Render for SettingsPanel {
             // Escape, from anywhere inside: the panel is the whole dialog.
             .on_key_down(cx.listener(Self::panel_key))
             .child(self.header(cx))
-            .child(self.binary_row(Binary::Swarm, cx))
-            .child(self.binary_row(Binary::Agent, cx))
+            .child(self.binary_row(Binary::Swarm, window, cx))
+            .child(self.binary_row(Binary::Agent, window, cx))
             .child(self.theme_row(window, cx))
             // The buttons sit on the dialog's floor, however much room is left.
             .child(div().flex_1())

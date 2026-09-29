@@ -1756,7 +1756,7 @@ mod tests {
             Some(trigger.clone()),
             "escape gives the chooser back its trigger"
         );
-        assert!(f.act(cx, |window, cx| window.find("empty-tab").visible()));
+        assert!(f.act(cx, |window, _| window.find("empty-tab").visible()));
         assert!(f.events().is_empty(), "a closed chooser launches nothing");
         cx.update(|cx| {
             assert_eq!(f.tab.read(cx).coordinator_model(cx).as_ref(), "Default");
@@ -1823,7 +1823,7 @@ mod tests {
                 Some(trigger),
                 "escape closes what {key} opened, without leaving the tab"
             );
-            assert!(f.act(cx, |window, cx| window.find("empty-tab").visible()));
+            assert!(f.act(cx, |window, _| window.find("empty-tab").visible()));
         }
     }
 

@@ -926,7 +926,7 @@ mod tests {
             window.render_frame(cx);
         });
         assert_eq!(f.events(), vec![AgentListEvent::Select(AgentKey::Lane(1))]);
-        f.act(cx, |window, cx| {
+        f.act(cx, |_window, cx| {
             f.list
                 .update(cx, |list, cx| list.set_selected(AgentKey::Lane(1), cx))
         });
