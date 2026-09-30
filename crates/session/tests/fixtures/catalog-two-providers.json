@@ -1,0 +1,24 @@
+{
+  "models": [
+    { "id": "stub-a", "provider": "stub", "name": "Stub A (local)", "api": "anthropic-messages", "context_window": 200000, "reasoning": true, "images": true, "ready": true, "reason": null },
+    { "id": "stub-a", "provider": "stub2", "name": "Stub A (remote)", "api": "anthropic-messages", "context_window": 200000, "reasoning": false, "images": false, "ready": true, "reason": null }
+  ],
+  "providers": [
+    { "name": "stub", "api": "anthropic-messages", "has_key": true, "key_env": null },
+    { "name": "stub2", "api": "anthropic-messages", "has_key": true, "key_env": "STUB2_API_KEY" }
+  ],
+  "default_model": { "id": "stub-a", "provider": "stub" },
+  "thinking_levels": ["off", "high"],
+  "languages": [{ "code": "en", "name": "English" }],
+  "ops": [],
+  "commands": [],
+  "skills": [],
+  "tools": [],
+  "lanes": {
+    "models": [
+      { "id": "stub-a", "provider": "stub", "ok": true, "reason": null },
+      { "id": "stub-a", "provider": "stub2", "ok": true, "reason": null }
+    ]
+  },
+  "warnings": []
+}

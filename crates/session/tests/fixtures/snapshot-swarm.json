@@ -1,0 +1,70 @@
+{
+  "epoch": "7f3a91c2",
+  "seq": 43,
+  "topics": {
+    "swarm": {
+      "state": {
+        "id": "20260929T092544Z-90a1",
+        "workers": 3,
+        "status": { "busy": 2, "waiting_on_lanes": true },
+        "config": {
+          "lane_model": { "id": "stub-b", "provider": "openai" },
+          "lane_thinking": "medium"
+        },
+        "lanes": [
+          {
+            "n": 1,
+            "state": "working",
+            "task": "port the view model",
+            "task_started_at": 1759200010000,
+            "step_started_at": 1759200020000,
+            "restarts": 0,
+            "pid": 4101,
+            "worktree": "/Users/bytedance/coding/evo/wt/gui-model",
+            "branch": "redesign/gui-model",
+            "model": { "id": "stub-b", "provider": "openai" },
+            "context": { "tokens": 21000, "window": 200000, "source": "usage" },
+            "goal": { "goal_id": "b1", "objective": "the view model", "status": "active", "budget": null, "tokens": 4000 },
+            "todos": [{ "text": "write items", "status": "done" }],
+            "reports": 2,
+            "last_item": { "kind": "assistant", "summary": "Working on the items" }
+          },
+          {
+            "n": 2,
+            "state": "idle",
+            "task": "the transcript crate",
+            "task_started_at": 1759200011000,
+            "step_started_at": null,
+            "restarts": 1,
+            "pid": 4102,
+            "worktree": null,
+            "branch": null,
+            "model": { "id": "stub-b", "provider": "openai" },
+            "context": { "tokens": 4000, "window": 200000, "source": "usage" },
+            "goal": null,
+            "todos": [],
+            "reports": 2,
+            "last_item": { "kind": "lane_report", "summary": "report: moved the reducer" }
+          },
+          {
+            "n": 3,
+            "state": "down",
+            "task": null,
+            "task_started_at": null,
+            "step_started_at": null,
+            "restarts": 2,
+            "pid": null,
+            "worktree": null,
+            "branch": null,
+            "model": { "id": "stub-b", "provider": "openai" },
+            "context": null,
+            "goal": null,
+            "todos": [],
+            "reports": 0,
+            "last_item": { "kind": "lane_event", "summary": "is down — its process exited" }
+          }
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,234 @@
+{
+  "epoch": "7f3a91c2",
+  "seq": 42,
+  "topics": {
+    "session": {
+      "state": {
+        "status": "running",
+        "task": {
+          "id": "tk_1",
+          "kind": "run",
+          "turn": 3,
+          "started_at": 1759200000000,
+          "step_started_at": 1759200010000
+        },
+        "model": {
+          "id": "stub-a",
+          "provider": "openai",
+          "ready": true,
+          "reason": null
+        },
+        "thinking": "high",
+        "language": "en",
+        "context": {
+          "tokens": 48000,
+          "window": 936000,
+          "source": "usage"
+        },
+        "goal": {
+          "goal_id": "a1b2c3d4",
+          "objective": "ship the redesign",
+          "status": "active",
+          "budget": 50000,
+          "tokens": 12000
+        },
+        "todos": [
+          { "text": "port the view model", "status": "in_progress" },
+          { "text": "trim the workspace", "status": "pending" }
+        ],
+        "queue": ["e_queued_1"],
+        "jobs": [
+          {
+            "id": "job_1",
+            "name": "index",
+            "status": "running",
+            "started_at": 1759199990000
+          }
+        ],
+        "segments": [
+          { "name": "model", "order": 100, "side": "left", "text": "stub-a", "data": {} },
+          { "name": "thinking", "order": 200, "side": "left", "text": "high", "data": {} },
+          { "name": "context", "order": 300, "side": "left", "text": "ctx 48k/936k (5%)", "data": {} },
+          { "name": "cache-stats", "order": 350, "side": "left", "text": "97% cached", "data": {} },
+          { "name": "goal", "order": 400, "side": "left", "text": "goal a1b2c3d4 (active) 12k/50k", "data": {} },
+          { "name": "swarm", "order": 1, "side": "right", "text": "2 lanes", "data": { "lanes": 2 } }
+        ],
+        "session": {
+          "id": "20260929T092544Z_89991c7c",
+          "path": "/home/.evo/sessions/20260929T092544Z_89991c7c.sexp",
+          "leaf": "e_9",
+          "program": "evo-swarm",
+          "started_at": 1759199000000
+        }
+      },
+      "items": [
+        { "id": "e_1", "ts": 1759200000000, "kind": "user", "text": "port the view model", "images": [], "status": "sent", "queue": null },
+        {
+          "id": "e_2",
+          "ts": 1759200001000,
+          "kind": "context",
+          "key": "global-memory",
+          "text": "- [mem-1] keep responses short"
+        },
+        {
+          "id": "e_3",
+          "ts": 1759200002000,
+          "kind": "assistant",
+          "text": "Reading the crate now.",
+          "thinking": "the session crate is the core",
+          "status": "final",
+          "error": null,
+          "model": "stub-a",
+          "provider": "openai",
+          "usage": { "input": 1200, "output": 300, "cache_read": 40000, "cache_write": 0 }
+        },
+        {
+          "id": "t_call_1",
+          "ts": 1759200003000,
+          "kind": "tool",
+          "call_id": "call_1",
+          "name": "bash",
+          "args": { "command": "rg -n 'RowKind' crates/" },
+          "status": "running",
+          "result": null,
+          "parent": "e_3"
+        },
+        {
+          "id": "t_call_2",
+          "ts": 1759200004000,
+          "kind": "tool",
+          "call_id": "call_2",
+          "name": "read",
+          "args": { "path": "crates/session/src/model.rs" },
+          "status": "ok",
+          "result": { "text": "//! One agent's transcript…", "chars": 9000, "truncated": true },
+          "parent": "e_3"
+        },
+        {
+          "id": "e_4",
+          "ts": 1759200005000,
+          "kind": "goal",
+          "event": "created",
+          "goal_id": "a1b2c3d4",
+          "objective": "ship the redesign",
+          "budget": 50000,
+          "tokens": 12000
+        },
+        {
+          "id": "e_5",
+          "ts": 1759200006000,
+          "kind": "notice",
+          "severity": "warn",
+          "text": "lane 3 is down",
+          "source": "swarm",
+          "durable": true
+        },
+        {
+          "id": "e_6",
+          "ts": 1759200007000,
+          "kind": "lane_report",
+          "lane": 2,
+          "done": "moved the reducer",
+          "evidence": "cargo test -p session",
+          "next": "the tests",
+          "blocked": "",
+          "requests": "",
+          "goal": "active"
+        },
+        {
+          "id": "e_7",
+          "ts": 1759200008000,
+          "kind": "lane_event",
+          "lane": 1,
+          "event": "run_ended",
+          "outcome": "stop",
+          "goal_status": "active",
+          "detail": "task: port the view model",
+          "severity": "info"
+        },
+        {
+          "id": "e_8",
+          "ts": 1759200009000,
+          "kind": "command_note",
+          "command": "/lore",
+          "text": "The user added global-lore (durable guidance, applies from now on): be brief."
+        },
+        {
+          "id": "e_9",
+          "ts": 1759200010000,
+          "kind": "human_action",
+          "action": "interrupt",
+          "lanes": [2]
+        },
+        {
+          "id": "e_10",
+          "ts": 1759200011000,
+          "kind": "compaction",
+          "summary": "The redesign was planned; the session crate is next.",
+          "tokens_before": 210000,
+          "tokens_after": 12000,
+          "manual": false
+        },
+        {
+          "id": "e_11",
+          "ts": 1759200012000,
+          "kind": "assistant",
+          "text": "",
+          "thinking": "",
+          "status": "error",
+          "error": "overloaded_error",
+          "model": "stub-a",
+          "provider": "openai",
+          "usage": null
+        },
+        {
+          "id": "e_12",
+          "ts": 1759200013000,
+          "kind": "run_outcome",
+          "outcome": "aborted",
+          "error": null
+        },
+        {
+          "id": "e_13",
+          "ts": 1759200014000,
+          "kind": "recovery",
+          "status": "replaced",
+          "code": "supervisor_restart",
+          "attempt": 1,
+          "reason": "the child died"
+        },
+        {
+          "id": "e_14",
+          "ts": 1759200015000,
+          "kind": "provider_retry",
+          "attempt": 2,
+          "max": 5,
+          "delay_ms": 1500,
+          "reason": "529 overloaded"
+        },
+        {
+          "id": "e_queued_1",
+          "ts": 1759200016000,
+          "kind": "user",
+          "text": "and then the transcript",
+          "images": [],
+          "status": "queued",
+          "queue": "after_run"
+        },
+        {
+          "id": "e_15",
+          "ts": 1759200017000,
+          "kind": "assistant",
+          "text": "Working on ",
+          "thinking": "",
+          "status": "streaming",
+          "error": null,
+          "model": "stub-a",
+          "provider": "openai",
+          "usage": null
+        }
+      ],
+      "has_more": true
+    }
+  }
+}

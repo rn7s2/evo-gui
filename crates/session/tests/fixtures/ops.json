@@ -1,0 +1,102 @@
+[
+  { "op": "hello", "data": { "epoch": "7f3a91c2", "seq": 44 } },
+  {
+    "op": "item.add",
+    "topic": "session",
+    "data": {
+      "after": null,
+      "item": {
+        "id": "e_16",
+        "ts": 1759200020000,
+        "kind": "user",
+        "text": "and then the transcript",
+        "images": [],
+        "status": "sent",
+        "queue": null
+      }
+    }
+  },
+  {
+    "op": "item.add",
+    "topic": "session",
+    "data": {
+      "after": null,
+      "item": {
+        "id": "e_17",
+        "ts": 1759200021000,
+        "kind": "assistant",
+        "text": "",
+        "thinking": "",
+        "status": "streaming",
+        "error": null,
+        "model": "stub-a",
+        "provider": "openai",
+        "usage": null
+      }
+    }
+  },
+  { "op": "item.append", "topic": "session", "data": { "id": "e_17", "field": "text", "text": "Trimming " } },
+  { "op": "item.append", "topic": "session", "data": { "id": "e_17", "field": "text", "text": "the workspace." } },
+  {
+    "op": "item.patch",
+    "topic": "session",
+    "data": {
+      "id": "e_17",
+      "patch": {
+        "status": "final",
+        "usage": { "input": 300, "output": 40, "cache_read": 0, "cache_write": 0 }
+      }
+    }
+  },
+  {
+    "op": "item.add",
+    "topic": "session",
+    "data": {
+      "after": "e_3",
+      "item": {
+        "id": "t_call_9",
+        "ts": 1759200022000,
+        "kind": "tool",
+        "call_id": "call_9",
+        "name": "bash",
+        "args": { "command": "cargo test" },
+        "status": "running",
+        "result": null,
+        "parent": "e_3"
+      }
+    }
+  },
+  { "op": "item.remove", "topic": "session", "data": { "id": "t_call_9" } },
+  {
+    "op": "state.patch",
+    "topic": "session",
+    "data": {
+      "patch": {
+        "status": "waiting",
+        "queue": [],
+        "context": { "tokens": 49000, "window": 936000, "source": "usage" }
+      }
+    }
+  },
+  { "op": "state.patch", "topic": "lane:1", "data": { "patch": { "status": "idle", "task": null } } },
+  {
+    "op": "item.add",
+    "topic": "lane:1",
+    "data": {
+      "after": null,
+      "item": {
+        "id": "l_4",
+        "ts": 1759200025000,
+        "kind": "lane_report",
+        "lane": 1,
+        "done": "ported the items",
+        "evidence": "cargo test -p session",
+        "next": "",
+        "blocked": "",
+        "requests": "",
+        "goal": "active"
+      }
+    }
+  },
+  { "op": "topic.reset", "topic": "lane:2", "data": { "reason": "lane_restarted" } }
+]

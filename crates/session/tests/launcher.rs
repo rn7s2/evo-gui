@@ -1,11 +1,10 @@
-//! The empty tab's view model: the choosers built from the captured registries, the launch
-//! plan they produce, the `swarm.lisp` note, and the history rows.
+//! The empty tab's view model: the choosers built from a catalog, the launch plan they
+//! produce, the `swarm.lisp` note, and the history rows.
 //!
-//! The two registries are real captures (`registry.json` from the swarm's coordinator,
-//! `registry-two-providers.json` from a swarm whose two providers serve the same model id).
-//! Cases no capture reaches — a model whose API a lane does not have, a worker count the
-//! registry configures, a session with no timestamp — are synthesized here, and each says
-//! what shape it copies and from where.
+//! `catalog.json` is `GET /catalog` as CONTRACT §5.6 describes it (`catalog-two-providers`
+//! is the same shape with one id under two providers). Cases no catalog reaches — a model
+//! the catalog says is not ready, a worker count outside the chooser's range, a session
+//! with no timestamp — are synthesized here, and each says what shape it copies.
 
 mod common;
 
@@ -13,15 +12,9 @@ use common::fixture;
 use serde_json::json;
 use session::{
     coordinator_chooser, history_rows, home_short, lanes_chooser, lanes_model_note, relative_time,
-    swarm_lisp_path, swarm_workers_setting, workers_chooser, Choice, Chooser, HistoryEntry,
-    HistorySource, LaunchPlan, Launcher, When, DEFAULT_KEY, NEEDS_EXTENSION_API, WORKERS_MAX,
+    swarm_lisp_path, workers_chooser, Choice, Chooser, HistoryEntry, HistorySource, LaunchPlan,
+    Launcher, When, DEFAULT_KEY, WORKERS_MAX,
 };
-
-/// The kernel's own API set, as a `--no-userspace` probe reports it — the capture's
-/// coordinator registry carries it too (`/registry.apis`, `src/serve/routes.lisp:472`).
-fn kernel_apis(registry: &serde_json::Value) -> serde_json::Value {
-    registry["apis"].clone()
-}
 
 fn labels(chooser: &Chooser) -> Vec<&str> {
     chooser
@@ -48,45 +41,58 @@ fn entry(path: &str, folder: &str, when: When) -> HistoryEntry {
 
 #[test]
 fn the_coordinator_chooser_lists_every_model_after_default() {
-    let chooser = coordinator_chooser(&fixture("registry.json"));
-    assert_eq!(labels(&chooser), vec!["Default", "stub-a", "stub-b"]);
+    let chooser = coordinator_chooser(&fixture("catalog.json"));
+    assert_eq!(
+        labels(&chooser),
+        vec!["Default", "stub-a", "stub-b", "unready"]
+    );
     assert_eq!(chooser.options[0].key, DEFAULT_KEY);
     assert_eq!(chooser.options[0].detail, "evo's own default");
-    assert!(
-        !chooser.uncertain,
-        "the coordinator can use whatever its registry lists"
-    );
-    assert!(chooser.options.iter().all(|option| option.available));
-    assert!(chooser
-        .options
-        .iter()
-        .all(|option| option.unavailable_reason.is_none()));
 
     let stub_a = chooser
         .option("stub-a@stub")
         .expect("the key names id and provider");
     assert_eq!(stub_a.label, "stub-a");
-    assert_eq!(stub_a.detail, "200k ctx · vision · effort low–max");
+    assert_eq!(stub_a.detail, "200k ctx · vision · thinking");
     assert_eq!(
         stub_a.model(),
         Some(("stub-a".to_string(), "stub".to_string()))
     );
     assert!(stub_a.available && stub_a.unavailable_reason.is_none());
 
-    // Sorted by provider then id, and detail follows the registry's own fields.
-    let stub_b = chooser.option("stub-b@stub").expect("stub-b");
-    assert_eq!(stub_b.detail, "100k ctx · vision · effort low–max");
-    assert_eq!(chooser.models().count(), 2, "Default is not a model");
-    assert_eq!(chooser.index_of("stub-b@stub"), Some(2));
+    // Sorted by provider then id, and the detail follows the catalog's own fields.
+    assert_eq!(
+        chooser.option("stub-b@stub").expect("stub-b").detail,
+        "100k ctx · vision · thinking"
+    );
+    assert_eq!(chooser.models().count(), 3, "Default is not a model");
+    assert_eq!(chooser.index_of("unready@stub"), Some(3));
     assert_eq!(chooser.index_of("nope"), None);
     assert!(chooser.option(DEFAULT_KEY).unwrap().model().is_none());
+}
+
+/// A model the catalog says is not ready (`ready: false`) is listed, not choosable, and
+/// says why — the coordinator's own answer, no probe involved (CONTRACT §5.6).
+#[test]
+fn a_model_the_catalog_says_is_unready_is_offered_with_its_reason() {
+    let chooser = coordinator_chooser(&fixture("catalog.json"));
+    let unready = chooser.option("unready@stub").expect("listed anyway");
+    assert!(!unready.available);
+    assert_eq!(
+        unready.unavailable_reason.as_deref(),
+        Some("no API key for this provider")
+    );
+    assert!(chooser
+        .models()
+        .filter(|option| option.key != "unready@stub")
+        .all(|option| option.available));
 }
 
 /// §7.3's rule: an id under more than one provider is named with its provider, because the
 /// bare id no longer identifies the endpoint.
 #[test]
 fn an_id_under_two_providers_names_its_provider() {
-    let chooser = coordinator_chooser(&fixture("registry-two-providers.json"));
+    let chooser = coordinator_chooser(&fixture("catalog-two-providers.json"));
     assert_eq!(
         labels(&chooser),
         vec!["Default", "stub-a (stub)", "stub-a (stub2)"]
@@ -101,44 +107,37 @@ fn an_id_under_two_providers_names_its_provider() {
         Some(("stub-a".to_string(), "stub2".to_string()))
     );
     assert_ne!(chooser.options[1].key, chooser.options[2].key);
+    // The detail follows each registration's own fields.
+    assert_eq!(chooser.options[1].detail, "200k ctx · vision · thinking");
+    assert_eq!(chooser.options[2].detail, "200k ctx");
 }
 
-/// F4 of `docs/review-1.md`: the coordinator's model reaches the swarm as `--model <id>`,
-/// which is a bare id, so only the registration a bare id resolves to is a real choice.
+/// The coordinator's model reaches the swarm as `--model <id>`, a bare id, so only the
+/// registration a bare id resolves to is a real choice.
 ///
-/// The order evidence: evo's `*models*` is documented "in registration order"
-/// (`src/provider/registry.lisp`), `/registry.models` is that list walked in order
-/// (`src/serve/routes.lisp`), and `find-model` for a bare id takes the **first** entry
-/// (`src/provider/registry.lisp`) — which is why the capture, whose two providers registered
-/// `stub` then `stub2`, resolves `stub-a` to `stub`.
+/// The order evidence: the catalog lists models in registration order, and `find-model`
+/// for a bare id takes the **first** entry (`src/provider/registry.lisp`) — which is why
+/// the capture, whose two providers registered `stub` then `stub2`, resolves `stub-a` to
+/// `stub`.
 #[test]
 fn the_coordinator_offers_only_the_registration_a_bare_id_reaches() {
-    let registry = fixture("registry-two-providers.json");
+    let catalog = fixture("catalog-two-providers.json");
     assert_eq!(
-        registry["models"]
+        catalog["models"]
             .as_array()
             .unwrap()
             .iter()
             .map(|model| model["provider"].as_str().unwrap().to_string())
             .collect::<Vec<_>>(),
         vec!["stub", "stub2"],
-        "the capture lists the two registrations in registration order"
+        "the catalog lists the two registrations in registration order"
     );
 
-    let chooser = coordinator_chooser(&registry);
-    assert_eq!(
-        labels(&chooser),
-        vec!["Default", "stub-a (stub)", "stub-a (stub2)"]
-    );
+    let chooser = coordinator_chooser(&catalog);
     let reached = chooser
         .option("stub-a@stub")
         .expect("the first registration");
     assert!(reached.available && reached.unavailable_reason.is_none());
-    assert_eq!(
-        reached.model(),
-        Some(("stub-a".to_string(), "stub".to_string()))
-    );
-
     let other = chooser
         .option("stub-a@stub2")
         .expect("the second registration is still listed");
@@ -148,7 +147,7 @@ fn the_coordinator_offers_only_the_registration_a_bare_id_reaches() {
         Some("evo-swarm --model resolves this id to stub")
     );
 
-    // The rule follows the registry's order, not the alphabet: register stub2 first and the
+    // The rule follows the catalog's order, not the alphabet: register stub2 first and the
     // other registration is the reachable one.
     let reversed = json!({ "models": [
         { "id": "stub-a", "provider": "stub2", "api": "anthropic-messages", "context_window": 200000 },
@@ -163,14 +162,14 @@ fn the_coordinator_offers_only_the_registration_a_bare_id_reaches() {
         Some("evo-swarm --model resolves this id to stub2")
     );
 
-    // Nothing else is affected: an unambiguous id, and the one-provider capture, stay whole.
-    assert!(coordinator_chooser(&fixture("registry.json"))
-        .models()
-        .all(|option| option.available));
+    // Nothing else is affected: an unambiguous id stays whole.
+    assert!(coordinator_chooser(&fixture("catalog.json"))
+        .option("stub-a@stub")
+        .is_some_and(|option| option.available));
 
     // The lanes chooser is untouched (§9.6 writes the provider into swarm.lisp, so every
     // registration is its own choice there), and the labels keep naming the provider.
-    let lanes = lanes_chooser(&registry, Some(&kernel_apis(&registry)));
+    let lanes = lanes_chooser(&catalog);
     assert_eq!(
         labels(&lanes),
         vec!["Default", "stub-a (stub)", "stub-a (stub2)"]
@@ -185,62 +184,31 @@ fn the_coordinator_offers_only_the_registration_a_bare_id_reaches() {
 }
 
 #[test]
-fn the_lanes_chooser_measures_models_against_the_kernel_api_set() {
-    let registry = fixture("registry.json");
-    let apis = kernel_apis(&registry);
-    assert_eq!(apis, json!(["anthropic-messages"]));
-
-    // Every captured model speaks the kernel's API, so a lane registers it.
-    let chooser = lanes_chooser(&registry, Some(&apis));
-    assert!(!chooser.uncertain);
-    assert_eq!(labels(&chooser), vec!["Default", "stub-a", "stub-b"]);
-    assert!(chooser.models().all(|option| option.available));
-
-    // A model whose API is not in the lane: a lane calling `find-api` for it errors
-    // (`src/provider/api.lisp`), and only `swarm.lisp`'s `(evo.swarm:in-lanes …)` can load
-    // the extension that defines it. The shape below is a captured model's, with the API
-    // and a second model's missing `api` swapped in.
-    let mixed = json!({ "models": [
-        { "id": "stub-a", "provider": "stub", "api": "anthropic-messages", "context_window": 200000,
-          "vision": true, "effort": ["low", "medium", "max"] },
-        { "id": "gpt-9", "provider": "openai", "api": "openai-chat", "context_window": 1000000,
-          "vision": true, "effort": ["low"] },
-        { "id": "mystery", "provider": "acme", "context_window": 8000 },
-    ]});
-    let chooser = lanes_chooser(&mixed, Some(&apis));
-    assert!(!chooser.uncertain);
-    let gpt = chooser.option("gpt-9@openai").expect("gpt-9");
-    assert!(!gpt.available);
-    assert_eq!(gpt.unavailable_reason.as_deref(), Some(NEEDS_EXTENSION_API));
+fn the_lanes_chooser_reads_the_catalogs_own_lane_answer() {
+    let chooser = lanes_chooser(&fixture("catalog.json"));
     assert_eq!(
-        gpt.detail, "1M ctx · vision · effort low",
-        "a whole million reads 1M, and a single effort level has no range"
-    );
-    assert!(
-        chooser
-            .option("mystery@acme")
-            .is_some_and(|option| !option.available),
-        "a model that names no API cannot be checked, so a lane is not promised it"
+        labels(&chooser),
+        vec!["Default", "stub-a", "stub-b", "unready"]
     );
     assert!(chooser
         .option("stub-a@stub")
         .is_some_and(|option| option.available));
+    // What a lane cannot register comes from `lanes.models`, with the catalog's reason.
+    let unready = chooser.option("unready@stub").expect("still listed");
+    assert!(!unready.available);
     assert_eq!(
-        chooser.option("stub-a@stub").unwrap().detail,
-        "200k ctx · vision · effort low–max"
+        unready.unavailable_reason.as_deref(),
+        Some("a lane cannot register this model")
     );
 
-    // No probe has reported the set: nothing is claimed unavailable, and the chooser says
-    // its availability is unverified (§9.4).
-    let unknown = lanes_chooser(&registry, None);
-    assert!(unknown.uncertain);
-    assert!(unknown
+    // A catalog with nothing to say about lanes claims nothing: every model reads
+    // available rather than being hidden.
+    let quiet = lanes_chooser(&json!({ "models": [
+        { "id": "stub-a", "provider": "stub", "context_window": 200000 }
+    ]}));
+    assert!(quiet
         .models()
         .all(|option| option.available && option.unavailable_reason.is_none()));
-    // A null `apis` is "no probe has said", not "no API exists".
-    let null = lanes_chooser(&registry, Some(&json!(null)));
-    assert!(null.uncertain);
-    assert!(null.models().all(|option| option.available));
 
     // The lanes' Default is the rule, not a model: a lane runs the coordinator's model
     // unless the project's swarm.lisp says otherwise (§9.6).
@@ -279,7 +247,9 @@ fn the_detail_shows_windows_the_way_evos_picker_does() {
     ];
     let models: Vec<serde_json::Value> = windows
         .iter()
-        .map(|(window, _)| json!({ "id": format!("m{}", window), "provider": "stub", "api": "anthropic-messages", "context_window": window }))
+        .map(|(window, _)| {
+            json!({ "id": format!("m{}", window), "provider": "stub", "context_window": window })
+        })
         .collect();
     let chooser = coordinator_chooser(&json!({ "models": models }));
     for (window, expected) in windows {
@@ -289,9 +259,9 @@ fn the_detail_shows_windows_the_way_evos_picker_does() {
         assert_eq!(option.detail, format!("{} ctx", expected), "{window}");
     }
 
-    // A model the registry says nothing about has no detail at all, rather than a zero.
+    // A model the catalog says nothing about has no detail at all, rather than a zero.
     let chooser = coordinator_chooser(&json!({ "models": [
-        { "id": "quiet", "provider": "stub", "api": "anthropic-messages", "context_window": 0 }
+        { "id": "quiet", "provider": "stub", "context_window": 0 }
     ]}));
     assert_eq!(chooser.option("quiet@stub").unwrap().detail, "");
 }
@@ -323,32 +293,6 @@ fn the_workers_chooser_spans_one_to_sixty_four() {
     assert_eq!(chooser.options.len(), 1 + WORKERS_MAX as usize);
 }
 
-#[test]
-fn the_configured_swarm_workers_comes_from_the_registry_settings() {
-    // The capture's settings carry only the model; `:swarm-workers` appears once a project
-    // or the user sets it (`docs/swarm.md`), and crosses the wire as `swarm_workers`.
-    assert_eq!(swarm_workers_setting(&fixture("registry.json")), None);
-    assert_eq!(
-        swarm_workers_setting(&json!({ "settings": { "swarm_workers": 6 } })),
-        Some(6)
-    );
-    assert_eq!(
-        swarm_workers_setting(&json!({ "settings": { "swarm_workers": null } })),
-        None
-    );
-    assert_eq!(
-        swarm_workers_setting(&json!({ "settings": { "swarm_workers": 0 } })),
-        None
-    );
-    assert_eq!(
-        swarm_workers_setting(&json!({ "settings": { "swarm_workers": 99 } })),
-        Some(99),
-        "outside the chooser's 1–64 range, but still what Default would mean"
-    );
-    assert_eq!(swarm_workers_setting(&json!({ "settings": {} })), None);
-    assert_eq!(swarm_workers_setting(&json!({})), None);
-}
-
 // --- the plan and the note ---------------------------------------------------------
 
 #[test]
@@ -361,8 +305,7 @@ fn the_plan_passes_only_what_was_chosen() {
     );
     assert_eq!(tab.selected_key(Choice::Coordinator), DEFAULT_KEY);
 
-    assert!(tab.set_registry(&fixture("registry.json")));
-    assert!(tab.set_kernel_apis(Some(&kernel_apis(&fixture("registry.json")))));
+    assert!(tab.set_catalog(&fixture("catalog.json")));
 
     assert!(tab.select(Choice::Coordinator, "stub-b@stub"));
     assert!(tab.select(Choice::Lanes, "stub-a@stub"));
@@ -378,7 +321,7 @@ fn the_plan_passes_only_what_was_chosen() {
     assert_eq!(tab.selected(Choice::Lanes).unwrap().label, "stub-a");
 
     // Choosing the same thing again is not a change, and an unknown key is ignored: the
-    // choosers come from `/registry`, so a key that is not there selects nothing.
+    // choosers come from the catalog, so a key that is not there selects nothing.
     assert!(!tab.select(Choice::Coordinator, "stub-b@stub"));
     assert!(!tab.select(Choice::Coordinator, "not-a-model"));
     assert_eq!(
@@ -396,20 +339,20 @@ fn the_plan_passes_only_what_was_chosen() {
     assert!(tab.select(Choice::Workers, DEFAULT_KEY));
     assert_eq!(tab.plan().workers, None);
 
-    // A selection that the next registry does not have falls back to Default, and the tab
+    // A selection that the next catalog does not have falls back to Default, and the tab
     // says it changed.
     assert!(tab.select(Choice::Lanes, "stub-b@stub"));
-    assert!(tab.set_registry(&json!({ "models": [
+    assert!(tab.set_catalog(&json!({ "models": [
         { "id": "other", "provider": "stub", "api": "anthropic-messages" }
     ]})));
     assert_eq!(tab.selected_key(Choice::Lanes), DEFAULT_KEY);
     assert_eq!(tab.plan().lanes_model, None);
-    // ...and a registry that still has the chosen model keeps it: the tab is only reset
+    // ...and a catalog that still has the chosen model keeps it: the tab is only reset
     // when the option itself is gone.
-    assert!(tab.set_registry(&fixture("registry.json")));
+    assert!(tab.set_catalog(&fixture("catalog.json")));
     assert!(tab.select(Choice::Lanes, "stub-b@stub"));
     assert!(
-        !tab.set_registry(&fixture("registry.json")),
+        !tab.set_catalog(&fixture("catalog.json")),
         "the same catalog is not a change"
     );
     assert_eq!(tab.selected_key(Choice::Lanes), "stub-b@stub");
@@ -423,30 +366,12 @@ fn the_plan_passes_only_what_was_chosen() {
 fn the_empty_tab_reports_which_updates_changed_it() {
     let mut tab = Launcher::new();
     assert!(
-        tab.set_registry(&fixture("registry.json")),
-        "the first registry is news"
+        tab.set_catalog(&fixture("catalog.json")),
+        "the first catalog is news"
     );
 
-    // A probe registry is both halves at once: the catalog and the kernel's API set.
-    let mut probe = Launcher::new();
-    assert!(probe.set_probe_registry(&fixture("registry.json")));
-    assert!(!probe.lanes().uncertain);
-    assert_eq!(labels(probe.lanes()), vec!["Default", "stub-a", "stub-b"]);
-
-    // The same registry again changes nothing.
-    assert!(!probe.set_probe_registry(&fixture("registry.json")));
-    assert!(!probe.set_kernel_apis(Some(&kernel_apis(&fixture("registry.json")))));
-
-    // The kernel set arriving later still counts as a change.
-    let mut tab = Launcher::new();
-    tab.set_registry(&fixture("registry.json"));
-    assert!(tab.lanes().uncertain);
-    assert!(tab.set_kernel_apis(Some(&kernel_apis(&fixture("registry.json")))));
-    assert!(!tab.lanes().uncertain);
-    assert!(
-        tab.set_kernel_apis(None),
-        "forgetting the set is a change too"
-    );
+    // The same catalog again changes nothing.
+    assert!(!tab.set_catalog(&fixture("catalog.json")));
 
     // The configured worker count is a change once, and Default keeps meaning it.
     let mut tab = Launcher::new();
