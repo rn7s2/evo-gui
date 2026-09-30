@@ -89,6 +89,21 @@ fn context(id: &str, key: &str, text: &str) -> Item {
     item(json!({ "id": id, "ts": 1, "kind": "context", "key": key, "text": text }))
 }
 
+fn user_with_image(id: &str, n: usize) -> Item {
+    let images: Vec<Value> = (0..n)
+        .map(|i| {
+            json!({
+                "name": format!("shot-{i}.png"), "media_type": "image/png",
+                "bytes": 68, "href": format!("/media/{id}/{i}")
+            })
+        })
+        .collect();
+    item(json!({
+        "id": id, "ts": 1, "kind": "user", "text": "look at this",
+        "images": images, "status": "sent"
+    }))
+}
+
 fn run_outcome(id: &str, outcome: &str) -> Item {
     item(json!({ "id": id, "ts": 1, "kind": "run_outcome", "outcome": outcome }))
 }
@@ -577,6 +592,70 @@ fn an_empty_transcript_names_the_agent(cx: &mut TestAppContext) {
         assert!(window.try_find("transcript-empty").is_none());
         assert!(window.try_find(("transcript-empty-lane", 3u64)).is_some());
     });
+}
+
+/// An image is fetched once, when its row is on screen, and drawn from the bytes: the
+/// row says it is loading until they arrive, and says so calmly when they cannot be
+/// decoded.
+#[gpui_kit::test]
+fn an_image_is_fetched_once_and_then_drawn(cx: &mut TestAppContext) {
+    let (view, cx) = open!(cx, vec![user_with_image("e_1", 2)]);
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let recorded = asked.clone();
+    view.update(cx, |view, cx| {
+        view.on_fetch_image(
+            move |id, n, _window, _cx| recorded.borrow_mut().push((id.to_string(), n)),
+            cx,
+        );
+    });
+
+    cx.update(|window, cx| window.render_frame(cx));
+    assert_eq!(
+        asked.borrow().as_slice(),
+        [("e_1".to_string(), 0), ("e_1".to_string(), 1)],
+        "each image of the row is asked for exactly once"
+    );
+    cx.update(|window, _| {
+        assert!(
+            window
+                .try_find(row_id("transcript-image-0", "e_1"))
+                .is_none(),
+            "nothing is drawn until the bytes are here"
+        );
+    });
+
+    // The bytes arrive: one PNG, decoded by the owner, handed to the row.
+    let frame = transcript_png();
+    let decoded = crate::decode_image(&frame).expect("a decodable PNG");
+    view.update(cx, |view, cx| view.set_image("e_1", 0, decoded, cx));
+    view.update(cx, |view, cx| view.set_image_failed("e_1", 1, cx));
+    cx.update(|window, cx| window.render_frame(cx));
+    cx.update(|window, cx| {
+        assert!(
+            window
+                .try_find(row_id("transcript-image-0", "e_1"))
+                .is_some(),
+            "the decoded image is drawn"
+        );
+        // A frame that could not be read says so instead of leaving a hole.
+        let note = window.find(row_id("transcript-image-note-1", "e_1"));
+        assert_eq!(note.label(), Some("shot-1.png — could not be shown"));
+        // And nothing is asked for twice.
+        window.render_frame(cx);
+    });
+    assert_eq!(asked.borrow().len(), 2);
+}
+
+/// A one-pixel PNG, made here rather than embedded: the test is about the path from
+/// bytes to a drawn frame, and this is the smallest thing that goes through it.
+fn transcript_png() -> Vec<u8> {
+    use image::{ImageFormat, Rgba, RgbaImage};
+    let image = RgbaImage::from_pixel(2, 2, Rgba([10, 20, 30, 255]));
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image
+        .write_to(&mut bytes, ImageFormat::Png)
+        .expect("a PNG in memory");
+    bytes.into_inner()
 }
 
 #[gpui_kit::test]

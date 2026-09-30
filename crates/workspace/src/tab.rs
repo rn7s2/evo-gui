@@ -28,7 +28,7 @@ use gpui_kit::{
 use async_channel::Receiver;
 use composer::{Composer, ComposerEvent};
 use session::{
-    AgentKey, Changes, ItemChange, LaunchPlan, Op, OpRequest, Queue, Status, StreamStatus, TabModel,
+    AgentKey, Changes, ItemChange, LaunchPlan, Op, Queue, Status, StreamStatus, TabModel,
 };
 use swarm_client::{ErrorCode, OpError, OpReply};
 use tab_engine::{EngineHandle, Update};
@@ -266,8 +266,8 @@ pub struct TabContent {
 /// changes before any view is touched.
 #[derive(Default)]
 struct ViewPlan {
-    /// The whole item list, with the topic's own `has_more`.
-    reset: Option<(Vec<session::Item>, bool)>,
+    /// The whole item list.
+    reset: Option<Vec<session::Item>>,
     /// Older items, paged in at the front.
     prepend: Option<Vec<session::Item>>,
     upsert: Vec<session::Item>,
@@ -301,12 +301,9 @@ struct AgentsSnapshot {
     down_reasons: Vec<(u32, Option<String>)>,
 }
 
-/// The op a tab is waiting for a reply to, so its answer is read for what it is:
-/// only a *send*'s `ok` clears the draft — a stop is answered `ok` too, and the
-/// text the person was typing is none of its business (§7.3).
-///
-/// One op is outstanding at a time: the composer disables its own button while it
-/// waits, and the ops the list sends do not touch its alphabet.
+/// What one outstanding op was, so its reply is read for what it is: only a *send*'s
+/// `ok` clears the draft — a stop is answered `ok` too, and the text the person was
+/// typing is none of its business (§7.3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Pending {
     /// `input.send` — the reply is the one that clears the draft.
@@ -329,8 +326,9 @@ struct Live {
     _pump: Task<()>,
     /// `tabs/<id>/` — where the swarm keeps its log and its ready file (§6).
     tab_dir: PathBuf,
-    /// The op a reply is still expected for, and what it was (§5.5).
-    pending: Option<Pending>,
+    /// The ops a reply is still expected for, by the rid the engine minted, and what
+    /// each was (§5.5). An op's refusal is shown whether or not it was the composer's.
+    pending: BTreeMap<String, Pending>,
     /// The one stream's state, for the `reconnecting` badge (§5.3, §9.7).
     stream: StreamStatus,
     /// True once this tab's session has been recorded as a recent (§9.5).
@@ -738,7 +736,7 @@ impl TabContent {
             model: TabModel::new(),
             _pump: pump,
             tab_dir: started.tab_dir,
-            pending: None,
+            pending: BTreeMap::new(),
             stream: StreamStatus::Connected,
             recorded: false,
             recording: false,
@@ -794,7 +792,13 @@ impl TabContent {
                 },
                 cx,
             );
-            let _ = &cancel_topic;
+            let engine = live.engine.clone();
+            view.on_fetch_image(
+                move |id, n, _window, _cx| {
+                    engine.media(&cancel_topic, id, n);
+                },
+                cx,
+            );
         });
     }
 
@@ -913,10 +917,15 @@ impl TabContent {
             // One item, whole: a tool row's untruncated output (§5.4). The view
             // holding that row takes it.
             Update::Item { topic, body } => self.on_full_item(&topic, &body, cx),
-            // Image bytes. The transcript draws an image reference as its own line
-            // today and fetches nothing, so the bytes are dropped rather than
-            // half-rendered.
-            Update::Media { .. } => {}
+            // Image bytes, decoded once on a thread of its own and handed to the row
+            // that asked for them (§5.4).
+            Update::Media {
+                topic,
+                id,
+                n,
+                bytes,
+                ..
+            } => self.on_media(&topic, &id, n, bytes, cx),
             // A read that failed. The view stays as it was, and one quiet line says
             // what could not be fetched: nothing is retried (§5.4).
             Update::FetchFailed { what, reason } => {
@@ -927,7 +936,7 @@ impl TabContent {
                     cx,
                 );
             }
-            Update::OpReply { reply, .. } => self.on_op_reply(*reply, window, cx),
+            Update::OpReply { rid, op, reply } => self.on_op_reply(&rid, &op, *reply, window, cx),
             Update::ServerGone => self.server_gone(window, cx),
             Update::Exited { outcome } => {
                 // The engine stopped. A tab being closed never sees this; one that
@@ -980,10 +989,7 @@ impl TabContent {
                 };
                 let mut plan = ViewPlan::default();
                 if topic_changes.reset {
-                    plan.reset = Some((
-                        live.model.items(agent).to_vec(),
-                        live.model.agent_topic(agent).is_some_and(|t| t.has_older()),
-                    ));
+                    plan.reset = Some(live.model.items(agent).to_vec());
                 }
                 if topic_changes.prepended > 0 {
                     plan.prepend =
@@ -1031,13 +1037,23 @@ impl TabContent {
             let Some(view) = self.transcripts.get(&agent).cloned() else {
                 continue;
             };
+            // What the topic says about the history behind it, read before the view is
+            // touched.
+            let has_older = self
+                .live
+                .as_ref()
+                .and_then(|live| live.model.agent_topic(agent))
+                .is_some_and(|topic| topic.has_older());
             view.update(cx, |view, cx| {
-                if let Some((items, has_older)) = plan.reset {
+                if let Some(items) = plan.reset {
                     view.replace(items, cx);
                     view.set_history(has_older, view.is_loading_older(), cx);
                 }
                 if let Some(older) = plan.prepend {
                     view.prepend(older, cx);
+                    // The page the reader asked for has landed: the header stops saying
+                    // it is in flight, and knows whether there is more behind it.
+                    view.set_history(has_older, false, cx);
                 }
                 for id in plan.remove {
                     view.remove(&id, cx);
@@ -1227,7 +1243,7 @@ impl TabContent {
     ) {
         let sent = match self.live.as_mut() {
             Some(live) => {
-                let request: OpRequest = match event {
+                let (request, pending) = match event {
                     ComposerEvent::Send(text) => {
                         // A run in flight takes the words at its next boundary; an idle
                         // coordinator runs them now (§5.5).
@@ -1236,28 +1252,28 @@ impl TabContent {
                         } else {
                             Queue::AfterRun
                         };
-                        live.pending = Some(Pending::Send);
-                        live.model.send_input(&text, queue)
+                        (live.model.send_input(&text, queue), Pending::Send)
                     }
-                    ComposerEvent::StopSwarm => {
-                        live.pending = Some(Pending::Interrupt);
-                        live.model.interrupt_swarm()
-                    }
+                    ComposerEvent::StopSwarm => (live.model.interrupt_swarm(), Pending::Interrupt),
                     ComposerEvent::Interrupt => {
-                        live.pending = Some(Pending::Interrupt);
-                        live.model.interrupt_session()
+                        (live.model.interrupt_session(), Pending::Interrupt)
                     }
                 };
-                live.engine.request(request).is_some()
+                // The engine mints the request's id, and the reply comes back tagged
+                // with it: that is what says which op was answered (§5.5).
+                match live.engine.request(request) {
+                    Some(rid) => {
+                        live.pending.insert(rid, pending);
+                        true
+                    }
+                    None => false,
+                }
             }
             // No swarm: there is nothing to send to, and the button must not stay
             // disabled waiting for a reply that cannot come.
             None => false,
         };
         if !sent {
-            if let Some(live) = self.live.as_mut() {
-                live.pending = None;
-            }
             self.composer.update(cx, |composer, cx| {
                 composer.request_finished(false, window, cx)
             });
@@ -1271,6 +1287,39 @@ impl TabContent {
             let request = live.model.interrupt_lane(lane);
             live.engine.request(request);
         }
+    }
+
+    /// The bytes of one image, from `GET /media/<id>/<n>`: decoded once, on a thread of
+    /// its own (a megabyte of PNG is not a frame's work), and handed to the row that asked
+    /// for it.
+    fn on_media(&mut self, topic: &str, id: &str, n: u32, bytes: Vec<u8>, cx: &mut Context<Self>) {
+        let Some(agent) = AgentKey::from_topic(topic) else {
+            return;
+        };
+        let (bridge, _worker) = crate::bridge::Bridge::spawn(
+            crate::bridge::Revision::new(0),
+            move |updates: crate::bridge::BridgeSender<Option<Arc<gpui_kit::RenderImage>>>| {
+                let image = transcript::decode_image(&bytes);
+                let _ = updates.send(image);
+            },
+        );
+        let id = id.to_string();
+        bridge
+            .drive_into(
+                cx,
+                |_tab: &TabContent| crate::bridge::Revision::new(0),
+                move |tab, image: Option<Arc<gpui_kit::RenderImage>>, cx| {
+                    let Some(view) = tab.transcripts.get(&agent).cloned() else {
+                        return;
+                    };
+                    let id = id.clone();
+                    view.update(cx, |view, cx| match image {
+                        Some(image) => view.set_image(&id, n, image, cx),
+                        None => view.set_image_failed(&id, n, cx),
+                    });
+                },
+            )
+            .detach();
     }
 
     /// The whole of one item, as `GET /items/<id>` answered: the row that asked for it
@@ -1352,8 +1401,15 @@ impl TabContent {
     ///
     /// Only a *send* may clear the draft: a stop is answered `ok` too, and it leaves the
     /// half-written text where it was (§7.3).
-    fn on_op_reply(&mut self, reply: OpReply, window: &mut Window, cx: &mut Context<Self>) {
-        let asked = self.live.as_mut().and_then(|live| live.pending.take());
+    fn on_op_reply(
+        &mut self,
+        rid: &str,
+        op: &str,
+        reply: OpReply,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let asked = self.live.as_mut().and_then(|live| live.pending.remove(rid));
         if let Some(asked) = asked {
             if asked == Pending::Send {
                 self.composer.update(cx, |composer, cx| {
@@ -1369,7 +1425,9 @@ impl TabContent {
         if let Some(error) = reply.error() {
             let tone = notice_tone(error);
             let (text, detail) = notice_words(error);
-            self.show_notice(text, detail, tone, cx);
+            // Which op was refused is the reader's to know: `input.cancel` and
+            // `run.interrupt` look nothing alike.
+            self.show_notice(format!("{op}: {text}"), detail, tone, cx);
         }
     }
 
@@ -1628,6 +1686,8 @@ mod tests {
         cx.update_window(window, |_, window, cx| {
             tab.update(cx, |tab, cx| {
                 tab.on_op_reply(
+                    "r1",
+                    "input.send",
                     OpReply {
                         rid: "r1".to_string(),
                         ok: false,
@@ -1645,7 +1705,7 @@ mod tests {
         cx.update_window(window, |_, window, cx| {
             window.render_frame(cx);
             let line = window.find("composer-notice-dim");
-            assert_eq!(line.label(), Some("a run is in flight"));
+            assert_eq!(line.label(), Some("input.send: a run is in flight"));
             assert!(
                 window.try_find("composer-notice-error").is_none(),
                 "a busy refusal is not an error"
@@ -1657,6 +1717,8 @@ mod tests {
         cx.update_window(window, |_, window, cx| {
             tab.update(cx, |tab, cx| {
                 tab.on_op_reply(
+                    "r2",
+                    "goal.set",
                     OpReply {
                         rid: "r2".to_string(),
                         ok: false,
@@ -1674,7 +1736,7 @@ mod tests {
             window.render_frame(cx);
             assert_eq!(
                 window.find("composer-notice-error").label(),
-                Some("the objective is empty")
+                Some("goal.set: the objective is empty")
             );
         })
         .expect("the error line");
