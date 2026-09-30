@@ -26,6 +26,7 @@ stream. The app keeps its own data under `~/.evo/desktop/`.
 | `evo-serve-redesign.html` | why it is shaped that way (root causes, the removed surfaces, the plan) |
 | `evo-agent/docs/serve.md` | the protocol as the server side documents it (evo's own checkout, beside this repo) |
 | `evo-agent/docs/swarm.md` | what a swarm is, and how its lanes are mirrored into topic `lane:N` |
+| `design/doc28/` | the user's design for this app: the React and CSS source of truth for every colour, size and micro-interaction, and what §7 describes. Where the two disagree, the design and the code win |
 
 gpui-kit docs are markdown: `curl -s https://gpui-kit.com/llms.txt` is the index, and every page is
 `https://gpui-kit.com/<path>.md` (e.g. `/component/tabs.md`). Read at least `docs/installation`,
@@ -154,26 +155,49 @@ out of there.
 
 ### 7.3 Tab page
 
+The design's own page (`design/doc28/Workspace.tsx`): **two columns with one split, and the
+composer at the foot of the conversation**. One band runs across both columns — the lanes band and
+the agent header are the same height on the same surface, so the rule under them is straight.
+
 ```
-┌────────────┬───────────────────────────────────┬──────────────────┐
-│ ● main     │  transcript (markdown, rendered   │ ┌──────────────┐ │
-│ ◐ Lane 1   │   live as it streams)             │ │ input        │ │
-│ ○ Lane 2   │                                   │ └──────────────┘ │
-│ ✗ Lane 3   │                                   │ model · max ·    │
-│            │                                   │ ctx 48k/936k ·   │
-│            ├───────────────────────────────────┤ 97% cached ·     │
-│            │ ☑ todos of the selected agent     │ goal a1b2 (…)    │
-│            │                                   │    [  Send  ]    │
-└────────────┴───────────────────────────────────┴──────────────────┘
+┌──────────────────────┬────────────────────────────────────────────┐
+│ Lanes 2 of 6 busy    │ main  coordinator                          │
+├──────────────────────┼────────────────────────────────────────────┤
+│ ● main   coordinator │        the agent's transcript              │
+│ ◐ lane 1 the view …  │                                            │
+│ ○ lane 2        idle │  ┌──────────────────────────────────────┐  │
+│ ✗ lane 3        down │  │ Todos 1/3         ⌃                  │  │
+│                      │  │ Message the coordinator…             │  │
+│ ~/coding/evo-gui     │  │ (Enter to send, Shift+Enter)         │  │
+│                      │  │ [stub-a medium] [ctx 48k/936k]       │  │
+│                      │  │                     [ ↑ Send ]       │  │
+│                      │  └──────────────────────────────────────┘  │
+└──────────────────────┴────────────────────────────────────────────┘
 ```
 
-- **Left** (~260 px): the agent list — `main` (the coordinator) first, then one row per lane. Each
-  lane row carries a **status icon**: `●` working, `◐` compacting, `○` idle, `◌` starting, `✗` down
-  (a colored dot + tooltip is fine; keep the meaning). Show the current task (truncated) and the
-  step clock when working. Driven by the `swarm` topic's `lanes[]`, published on every transition
-  (a lane coming up idle included). Selection highlights and drives the center column.
-- **Center**: the selected agent's items — the coordinator's `session` topic, or that lane's
-  `lane:N` topic. Assistant text is **rendered markdown that stays rendered while it
+- **The lanes column** (left, 180–480 px, 260 at rest): the band says `Lanes` on one side and
+  `N of M busy` on the other, and under it `main` (the coordinator) comes first, then one row per
+  lane at 32 px: a 9 px dot, the name, the task it was given (truncated, dim), and the state — or
+  the step clock while it works — at the far end, right-aligned in tabular figures. The dot is
+  **breathing** while that agent works: its fill mixes between the ink and the surface of the row it
+  sits on, on a cosine with a 1600 ms period; an idle agent wears a muted ring instead. Hovering a
+  row mixes 5% of the ink into it, selecting one 9% and the name goes medium. While the pointer is
+  on a **working** lane's row that row offers a small **Stop** — `run.interrupt`, scope `lane`, the
+  one thing a person may do to a lane. A click selects that agent, and `↓`/`↑` with `Home`/`End`
+  walks the rows. `main`'s state is the session's own — `idle`, `running`, `compacting`, or
+  `waiting on lanes` while the swarm holds it for them. All of it is the `swarm` topic's `lanes[]`
+  (§4.3) plus the session's status; nothing is inferred. The folder the swarm runs in is pinned at
+  the bottom of the column, one line, `~`-shortened and trimmed from the front — whole directories
+  at a time, so the tail that names the place is the last thing to go — with the whole path on
+  hover.
+- **The split**: a 9 px band with a 1 px hairline down it, and the pill that grows on hover, press
+  and drag (20 / 28 / 44 px tall at 35 / 60 / 90%). A drag clamps the agent column to 180–480 px and
+  leaves the conversation at least 420; a double-click puts the column back to 260, and the width is
+  shared by every tab and kept in `app.json`.
+- **The conversation** (right, at least 420 px): the agent header — the name, its task (dim,
+  truncated), and, when that agent's transcript carries thinking text, a quiet **Show thinking**
+  toggle — then that agent's items — the coordinator's `session` topic, or that lane's `lane:N`
+  topic. Assistant text is **rendered markdown that stays rendered while it
   streams**: headings, lists, tables and code fences are formatted as deltas arrive, so a
   half-finished message already reads as the finished one will (§2.8) — not raw source during the
   stream and not "format it when it is done". Mechanics: one `TextViewState::markdown` per message,
@@ -188,49 +212,61 @@ out of there.
   a lane's `lane_report` as a distinct report row; `notice`, `lane_event`, `run_outcome` and
   `command_note` items as their own lines. Auto-follow the tail while the reader is at the bottom; show a jump
   affordance when they are not.
-- **Center bottom**: the **selected agent's todo list**, above the fold of the input area, hidden
-  when that agent has none. Both come from the selected agent's topic state — `state.todos` of
-  `session`, or of that lane — seeded by the snapshot and kept current by `state.patch`.
-  Each item: status glyph (`☑`/`◐`/`☐`) + text, compact, clickable only if you add interactions.
-- **Right** (~360 px): the coordinator's composer — the **Input** (plain multiline text editor for
-  now — `Textarea` + `TextareaState`, auto-grow 2→8 rows; Enter sends, Shift+Enter is a newline) and
-  **one status row beneath it: the session readout on the left, the action button on the right** —
-  same line, text flush left, button flush right, one line high. When the readout is wider than the
-  row, truncate it with an ellipsis and carry the whole line in a tooltip; never let it wrap the
-  button onto a line of its own.
-  The readout **renders the topic's `segments`**, in the order the server publishes them. A core
-  registry (`evo:define-status-segment`) builds that list, so the TUI's status line and this row
-  cannot drift apart, and an extension's own segment (cache-stats, say) reaches both the same way:
-  the app computes none of it, and walks no journal.
+- **The composer, at the foot of the conversation** — the selected agent's, on the transcript's own
+  reading measure (an 800 px measure, inset 16). `design/doc28/Composer.tsx`: an `input`-surface box,
+  12 px radius, 1 px border; with the caret in it the border mixes 55% of the primary into the
+  border and a 3 px ring of the primary at 12% sits outside it. Inside the box, in the order the
+  design draws them:
+  1. the **todo strip** of the selected agent across the top — a 32 px row reading `Todos d/n` with
+     a chevron that turns over 120 ms — and, folded out under it, the items (`☑` done, `◐` in
+     progress, `☐` pending), scrolling past 156 px. No todos, no strip: `Todos 0/0` over nothing is
+     chrome that says only that there is nothing to say. The todos come from the selected agent's
+     topic state — `state.todos` of `session`, or of that lane — seeded by the snapshot and kept
+     current by `state.patch`.
+  2. the **drawers** a chip folds out, inside the box, in the todo strip's own style: a 32 px title
+     row that folds it back, and the body under it. A click outside the box, or selecting another
+     agent, folds it back too.
+  3. the **input** (plain multiline text editor for now — `Textarea` + `TextareaState`, 14 px on a
+     20 px line): two rows at rest, growing with what is typed to **half the conversation pane**,
+     and scrolling inside itself past that. Enter sends, Shift+Enter is a newline, `Esc` interrupts
+     the coordinator's turn, and `↑`/`↓` walk the prompts this tab has sent while the input is
+     empty.
+  4. the **foot row**: the agent's status line as chips, then the one action button.
+- **The chips** are the topic's **`segments`**, one chip per segment and in the order the server
+  publishes them — the same core registry (`evo:define-status-segment`) the TUI's status line uses,
+  so the two cannot drift apart, and an extension's own segment (cache-stats, say) arrives the same
+  way: the app computes none of it and walks no journal.
 
-  | Segment | Shown as | From |
+  | Segment | Chip | From |
   |---|---|---|
-  | model | the id, or `id (provider)` when that id is registered under more than one provider | `state.model` |
-  | thinking | the effort level, lower-cased (`low` … `max`) | `state.thinking` |
+  | model | the id, or `id (provider)` when that id is registered under more than one provider, with the effort in the chip's dim half | `state.model`, `state.thinking` |
+  | thinking | the effort level, when there is no model chip to ride on | `state.thinking` |
   | context | `ctx 48k/936k (5%)` — the server's own numbers and units | `state.context` |
-  | goal | `goal <id> (<status>) <tokens>[/<budget>]` | `state.goal` |
+  | goal | `goal <id> (<status>) <tokens>[/<budget>]` — its status in the chip's dim half — opening the goal drawer; with a goal in `state.goal` and no segment for it, the design's own `goal` chip (`goal` + the dim status) stands in | `state.goal` |
 
-  Each segment carries its own `text`, `order` and `side`; render them as they are, in the theme's
-  muted color, left segments flush left and right segments flush right, and leave out a segment the
-  server does not publish. Nothing is re-anchored from `usage` on this side: `state.context` already
-  says whether its number is a usage figure or an estimate.
-
-  The **button** shares that row, and its face and function follow the coordinator's status — never a
+  Render a segment's `text` as it is, `order` left to right (right-hand segments are the swarm's
+  own summary, which the lanes column already states), and **leave out a segment the server does not
+  publish** — a session with no cache activity and no goal shows no cache and no goal chip, which is
+  the whole of that status line. The `model` chip opens the drawer holding the models `/catalog`
+  lists and the effort ladder it declares (`thinking_levels`, in the server's order, never `off`),
+  and changes the **coordinator's own** model and effort with `model.set` / `thinking.set` (§5.5) —
+  the session's, not a lane's: for a lane the drawer states what the swarm runs and says so
+  read-only.
+- **The button** shares that row, and its face and function follow what is going on — never a
   Send and a Stop side by side:
-  - status `idle` (also before the first run, and after a failed one): the button reads **Send**
-    (primary), enabled only when the input has text; clicking posts `input.send`.
-  - status `running` or `compacting` (from the topic's `state.status`): the *same* button reads
-    **Stop** (secondary, square glyph) and clicking posts `run.interrupt` — it interrupts and
-    **leaves the draft untouched**; it never sends. A coordinator that is only `waiting` on its lanes
-    gets scope `swarm`, because that is what that face means there.
+  - nothing going on: the button reads **Send** (primary), enabled only when the input has text;
+    clicking posts `input.send`.
+  - anything going on — the coordinator's own run (`running`/`compacting` from `state.status`), a
+    coordinator held `waiting` on its lanes, or a lane still working: the *same* button reads
+    **■ Stop swarm** and clicking posts `run.interrupt` with scope `swarm` — it interrupts and
+    **leaves the draft untouched**; it never sends.
   - `Esc` is a second route to that same interrupt. Enter, in both states, keeps the TUI's meaning:
     it sends (`input.send` lands at the running turn's next boundary, as a `user` item whose status
     is `queued`), so text can be queued while the agent works — the button's face always says what
     the button does.
-  There is **no model selector in a tab** (§14.7): the model is chosen when the tab is created, or
-  inherited from the resumed journal, and the readout above shows it; nothing in the tab changes it.
-- Input and button always target the **coordinator**; selecting a lane changes only the center
-  column (lane control belongs to the coordinator, §D21).
+- Input and button always target the **coordinator**; selecting a lane changes the conversation, and
+  the composer's chips and todo strip follow the selection — a lane's are read-only, because a
+  lane's model and effort are the swarm's (lane control belongs to the coordinator, §D21).
 
 ## 8. Act, don't reimplement
 
@@ -253,10 +289,10 @@ unknown command is `unknown_op`. None of it is re-validated locally.
    the run starts, running → the input is queued and arrives as a `user` item whose
    `status` is `queued` until evo drains it. Clear the input only once the reply
    says `ok`; a queued row can be taken back with `input.cancel`. The button's face
-   tracks the topic's `status` (Send when idle, Stop while running or compacting)
-   and a click never does something other than what that face says: Stop posts
-   `run.interrupt`, with scope `swarm` when the coordinator is only `waiting` on
-   its lanes.
+   tracks what is going on (Send when nothing is, Stop while the coordinator runs,
+   compacts or waits on its lanes, or while any lane is working) and a click never
+   does something other than what that face says: Stop posts `run.interrupt` with
+   scope `swarm`.
 3. **Lanes.** One stream carries them: `lane:*` is subscribed with the session, so
    every lane's state and items are already in the mirror. There is no per-lane
    subscription, no lane port, no lane token, and no relay to ask for.
@@ -314,7 +350,7 @@ than patching evo — a local patch would silently diverge the GUI from the bina
   (`EVO_STUB_MESSAGES`), and the built binaries through `EVO_SWARM_BIN` / `EVO_AGENT_BIN`
   (`scripts/stub_home.sh` is the manual half of the same thing). The real-binary proofs live in
   `crates/proofs`; the UI crates keep gpui-kit `TestAppContext` tests for the tab strip, the empty
-  tab, transcript row building, and the todo panel.
+  tab, transcript row building, and the composer.
 
 ## 12. Where the work is
 
@@ -329,16 +365,16 @@ Roughly: `crates/app` is the shell (single instance, the window and its bounds, 
 launch-time loads, Settings, About, the quit sequence), `crates/workspace` is the
 tab strip, the empty tab and the tab page, `crates/transcript` and
 `crates/composer` are the two surfaces a person types into and reads,
-`crates/agent_list` is the left column, `crates/settings` the panel, and
+`crates/agent_list` is the lanes column, `crates/settings` the panel, and
 `crates/tab_engine` + `crates/swarm_client` are one tab's I/O over
 `crates/session` (the topic mirrors and the view model) and `crates/store` (the
 on-disk layout, the offline CLI reads, the launch argv).
 
 ## 13. Non-goals (v1)
 
-Rich-text composer, image paste, runtime model switching and any command surface, lane control endpoints, remote/non-loopback servers, TLS, multiple
-windows, Windows/Linux packaging, an embedded browser, editing evo's journals, a settings UI beyond
-binary paths and theme.
+Rich-text composer, image paste, any command surface, lane control endpoints, remote/non-loopback
+servers, TLS, multiple windows, Windows/Linux packaging, an embedded browser, editing evo's
+journals, a settings UI beyond binary paths and theme.
 
 ## 14. Settled decisions
 
@@ -352,6 +388,9 @@ binary paths and theme.
 5. **Closing a tab** shuts its swarm down (`server.shutdown`, then the pipe), and the session stays
    on disk and reappears in history.
 6. The app never auto-starts swarms on launch: it opens one empty tab.
-7. **No model selector in a tab, and one action button.** The model is chosen when the tab is created
-   (or inherited from the resumed journal) and shown read-only; the composer's single button is Send
-   when the coordinator is idle and Stop while it runs, and Enter always sends through `input.send`.
+7. **One action button, and only the coordinator's own model is settable in a tab.** A swarm's model
+   is chosen when the tab is created (or inherited from the resumed journal); the composer's model
+   drawer changes the **coordinator's** model and effort (`model.set` / `thinking.set`), which are
+   the session's own — a lane's chip states what the swarm runs, read-only (§7.3). The button is Send
+   when nothing is going on and Stop while anything is (the coordinator's run, its wait for the
+   lanes, or a working lane), and Enter always sends through `input.send`.
