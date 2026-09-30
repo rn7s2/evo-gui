@@ -1,19 +1,13 @@
 //! Quitting the app (§9.8, §3).
 //!
 //! Closing the window (or Cmd-Q) does not end the process: it starts *this*.
-//! Every tab's swarm is stopped the ladder's way — `POST /shutdown`, then
-//! `SIGTERM`, then `SIGKILL` — on a thread of its own, so the UI never waits;
-//! `app.json` is written while that runs; and the process exits when the last
-//! tab is gone or the deadline passes.
+//! `app.json` is written while the tabs are handed over, every tab's server is
+//! told to stop, and the process exits.
 //!
-//! If the platform terminates us some other way (a logout, the dock's Quit
-//! while our key binding never saw the keystroke), there is no time for any of
-//! this: GPUI's own shutdown gives observers
-//! [`SHUTDOWN_TIMEOUT`](gpui_kit::SHUTDOWN_TIMEOUT) — 200 ms — so the ladder is
-//! started and left behind, and the swarms stop because this process
-//! (`EVO_SERVE_WATCH_PID`) does.
-
-use std::time::Duration;
+//! There is no ladder to walk and nothing to wait for. A tab's server stops when
+//! its engine goes: the engine holds the child's stdin (`--watch-stdin`), and
+//! EOF on that pipe is what tells the child its tab is gone — immediate, and
+//! immune to pid reuse (§8).
 
 use std::path::PathBuf;
 
@@ -22,14 +16,10 @@ use gpui_kit::{App, WeakEntity};
 use store::app_state::{AppState, Recent};
 use store::paths::TabId as StoredTabId;
 use store::time;
-use tab_engine::{shutdown_all, EngineHandle};
+use tab_engine::EngineHandle;
 use workspace::WorkspaceView;
 
 use crate::Shell;
-
-/// How long §3's ladder is given before a tab is left to finish stopping on its
-/// own: `POST /shutdown` (≤10 s), then `SIGTERM` (5 s), then `SIGKILL`.
-pub const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(20);
 
 /// Whether the quit sequence has begun.
 pub fn is_quitting(cx: &App) -> bool {
@@ -55,41 +45,15 @@ pub fn begin_with(cx: &mut App, engines: Vec<EngineHandle>) {
     log.info("quitting: stopping every tab");
 
     // The bounds and the recents are what the next launch needs, and they do not
-    // depend on the swarms stopping, so they are written first.
+    // depend on the servers stopping, so they are written first.
     let tabs = engines.len();
     save_state(cx);
 
-    let (done_tx, done_rx) = async_channel::bounded::<()>(1);
-    let thread_log = log.clone();
-    let spawned = std::thread::Builder::new()
-        .name("evo-desktop-shutdown".to_owned())
-        .spawn(move || {
-            let report = shutdown_all(engines, SHUTDOWN_DEADLINE);
-            if report.all_exited() {
-                thread_log.info(format!("shutdown: all {tabs} tab(s) exited"));
-            } else {
-                thread_log.warn(format!(
-                    "shutdown: {} of {tabs} tab(s) exited; still stopping: {:?}",
-                    report.exited.len(),
-                    report.pending
-                ));
-            }
-            let _ = done_tx.send_blocking(());
-        });
-    if let Err(error) = spawned {
-        log.error(format!("could not start the shutdown thread: {error}"));
-    }
-
-    // Quit once the ladder is done (or the deadline passed, which is when the
-    // thread returns anyway).
-    cx.spawn(async move |cx| {
-        let _ = done_rx.recv().await;
-        cx.update(|cx| {
-            log.info("stopped; exiting");
-            cx.quit();
-        });
-    })
-    .detach();
+    // Dropping a tab's engine closes the pipe its server is watching, which is
+    // the whole of "stop this tab" (§8): no request, no signal, no deadline.
+    drop(engines);
+    log.info(format!("stopped; exiting ({} tab(s))", tabs));
+    cx.defer(|cx| cx.quit());
 }
 
 /// One open tab, as `app.json` records it (§6).

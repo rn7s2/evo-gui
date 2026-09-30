@@ -24,7 +24,7 @@ use settings::{
 use store::app_state::{AppState, Binaries, Theme};
 use store::model_cache::ModelCache;
 use store::paths::Root as AppRoot;
-use workspace::{SwarmConfig, TabContentEvent, TabState, WorkspaceView};
+use workspace::{LaunchEnv, TabContentEvent, TabState, WorkspaceView};
 
 /// What the test saves: a swarm binary that is not there, so the next tab's launch
 /// says which binary it could not run — and an agent path that is not there either.
@@ -58,8 +58,8 @@ fn open(
                 ..AppState::default()
             };
             Shell::new(root.clone(), log, state, ModelCache::default()).install(cx);
-            // The same config `run` builds, from the same binaries.
-            let config = Arc::new(SwarmConfig {
+            // The same launch environment `run` builds, from the same binaries.
+            let config = Arc::new(LaunchEnv {
                 swarm_bin: cx.global::<Shell>().binaries.evo_swarm.clone(),
                 agent_bin: cx.global::<Shell>().binaries.evo_agent.clone(),
                 root,
@@ -245,12 +245,14 @@ fn saving_settings_persists_them_and_the_next_tab_spawns_with_them(cx: &mut Test
     wait_for(cx, "the new tab's failure", |cx| {
         cx.update(|cx| matches!(tab.read(cx).state(), TabState::Failed { .. }))
     });
-    let TabState::Failed { log_tail, .. } = cx.update(|cx| tab.read(cx).state().clone()) else {
+    let TabState::Failed { message, .. } = cx.update(|cx| tab.read(cx).state().clone()) else {
         unreachable!("just matched")
     };
     assert!(
-        log_tail.contains(SAVED_SWARM),
-        "the new tab ran the binary Settings saved: {log_tail:?}"
+        message
+            .as_deref()
+            .is_some_and(|reason| reason.contains(SAVED_SWARM)),
+        "the new tab ran the binary Settings saved: {message:?}"
     );
 
     let _ = std::fs::remove_dir_all(root.path());

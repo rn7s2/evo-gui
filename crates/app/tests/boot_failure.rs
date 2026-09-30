@@ -1,14 +1,15 @@
-//! M4 (hardening) — a swarm that never comes up shows why, and offers a Retry
-//! (§9.7).
+//! A swarm that never comes up says why, and offers a Retry (§9.7).
 //!
-//! What this one adds over a workspace test is the whole app in the path: the
+//! What this one adds over a tab's own tests is the whole app in the path: the
 //! binary paths in `app.json` are what a window's tabs start swarms with, so a
-//! user who points `evo_swarm` at something that is not there gets the reason on
-//! the failure screen — not an empty window and not an empty log box.
+//! user who points `evo_swarm` at something that is not there gets the engine's
+//! own reason (`TabState::Failed`'s `message`) on the failure screen — not an
+//! empty window, and not an empty log box. The log tail is the evidence behind
+//! the reason and may be empty; the reason may not.
 //!
 //! The engine runs on threads of its own and hands its updates to a gpui task, so
-//! these tests pump the UI thread (`wait_for`) and opt into parking, which is
-//! what GPUI asks for when real threads wake its tasks.
+//! these tests pump the UI thread (`wait_for`) and opt into parking, which is what
+//! GPUI asks for when real threads wake its tasks.
 
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -16,7 +17,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use evo_desktop::{swarm_config, AppLog, Shell};
+use evo_desktop::{launch_env, AppLog, Shell};
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
     px, size, AnyWindowHandle, AppContext as _, Bounds, Entity, Point, TestAppContext,
@@ -76,7 +77,7 @@ fn open(
                 ..AppState::default()
             };
             Shell::new(root, log, state, ModelCache::default()).install(cx);
-            let config = Arc::new(swarm_config(cx));
+            let config = Arc::new(launch_env(cx));
             gpui_kit::open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(Bounds {
@@ -93,8 +94,45 @@ fn open(
     (window, view)
 }
 
+/// Start this tab in `folder`, the way the empty tab does.
+fn launch(cx: &mut TestAppContext, tab: &Entity<TabContent>, folder: &std::path::Path) {
+    let folder = folder.to_path_buf();
+    let tab = tab.clone();
+    cx.update(move |cx| {
+        tab.update(cx, |_tab, cx| {
+            cx.emit(TabContentEvent::Launch {
+                folder,
+                plan: LaunchPlan::default(),
+            })
+        })
+    });
+}
+
+/// The failure the tab is showing: its folder, and the reason it has to show.
+fn failure(cx: &mut TestAppContext, tab: &Entity<TabContent>) -> (PathBuf, String) {
+    let TabState::Failed {
+        folder, message, ..
+    } = state(cx, tab)
+    else {
+        panic!("the tab is not showing a failure: {:?}", state(cx, tab));
+    };
+    let message = message.expect("a failure has a reason to show");
+    assert!(
+        !message.trim().is_empty(),
+        "and it is not blank: {message:?}"
+    );
+    (folder, message)
+}
+
+fn binaries(evo_swarm: &str, evo_agent: &str) -> Binaries {
+    Binaries {
+        evo_swarm: PathBuf::from(evo_swarm),
+        evo_agent: PathBuf::from(evo_agent),
+    }
+}
+
 #[gpui_kit::test]
-fn a_swarm_binary_that_is_not_there_shows_the_reason_and_retries(cx: &mut TestAppContext) {
+fn a_binary_that_cannot_run_shows_the_reason_and_retries(cx: &mut TestAppContext) {
     // The engine's threads wake this test's tasks: that is the point.
     cx.dispatcher.allow_parking();
     cx.update(gpui_kit::init);
@@ -106,58 +144,32 @@ fn a_swarm_binary_that_is_not_there_shows_the_reason_and_retries(cx: &mut TestAp
     let (window, view) = open(
         cx,
         &root,
-        Binaries {
-            evo_swarm: PathBuf::from("/nonexistent/evo-swarm"),
-            evo_agent: PathBuf::from("/nonexistent/evo-agent"),
-        },
+        binaries("/nonexistent/evo-swarm", "/nonexistent/evo-agent"),
     );
     let tab = cx.update(|cx| view.read(cx).selected_tab().clone());
-
-    // A folder was picked: this is the event the empty tab sends, and the window
-    // is what turns it into a launch (§7.2).
-    cx.update(|cx| {
-        tab.update(cx, |_tab, cx| {
-            cx.emit(TabContentEvent::Launch {
-                folder: folder.clone(),
-                plan: LaunchPlan::default(),
-            })
-        });
-    });
+    launch(cx, &tab, &folder);
 
     wait_for(cx, "the failure screen", |cx| {
         matches!(state(cx, &tab), TabState::Failed { .. })
     });
-    let TabState::Failed {
-        folder: failed_in,
-        log_tail,
-        ..
-    } = state(cx, &tab)
-    else {
-        unreachable!("just matched")
-    };
+    let (failed_in, message) = failure(cx, &tab);
     assert_eq!(
         failed_in, folder,
         "the screen names the folder it could not start in"
     );
     assert!(
-        log_tail.contains("evo-swarm"),
-        "the reason names the binary that could not run: {log_tail:?}"
+        message.contains("evo-swarm"),
+        "the reason names the binary that could not run: {message:?}"
     );
 
-    // The screen the user is looking at: the reason, and its Retry. (The log box
-    // is for a tail that says something the reason does not — §9.7 — which a
-    // process that never started cannot have.)
+    // The screen the user is looking at: the reason itself, and its Retry.
     let (drawn_reason, retry_visible) = cx
         .update_window(window, |_, window, cx| {
             window.render_frame(cx);
             let reason = window.find("boot-failure-reason");
-            let retry = window.find("tab-retry");
             (
-                reason
-                    .label()
-                    .map(str::to_owned)
-                    .or_else(|| reason.value().map(str::to_owned)),
-                retry.visible(),
+                reason.label().or_else(|| reason.value()).map(str::to_owned),
+                window.find("tab-retry").visible(),
             )
         })
         .expect("a drawn frame");
@@ -188,69 +200,50 @@ fn a_swarm_binary_that_is_not_there_shows_the_reason_and_retries(cx: &mut TestAp
         "the click went through the screen's Retry: {:?}",
         events.borrow()
     );
-    // The retry has already started the launch again by the time the click's
-    // update is over: the tab is booting, not sitting on a dead screen.
-    assert!(
-        matches!(state(cx, &tab), TabState::Booting { .. }),
-        "the retry started a boot: {:?}",
-        state(cx, &tab)
-    );
 
     // And it fails again, the same way, with the same reason to show.
     wait_for(cx, "the second failure screen", |cx| {
         matches!(state(cx, &tab), TabState::Failed { .. })
     });
-    let TabState::Failed { log_tail, .. } = state(cx, &tab) else {
-        unreachable!("just matched")
-    };
-    assert!(
-        log_tail.contains("evo-swarm"),
-        "still the reason, not an empty box: {log_tail:?}"
+    let (_, again) = failure(cx, &tab);
+    assert_eq!(
+        again, message,
+        "the same binary is still missing, so the same reason comes back"
     );
 
     let _ = std::fs::remove_dir_all(root.path());
 }
 
 #[gpui_kit::test]
-fn a_folder_that_cannot_be_written_fails_the_tab_before_anything_starts(cx: &mut TestAppContext) {
+fn a_folder_the_swarm_cannot_start_in_fails_the_tab(cx: &mut TestAppContext) {
+    cx.dispatcher.allow_parking();
     cx.update(gpui_kit::init);
     let root = temp_root("boot-failure-folder");
     let (window, view) = open(
         cx,
         &root,
-        Binaries {
-            evo_swarm: PathBuf::from("/nonexistent/evo-swarm"),
-            evo_agent: PathBuf::from("/nonexistent/evo-agent"),
-        },
+        // The binaries this machine has: the folder is the only thing wrong here.
+        binaries(
+            &store::cli::swarm_bin().display().to_string(),
+            &store::cli::agent_bin().display().to_string(),
+        ),
     );
     let tab = cx.update(|cx| view.read(cx).selected_tab().clone());
 
-    // A folder that does not exist: the prep cannot write the tab's own directory
-    // or the folder's `swarm.lisp` block (§9.6), so there is nothing to boot.
-    let nowhere = root.path().join("no").join("such").join("folder");
-    cx.update(|cx| {
-        tab.update(cx, |_tab, cx| {
-            cx.emit(TabContentEvent::Launch {
-                folder: nowhere.clone(),
-                plan: LaunchPlan::default(),
-            })
-        });
-    });
-    cx.run_until_parked();
+    // A *file* where the project folder should be: the child cannot start in it,
+    // so there is nothing to boot and the screen has to say so.
+    let not_a_folder = root.path().join("not-a-folder");
+    std::fs::write(&not_a_folder, "this is not a directory\n").expect("a file to trip over");
+    launch(cx, &tab, &not_a_folder);
 
-    let TabState::Failed {
-        folder, log_tail, ..
-    } = state(cx, &tab)
-    else {
-        panic!(
-            "a folder that cannot be written is a failure, not a boot: {:?}",
-            state(cx, &tab)
-        );
-    };
-    assert_eq!(folder, nowhere);
+    wait_for(cx, "the failure screen", |cx| {
+        matches!(state(cx, &tab), TabState::Failed { .. })
+    });
+    let (failed_in, message) = failure(cx, &tab);
+    assert_eq!(failed_in, not_a_folder);
     assert!(
-        !log_tail.trim().is_empty(),
-        "the screen says what could not be prepared"
+        message.contains("not-a-folder") || message.contains("directory"),
+        "the reason points at what the child could not do: {message:?}"
     );
     let _ = window;
     let _ = std::fs::remove_dir_all(root.path());

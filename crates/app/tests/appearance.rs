@@ -37,7 +37,7 @@ fn open(cx: &mut TestAppContext, theme: Theme) -> (AnyWindowHandle, AppLog) {
                     ..AppState::default()
                 };
                 Shell::new(root, log, state, ModelCache::default()).install(cx);
-                let config = std::sync::Arc::new(evo_desktop::swarm_config(cx));
+                let config = std::sync::Arc::new(evo_desktop::launch_env(cx));
                 gpui_kit::open_window(
                     WindowOptions {
                         window_bounds: Some(WindowBounds::Windowed(Bounds {

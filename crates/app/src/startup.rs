@@ -6,46 +6,37 @@
 //! 1. the cached catalog (`model-cache.json`) is handed to the empty tabs
 //!    straight away — it is already on disk, so the choosers fill in the first
 //!    frame;
-//! 2. the session scan (`store::history`) runs on its own thread and its rows
-//!    arrive later;
-//! 3. if that cache is missing or older than [`CACHE_MAX_AGE`], a catalog probe
-//!    (`tab_engine::catalog`, two throwaway servers under
-//!    `~/.evo/desktop/probe`) refreshes it, is written back through `store`, and
-//!    handed over when it lands.
+//! 2. `evo-agent sessions --json` runs on a thread of its own and its rows
+//!    arrive later: one process, one JSON document, no journal is read here
+//!    (§9);
+//! 3. `evo-swarm catalog --json` refreshes the cache — the same shape of read,
+//!    and it replaces the two throwaway servers this used to need. What it found
+//!    is written back through `store` and handed over when it lands.
 //!
 //! Each arrival goes through [`crate::launcher`], which both pushes it into the
 //! tabs that exist and remembers it for the ones created later.
 
-use std::time::{Duration, SystemTime};
+use std::path::PathBuf;
+use std::time::SystemTime;
 
 use gpui_kit::App;
 
-use store::app_state::{AppState, Binaries};
-use store::history::{self, ScanBudget};
+use store::app_state::Binaries;
+use store::cli;
+use store::history::{self, SessionsQuery};
 use store::model_cache::ModelCache;
 use store::paths::Root;
-use store::time;
 
 use crate::housekeeping;
 use crate::launcher;
 use crate::logging::AppLog;
 use crate::Shell;
 
-/// How old the cached catalog may be before it is probed again.
-pub const CACHE_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
-
-/// Whether the cache has to be refreshed: empty, undated, or older than
-/// [`CACHE_MAX_AGE`].
-pub fn cache_is_stale(cache: &ModelCache, now_epoch: u64) -> bool {
-    if cache.is_empty() {
-        return true;
-    }
-    match cache.fetched_epoch() {
-        Some(fetched) => now_epoch.saturating_sub(fetched) > CACHE_MAX_AGE.as_secs(),
-        // A cache with no readable timestamp cannot be judged; refresh it.
-        None => true,
-    }
-}
+/// The catalog is read with `evo-swarm`: its body is the one that carries
+/// `lanes` — the models a lane can register, which the lanes chooser greys out
+/// against (§5.6, §9). `evo-agent catalog --json` prints the same body without
+/// them.
+const CATALOG: &[&str] = &["catalog", "--json"];
 
 /// Start the launch-time loads. Called once, after the window exists.
 pub fn start(cx: &mut App) {
@@ -60,115 +51,135 @@ pub fn start(cx: &mut App) {
         }
     ));
 
-    // 1. The cache we already have goes out first.
-    launcher::set_catalog(cx, cache.clone(), None);
+    // 1. The cache we already have goes out first: the window is up, and this is
+    //    what it shows while a real catalog is being read.
+    launcher::set_catalog(cx, cache, None);
     log.info(format!(
         "startup: {} tab(s) will show it",
         launcher::tab_count(cx)
     ));
 
-    // 2. The session scan, on the store's own thread, bridged onto an
-    //    `async_channel` so the rows land on a gpui task.
-    launcher::set_scanning(cx, true);
-    let sessions = history::sessions_dir();
-    let scan = history::scan_in_background(sessions.clone(), ScanBudget::default());
-    let (scan_tx, scan_rx) = async_channel::bounded(1);
-    let bridged = std::thread::Builder::new()
-        .name("evo-desktop-history".to_owned())
-        .spawn(move || {
-            if let Ok(outcome) = scan.recv() {
-                let _ = scan_tx.send_blocking(outcome);
-            }
-        });
-    if let Err(error) = bridged {
-        log.error(format!("could not start the history bridge: {error}"));
-    }
-    let scan_log = log.clone();
-    let scan_sessions = sessions.clone();
-    cx.spawn(async move |cx| {
-        let Ok(outcome) = scan_rx.recv().await else {
-            return;
-        };
-        cx.update(|cx| {
-            // The app's own recents join the scan (§9.5, §14.3).
-            let recents = cx.global::<Shell>().recents.clone();
-            let entries = history::merge(outcome.entries, &recents);
-            scan_log.info(format!(
-                "history: {} row(s) ({} files read of {} seen{})",
-                entries.len(),
-                outcome.files_read,
-                outcome.files_seen,
-                if outcome.stopped_early {
-                    ", stopped early"
-                } else {
-                    ""
-                }
-            ));
-            // A scan of a directory that is not there yet — the first run, before
-            // evo has written a journal — is an empty history, not a failure:
-            // `store` decides which of the two this was (§9.5).
-            let error = history::unreadable(&scan_sessions);
-            if let Some(error) = &error {
-                scan_log.warn(format!("history: {error}"));
-            }
-            launcher::set_history(cx, entries, error);
-        });
-    })
-    .detach();
+    // 2. The session index, read by evo itself, on a thread of its own.
+    load_history(cx, binaries.evo_agent.clone());
 
     // 3. Tab directories nobody has touched for a week, on a thread of its own:
     //    the walk is I/O and §9.7's evidence is what is at stake, not speed.
     prune_tab_dirs(root.clone(), log.clone());
 
-    // 4. The catalog probe, when the cache cannot be trusted.
-    if cache_is_stale(&cache, time::now_epoch()) {
-        log.info(format!(
-            "catalog: probing with {} (cache older than {:?} or missing)",
-            binaries.evo_agent.display(),
-            CACHE_MAX_AGE
-        ));
-        let probe = tab_engine::catalog::learn(binaries.evo_agent.clone(), root.probe_dir());
-        let probe_log = log.clone();
-        let probe_root = root.clone();
-        cx.spawn(async move |cx| {
-            let Ok(update) = probe.recv().await else {
-                return;
-            };
-            cx.update(|cx| match update {
-                tab_engine::catalog::CatalogUpdate::Done {
-                    registry,
-                    kernel_apis,
-                } => {
-                    let mut cache = ModelCache::from_probe(registry);
-                    if let Some(apis) = kernel_apis {
-                        cache = cache.with_kernel_apis(apis);
-                    }
-                    probe_log.info(format!(
-                        "catalog: probed {} model(s), {} kernel api(s)",
-                        cache.models().len(),
-                        cache.kernel_apis.len()
-                    ));
-                    if let Err(error) = cache.save(&probe_root) {
-                        probe_log.error(format!(
-                            "could not save {}: {error}",
-                            probe_root.model_cache().display()
-                        ));
-                    }
-                    launcher::set_catalog(cx, cache, None);
-                }
-                tab_engine::catalog::CatalogUpdate::Failed { message, log_tail } => {
-                    // The cache we have stays in use; the tab says the catalog
-                    // could not be refreshed (§9.4).
-                    probe_log.error(format!("catalog probe failed: {message}"));
-                    if !log_tail.is_empty() {
-                        probe_log.error(format!("catalog probe log tail:\n{log_tail}"));
-                    }
-                    launcher::set_catalog_error(cx, Some(message));
-                }
-            });
-        })
-        .detach();
+    // 4. The catalog, refreshed the same way.
+    load_catalog(cx, root, binaries.evo_swarm);
+}
+
+/// Read the model catalog again, in the background, and hand it over when it
+/// lands. Called at startup and whenever Settings changes the binaries (§9.4):
+/// a new `evo-swarm` is a new catalog.
+pub fn refresh_catalog(cx: &mut App) {
+    let (root, bin) = {
+        let shell = cx.global::<Shell>();
+        (shell.root.clone(), shell.binaries.evo_swarm.clone())
+    };
+    load_catalog(cx, root, bin);
+}
+
+/// `evo-agent sessions --json` on a thread of its own, bridged onto a gpui task.
+///
+/// A failure is not an empty history: a read that could not run says why, and
+/// the empty tabs show that line instead of claiming there is nothing to resume
+/// (§9.5).
+fn load_history(cx: &mut App, bin: PathBuf) {
+    let log = cx.global::<Shell>().log.clone();
+    launcher::set_history_loading(cx, true);
+
+    let (tx, rx) = async_channel::bounded(1);
+    let thread_log = log.clone();
+    let spawned = std::thread::Builder::new()
+        .name("evo-desktop-history".to_owned())
+        .spawn(move || {
+            let read =
+                history::fetch(&bin, &SessionsQuery::swarms()).map_err(|error| error.summary());
+            if let Err(message) = &read {
+                thread_log.warn(format!("history: {message}"));
+            }
+            let _ = tx.send_blocking(read);
+        });
+    if let Err(error) = spawned {
+        log.error(format!("could not start the history read: {error}"));
+        launcher::set_history_loading(cx, false);
+        return;
     }
+
+    cx.spawn(async move |cx| {
+        let Ok(read) = rx.recv().await else {
+            return;
+        };
+        cx.update(|cx| match read {
+            Ok(sessions) => {
+                // The app's own recents join the index (§9.5, §14.3).
+                let recents = cx.global::<Shell>().recents.clone();
+                let entries = history::merge(sessions, &recents);
+                cx.global::<Shell>().log.info(format!(
+                    "history: {} row(s) from the session index",
+                    entries.len()
+                ));
+                launcher::set_history(cx, entries, None);
+            }
+            Err(message) => launcher::set_history(cx, Vec::new(), Some(message)),
+        });
+    })
+    .detach();
+}
+
+/// `evo-swarm catalog --json` on a thread of its own: one process, one document,
+/// and the cache is rewritten with what it printed.
+fn load_catalog(cx: &mut App, root: Root, bin: PathBuf) {
+    let log = cx.global::<Shell>().log.clone();
+    log.info(format!("catalog: reading with {}", bin.display()));
+
+    let (tx, rx) = async_channel::bounded(1);
+    let thread_log = log.clone();
+    let spawned = std::thread::Builder::new()
+        .name("evo-desktop-catalog".to_owned())
+        .spawn(move || {
+            let read = cli::run_json(&bin, &cli::args(CATALOG))
+                .map(|body| ModelCache::from_catalog("evo-swarm", body))
+                .map_err(|error| error.summary());
+            if let Err(message) = &read {
+                thread_log.warn(format!("catalog: {message}"));
+            }
+            let _ = tx.send_blocking(read);
+        });
+    if let Err(error) = spawned {
+        log.error(format!("could not start the catalog read: {error}"));
+        launcher::set_catalog_error(cx, Some(format!("{error}")));
+        return;
+    }
+
+    cx.spawn(async move |cx| {
+        let Ok(read) = rx.recv().await else {
+            return;
+        };
+        cx.update(|cx| match read {
+            Ok(cache) => {
+                let log = cx.global::<Shell>().log.clone();
+                log.info(format!(
+                    "catalog: {} model(s), {} lane model(s)",
+                    cache.models().len(),
+                    cache.catalog().lane_models().map_or(0, |lanes| lanes.len())
+                ));
+                if let Err(error) = cache.save(&root) {
+                    log.error(format!(
+                        "could not save {}: {error}",
+                        root.model_cache().display()
+                    ));
+                }
+                launcher::set_catalog(cx, cache, None);
+            }
+            // The cache we have stays in use; the tab says the catalog could not
+            // be refreshed (§9.4).
+            Err(message) => launcher::set_catalog_error(cx, Some(message)),
+        });
+    })
+    .detach();
 }
 
 /// Remove the `tabs/<id>/` directories the app is done with (§6).
@@ -182,7 +193,7 @@ fn prune_tab_dirs(root: Root, log: AppLog) {
     let spawned = std::thread::Builder::new()
         .name("evo-desktop-prune".to_owned())
         .spawn(move || {
-            let keep: Vec<String> = AppState::load(&root)
+            let keep: Vec<String> = store::app_state::AppState::load(&root)
                 .tabs
                 .iter()
                 .map(|id| id.as_str().to_owned())
@@ -228,49 +239,36 @@ fn snapshot(cx: &App) -> (Root, AppLog, ModelCache, Binaries) {
     )
 }
 
+/// A `model-cache.json` holding `body`, for the tests below.
+#[cfg(test)]
+fn cache_from(body: serde_json::Value) -> ModelCache {
+    ModelCache::from_catalog("evo-swarm", body)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
-    fn cache(registry: serde_json::Value, fetched_at: &str) -> ModelCache {
-        ModelCache {
-            version: 1,
-            fetched_at: fetched_at.to_owned(),
-            kernel_apis: Vec::new(),
-            registry,
-        }
+    #[test]
+    fn a_missing_cache_holds_no_models() {
+        assert!(ModelCache::default().is_empty());
     }
 
     #[test]
-    fn a_missing_cache_is_stale() {
-        assert!(cache_is_stale(&ModelCache::default(), 1_000));
+    fn a_catalog_body_becomes_the_cache_the_choosers_read() {
+        let cache = cache_from(serde_json::json!({
+            "models": [{"id": "m", "provider": "p", "ready": true}],
+            "lanes": {"models": [{"id": "m", "provider": "p", "ok": true}]},
+        }));
+        assert_eq!(cache.models().len(), 1);
+        assert!(!cache.is_empty());
+        assert!(cache.catalog().lane_model_ok("m", Some("p")));
+        assert!(cache.fetched_epoch().is_some(), "a read is stamped");
     }
 
     #[test]
-    fn a_cache_with_no_models_is_stale() {
-        let empty_models = cache(json!({ "models": [] }), "2026-09-29T00:00:00Z");
-        assert!(cache_is_stale(&empty_models, 1_000));
-    }
-
-    #[test]
-    fn a_cache_younger_than_a_day_is_fresh() {
-        let fresh = cache(json!({ "models": [{ "id": "m" }] }), "2026-09-29T00:00:00Z");
-        let fetched = fresh.fetched_epoch().expect("a timestamp");
-        assert!(!cache_is_stale(&fresh, fetched + 60));
-        assert!(!cache_is_stale(&fresh, fetched + CACHE_MAX_AGE.as_secs()));
-    }
-
-    #[test]
-    fn a_cache_older_than_a_day_is_stale() {
-        let old = cache(json!({ "models": [{ "id": "m" }] }), "2026-09-27T00:00:00Z");
-        let fetched = old.fetched_epoch().expect("a timestamp");
-        assert!(cache_is_stale(&old, fetched + CACHE_MAX_AGE.as_secs() + 1));
-    }
-
-    #[test]
-    fn an_undated_cache_is_stale() {
-        let undated = cache(json!({ "models": [{ "id": "m" }] }), "not a date");
-        assert!(cache_is_stale(&undated, 1_000));
+    fn a_body_with_no_models_is_the_same_as_no_catalog() {
+        let cache = cache_from(serde_json::json!({"models": []}));
+        assert!(cache.is_empty(), "the choosers stay on Default");
     }
 }

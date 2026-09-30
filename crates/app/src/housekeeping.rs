@@ -1,11 +1,12 @@
 //! §6 layout hygiene: the `tabs/<id>/` directories the app is done with.
 //!
-//! Starting a swarm mints a tab directory holding its `tab.json`, its token and
-//! its `swarm.log`. Those are evidence — §9.7 shows the log's tail when a boot
-//! fails — so a directory is never removed while it might still be wanted: not one
-//! `app.json` names as an open tab, and not one touched inside [`TAB_DIR_TTL`].
-//! What is older than that belongs to a swarm nobody has looked at for a week, and
-//! is removed. The walk happens at startup, on a thread of its own.
+//! Starting a swarm mints a tab directory holding its ready file, its
+//! `swarm.log` and its lanes' logs. Those are evidence — §9.7 shows the log's
+//! tail when a boot fails — so a directory is never removed while it might still
+//! be wanted: not one `app.json` names as an open tab, and not one touched inside
+//! [`TAB_DIR_TTL`]. What is older than that belongs to a swarm nobody has looked
+//! at for a week, and is removed. The walk happens at startup, on a thread of
+//! its own.
 
 use std::fs;
 use std::io;

@@ -6,7 +6,7 @@
 //!
 //! The window opens before anything slow happens: `app.json` and the model cache
 //! are two small files read on the way in, and everything else — the session
-//! scan, a catalog probe, the tabs shutting down on the way out — runs on other
+//! scan, a catalog read, the tabs stopping on the way out — runs on other
 //! threads and arrives through a channel (§2 rule 6).
 //!
 //! ```text
@@ -14,8 +14,8 @@
 //!             ├── single instance: lock, or knock and exit 0
 //!             ├── window (bounds from app.json, clamped to the display)
 //!             ├── activation watcher: a second launch raises this window
-//!             ├── startup: cache → scan → probe, pushed to the empty tabs
-//!             └── quit: every tab's ladder, then app.json, then exit
+//!             ├── startup: cache → sessions → catalog, pushed to the empty tabs
+//!             └── quit: app.json, the tabs' pipes closed, then exit
 //! ```
 
 mod about;
@@ -32,19 +32,15 @@ mod theme;
 pub use about::{start as start_version_probe, Versions};
 pub use bounds::{window_bounds, window_options, Tracker};
 pub use housekeeping::{prune_tab_dirs, Pruned, TAB_DIR_TTL};
-pub use launcher::{
-    history_entries, hook_live_registry, on_live_registry, push_launcher_data, tab_count,
-    utc_offset_seconds, Launcher,
-};
+pub use launcher::{history_entries, push_launcher_data, tab_count, Launcher};
 pub use logging::{AppLog, Level, LOG_NAME};
 pub use menus::open_about;
 pub use menus::{install as install_menus, open_settings, CloseTab, NewTab, QuitApp};
 pub use quit::{
     begin as begin_quit, is_quitting, open_tabs, remember_tab_set, take_engines, TabRecord,
-    SHUTDOWN_DEADLINE,
 };
 pub use settings::{apply as apply_settings, open as open_settings_panel, DIALOG_CONTENT_ID};
-pub use startup::{cache_is_stale, start as start_background_loads, CACHE_MAX_AGE};
+pub use startup::{refresh_catalog, start as start_background_loads};
 pub use theme::{follow_appearance, mode_for};
 
 use gpui_kit::prelude::*;
@@ -116,15 +112,17 @@ impl Shell {
     }
 }
 
-/// What this launch's tabs start their swarms with (§3): the binaries `app.json`
-/// names and this app's own root.
+/// What a tab's launch needs from the app (§3): the binaries `app.json` names,
+/// this app's own root, and the environment the child runs in.
 ///
 /// The binary paths are in `app.json` so they can be pointed elsewhere (§9.1);
 /// without passing them on, a window would run whatever the defaults happen to
-/// be and the file would be a lie.
-pub fn swarm_config(cx: &App) -> workspace::SwarmConfig {
+/// be and the file would be a lie. The window builds a
+/// [`LaunchSpec`](store::launch::LaunchSpec) out of this — the choosers are the
+/// window's own state — and the client spawns that.
+pub fn launch_env(cx: &App) -> workspace::LaunchEnv {
     let shell = cx.global::<Shell>();
-    workspace::SwarmConfig {
+    workspace::LaunchEnv {
         swarm_bin: shell.binaries.evo_swarm.clone(),
         agent_bin: shell.binaries.evo_agent.clone(),
         root: shell.root.clone(),
@@ -201,10 +199,10 @@ pub fn run() {
             let options = bounds::window_options(cx, stored_bounds);
             let opened = gpui_kit::open_window(options, cx, |window, cx: &mut App| {
                 let tracker = cx.new(|cx| Tracker::new(window, cx));
-                // The window's tabs start swarms with the binaries `app.json`
+                // The window's tabs start servers with the binaries `app.json`
                 // names, out of this app's own root.
-                let config = std::sync::Arc::new(swarm_config(cx));
-                let view = cx.new(|cx| WorkspaceView::with_config(config, window, cx));
+                let env = std::sync::Arc::new(launch_env(cx));
+                let view = cx.new(|cx| WorkspaceView::with_config(env, window, cx));
                 cx.update_global::<Shell, _>(|shell, _| shell.tracker = Some(tracker));
                 view
             });
@@ -244,15 +242,11 @@ pub fn run() {
             view.update(cx, |view, _cx| {
                 view.set_quit_hook(Box::new(|request, _window, cx| {
                     quit::begin_with(cx, request.engines);
-                    // Let the close go ahead: the app is still alive while the
-                    // ladders run (the quit mode is explicit), and ends itself
-                    // when they are done.
+                    // Let the close go ahead: the quit sequence ends the process
+                    // itself (the quit mode is explicit).
                     false
                 }));
             });
-            // A tab's own swarm answering `/registry` refreshes the catalog
-            // (§9.4); the window passes every live tab's through this.
-            launcher::hook_live_registry(cx);
             let closing = cx.on_window_closed(|cx: &mut App, _id| quit::begin(cx));
             cx.update_global::<Shell, _>(|shell, _| {
                 shell.view = Some(view.downgrade());
