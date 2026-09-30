@@ -4,9 +4,10 @@
 //! log read next to a journal never depends on the machine's timezone.
 //!
 //! A token is never logged. Nothing here can log one — the app never holds a
-//! tab's token (the engine learns it from the server's `--token-file`), and
-//! `swarm_client::Token`'s `Debug`/`Display` are both redacted — but the rule is
-//! repeated here because this is the file someone would reach for.
+//! tab's token (the engine reads it from the server's ready file, and the port
+//! and token are the engine's own business), and `swarm_client::Token`'s
+//! `Debug`/`Display` are both redacted — but the rule is repeated here because
+//! this is the file someone would reach for.
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;

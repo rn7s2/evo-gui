@@ -13,7 +13,6 @@
 //! `Context::defer_in` uses).
 
 use gpui_kit::App;
-use serde_json::Value;
 
 use session::{HistoryEntry, HistorySource, When};
 use store::history::HistorySource as StoreSource;
@@ -25,9 +24,8 @@ use crate::Shell;
 /// Everything the empty tabs show, in the shapes the window wants (§9.4, §9.5).
 #[derive(Clone, Debug, Default)]
 pub struct Launcher {
-    /// The catalog: what the disk cache held, what a probe found, or what a live
-    /// server's `/registry` last said. It also carries the kernel api set only a
-    /// probe can learn.
+    /// The catalog: what the disk cache held, or what the launch-time load found.
+    /// It also carries the kernel api set only a catalog read can learn.
     pub cache: ModelCache,
     /// The resumable swarms the scan found, plus the app's own recents.
     pub history: Vec<HistoryEntry>,
@@ -194,41 +192,6 @@ pub fn set_catalog(cx: &mut App, cache: ModelCache, error: Option<String>) {
         launch.catalog_error = error;
     }
     push_launcher_data(cx);
-}
-
-/// A live server answered `/registry` (§9.4): keep it for the empty tabs and for
-/// the next launch. Registered as the window's registry hook.
-pub fn on_live_registry(cx: &mut App, raw: Value) {
-    let (root, log) = {
-        let shell = cx.global::<Shell>();
-        (shell.root.clone(), shell.log.clone())
-    };
-    // The catalog moves forward; the kernel api set only a probe can learn is
-    // kept (§9.4).
-    let cache = cx.global::<Shell>().launcher.cache.with_live_registry(raw);
-    if let Err(error) = cache.save(&root) {
-        log.error(format!(
-            "could not save {}: {error}",
-            root.model_cache().display()
-        ));
-    }
-    {
-        let launch = &mut cx.global_mut::<Shell>().launcher;
-        launch.cache = cache;
-        launch.catalog_error = None;
-    }
-    push_launcher_data(cx);
-}
-
-/// Register [`on_live_registry`] with the window, so a tab's own swarm refreshes
-/// the catalog (§9.4).
-pub fn hook_live_registry(cx: &mut App) {
-    let Some(view) = crate::quit::view(cx) else {
-        return;
-    };
-    view.update(cx, |view, cx| {
-        view.on_registry(|raw, cx| on_live_registry(cx, raw.clone()), cx);
-    });
 }
 
 /// The scan found what it found. `error` is set when the sessions directory
