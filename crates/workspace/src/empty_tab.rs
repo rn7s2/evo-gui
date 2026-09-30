@@ -940,7 +940,7 @@ impl EmptyTabState {
             .collect();
         let weak = cx.entity().downgrade();
         let slider = widgets::EffortSlider::with_levels(
-            ElementId::Name(format!("{id}-rail-y").into()),
+            format!("{id}-rail-y"),
             levels,
             self.launcher.effort(role),
         )
