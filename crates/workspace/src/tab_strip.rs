@@ -34,12 +34,13 @@ use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{h_flex, ActiveTheme as _, TitleBar};
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    canvas, div, point, px, AnyElement, Context, ElementId, Entity, Hsla, IntoElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Point, SharedString,
-    TestSupportExt as _, Window,
+    canvas, div, point, px, AnyElement, Context, ElementId, Entity, IntoElement, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, SharedString, TestSupportExt as _,
+    Window,
 };
 use store::design::{self, Palette, Rgb};
 use widgets::dot::dot_id;
+use widgets::glyph;
 use widgets::paint::{color, mix};
 use widgets::BreathingDot;
 
@@ -252,7 +253,7 @@ fn tab(
     }
     element
         .when(divider, |this| this.child(rule(cx)))
-        .child(slot(id, busy, unseen, surface, cx))
+        .child(slot(id, busy, unseen, surface, ink, cx))
         .child(
             div()
                 .id(ElementId::NamedInteger("tab-label".into(), id.get()))
@@ -429,6 +430,7 @@ fn slot(
     busy: bool,
     unseen: bool,
     surface: Rgb,
+    ink: Rgb,
     cx: &Context<WorkspaceView>,
 ) -> AnyElement {
     let palette = palette(cx);
@@ -452,6 +454,10 @@ fn slot(
             BreathingDot::new(dot_id(format!("tab-{}", id.get())), busy)
                 .palette(palette)
                 .surface(surface)
+                // The idle ring is the tab's own ink (`currentColor` in the
+                // design): the foreground on the tab being shown, the tab ink on
+                // the others.
+                .ring(color(ink))
                 .idle_opacity(if unseen { 1. } else { design::IDLE_OPACITY })
                 .render(),
         )
@@ -487,32 +493,13 @@ fn close(id: TabId, shown: bool, surface: Rgb, cx: &Context<WorkspaceView>) -> A
             cx.stop_propagation();
             this.close_tab(id, window, cx);
         }))
-        .child(cross(palette))
+        .child(glyph::cross_in(palette))
         .into_any_element()
-}
-
-/// The `×` in a close button: the design's two strokes of a 10px glyph.
-fn cross(palette: &'static Palette) -> AnyElement {
-    let size = design::CLOSE_ICON;
-    // The design's 10px glyph runs from 1.5 to 8.5.
-    let (from, to) = (size * 0.15, size * 0.85);
-    stroke_path(
-        size,
-        design::CLOSE_STROKE,
-        &[
-            (point(px(from), px(from)), point(px(to), px(to))),
-            (point(px(to), px(from)), point(px(from), px(to))),
-        ],
-        color(palette.tab_ink),
-    )
 }
 
 /// The `+` at the end of the strip.
 fn add(cx: &mut Context<WorkspaceView>) -> impl IntoElement {
     let palette = palette(cx);
-    let size = design::ADD_ICON;
-    let (from, to) = (size * 0.125, size * 0.875);
-    let mid = size / 2.;
     div()
         .id(ADD_ID)
         .test_support()
@@ -533,46 +520,7 @@ fn add(cx: &mut Context<WorkspaceView>) -> impl IntoElement {
         .on_click(cx.listener(|this, _, window, cx| {
             this.open_empty_tab(window, cx);
         }))
-        .child(stroke_path(
-            size,
-            design::ADD_STROKE,
-            &[
-                (point(px(from), px(mid)), point(px(to), px(mid))),
-                (point(px(mid), px(from)), point(px(mid), px(to))),
-            ],
-            color(palette.tab_ink),
-        ))
-}
-
-/// A square of `size` with straight strokes through it, in a colour:
-/// the one painter for the strip's two glyphs.
-///
-/// (`gpui`'s path builder takes lyon's `StrokeOptions` but does not re-export
-/// `LineCap`, so the strokes end square here; the design's round caps would differ
-/// by a sub-pixel at each end of a 10px glyph.)
-fn stroke_path(
-    size: f32,
-    width: f32,
-    lines: &[(Point<Pixels>, Point<Pixels>)],
-    colour: Hsla,
-) -> AnyElement {
-    let lines = lines.to_vec();
-    canvas(
-        |_, _, _| (),
-        move |bounds, _, window, _| {
-            let mut builder = PathBuilder::stroke(px(width));
-            for (from, to) in &lines {
-                builder.move_to(point(bounds.origin.x + from.x, bounds.origin.y + from.y));
-                builder.line_to(point(bounds.origin.x + to.x, bounds.origin.y + to.y));
-            }
-            if let Ok(path) = builder.build() {
-                window.paint_path(path, colour);
-            }
-        },
-    )
-    .flex_none()
-    .size(px(size))
-    .into_any_element()
+        .child(glyph::plus_in(palette))
 }
 
 /// The window's palette, as the strip's drawing reads it.

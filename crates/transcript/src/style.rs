@@ -3,9 +3,11 @@
 
 use gpui_kit::component::text::TextViewStyle;
 use gpui_kit::component::ActiveTheme as _;
+
 use gpui_kit::{
     px, rems, App, FontWeight, Hsla, Overflow, Pixels, SharedString, StyleRefinement, Styled as _,
 };
+use store::design;
 
 /// The widest a row's content gets.
 ///
@@ -41,9 +43,6 @@ pub(crate) struct Palette {
     pub(crate) sidebar: Hsla,
     /// The lightest surface: a card's body, an input.
     pub(crate) input: Hsla,
-    /// A status pill's ink — the success colour most of the way to the ink, which
-    /// is what `Rows.css` mixes its `.tc-status` text from.
-    pub(crate) pill_ink: Hsla,
     pub(crate) warning: Hsla,
     pub(crate) info: Hsla,
     pub(crate) mono: SharedString,
@@ -85,19 +84,28 @@ impl Palette {
         mix(self.foreground, 10., self.background)
     }
 
-    pub(crate) fn pill_ground(&self, surface: Hsla) -> Hsla {
-        mix(self.success, 12., surface)
-    }
-
     pub(crate) fn from_app(cx: &App) -> Self {
         let theme = cx.theme();
         let colors = theme.semantic_tokens().colors;
+        let color = |token: store::design::Rgb| {
+            let rgba = gpui_kit::Rgba {
+                r: f32::from(token.r) / 255.,
+                g: f32::from(token.g) / 255.,
+                b: f32::from(token.b) / 255.,
+                a: 1.,
+            };
+            Hsla::from(rgba)
+        };
         Self {
             background: colors.background,
             foreground: colors.foreground,
-            sidebar: theme.sidebar,
-            input: theme.input,
-            pill_ink: mix(theme.success, 85., colors.foreground),
+            // The two surfaces the design's cards are drawn on. They come from
+            // the design's own palette rather than the theme's, because the theme
+            // carries no `input.background` token: a card's body is the lightest
+            // surface in the design (`--input`), and a card's head the chrome one
+            // (`--sidebar`).
+            sidebar: color(design::palette(theme.is_dark()).sidebar),
+            input: color(design::palette(theme.is_dark()).input),
             muted: colors.muted,
             muted_foreground: colors.muted_foreground,
             border: colors.border,

@@ -1,9 +1,10 @@
 //! The small pieces of the evo-gui design that more than one surface draws.
 //!
-//! Three of them, each one a thing the design repeats: the dot that says an agent
-//! is working, the effort slider, and the chip that states one fact about a
-//! setting. They are ports of `design/doc28`'s `Workspace.tsx` + `TabStrip.tsx`
-//! (`Dot` / `BusyDot`), `EffortSlider.tsx` + `EffortSlider.css`, and
+//! Four of them, each one a thing the design repeats: the dot that says an agent
+//! is working, the effort slider, the chip that states one fact about a setting,
+//! and the two glyphs the chrome strokes itself. They are ports of
+//! `design/doc28`'s `Workspace.tsx` + `TabStrip.tsx` (`Dot` / `BusyDot` and the
+//! close and add glyphs), `EffortSlider.tsx` + `EffortSlider.css`, and
 //! `Composer.css` (`.chip`).
 //!
 //! ## What a caller has to give them
@@ -29,6 +30,7 @@
 pub mod chip;
 pub mod dot;
 pub mod effort;
+pub mod glyph;
 pub mod paint;
 
 pub use chip::Chip;
