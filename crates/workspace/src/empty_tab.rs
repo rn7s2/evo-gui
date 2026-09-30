@@ -183,6 +183,10 @@ const HISTORY_COUNT_ID: &str = "history-count";
 /// the list around them has no name of its own.
 const HISTORY_LABEL: &str = "Resumable swarms";
 const ROW_ICON: Pixels = px(16.);
+/// A history row's tooltip: one fact per line, never wider than this.
+const HISTORY_TOOLTIP_ID: &str = "history-tooltip";
+const TOOLTIP_MAX_W: f32 = 460.;
+const TOOLTIP_TEXT: f32 = 12.;
 const OPEN_AT_QUIT_ID: &str = "history-open-at-quit";
 const OPEN_AT_QUIT_TEXT: &str = "open at last quit";
 const RESUME_ARROW: &str = "›";
@@ -1572,11 +1576,48 @@ impl EmptyTabState {
             .when(ix + 1 == count, |row| row.rounded_b(ROW_INNER_RADIUS))
             .when(ix > 0, |row| row.border_t_1().border_color(theme.border))
             .tooltip({
-                let tooltip = SharedString::from(row.tooltip.clone());
+                // One fact per line (the row's tooltip is `fact · fact · …`), each
+                // wrapping inside the box: as one run the kit's flex row laid the
+                // text out on a single line that ran past its own 460px box and the
+                // window's edge (a folder, a session file name, a date, the models).
+                let lines: Vec<SharedString> = row
+                    .tooltip
+                    .split(" · ")
+                    .map(|line| SharedString::from(line.to_string()))
+                    .collect();
                 move |window, cx| {
-                    Tooltip::new(tooltip.clone())
-                        .max_w(px(460.))
-                        .build(window, cx)
+                    let lines = lines.clone();
+                    Tooltip::element(move |window, _| {
+                        // A definite width — the widest line as the window's own text
+                        // system shapes it, capped — is what lets a longer line wrap:
+                        // content-sized text in the kit's flex row has no width to
+                        // wrap against and lays out 0px wide.
+                        let style = window.text_style();
+                        let size = px(TOOLTIP_TEXT);
+                        let widest = lines
+                            .iter()
+                            .map(|line| {
+                                let run = style.to_run(line.len());
+                                window
+                                    .text_system()
+                                    .shape_line(line.clone(), size, &[run], None)
+                                    .width
+                            })
+                            .fold(px(0.), |a, b| a.max(b));
+                        v_flex()
+                            .id(HISTORY_TOOLTIP_ID)
+                            .test_support()
+                            .w((widest + px(1.)).min(px(TOOLTIP_MAX_W)))
+                            .text_size(size)
+                            .py_1()
+                            .gap_0p5()
+                            .children(
+                                lines
+                                    .iter()
+                                    .map(|line| div().w_full().min_w_0().child(line.clone())),
+                            )
+                    })
+                    .build(window, cx)
                 }
             })
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -2862,6 +2903,39 @@ mod tests {
                 folder: PathBuf::from("/Users/you/coding/bar"),
             }]
         );
+    }
+
+    /// A history row's tooltip lists its facts one per line, and a line longer than
+    /// the box wraps inside it rather than running past the box and the window.
+    #[gpui_kit::test]
+    fn a_history_tooltip_is_one_fact_per_line_within_its_box(cx: &mut TestAppContext) {
+        let f = open(cx);
+        let deep = format!("/Users/you/{}", "a-very-long-directory-name/".repeat(12));
+        f.history(cx, &[entry("/j/1.sexp", &deep, true)], "/Users/you");
+        f.render(cx);
+        f.act(cx, |window, cx| {
+            window.hover(ElementId::NamedInteger(HISTORY_ROW_ID.into(), 0), cx);
+        });
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(1500));
+        cx.run_until_parked();
+        f.render(cx);
+        f.act(cx, |window, _| {
+            let tip = window.find(HISTORY_TOOLTIP_ID);
+            assert!(tip.visible(), "the tooltip shows");
+            let bounds = tip.bounds();
+            assert!(bounds.size.width <= px(TOOLTIP_MAX_W), "{bounds:?}");
+            assert!(
+                bounds.right() <= px(WINDOW.0),
+                "inside the window: {bounds:?}"
+            );
+            // Path (wrapped over several lines), file, date, badge, models, lanes:
+            // taller than the six one-line facts would be at one line each.
+            assert!(
+                bounds.size.height > px(6. * 16.),
+                "the long path wraps: {bounds:?}"
+            );
+        });
     }
 
     /// The row's pointer fill is the design's own arithmetic — 5% of the page's ink mixed
