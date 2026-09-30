@@ -44,8 +44,14 @@ pub enum Update {
     Op { topic: String, op: session::Op },
     /// The stream's state, for the "reconnecting" line.
     Stream { status: StreamStatus },
-    /// The reply to an op the UI sent (§5.5).
-    OpReply(Box<OpReply>),
+    /// The reply to an op the UI sent (§5.5), carrying the rid and the op name
+    /// the UI sent it with, so a reply can be matched to its request — and to
+    /// whatever the UI showed while it waited.
+    OpReply {
+        rid: String,
+        op: String,
+        reply: Box<OpReply>,
+    },
     /// Older items (`GET /items?before=`), for a scrollback that pages backwards:
     /// the body is the server's, `{items, has_more}`. `TabModel::on_items_before`.
     ItemsBefore {

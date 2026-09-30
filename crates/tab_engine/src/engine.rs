@@ -42,8 +42,12 @@ use crate::types::tab_topics;
 /// What the engine thread reads: a command from the UI, or something the stream
 /// saw. One channel for both, so the loop never blocks on two things at once.
 enum Inbound {
-    /// An op the UI asked for (session built it; the engine POSTs it).
-    Request(Box<OpRequest>),
+    /// An op the UI asked for (session built it; the engine POSTs it, under the
+    /// rid the handle minted so the UI can recognise its reply).
+    Request {
+        rid: String,
+        request: Box<OpRequest>,
+    },
     /// Re-read every topic.
     Snapshot,
     /// A read the UI asked for (§5.4): older items, one whole item, image bytes.
@@ -166,11 +170,18 @@ impl EngineHandle {
         &self.folder
     }
 
-    /// Send one op (`TabModel::send_input`, `interrupt_lane`, …).
-    pub fn request(&self, request: OpRequest) -> bool {
-        self.inbox
-            .send_blocking(Inbound::Request(Box::new(request)))
-            .is_ok()
+    /// Send one op (`TabModel::send_input`, `interrupt_lane`, …), and say which
+    /// rid it was sent under: the reply arrives as
+    /// [`Update::OpReply`](crate::Update::OpReply) with that rid and the op's
+    /// name, so the UI can match it to the request it made. `None` when the
+    /// engine is already gone.
+    pub fn request(&self, request: OpRequest) -> Option<String> {
+        let rid = swarm_client::new_rid();
+        let sent = self.send(Inbound::Request {
+            rid: rid.clone(),
+            request: Box::new(request),
+        });
+        sent.then_some(rid)
     }
 
     /// Re-read every topic — what a UI asks for when it dropped updates it could
@@ -246,10 +257,12 @@ impl EngineHandle {
     }
 }
 
-/// The UI builds an op; the transport POSTs it. This is the transport.
+/// The UI builds an op; the transport POSTs it. This is the transport. The
+/// fire-and-forget form: a caller that wants to recognise its reply uses
+/// [`EngineHandle::request`] and keeps the rid.
 impl OpSink for EngineHandle {
     fn send(&self, request: OpRequest) {
-        self.request(request);
+        let _ = self.request(request);
     }
 }
 
@@ -381,7 +394,7 @@ fn engine_loop(
             Inbound::Snapshot => {
                 engine.snapshot(client, None);
             }
-            Inbound::Request(request) => post(engine, client, *request),
+            Inbound::Request { rid, request } => post(engine, client, rid, *request),
             Inbound::Fetch(fetch) => fetch_off_loop(engine, client, fetch),
             Inbound::Stream(StreamMsg::Connected { .. }) => {
                 engine.send(Update::Stream {
@@ -456,16 +469,19 @@ fn fetch_off_loop(engine: &Engine, client: &Client, fetch: Fetch) {
 
 /// POST one op, on a thread of its own: a slow or refused op must not hold up the
 /// stream, and the rid makes the client's one retry free (§5.5).
-fn post(engine: &Engine, client: &Client, request: OpRequest) {
+fn post(engine: &Engine, client: &Client, rid: String, request: OpRequest) {
     let client = client.clone();
     let updates = engine.updates.clone();
+    let op = request.op.clone();
     let _ = thread::Builder::new()
         .name("evo-tab-op".into())
         .spawn(move || {
+            // Sent under the rid the handle minted, so the reply the UI gets is
+            // the one its request is waiting for.
             let reply = client
-                .op(&request.op, request.args)
+                .op_with_rid(&rid, &request.op, request.args)
                 .unwrap_or_else(|error| OpReply {
-                    rid: String::new(),
+                    rid: rid.clone(),
                     ok: false,
                     seq: 0,
                     result: Value::Null,
@@ -475,7 +491,11 @@ fn post(engine: &Engine, client: &Client, request: OpRequest) {
                         detail: Value::Null,
                     }),
                 });
-            let _ = updates.send_blocking(Update::OpReply(Box::new(reply)));
+            let _ = updates.send_blocking(Update::OpReply {
+                rid,
+                op,
+                reply: Box::new(reply),
+            });
         });
 }
 

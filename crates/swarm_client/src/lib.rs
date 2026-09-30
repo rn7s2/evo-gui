@@ -49,7 +49,7 @@ pub mod stream;
 #[cfg(feature = "test-harness")]
 pub mod harness;
 
-pub use client::Client;
+pub use client::{new_rid, Client};
 pub use error::{BootFailure, Error, RequestError, Result, StatusError};
 pub use http::{is_loopback, HttpClient, HttpResponse, SseConnection, Token};
 pub use protocol::{

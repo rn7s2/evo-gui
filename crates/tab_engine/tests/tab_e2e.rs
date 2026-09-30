@@ -287,16 +287,30 @@ fn a_request_from_the_model_becomes_a_post() {
     let control = Control::attach(dir.path()).unwrap();
     control.requests();
 
-    // The model builds the op; the handle is its sink.
+    // The model builds the op; the handle sends it and names the rid.
     let model = TabModel::new();
-    assert!(handle.request(model.send_input("hello there", session::Queue::Now)));
+    let rid = handle
+        .request(model.send_input("hello there", session::Queue::Now))
+        .expect("the engine took the request");
+    assert!(!rid.is_empty());
 
-    let update = feed.expect("the reply", |update| matches!(update, Update::OpReply(_)));
-    let Update::OpReply(reply) = update else {
+    let update = feed.expect("the reply", |update| {
+        matches!(update, Update::OpReply { .. })
+    });
+    let Update::OpReply {
+        rid: answered,
+        op,
+        reply,
+    } = update
+    else {
         unreachable!()
     };
+    // The reply is matched to its request by the rid the handle minted, and names
+    // the op so the UI knows which of its requests came back.
+    assert_eq!(answered, rid);
+    assert_eq!(op, "input.send");
+    assert_eq!(reply.rid, rid);
     assert!(reply.ok, "{reply:?}");
-    assert!(!reply.rid.is_empty());
 
     let posted = control.requests_on("/ops");
     assert_eq!(posted.len(), 1, "{posted:?}");
@@ -304,7 +318,7 @@ fn a_request_from_the_model_becomes_a_post() {
     assert_eq!(body["op"], "input.send");
     assert_eq!(body["args"]["text"], "hello there");
     assert_eq!(body["args"]["queue"], "now");
-    assert_eq!(body["rid"], json!(reply.rid));
+    assert_eq!(body["rid"], json!(rid));
     drop(handle);
 }
 
@@ -481,6 +495,38 @@ fn a_read_that_fails_comes_back_as_a_fetch_failed() {
         unreachable!()
     };
     assert!(what.starts_with("media 3 of e_missing"), "{what}");
+    drop(handle);
+}
+
+#[test]
+fn the_sink_is_the_fire_and_forget_form_of_the_same_request() {
+    let (dir, handle, updates) = tab("sink", &[]);
+    let mut feed = Feed {
+        updates,
+        seen: Vec::new(),
+    };
+    serving(&mut feed);
+    let control = Control::attach(dir.path()).unwrap();
+    control.requests();
+
+    // `OpSink::send` mints a rid too — the reply just arrives with a rid nobody
+    // kept, which is exactly what a fire-and-forget caller wants.
+    let model = TabModel::new();
+    session::OpSink::send(&handle, model.interrupt_swarm());
+    let update = feed.expect("the reply", |update| {
+        matches!(update, Update::OpReply { .. })
+    });
+    let Update::OpReply { rid, op, reply } = update else {
+        unreachable!()
+    };
+    assert!(!rid.is_empty());
+    assert_eq!(op, "run.interrupt");
+    assert!(reply.ok, "{reply:?}");
+    assert_eq!(reply.rid, rid);
+    let posted = control.requests_on("/ops");
+    assert_eq!(posted.len(), 1, "{posted:?}");
+    assert_eq!(posted[0]["body"]["op"], "run.interrupt");
+    assert_eq!(posted[0]["body"]["args"]["scope"], "swarm");
     drop(handle);
 }
 

@@ -208,7 +208,10 @@ fn encode_value(text: &str) -> String {
 
 /// A request id, unique to this process and this instant: the server dedupes
 /// retries by rid, so it only has to be *unique*, not a real uuid.
-fn new_rid() -> String {
+///
+/// Public because a caller that wants to recognise its own reply mints the rid
+/// itself and uses [`Client::op_with_rid`].
+pub fn new_rid() -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let nanos = SystemTime::now()
