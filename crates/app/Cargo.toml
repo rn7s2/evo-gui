@@ -25,3 +25,6 @@ libc = "0.2"
 
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }
+# The example that draws the screenshots runs in a proof's world: a throwaway
+# HOME whose init.lisp registers the scripted model.
+proofs = { path = "../proofs" }

@@ -1,9 +1,9 @@
 //! Redaction: server text is not trusted to be free of credentials.
 //!
-//! A live server puts user configuration into its replies — the real
-//! `GET /registry` 500 in docs/proofs-real.md echoes an MCP bearer token — and
-//! that text ends up in the app's log and, when a probe fails, on screen as the
-//! empty tab's caption. So every string this crate stores *because a server or
+//! A live server puts user configuration into its replies — a real `GET` that
+//! failed once echoed an MCP bearer token back in the error — and that text ends
+//! up in the app's log and, when a read fails, on screen as the empty tab's
+//! caption. So every string this crate stores *because a server or
 //! a server's log said it* goes through [`redact`] first:
 //!
 //! * [`StatusError`](crate::StatusError) — its `message` and its whole `raw`

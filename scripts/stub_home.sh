@@ -172,8 +172,7 @@ run_env() {
         extra+=(EVO_BINARY=/usr/local/bin/evo-agent)
     fi
     # EVO_HOME keeps its trailing separator: evo's own extensions merge this
-    # path textually, and one without the slash loses its last component
-    # (docs/proofs-real.md R2).
+    # path textually, and one without the slash loses its last component.
     env "${unset[@]}" "${extra[@]}" \
         HOME="$home" EVO_HOME="$home/.evo/" TERM="${TERM:-xterm-256color}" \
         STUB_URL="http://127.0.0.1:${STUB_PORT:-$(stub_port "$home")}" \

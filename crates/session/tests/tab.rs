@@ -87,10 +87,7 @@ fn the_lane_list_comes_from_the_swarm_topic() {
 
     // The swarm's own count is the button's business, and it counts the rows too.
     assert_eq!(tab.swarm().unwrap().busy, 2);
-    assert!(
-        tab.is_swarm_busy(),
-        "waiting_on_lanes is the swarm being busy"
-    );
+    assert!(tab.lanes_busy(), "waiting_on_lanes is the swarm being busy");
 
     // The header's tooltip is the swarm's line, plus what the new topic adds.
     let tooltip = lanes[0].tooltip(1759200035000);
@@ -177,10 +174,7 @@ fn an_op_moves_exactly_what_it_touched() {
     // The lane topic took its own op: a lane's status is its own state, and the lane list
     // follows the *swarm* topic, which has not published the change yet.
     assert_eq!(tab.state(AgentKey::Lane(1)).unwrap().status, Status::Idle);
-    assert!(
-        tab.is_swarm_busy(),
-        "the swarm topic still says a lane works"
-    );
+    assert!(tab.lanes_busy(), "the swarm topic still says a lane works");
 
     // A lane that was restarted drops its mirror: the next snapshot is a fresh one.
     let changes = tab.on_op(

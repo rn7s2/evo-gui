@@ -262,9 +262,14 @@ impl TabModel {
         &self.lane_list
     }
 
-    /// Whether the swarm is doing anything: the action button says "Stop swarm" while it
-    /// is, and `run.interrupt` with scope `swarm` stops it all.
-    pub fn is_swarm_busy(&self) -> bool {
+    /// Whether the swarm topic says the swarm is working: a lane busy, or the
+    /// coordinator held waiting for one.
+    ///
+    /// The coordinator's *own* run is not in here. The swarms's `busy` counts
+    /// lanes, and `waiting_on_lanes` is false while the coordinator itself works —
+    /// so a caller that wants "is anything going on" (the action button's face)
+    /// folds in [`TabModel::activity`] as well.
+    pub fn lanes_busy(&self) -> bool {
         self.lane_list.is_busy()
     }
 
