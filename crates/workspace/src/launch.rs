@@ -99,8 +99,8 @@ impl Launch {
 /// writes; `--watch-stdin` is left to the spawn, which is the process that holds
 /// the pipe.
 pub fn launch_spec(env: &LaunchEnv, launch: &Launch, id: &store::paths::TabId) -> LaunchSpec {
-    let mut spec = LaunchSpec::new(Program::Swarm, launch.folder().clone());
-    spec.ready_file = Some(LaunchSpec::ready_file_in(&env.root, id));
+    let tab_dir = env.root.tab_dir(id);
+    let mut spec = LaunchSpec::tab(Program::Swarm, launch.folder().clone(), &tab_dir);
     // A new swarm asks the child to pick a port and report it in the ready file
     // (§1): nothing has bound one yet, and the supervisor keeps the port it got.
     spec.port = Some(0);
