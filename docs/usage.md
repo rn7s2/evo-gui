@@ -182,26 +182,30 @@ first run shows: there is nothing to resume yet, which is not a failure.
 ## The tab page
 
 ```
-┌──────────────────────┬────────────────────────────┬──────────────────┐
-│ 6 lanes · 2 busy     │ ● main  delegate the …     │ ┌──────────────┐ │
-│ ● main               │                            │ │ input        │ │
-│ ◐ Lane 1       [Stop]│ ◐ Lane 1  SLOW: walk …     │ └──────────────┘ │
-│ ○ Lane 2             │    transcript (markdown,   │                  │
-│ ✗ Lane 3             │    rendered live as it     │    [■ Stop swarm]│
-│                      │    streams)                │                  │
-│                      ├────────────────────────────┤                  │
-│ ~/coding/evo-gui     │ ☑ todos of the agent shown │                  │
-│                      │ model · medium · ctx 48k…  │                  │
-└──────────────────────┴────────────────────────────┴──────────────────┘
+┌──────────────────────┬────────────────────────────────────────────┐
+│ Lanes 2 of 6 busy    │ main  coordinator                          │
+├──────────────────────┼────────────────────────────────────────────┤
+│ ● main   coordinator │        the agent's transcript              │
+│ ◐ lane 1 the view …  │                                            │
+│ ○ lane 2        idle │  ┌──────────────────────────────────────┐  │
+│ ✗ lane 3        down │  │ Todos 1/3         ⌃                  │  │
+│                      │  │ Message the coordinator…             │  │
+│ ~/coding/evo-gui     │  │ (Enter to send, Shift+Enter)         │  │
+│                      │  │ [stub-a medium] [ctx 48k/936k]       │  │
+│                      │  │                     [ ↑ Send ]       │  │
+│                      │  └──────────────────────────────────────┘  │
+└──────────────────────┴────────────────────────────────────────────┘
 ```
 
 ### Left — the agents
 
-The column opens with a summary — `6 lanes · 2 busy` — and then `main`, the
-coordinator, followed by one row per lane: a status glyph, the task it is on
-(truncated), and how long the current step has taken. A lane that is down shows
-the reason in place of its task; hovering any row gives the whole story. While a
-lane is working its row carries a small **Stop** — the one thing a person may do
+The column opens with its own band — `Lanes`, and `2 of 6 busy` at the other
+end — and then `main`, the coordinator, followed by one row per lane: a status
+glyph, the task it is on (truncated), and the state — `idle`, or how long the
+current step has taken while it works. `main`, the coordinator, says `waiting on
+lanes` while it is held for them. A lane that is down shows the reason in place
+of its task; hovering any row gives the whole story. While a lane is working its
+row carries a small **Stop** — the one thing a person may do
 to a lane (`run.interrupt`, scope `lane`); the coordinator is told, and steering
 the lane stays its job.
 
@@ -214,13 +218,15 @@ the lane stays its job.
 | `✗` | down — the row says why |
 | `◦` | stopped |
 
-Clicking a row selects that agent: it changes what the centre column shows and
+Clicking a row selects that agent: it changes what the conversation shows and
 nothing else. The keyboard walks the rows with `↓`/`↑` and jumps to the ends
 with `Home`/`End`. Input always goes to the coordinator. The folder the swarm
-runs in is pinned at the bottom of the column, `~`-shortened, elided in the
-middle, with the full path on hover.
+runs in is pinned at the bottom of the column, one line, `~`-shortened where it
+is under the home directory and trimmed from the front — whole directories at a
+time, so a name is never cut in half: `…/project`, or
+`~/…/gui-model/crates/workspace/src`. Hovering shows the whole path.
 
-### Centre — the transcript, and the todos
+### The transcript
 
 A slim header names the agent being shown (`main`, `Lane 1`) with the same status
 glyph the left column uses, the task that agent was given, and — when that
@@ -290,13 +296,26 @@ When you scroll away from the bottom the view stops following and offers a
 `Ask the coordinator to get started` for `main`, and
 `Lane 1 hasn't been given work yet.` for a lane.
 
-Under the transcript, the todos of the selected agent (`☑` done, `◐` in
-progress, `☐` pending), hidden when that agent has none.
+### The composer, at the foot
 
-### Right — the input, and one button
+The composer sits under the transcript, on the same reading measure, and it is
+the selected agent's: a box with the todo strip across its top (`Todos 1/3`, and
+a click on the row folds the list out under it — `☑` done, `◐` in progress, `☐`
+pending — hidden when that agent has no todos), then the drawers a chip folds
+out, then the input, then one row of chips and the button.
 
-The input grows from two to eight rows. **Enter** sends, **Shift+Enter** is a
-newline, **Esc** interrupts the coordinator's turn. An empty input's **↑** walks
+The chips are the server's own status line for that agent, one chip per segment
+and in its order — the model with its effort beside it, the context, how much of
+the input was read from cache, and the goal with its status; a segment the
+server does not publish has no chip. The model chip folds out the model and
+effort drawer, and the goal chip the goal drawer, both inside the box; a click
+outside the box, or selecting another agent, folds them back. The model and
+effort are the coordinator's own to change — a lane's chip states what the swarm
+runs, and the drawer says so.
+
+The input grows from two rows to half the pane, and scrolls after that.
+**Enter** sends, **Shift+Enter** is a newline, **Esc** interrupts the
+coordinator's turn. An empty input's **↑** walks
 back through the prompts this tab has sent (**↓** walks forward again), so a
 prompt can be sent twice without retyping it; typing anything makes the recalled
 text a draft like any other. **⌘C** with nothing selected in the input copies the
@@ -316,12 +335,13 @@ There is never a Send and a Stop side by side; `Esc` is the same interrupt with 
 keyboard, and **Enter** still sends while the swarm is busy (that is what the queue
 is for). A lane can be stopped from its own row in the left column.
 
-The status line sits at the foot of the centre column: the `segments` the server
-publishes for the agent being shown, in its order, so the same session reads the
-same here and in the TUI. A core registry builds them — model, thinking, context,
-goal — and an extension's own segment (a project's `cache-stats`, say) arrives the
-same way. The line is truncated with an ellipsis when the column is too narrow;
-hovering shows the whole of it.
+The chips row is that agent's status line, chipped: the `segments` the server
+publishes for it, in its order, so the same session reads the same here and in the
+TUI. A core registry builds them — model, thinking, context, goal — and an
+extension's own segment (a project's `cache-stats`, say) arrives the same way, as
+a chip of its own. A segment the server does not publish has no chip, so a session
+with no cache activity and no goal shows neither, which is the whole of that
+agent's status line and not a row with holes in it.
 
 ## Settings, About, and light or dark
 

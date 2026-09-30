@@ -13,10 +13,10 @@ build prompt; references like §9.4 in the code point at it.
 | `tab_engine` | pure Rust, no gpui | one tab's I/O, off the UI thread: spawn → snapshot → one stream → ops. Commands in, updates out over an `async-channel`; the UI folds the updates into `session`. |
 | `session` | pure Rust | the tab's view model: a mirror of the server's topics (`TabModel`: items, topic states, the lane list, the selection), the empty tab's `Launcher` (the four choosers, the history rows, the check's problems), and `OpRequest`/`OpSink` — the UI's actions as the ops of §5.5, handed to the transport rather than sent from here. |
 | `widgets` | gpui | the pieces more than one surface draws, from the design: the breathing dot a working agent wears, the effort slider, the chip. `store::design` owns their numbers and colours. |
-| `transcript` | gpui | the centre column: one agent's items, rendered markdown that stays rendered while it streams, tool/notice/lane rows, paging back, the todo panel. |
-| `agent_list` | gpui | the left column: `main` first, then one row per lane — status glyph, task, step clock, selection, reconnecting badge. |
-| `composer` | gpui | the right column: the input (2→8 rows, Enter/Shift+Enter/Esc) and the status row under it — the readout on the left, the one Send/Stop button on the right. |
-| `workspace` | gpui | the window: title bar and tab strip, the empty tab (choosers, folder button, history, the check's problems), the tab page's three columns, and the tab lifecycle that wires `tab_engine` to `session`. |
+| `transcript` | gpui | the reading column: one agent's items, rendered markdown that stays rendered while it streams, tool/notice/lane rows, paging back, the thinking reveal. |
+| `agent_list` | gpui | the lanes column: its band (`Lanes`, and how many are busy), then `main` first and one row per lane — breathing dot, task, state or step clock, selection, reconnecting badge, the lane's own Stop. |
+| `composer` | gpui | the box at the foot of the conversation: the todo strip across its top, the drawers a chip folds out inside it, the input (2 rows to half the pane, Enter/Shift+Enter/Esc), and the foot row — the agent's segments as chips, and the one Send/Stop button. |
+| `workspace` | gpui | the window: title bar and tab strip, the empty tab (choosers, folder button, history, the check's problems), the tab page's two columns and the split between them, and the tab lifecycle that wires `tab_engine` to `session`. |
 | `settings` | gpui | the Settings panel: the two binaries and the theme, and nothing else. |
 | `proofs` | tests | the real-binary proofs: one per `tests/tNN_*.rs`, a hermetic stub home, real servers. `docs/proofs.md`. |
 | `evo-desktop` (`crates/app`) | bin | the shell: single instance, the window and its remembered bounds, the launch-time loads (catalog, sessions), quit, the menu bar, About, and Settings. |
@@ -53,11 +53,9 @@ verified; a title-only message is not acceptable. Every message ends with the tr
 
 ## Layout decisions
 
-- The status readout is drawn at the foot of the centre column
-  (`workspace::READOUT_LINE_ID`) and renders the shown agent's `segments` in the order
-  the server publishes them. `composer::READOUT_ID` is the same line for a composer used
-  on its own (the component's own demo); the tab page turns it off
-  (`set_show_readout(false)`), so the app draws it once, where every agent's segments
-  can be shown rather than the coordinator's alone.
-- The left and right columns are resizable by dragging the splits (defaults 260 / 360 px),
-  and the widths are shared by every tab and kept in `app.json`.
+- The status line is the composer's foot row: one `Chip` per `segment`, in the order the
+  server publishes them, so the same session reads the same here and in the TUI
+  (`crates/composer`). The app composes none of it.
+- The agent column is resizable by dragging the split (180–480 px, starting at 260), and
+  its width is shared by every tab and kept in `app.json`; the conversation keeps 420 px.
+  A double-click on the split puts it back.

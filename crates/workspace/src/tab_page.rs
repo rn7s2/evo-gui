@@ -547,7 +547,15 @@ fn path_text(id: &'static str, folder: &Path, limit: usize, muted: bool, cx: &Ap
         .into_any_element()
 }
 
-/// A path as `~` where it is the home directory: the form a person reads.
+/// A path as `~` where it is the home directory, and with whole leading
+/// components dropped while it is still longer than the limit.
+///
+/// A folder line has one line to say where the swarm runs. Cutting the middle out
+/// of the path (`/var/folder…-88368-screens/project`) keeps the temporary root
+/// nobody asked about and swallows the names a person is looking for; dropping
+/// leading components whole keeps the tail, which is the part that names the
+/// place: `…/project`, or `~/…/gui-model/crates/workspace/src` for a directory
+/// under the home directory, whose `~` is kept however deep it goes.
 fn shorten_path(path: &str, limit: usize) -> String {
     let shortened = match std::env::var("HOME") {
         Ok(home) if !home.is_empty() => match path.strip_prefix(&home) {
@@ -556,7 +564,39 @@ fn shorten_path(path: &str, limit: usize) -> String {
         },
         _ => path.to_string(),
     };
-    elide_middle(&shortened, limit)
+    if shortened.chars().count() <= limit {
+        return shortened;
+    }
+    // The root is kept: `~` says the folder is in the home directory, `/` that it
+    // is somewhere absolute. What goes is a stretch of directories under it, one
+    // whole component at a time, longest tail first — so a name is never cut in
+    // half and the tail, which names the place, is the last thing to go.
+    let (root, rest) = match shortened.strip_prefix('~') {
+        Some(rest) => ("~", rest),
+        None => ("", shortened.as_str()),
+    };
+    let head = if root.is_empty() {
+        "…".to_string()
+    } else {
+        format!("{root}/…")
+    };
+    for slash in rest.match_indices('/').map(|(at, _)| at) {
+        let candidate = format!("{head}{}", &rest[slash..]);
+        if candidate.chars().count() <= limit {
+            return candidate;
+        }
+    }
+    // Every component above the last one dropped and the name itself still too
+    // long: the only thing left to take away is the middle of that one name.
+    let last = match rest.rfind('/') {
+        Some(at) => &rest[at..],
+        None => rest,
+    };
+    let head_len = head.chars().count();
+    format!(
+        "{head}{}",
+        elide_middle(last, limit.saturating_sub(head_len))
+    )
 }
 
 /// `head…tail`: both ends of a path are worth keeping, because the tail names the
@@ -747,6 +787,41 @@ mod tests {
             "~/work/proj"
         );
         assert_eq!(shorten_path("/var/tmp/proj", 80), "/var/tmp/proj");
+    }
+
+    /// A folder line too long for its one line loses whole leading components, not
+    /// the middle of a name: what is left names the place the swarm runs in, and
+    /// nothing above it is worth a character.
+    #[test]
+    fn a_folder_line_drops_leading_components_whole() {
+        let long = "/var/folders/5d/bgm58_l51j52vqz4v7jrdfch0000gn/T/swarm-client-fixture-88368-screens/project";
+        let shown = shorten_path(long, FOLDER_LINE_CHARS);
+        assert_eq!(
+            shown, "…/project",
+            "nothing above the folder it runs in fits, and the folder is what is kept"
+        );
+
+        // As many whole components as fit, and no more.
+        let mixed = "/var/folders/5d/x/T/tmp-1/run/project";
+        let shown = shorten_path(mixed, FOLDER_LINE_CHARS);
+        assert_eq!(shown, "…/folders/5d/x/T/tmp-1/run/project");
+        assert!(shown.chars().count() <= FOLDER_LINE_CHARS);
+
+        // A repository under the home directory still shows the path to it, as far
+        // as it fits.
+        let home = std::env::var("HOME").expect("a home directory");
+        let deep = format!("{home}/coding/evo/wt/gui-model/crates/workspace/src");
+        let shown = shorten_path(&deep, FOLDER_LINE_CHARS);
+        assert!(shown.starts_with("~/"), "{shown}");
+        assert!(shown.ends_with("src"), "{shown}");
+        assert!(shown.chars().count() <= FOLDER_LINE_CHARS);
+
+        // One name longer than the line: the middle of it goes, both ends stay.
+        let uuid = "/tmp/0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9-0a1b2c3d-4e5f-6071";
+        let shown = shorten_path(uuid, 20);
+        assert_eq!(shown.chars().count(), 20);
+        assert!(shown.starts_with("…/0a1b"), "{shown}");
+        assert!(shown.ends_with("6071"), "{shown}");
     }
 
     /// §9.7: the tail a failure screen shows is the log's lines with the paths a

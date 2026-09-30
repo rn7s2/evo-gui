@@ -259,7 +259,8 @@ impl Global for KeysBound {}
 /// carries the goal itself; everything else is a chip of its own, in the server's
 /// order. Right-hand segments are the swarm's own summary (`2 lanes`), which the lane
 /// column already states, so they are not repeated here.
-fn chips_of(segments: &[Segment], has_goal: bool) -> Vec<ChipFact> {
+fn chips_of(segments: &[Segment], goal: Option<&(String, String)>) -> Vec<ChipFact> {
+    let has_goal = goal.is_some();
     let (left, _right) = ordered_segments(segments);
     let effort = left
         .iter()
@@ -284,6 +285,18 @@ fn chips_of(segments: &[Segment], has_goal: bool) -> Vec<ChipFact> {
             text: SharedString::from(segment.text.clone()),
             dim: (name == "model").then(|| effort.clone()).flatten(),
             opens,
+        });
+    }
+    // A goal the topic's state carries is a goal even when the status line has no
+    // segment for it — a state without a goal is the only thing that means there is
+    // no goal (§4.2). The chip is the design's own: `goal`, its status beside it in
+    // the dim half, opening the drawer that holds the objective.
+    if let Some((status, _)) = goal.filter(|_| !chips.iter().any(|chip| chip.name == "goal")) {
+        chips.push(ChipFact {
+            name: "goal".to_string(),
+            text: SharedString::from("goal"),
+            dim: Some(SharedString::from(format!("({status})"))),
+            opens: Some(Drawer::Goal),
         });
     }
     chips
@@ -459,7 +472,7 @@ impl Composer {
             .as_ref()
             .map(|goal| (goal.status.clone(), goal.objective.clone()));
         let agent = Agent {
-            chips: chips_of(&state.segments, goal.is_some()),
+            chips: chips_of(&state.segments, goal.as_ref()),
             todos: state.todos.clone(),
             model: state
                 .model
@@ -801,7 +814,11 @@ impl Composer {
                     .gap(px(10.))
                     .pl(px(14.))
                     .pr(px(10.))
-                    .cursor_pointer()
+                    // The design keeps the arrow over every control of its own — a
+                    // macOS app's chrome does not turn the pointer into a hand
+                    // (`.todo-strip-row{cursor:default}`) — and only the effort
+                    // slider, a control the pointer does track, asks for one.
+                    .cursor_default()
                     .text_size(STRIP_FONT)
                     // `.todo-strip-row:hover{color:var(--fg)}`: the row's own words
                     // take the ink; the count is already the ink.
@@ -909,7 +926,7 @@ impl Composer {
                         .gap(px(10.))
                         .pl(px(14.))
                         .pr(px(10.))
-                        .cursor_pointer()
+                        .cursor_default()
                         .text_size(STRIP_FONT)
                         .text_color(paint::color(palette.muted_fg))
                         .hover(move |row| row.text_color(paint::color(palette.fg)))
@@ -1008,7 +1025,7 @@ impl Composer {
                 let weak = weak.clone();
                 let (id, provider) = (id.clone(), provider.clone());
                 row = row
-                    .cursor_pointer()
+                    .cursor_default()
                     .hover(move |row| row.bg(hover))
                     .on_click(move |_, _, cx| {
                         if let Some(composer) = weak.upgrade() {
@@ -2117,6 +2134,39 @@ mod tests {
                     px(widgets::chip::HEIGHT)
                 );
             }
+        });
+    }
+
+    /// A goal the topic's state carries is a goal even when the status line has no
+    /// segment for it: the chip appears last — the design's own `goal`, its status in
+    /// the dim half — and opens the drawer holding the objective (§4.2).
+    #[gpui_kit::test]
+    fn a_goal_the_state_carries_is_a_chip_without_a_segment(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.act(cx, |window, cx| {
+            let state = state_with(&["model", "thinking"]);
+            assert!(
+                state.goal.is_some(),
+                "the topic's state carries the goal, and its status line does not"
+            );
+            f.set_agent(&state, cx);
+            window.render_frame(cx);
+
+            let goal = window.find(chip_id("goal"));
+            assert!(goal.visible(), "the state's goal has a chip of its own");
+            assert_eq!(goal.label(), Some("goal (active)"));
+            assert!(
+                goal.bounds().left() > window.find(chip_id("model")).bounds().right(),
+                "last in the row, where the design draws it"
+            );
+
+            window.click(chip_id("goal"), cx);
+            window.render_frame(cx);
+            assert!(
+                window.find("composer-drawer").visible(),
+                "and opens the drawer the design puts the objective in"
+            );
+            assert!(window.find("drawer-goal-text").visible());
         });
     }
 

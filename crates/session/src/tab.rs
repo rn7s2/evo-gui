@@ -274,8 +274,27 @@ impl TabModel {
     }
 
     /// The coordinator's status, for the coordinator's row and the button.
+    ///
+    /// A coordinator the swarm says is held for its lanes *is* waiting on them,
+    /// even when its own topic has not caught up and still calls itself idle: the
+    /// swarm is the one that knows it is held (§4.2). Nothing is invented that way
+    /// — the flag is the server's own — and the two agree once the session's own
+    /// status arrives, so the row never flickers through "idle".
     pub fn activity(&self) -> Status {
-        self.session.state().status
+        let status = self.session.state().status;
+        if status == Status::Idle && self.lanes_waiting() {
+            Status::Waiting
+        } else {
+            status
+        }
+    }
+
+    /// Whether the swarm topic says the coordinator is held while its lanes work.
+    fn lanes_waiting(&self) -> bool {
+        self.lane_list
+            .swarm
+            .as_ref()
+            .is_some_and(|swarm| swarm.waiting_on_lanes)
     }
 
     /// The ids of the inputs still queued, oldest first: what a UI draws as held back and
