@@ -245,7 +245,10 @@ of its own. Their kind comes from the server, not from their words:
 - **Goal** — evo keeping a goal going: `Goal · continue — <objective> · <budget>`,
   `Goal · objective updated — <objective>`, `Goal · budget exhausted — wrap up`;
 - **Command** — an extension answering a command you ran mid-run (`/memory`,
-  `/global-memory`, `/lore`, `/notify doctor`): `Command · /global-memory`;
+  `/global-memory`, `/lore`, `/notify doctor`): `Command · /global-memory`. The
+  swarm's own notices arrive the same way today, because they go out through the
+  serve's command channel and carry `source: "command"`; a lane's report shows once
+  as this line and once as its own card, below.
 - **the swarm about a lane** — a lane's report is a `Lane 1 report` card, and
   `run ended`, `failed to start`, `is down` and the like are `Lane 1 · …` lines,
   red when something failed;

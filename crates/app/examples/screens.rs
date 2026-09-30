@@ -18,14 +18,12 @@
 //! the real `~/.evo` alone, and the two binaries are the ones the environment
 //! names (`EVO_SWARM_BIN` / `EVO_AGENT_BIN`, else `/usr/local/bin`).
 //!
-//! Which states get captured depends on what the binaries can do. A build whose
-//! `evo-swarm` cannot serve yet (`Unknown argument: --ready-file`) gives the
-//! boot-failure screen and the empty tab; a build that can gives the live tab
-//! page, the tool row, the queued prompt, an interrupt and the history. The run
-//! prints what it captured and what it could not, and still exits 0 — a picture
-//! of a failure screen is a picture.
+//! Every state is the swarm's own: the integration build serves tabs, so the
+//! pictures below are the pool coming up, a lane at work and its own transcript, a
+//! lane's report arriving as an item, a tool row opened, a prompt queued behind a
+//! run, the check's own line for a binary that cannot run, and the history a
+//! session leaves behind.
 
-use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -68,22 +66,12 @@ const QUEUED_PROMPT: &str = "and then check the proofs";
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut dir: Option<PathBuf> = None;
-    let mut via_agent: Option<PathBuf> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--capture" => {
                 i += 1;
                 dir = args.get(i).map(PathBuf::from);
-            }
-            // In a build where `evo-swarm` cannot serve a tab yet, the tab's
-            // server is the agent's own `serve` — the same server a swarm's
-            // coordinator is — with the flags only a swarm takes dropped by a
-            // one-line shim. Without it, the swarm its `app.json` names is the
-            // one used, and a launch that cannot come up is a picture too.
-            "--via-agent" => {
-                i += 1;
-                via_agent = args.get(i).map(PathBuf::from);
             }
             other => {
                 eprintln!("screens: unexpected argument {other:?}");
@@ -93,10 +81,10 @@ fn main() {
         i += 1;
     }
     let Some(dir) = dir else {
-        eprintln!("usage: screens --capture <dir> [--via-agent <evo-agent>]");
+        eprintln!("usage: screens --capture <dir>");
         std::process::exit(2);
     };
-    match capture(&dir, via_agent) {
+    match capture(&dir) {
         Ok(()) => {}
         Err(error) => {
             eprintln!("capture failed: {error}");
@@ -105,11 +93,11 @@ fn main() {
     }
 }
 
-fn capture(dir: &Path, via_agent: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
+fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(dir)?;
     let fixture = Fixture::new("screens");
     // The app's own reads (`sessions --json`) and every child it spawns: the stub
-    // home, the scripted model's address, the agent the lanes would run.
+    // home, the scripted model's address, the agent its lanes run.
     fixture.enter();
 
     let mut cx = HeadlessAppContext::with_platform(
@@ -120,23 +108,17 @@ fn capture(dir: &Path, via_agent: Option<PathBuf>) -> Result<(), Box<dyn std::er
     cx.update(gpui_kit::init);
     cx.allow_parking();
 
-    let agent = fixture.bins.agent.clone();
-    let swarm = fixture.bins.swarm.clone();
-    let live = match &via_agent {
-        Some(agent_bin) => shim(&fixture, agent_bin)?,
-        None => swarm.clone(),
+    let bins = Binaries {
+        evo_swarm: fixture.bins.swarm.clone(),
+        evo_agent: fixture.bins.agent.clone(),
     };
     println!(
         "[capture] swarm {} / agent {}",
-        live.display(),
-        agent.display()
+        bins.evo_swarm.display(),
+        bins.evo_agent.display()
     );
 
     // --- the window the app opens, and its first frame -------------------------
-    let bins = Binaries {
-        evo_swarm: live.clone(),
-        evo_agent: agent.clone(),
-    };
     let (window, view) = open(&mut cx, &fixture.root, bins)?;
     // The app's own loads: the cache, the session index, the catalog.
     cx.update(evo_desktop::start_background_loads);
@@ -167,39 +149,35 @@ fn capture(dir: &Path, via_agent: Option<PathBuf>) -> Result<(), Box<dyn std::er
             // puts it in the history list.
             cx.update(evo_desktop::start_background_loads);
             pump(&mut cx, LOADS);
-            shot(&mut cx, window, dir, "06-history")?;
-            // A second window, whose swarm cannot run at all: the failure screen.
-            let (failed_window, failed_view) = open(
-                &mut cx,
-                &fixture.root,
-                Binaries {
-                    evo_swarm: swarm,
-                    evo_agent: agent,
-                },
-            )?;
-            boot_failure(&mut cx, failed_window, &failed_view, dir, &fixture.folder)?;
-            stop_tabs(&mut cx, &failed_view);
+            shot(&mut cx, window, dir, "07-history")?;
         }
-        TabState::Failed { message, .. } => {
-            println!(
-                "[capture] the tab did not come up ({}): {}",
-                live.display(),
-                message.as_deref().unwrap_or("no reason given")
-            );
-            shot(&mut cx, window, dir, "07-boot-failure")?;
-            println!(
-                "[capture] the live states need a server this build can drive; \
-                 pass --via-agent <evo-agent> to capture them against the agent's serve"
-            );
-        }
-        other => println!("[capture] the tab settled in {other:?}: nothing captured"),
+        other => println!("[capture] the tab settled in {other:?}: no live states"),
     }
+
+    // --- a swarm that cannot run at all ----------------------------------------
+    //
+    // The same window machinery with a path that holds nothing: the empty tab's
+    // check line is about a binary that could not be run, and a launch in a folder
+    // is the failure screen.
+    let (broken_window, broken_view) = open(
+        &mut cx,
+        &fixture.root,
+        Binaries {
+            evo_swarm: PathBuf::from("/nonexistent/evo-swarm"),
+            evo_agent: fixture.bins.agent.clone(),
+        },
+    )?;
+    cx.update(evo_desktop::start_background_loads);
+    pump(&mut cx, LOADS);
+    shot(&mut cx, broken_window, dir, "08-check-problem")?;
+    boot_failure(&mut cx, broken_window, &broken_view, dir, &fixture.folder)?;
+    stop_tabs(&mut cx, &broken_view);
 
     // The tabs' servers are told to stop, the way the app's own quit tells them.
     stop_tabs(&mut cx, &view);
     // And the fixture goes first, while the app's context is still here: its `Drop`
-    // is what stops a server the app started, and the context's own drop is where
-    // this process ends.
+    // stops every process group this run started, and the context's own drop is
+    // where this process ends.
     drop(fixture);
     Ok(())
 }
@@ -215,67 +193,99 @@ fn stop_tabs(cx: &mut HeadlessAppContext, view: &Entity<WorkspaceView>) {
     pump(cx, Duration::from_secs(2));
 }
 
-/// The tab page, as a person builds it: a tool call, its row opened, an answer
-/// streaming, a prompt typed behind it, and the interrupt that ends it.
+/// The tab page, as a person builds it: a lane at work, that lane's own
+/// transcript, a tool row opened, a prompt typed behind a run, and the report a
+/// lane sends when its work is done.
 fn live_states(
     cx: &mut HeadlessAppContext,
     window: AnyWindowHandle,
     dir: &Path,
     tab: &Entity<TabContent>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // --- a tool call, and its row opened ---------------------------------------
+    // --- the pool, and one lane given work --------------------------------------
+    wait_for(cx, "the lanes to come up", |cx| {
+        (lanes(cx, tab) >= 1).then_some(())
+    });
+    println!("[capture] {} lane(s)", lanes(cx, tab));
+    type_text(cx, window, tab, &delegate(1, &lane_task()))?;
+    wait_for(cx, "lane 1 working", |cx| {
+        lane_busy(cx, tab, 1).then_some(())
+    });
+    shot(cx, window, dir, "02-lanes-working")?;
+
+    // --- the lane's own transcript ---------------------------------------------
+    click(cx, window, agent_row(AgentKey::Lane(1)))?;
+    wait_for(cx, "lane 1 selected", |cx| {
+        (cx.update(|cx| tab.read(cx).selected_agent()) == AgentKey::Lane(1)).then_some(())
+    });
+    pump(cx, Duration::from_millis(600));
+    shot(cx, window, dir, "03-lane-transcript")?;
+    click(cx, window, agent_row(AgentKey::Coordinator))?;
+
+    // --- a tool row, opened -----------------------------------------------------
     type_text(cx, window, tab, TOOL_PROMPT)?;
     let tool = wait_for(cx, "a tool row", |cx| tool_item(cx, tab));
-    cx.update_window(window, |_, window, cx| {
-        window.click(row("transcript-tool", &tool), cx)
-    })?;
+    click(cx, window, row("transcript-tool", &tool))?;
     pump(cx, Duration::from_millis(600));
-    shot(cx, window, dir, "03-tool")?;
+    shot(cx, window, dir, "04-tool")?;
 
-    // --- an answer that is still being written ---------------------------------
+    // --- an answer still being written, and a prompt typed behind it -------------
     type_text(cx, window, tab, SLOW_PROMPT)?;
     wait_for(cx, "the answer to start streaming", |cx| {
-        items(cx, tab)
-            .iter()
-            .any(|item| matches!(&item.kind, ItemKind::Assistant(a) if a.is_streaming()))
-            .then_some(())
+        streaming(cx, tab).then_some(())
     });
-    shot(cx, window, dir, "02-live")?;
-
-    // --- a prompt typed while it works: queued, and cancellable ----------------
     type_text(cx, window, tab, QUEUED_PROMPT)?;
-    wait_for(cx, "the queued prompt", |cx| {
-        items(cx, tab)
-            .iter()
-            .any(|item| matches!(&item.kind, ItemKind::User(u) if u.is_queued()))
-            .then_some(())
-    });
-    shot(cx, window, dir, "04-queued")?;
+    wait_for(cx, "the queued prompt", |cx| queued(cx, tab).then_some(()));
+    shot(cx, window, dir, "05-queued")?;
 
-    // --- the stop key, and what the server did with it -------------------------
+    // --- what the lane says when it is done -------------------------------------
     //
-    // `Esc` interrupts the coordinator's turn, and a turn is interrupted at a
-    // step's end: the picture is taken once nothing is streaming and nothing is
-    // waiting to be taken, which is the state the key left behind — an item
-    // saying a person stopped the run, an answer that ended where it was, or
-    // both, depending on the server.
-    focus(cx, window, tab)?;
-    cx.update_window(window, |_, window, cx| window.press("escape", cx))?;
-    wait_for(cx, "the stop to settle", |cx| {
-        let items = items(cx, tab);
-        let streaming = items
-            .iter()
-            .any(|item| matches!(&item.kind, ItemKind::Assistant(a) if a.is_streaming()));
-        let queued = items
-            .iter()
-            .any(|item| matches!(&item.kind, ItemKind::User(u) if u.is_queued()));
-        (!streaming && !queued).then_some(())
+    // A lane reports by calling the `report` tool: that item is the coordinator's
+    // copy of it, and it arrives as a `lane_report` (§4.1) — fields, not prose.
+    wait_for(cx, "the queue to be taken", |cx| {
+        (!queued(cx, tab)).then_some(())
     });
-    pump(cx, Duration::from_millis(300));
-    shot(cx, window, dir, "05-after-stop")?;
+    type_text(cx, window, tab, &delegate(1, &report_task()))?;
+    wait_for(cx, "lane 1's report", |cx| reported(cx, tab).then_some(()));
+    pump(cx, Duration::from_millis(800));
+    shot(cx, window, dir, "06-report")?;
     Ok(())
 }
 
+/// `CALL delegate {lane, task}` — the coordinator's own tool for giving a lane
+/// work, sent the way a person sends a prompt.
+fn delegate(lane: u32, task: &str) -> String {
+    format!(
+        "CALL delegate {}",
+        serde_json::json!({ "lane": lane, "task": task })
+    )
+}
+
+/// A lane's first job: three seconds of delay, then a checklist — long enough to
+/// take the picture while the lane is working.
+fn lane_task() -> String {
+    format!(
+        "DELAY3 CALL todo {}",
+        serde_json::json!({ "items": [
+            { "text": "read the tab page", "status": "in-progress" },
+            { "text": "fix the empty column", "status": "pending" },
+        ]})
+    )
+}
+
+/// A lane's second job: report back, which is what the coordinator hears.
+fn report_task() -> String {
+    format!(
+        "CALL report {}",
+        serde_json::json!({
+            "done": "the tab page reads the swarm's own topics",
+            "evidence": "crates/workspace/src/tab_page.rs, 61 workspace tests",
+            "next": "nothing",
+        })
+    )
+}
+
+/// A swarm that cannot come up says so, and offers a Retry (§9.7).
 /// A swarm that cannot come up says so, and offers a Retry (§9.7).
 fn boot_failure(
     cx: &mut HeadlessAppContext,
@@ -289,7 +299,7 @@ fn boot_failure(
     wait_for(cx, "the failure screen", |cx| {
         matches!(tab_state(cx, &tab), TabState::Failed { .. }).then_some(())
     });
-    shot(cx, window, dir, "07-boot-failure")?;
+    shot(cx, window, dir, "09-boot-failure")?;
     Ok(())
 }
 
@@ -401,6 +411,70 @@ fn row(name: &'static str, id: &str) -> ElementId {
     (ElementId::from(name), id.to_string()).into()
 }
 
+/// The element id of a row in the agents column: `main` is 0, lane N is N (§7.3).
+fn agent_row(key: AgentKey) -> ElementId {
+    let index = match key {
+        AgentKey::Coordinator => 0,
+        AgentKey::Lane(n) => u64::from(n),
+    };
+    ElementId::NamedInteger("agent-row".into(), index)
+}
+
+fn click(
+    cx: &mut HeadlessAppContext,
+    window: AnyWindowHandle,
+    id: ElementId,
+) -> Result<(), Box<dyn std::error::Error>> {
+    cx.update_window(window, |_, window, cx| window.click(id, cx))?;
+    Ok(())
+}
+
+/// How many lanes the pool is running.
+fn lanes(cx: &mut HeadlessAppContext, tab: &Entity<TabContent>) -> usize {
+    cx.update(|cx| {
+        tab.read(cx)
+            .model()
+            .map(|model| model.lane_rows().len())
+            .unwrap_or(0)
+    })
+}
+
+/// Whether lane N is working (or compacting) right now.
+fn lane_busy(cx: &mut HeadlessAppContext, tab: &Entity<TabContent>, n: u32) -> bool {
+    cx.update(|cx| {
+        tab.read(cx)
+            .model()
+            .map(|model| {
+                model
+                    .lane_rows()
+                    .iter()
+                    .any(|lane| lane.n == n && lane.is_busy())
+            })
+            .unwrap_or(false)
+    })
+}
+
+/// Whether an answer is still being written.
+fn streaming(cx: &mut HeadlessAppContext, tab: &Entity<TabContent>) -> bool {
+    items(cx, tab)
+        .iter()
+        .any(|item| matches!(&item.kind, ItemKind::Assistant(a) if a.is_streaming()))
+}
+
+/// Whether a prompt is waiting to be taken.
+fn queued(cx: &mut HeadlessAppContext, tab: &Entity<TabContent>) -> bool {
+    items(cx, tab)
+        .iter()
+        .any(|item| matches!(&item.kind, ItemKind::User(u) if u.is_queued()))
+}
+
+/// Whether a lane's report has reached the coordinator's transcript.
+fn reported(cx: &mut HeadlessAppContext, tab: &Entity<TabContent>) -> bool {
+    items(cx, tab)
+        .iter()
+        .any(|item| matches!(item.kind, ItemKind::LaneReport(_)))
+}
+
 /// Wait for something the app's threads have to deliver; `None` means not yet.
 fn wait_for<T>(
     cx: &mut HeadlessAppContext,
@@ -453,34 +527,4 @@ fn shot(
         );
     }
     Ok(())
-}
-
-/// A one-line `evo-agent` in the swarm's place: the flags only a swarm takes are
-/// dropped, everything else is handed on. Only used for `--via-agent`.
-fn shim(fixture: &Fixture, agent: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let path = fixture.dir.join("tab-server.sh");
-    // The fixture's paths are temp paths with no spaces in them, so the word
-    // splitting below cannot break an argument in half.
-    let script = format!(
-        "#!/bin/sh\n\
-         # A stand-in for an `evo-swarm` this build cannot serve with yet: the app's\n\
-         # swarm flags are dropped and the agent's own `serve` is the tab's server.\n\
-         agent={agent}\n\
-         shift_args=''\n\
-         skip=0\n\
-         for arg in \"$@\"; do\n\
-         \x20 if [ \"$skip\" = 1 ]; then skip=0; continue; fi\n\
-         \x20 case \"$arg\" in\n\
-         \x20   --evo|--workers|--lane-model|--lane-thinking) skip=1; continue ;;\n\
-         \x20 esac\n\
-         \x20 shift_args=\"$shift_args $arg\"\n\
-         done\n\
-         exec \"$agent\" $shift_args\n",
-        agent = agent.display()
-    );
-    std::fs::write(&path, script)?;
-    let mut perms = std::fs::metadata(&path)?.permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms)?;
-    Ok(path)
 }

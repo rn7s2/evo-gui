@@ -10,10 +10,10 @@ it.
 ![evo-desktop icon](assets/icon/icon-1024.png)
 
 ![The empty tab as the app opens it: the choosers on Default, the folder card, and the history](docs/screens/01-empty-light.png)
-![A tab driving a swarm: the agents column, an answer streaming, the Stop swarm button](docs/screens/02-live-dark.png)
-![A swarm that could not come up: the reason, the log tail, Retry and Close](docs/screens/07-boot-failure-light.png)
+![Six lanes, one of them working: the agents column, the delegate call, and the Stop swarm button](docs/screens/02-lanes-working-light.png)
+![A lane's transcript: the work it was given, and the checklist it left](docs/screens/03-lane-transcript-dark.png)
 
-Those are three of the fourteen captures in [`docs/screens.md`](docs/screens.md) — seven
+Those are three of the eighteen captures in [`docs/screens.md`](docs/screens.md) — nine
 states, each in both themes — which is also the recipe for taking them again, and
 `crates/app/examples/screens.rs` is what takes them.
 

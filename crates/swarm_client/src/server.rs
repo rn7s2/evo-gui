@@ -22,9 +22,9 @@
 //!   restart: the port, the token and the epoch all come from there, so nothing
 //!   polls `/health`, nothing picks a free port, and nothing compares pids.
 
+use std::collections::BTreeSet;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -606,8 +606,7 @@ fn register_group(pgid: u32) {
 /// a process listing: `killpg(pgid, 0)` answers `ESRCH` when the group is gone.
 pub fn group_alive(pgid: u32) -> bool {
     let sent = unsafe { libc::killpg(pgid as libc::pid_t, 0) };
-    sent == 0
-        || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    sent == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 /// The groups this process started that still have somebody in them.
