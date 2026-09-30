@@ -46,6 +46,30 @@ pub enum Update {
     Stream { status: StreamStatus },
     /// The reply to an op the UI sent (§5.5).
     OpReply(Box<OpReply>),
+    /// Older items (`GET /items?before=`), for a scrollback that pages backwards:
+    /// the body is the server's, `{items, has_more}`. `TabModel::on_items_before`.
+    ItemsBefore {
+        topic: String,
+        body: serde_json::Value,
+    },
+    /// One item, whole (`GET /items/<id>`) — what a tool row expands to, thinking
+    /// and untruncated tool output included. The body is `{item: {…}}`.
+    Item {
+        topic: String,
+        body: serde_json::Value,
+    },
+    /// Image bytes (`GET /media/<id>/<n>`) and the type they came with.
+    Media {
+        topic: String,
+        id: String,
+        n: u32,
+        content_type: String,
+        bytes: Vec<u8>,
+    },
+    /// A read failed. `what` names the fetch (`item e_3 in session`), `reason` is
+    /// what the server or the socket said. Nothing is retried, and nothing panics:
+    /// a failed fetch leaves the view as it was, and the UI decides what to say.
+    FetchFailed { what: String, reason: String },
     /// The server process died on its own; the engine has stopped.
     ServerGone,
     /// The engine has stopped, and how the server went.

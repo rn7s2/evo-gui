@@ -10,9 +10,9 @@
 //!
 //! * **stdin is a pipe we hold.** The child is started with `--watch-stdin` and
 //!   our end of the pipe; EOF means "the tab is gone", which is immediate and
-//!   immune to pid reuse. Dropping the [`Server`] drops the pipe, and
-//!   [`Server::stdin_handle`] hands out a closer a caller can use from anywhere —
-//!   a quit that must not wait for the ladder still stops the server at once.
+//!   immune to pid reuse. Dropping the [`Server`] drops the pipe, and a
+//!   [`StdinClose`] handed to [`Server::start_with`] closes it from anywhere — a
+//!   quit that must not wait for the ladder still stops the server at once.
 //! * **Readiness is one file.** The child writes `<tabdir>/ready.json`
 //!   atomically once it is listening, and rewrites it after every supervisor
 //!   restart: the port, the token and the epoch all come from there, so nothing
@@ -451,11 +451,6 @@ impl Server {
         self.proc.is_running()
     }
 
-    /// Whether the process is still there, without surprising it.
-    pub fn alive(&self) -> bool {
-        process_alive(self.proc.child.id())
-    }
-
     /// Wait up to `timeout` for the process to exit; the code, or `None`.
     pub fn wait_for_exit(&mut self, timeout: Duration) -> Option<i32> {
         self.proc.wait_for_exit(timeout)
@@ -465,13 +460,6 @@ impl Server {
     /// gone, and it needs no HTTP, no signal and no pid.
     pub fn close_stdin(&mut self) {
         self.proc.stdin.close();
-    }
-
-    /// A closer for the child's stdin, usable from anywhere — the app's quit path
-    /// keeps one so it can stop the server and return without waiting for the
-    /// ladder.
-    pub fn stdin_handle(&self) -> StdinClose {
-        self.proc.stdin.clone()
     }
 
     /// The ladder (§8): stdin EOF, `server.shutdown`, wait, `SIGTERM`, `SIGKILL`.

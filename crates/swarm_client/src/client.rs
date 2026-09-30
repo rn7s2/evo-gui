@@ -8,11 +8,11 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use crate::error::{Error, Result};
 use crate::http::{HttpClient, HttpResponse, SseConnection, Token};
-use crate::protocol::{Cursor, OpReply, Snapshot};
+use crate::protocol::{Cursor, OpReply, OpRequest, Snapshot};
 
 /// A client bound to one server, at one address, with one token.
 #[derive(Clone, Debug)]
@@ -98,7 +98,7 @@ impl Client {
     /// The same, with a caller-chosen rid — a caller retrying its own request
     /// after something other than an HTTP failure.
     pub fn op_with_rid(&self, rid: &str, op: &str, args: Value) -> Result<OpReply> {
-        let request = json!({"rid": rid, "op": op, "args": args});
+        let request = serde_json::to_value(OpRequest::new(rid, op, args))?;
         let body = match self.http.post("/ops", &request) {
             Ok(response) => response,
             Err(e) if e.is_transport() => {
@@ -117,7 +117,7 @@ impl Client {
     /// `server.shutdown` — the first rung of the ladder. A refusal is not an
     /// error: something is already stopping.
     pub fn shutdown(&self) -> Result<()> {
-        self.op("server.shutdown", json!({}))?;
+        self.op("server.shutdown", Value::Object(serde_json::Map::new()))?;
         Ok(())
     }
 

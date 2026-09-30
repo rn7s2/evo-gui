@@ -385,6 +385,106 @@ fn an_append_carries_its_id_field_and_text() {
 }
 
 #[test]
+fn the_scrollback_pages_older_items_the_whole_item_and_an_image() {
+    let (dir, handle, updates) = tab("reads", &[]);
+    let mut feed = Feed {
+        updates,
+        seen: Vec::new(),
+    };
+    serving(&mut feed);
+    let control = Control::attach(dir.path()).unwrap();
+
+    let items: Vec<_> = (1..=10)
+        .map(|n| json!({"id": format!("e_{n}"), "kind": "user", "ts": n, "text": format!("line {n}")}))
+        .collect();
+    control
+        .snapshot_body(json!({"session": {"state": {}, "items": items}}))
+        .unwrap();
+
+    // A page of the scrollback, the item a tool row expands to, and the bytes of
+    // an image: three reads, three updates, each carrying the server's own body.
+    assert!(handle.page("session", Some("e_8"), 3));
+    let update = feed.expect("a page of items", |update| {
+        matches!(update, Update::ItemsBefore { .. })
+    });
+    let Update::ItemsBefore { topic, body } = update else {
+        unreachable!()
+    };
+    assert_eq!(topic, "session");
+    let ids: Vec<&str> = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["e_5", "e_6", "e_7"]);
+    assert_eq!(body["has_more"], true);
+
+    assert!(handle.item("session", "e_3"));
+    let update = feed.expect("one item", |update| matches!(update, Update::Item { .. }));
+    let Update::Item { topic, body } = update else {
+        unreachable!()
+    };
+    assert_eq!(topic, "session");
+    assert_eq!(body["item"]["id"], "e_3");
+    assert_eq!(body["item"]["text"], "line 3");
+
+    assert!(handle.media("session", "e_3", 0));
+    let update = feed.expect("image bytes", |update| {
+        matches!(update, Update::Media { .. })
+    });
+    let Update::Media {
+        topic,
+        id,
+        n,
+        content_type,
+        bytes,
+    } = update
+    else {
+        unreachable!()
+    };
+    assert_eq!((topic.as_str(), id.as_str(), n), ("session", "e_3", 0));
+    assert_eq!(content_type, "image/png");
+    assert!(bytes.starts_with(b"fake-image"));
+    drop(handle);
+}
+
+#[test]
+fn a_read_that_fails_comes_back_as_a_fetch_failed() {
+    let (dir, handle, updates) = tab("reads-fail", &[]);
+    let mut feed = Feed {
+        updates,
+        seen: Vec::new(),
+    };
+    serving(&mut feed);
+    let control = Control::attach(dir.path()).unwrap();
+    control.requests();
+
+    // The server has no such item, so both reads are refusals — as an update,
+    // never a panic and never a retry.
+    assert!(handle.item("session", "e_missing"));
+    assert!(handle.media("session", "e_missing", 3));
+    let failed = |want: &'static str| {
+        move |update: &Update| {
+            matches!(update, Update::FetchFailed { what, reason }
+                if what.starts_with(want) && !reason.is_empty())
+        }
+    };
+    let update = feed.expect("the item failure", failed("item e_missing"));
+    let Update::FetchFailed { what, reason } = update else {
+        unreachable!()
+    };
+    assert!(what.starts_with("item e_missing"), "{what}");
+    assert!(reason.contains("404") || !reason.is_empty(), "{reason}");
+    let update = feed.expect("the media failure", failed("media 3 of e_missing"));
+    let Update::FetchFailed { what, .. } = update else {
+        unreachable!()
+    };
+    assert!(what.starts_with("media 3 of e_missing"), "{what}");
+    drop(handle);
+}
+
+#[test]
 fn a_server_that_dies_is_reported_and_the_tab_stops() {
     let (_dir, mut handle, updates) = tab("dies", &[]);
     let mut feed = Feed {

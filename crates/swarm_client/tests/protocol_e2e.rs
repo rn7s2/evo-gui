@@ -213,6 +213,69 @@ fn a_stream_reset_parks_the_stream_until_it_is_told_where_to_resume() {
 }
 
 #[test]
+fn a_reconnect_to_another_lifetime_is_a_reset() {
+    let (_dir, swarm) = swarm("restart");
+    let stream = EventStream::start(
+        swarm.client().clone(),
+        StreamConfig::new(["session".to_owned()]),
+    );
+    expect(&stream, "hello", |m| {
+        matches!(m, StreamMsg::Connected { .. })
+    });
+
+    // A different process lifetime, and our connection goes with it.
+    let epoch = swarm.control().new_epoch().unwrap();
+    swarm.control().drop_streams().unwrap();
+    let reset = expect(&stream, "a stream reset", |m| {
+        matches!(m, StreamMsg::Reset { .. })
+    });
+    assert!(
+        matches!(reset, StreamMsg::Reset { reason } if reason.as_str() == "restarted"),
+        "{reset:?}"
+    );
+
+    // Resuming from the snapshot of that lifetime continues it.
+    stream.resume_from(Cursor::new(epoch.clone(), 0));
+    expect(&stream, "hello in the new lifetime", |m| {
+        matches!(m, StreamMsg::Connected { .. })
+    });
+    assert_eq!(
+        stream.cursor().map(|cursor| cursor.epoch),
+        Some(epoch),
+        "the stream is in the new lifetime"
+    );
+}
+
+#[test]
+fn a_cursor_older_than_the_retention_is_a_reset_too() {
+    let (_dir, swarm) = swarm("forgotten");
+    let stream = EventStream::start(
+        swarm.client().clone(),
+        StreamConfig::new(["session".to_owned()]),
+    );
+    expect(&stream, "hello", |m| {
+        matches!(m, StreamMsg::Connected { .. })
+    });
+
+    swarm.control().forget_cursors().unwrap();
+    swarm.control().drop_streams().unwrap();
+    let reset = expect(&stream, "a cursor_too_old reset", |m| {
+        matches!(
+            m,
+            StreamMsg::Reset {
+                reason: StreamResetReason::CursorTooOld
+            }
+        )
+    });
+    assert_eq!(
+        reset,
+        StreamMsg::Reset {
+            reason: StreamResetReason::CursorTooOld
+        }
+    );
+}
+
+#[test]
 fn a_retried_rid_is_answered_again_and_acts_once() {
     let (_dir, swarm) = swarm("ops");
     let client = swarm.client().clone();
