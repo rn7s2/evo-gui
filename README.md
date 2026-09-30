@@ -107,8 +107,8 @@ wearing an `open at last quit` badge.
 - [`docs/usage.md`](docs/usage.md) — how to drive the app: tabs and their
   shortcuts, the model choosers, history, the tab page's three columns, Settings,
   failures, and where the logs are.
-- [`docs/screens.md`](docs/screens.md) — the twenty captures, and what is real
-  versus scripted in them.
+- [`docs/screens.md`](docs/screens.md) — the twenty states the capture run takes
+  (it does not keep the pictures), and what is real versus scripted in them.
 
 ## Status
 

@@ -1,9 +1,12 @@
-//! The pictures `docs/screens.md` shows: the real window, the real binaries, the
-//! scripted model — no mocks and no drawn-by-hand states.
+//! The states `docs/screens.md` describes: the real window, the real binaries, the
+//! scripted model — no mocks and no drawn-by-hand states. The pictures go to a
+//! directory of your own, not into the repository: every branch regenerates them,
+//! and a merge of two branches that have both captured is a merge of twenty binary
+//! conflicts.
 //!
 //! ```sh
 //! EVO_SWARM_BIN=…/evo-swarm EVO_AGENT_BIN=…/evo-agent \
-//!   cargo run -p evo-desktop --example screens -- --capture docs/screens
+//!   cargo run -p evo-desktop --example screens -- --capture /tmp/screens
 //! ```
 //!
 //! What it drives is the app's own path, the same one a person drives: the
