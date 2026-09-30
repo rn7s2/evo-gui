@@ -97,17 +97,16 @@ fn the_lane_list_comes_from_the_swarm_topic() {
 }
 
 #[test]
-fn a_lanes_own_mirror_gives_its_row_a_live_activity_line() {
+fn a_lanes_own_mirror_is_where_its_row_learns_the_newest_item() {
     let tab = open_tab();
     let lane = tab.lane_rows().iter().find(|lane| lane.n == 1).unwrap();
-    // The lane's mirror is newer than the swarm's summary: the last item it holds is what
-    // the row says the lane is doing.
-    assert_eq!(lane.label(), "Now the transcript.");
-    assert!(lane.activity.is_some());
+    // The lane's mirror is newer than the swarm's summary: the item it holds is the one
+    // the row knows about, and the row's middle cell is still the task it was given.
     assert_eq!(
         lane.last_item.as_ref().map(|(kind, _)| kind.as_str()),
         Some("assistant")
     );
+    assert_eq!(lane.task_label().as_deref(), Some("port the view model"));
 
     // A lane whose mirror is not held at all falls back to the swarm's own summary.
     let mut tab = open_tab();
@@ -116,7 +115,10 @@ fn a_lanes_own_mirror_gives_its_row_a_live_activity_line() {
           "last_item": { "kind": "lane_report", "summary": "report: done" } }
     ]}}));
     let lane = tab.lane_rows().iter().find(|lane| lane.n == 7).unwrap();
-    assert_eq!(lane.label(), "report: done");
+    assert_eq!(
+        lane.last_item.as_ref().map(|(kind, _)| kind.as_str()),
+        Some("lane_report")
+    );
 }
 
 #[test]

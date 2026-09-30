@@ -209,10 +209,10 @@ pub enum TabContentEvent {
     /// failure. The screen the keyboard was on is gone with the old one, so the
     /// window moves it to whatever the new screen starts with (§7.1).
     ScreenChanged,
-    /// Someone double-clicked the split between the middle column and one of the
-    /// sides (§7.3): that side goes back to the width it starts at. The window
-    /// owns the widths, so the gesture is reported rather than acted on.
-    ResetPane(crate::panes::PaneSide),
+    /// Someone double-clicked the split between the agent column and the
+    /// conversation (§7.3): the column goes back to the width it starts at. The
+    /// window owns the width, so the gesture is reported rather than acted on.
+    ResetPane,
 }
 
 /// The retained view behind one tab.
@@ -311,6 +311,9 @@ enum Pending {
     Send,
     /// A `run.interrupt`, from the button, from a lane's Stop, or from `Esc`.
     Interrupt,
+    /// `model.set` or `thinking.set`, from a drawer. The composer's button has nothing
+    /// to do with these: the reply only releases the composer's own in-flight flag.
+    Settings,
 }
 
 /// One tab's live swarm: the engine, the model its updates land in, and the pump
@@ -378,10 +381,6 @@ impl TabContent {
         );
 
         let composer = cx.new(|cx| Composer::new(window, cx));
-        // The status line is the tab page's, under the transcript, where it can
-        // name the agent being shown rather than the coordinator alone (§7.3):
-        // the composer keeps the input and the button.
-        composer.update(cx, |composer, cx| composer.set_show_readout(false, cx));
         let composer_subscription = cx.subscribe_in(
             &composer,
             window,
@@ -396,7 +395,15 @@ impl TabContent {
         let agents_subscription = cx.subscribe(
             &agents,
             |this, _list, event: &AgentListEvent, cx| match event {
-                AgentListEvent::Select(agent) => this.select_agent(*agent, cx),
+                AgentListEvent::Select(agent) => {
+                    this.select_agent(*agent, cx);
+                    // A drawer is about the agent that was selected when it was
+                    // opened: showing another agent's transcript folds it back, which
+                    // is what a press on the row does by landing outside the box —
+                    // and what the keyboard's own selection does here.
+                    this.composer
+                        .update(cx, |composer, cx| composer.close_drawer(cx));
+                }
                 // The one human action on a lane: stop it (§7.4).
                 AgentListEvent::StopLane(lane) => this.on_stop_lane(*lane),
             },
@@ -1100,18 +1107,36 @@ impl TabContent {
                 view.update(cx, |view, cx| view.set_todos(todos, cx));
             }
         }
-        let live = self.live.as_ref().expect("checked above");
-        let (left, right) = session::ordered_segments(live.model.selected_segments());
-        let left: Vec<session::Segment> = left.into_iter().cloned().collect();
-        let right: Vec<session::Segment> = right.into_iter().cloned().collect();
-        let swarm_busy = swarm_is_busy(&live.model);
-        self.composer.update(cx, |composer, cx| {
-            composer.set_segments(&left, &right, cx);
-            composer.set_swarm_busy(swarm_busy, cx);
-        });
-        // The left column takes the same facts, on the same batch (§7.3).
+        self.sync_composer(cx);
+        // The lane column takes the same facts, on the same batch (§7.3).
         self.sync_agents(cx);
         cx.notify();
+    }
+
+    /// Feed the composer from the model: the selected agent's own topic state — the
+    /// chips, the todos, the model and the goal it draws (CONTRACT §4.2) — and whether
+    /// this box may change the model and the effort.
+    ///
+    /// `model.set` and `thinking.set` act on the session (CONTRACT §5), and a lane's
+    /// model is the swarm's, fixed when it starts. So the coordinator's drawer is live
+    /// and a lane's states what it runs (§7.3).
+    fn sync_composer(&mut self, cx: &mut Context<Self>) {
+        let Some(live) = self.live.as_ref() else {
+            return;
+        };
+        let selected = live.model.selected();
+        let empty = session::TopicState::default();
+        let state = live.model.state(selected).unwrap_or(&empty).clone();
+        let busy = swarm_is_busy(&live.model);
+        let name = match selected {
+            AgentKey::Coordinator => "Coordinator".to_string(),
+            AgentKey::Lane(n) => format!("lane {n}"),
+        };
+        let settable = selected == AgentKey::Coordinator;
+        self.composer.update(cx, |composer, cx| {
+            composer.set_agent(&state, &name, settable, cx);
+            composer.set_swarm_busy(busy, cx);
+        });
     }
 
     /// Feed the agent list from the model: the rows, the coordinator's status and step
@@ -1276,6 +1301,15 @@ impl TabContent {
                     ComposerEvent::StopSwarm => (live.model.interrupt_swarm(), Pending::Interrupt),
                     ComposerEvent::Interrupt => {
                         (live.model.interrupt_session(), Pending::Interrupt)
+                    }
+                    // The drawer's two settings are the session's (CONTRACT §5): the
+                    // composer only offers them for the coordinator.
+                    ComposerEvent::ModelSet { id, provider } => (
+                        session::OpRequest::model_set(&id, Some(&provider)),
+                        Pending::Settings,
+                    ),
+                    ComposerEvent::ThinkingSet(level) => {
+                        (session::OpRequest::thinking_set(&level), Pending::Settings)
                     }
                 };
                 // The engine mints the request's id, and the reply comes back tagged
@@ -1609,7 +1643,7 @@ impl Render for TabContent {
         // ticker ends itself the moment it is not, and asks nothing of the
         // server (§7.3).
         self.ensure_step_ticker(window, cx);
-        self.render_for_state(cx)
+        self.render_for_state(window, cx)
     }
 }
 
@@ -1629,6 +1663,7 @@ mod tests {
         point, px, size, AnyWindowHandle, Bounds, Entity, TestAppContext, WindowBounds,
         WindowOptions,
     };
+    use session::Item;
     use swarm_client::ErrorCode;
 
     /// A tab showing a page of a swarm: what a refusal's line needs, and nothing more.
@@ -1655,6 +1690,16 @@ mod tests {
             })
             .expect("tab window")
         })
+    }
+
+    /// One assistant answer, with or without the thinking behind it, as a fixture
+    /// item (`GET /items`, §5.4).
+    fn assistant(id: &str, text: &str, thinking: &str) -> Item {
+        Item::from_json(&serde_json::json!({
+            "id": id, "ts": 1, "kind": "assistant", "text": text,
+            "thinking": thinking, "status": "final",
+        }))
+        .expect("a fixture item has an id")
     }
 
     fn error(code: ErrorCode, message: &str) -> OpError {
@@ -1864,5 +1909,160 @@ mod tests {
             ] } }),
         );
         assert!(swarm_is_busy(&model), "a lane still working");
+    }
+
+    /// §7.3: the band over the transcript carries one quiet control — the reveal for
+    /// thinking — and only while the transcript it heads has thinking to reveal. The
+    /// state is the *view's* own, so the header asks the view rather than deciding.
+    #[gpui_kit::test]
+    fn the_thinking_reveal_is_offered_only_when_there_is_thinking(cx: &mut TestAppContext) {
+        let (window, tab) = running_tab(cx);
+        let view = cx.update(|cx| cx.new(TranscriptView::new));
+        cx.update(|cx| {
+            tab.update(cx, |tab, _| {
+                tab.transcripts.insert(AgentKey::Coordinator, view.clone());
+            });
+        });
+
+        // An answer with thinking: the band offers to show it, and pressing the
+        // control is what flips it.
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.replace(vec![assistant("e_1", "the answer", "a thought")], cx);
+            });
+        });
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window.try_find("transcript-thinking").is_some(),
+                "a transcript with thinking carries the reveal"
+            );
+        })
+        .expect("the header's control");
+        cx.update_window(window, |_, window, cx| {
+            window.click("transcript-thinking", cx);
+        })
+        .expect("the press");
+        assert!(
+            cx.read(|cx| view.read(cx).is_showing_thinking(cx)),
+            "the press is the view's own state"
+        );
+
+        // An answer that carried none: nothing to reveal, and so no control.
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.replace(vec![assistant("e_2", "the answer", "")], cx);
+            });
+        });
+        assert!(!cx.read(|cx| view.read(cx).has_thinking(cx)));
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window.try_find("transcript-thinking").is_none(),
+                "no thinking, no control"
+            );
+        })
+        .expect("the header without it");
+    }
+
+    /// §7.3: a drawer folds out inside the box and is transient — a press that lands
+    /// outside the box folds it, wherever on the page it lands, and a press inside the
+    /// box leaves it alone (the design's `pointerdown` on the document, with the box
+    /// answering for itself).
+    #[gpui_kit::test]
+    fn a_press_outside_the_box_folds_an_open_drawer(cx: &mut TestAppContext) {
+        let (window, tab) = running_tab(cx);
+        let composer = cx.update(|cx| tab.read(cx).composer.clone());
+        // The chips are the topic's own segments, so the drawer has a chip to open
+        // from: an agent with a model, put in by hand the way the server would.
+        cx.update(|cx| {
+            composer.update(cx, |composer, cx| {
+                composer.set_agent(&model_state(), "Coordinator", true, cx)
+            });
+        });
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("composer-chip-model", cx);
+            window.render_frame(cx);
+            assert!(
+                window.try_find("composer-drawer").is_some(),
+                "the drawer is out"
+            );
+
+            // A press on the transcript, which is the page's own surface and not the
+            // box: the drawer folds.
+            window.click("conversation-column", cx);
+            window.render_frame(cx);
+            assert!(
+                window.try_find("composer-drawer").is_none(),
+                "a press on the transcript folds it"
+            );
+
+            // And a press in the box — on the input, which is inside it — leaves it.
+            window.click("composer-chip-model", cx);
+            window.render_frame(cx);
+            window.click("composer-box", cx);
+            window.render_frame(cx);
+            assert!(
+                window.try_find("composer-drawer").is_some(),
+                "a press on the box itself is not a press outside it"
+            );
+        })
+        .expect("the page");
+    }
+
+    /// §7.3: the keyboard's own selection is a selection too — a drawer opened on one
+    /// agent folds back when another is shown, without a press to carry it.
+    #[gpui_kit::test]
+    fn selecting_another_agent_folds_an_open_drawer(cx: &mut TestAppContext) {
+        let (window, tab) = running_tab(cx);
+        let composer = cx.update(|cx| tab.read(cx).composer.clone());
+        cx.update(|cx| {
+            composer.update(cx, |composer, cx| {
+                composer.set_agent(&model_state(), "Coordinator", true, cx)
+            });
+        });
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("composer-chip-model", cx);
+            window.render_frame(cx);
+            assert!(
+                window.try_find("composer-drawer").is_some(),
+                "the drawer is out"
+            );
+        })
+        .expect("the page");
+        // The selection, on its own update: an entity's event reaches its subscribers
+        // when the update that emitted it returns, not inside it.
+        cx.update(|cx| {
+            tab.update(cx, |tab, cx| {
+                tab.agents.update(cx, |_list, cx| {
+                    cx.emit(agent_list::AgentListEvent::Select(AgentKey::Lane(1)))
+                });
+            });
+        });
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window.try_find("composer-drawer").is_none(),
+                "showing another agent's transcript folds the drawer"
+            );
+        })
+        .expect("the page");
+    }
+
+    /// One topic's own state, as the server publishes it: a model, so the foot row has
+    /// a chip that opens the model drawer (`GET /snapshot`).
+    fn model_state() -> session::TopicState {
+        session::TopicState::from_json(&serde_json::json!({
+            "status": "idle",
+            "model": {"id": "stub-a", "provider": "openai", "ready": true},
+            "thinking": "medium",
+            "segments": [
+                {"name": "model", "order": 100, "side": "left", "text": "stub-a", "data": {}},
+                {"name": "thinking", "order": 200, "side": "left", "text": "medium",
+                 "data": {}},
+            ],
+        }))
     }
 }

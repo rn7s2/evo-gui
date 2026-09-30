@@ -1,16 +1,20 @@
-//! The tab page (§7.3) and the screens around it: a swarm starting, one that
-//! never came up, and one being stopped.
+//! The tab page and the screens around it: a swarm starting, one that never came up,
+//! and one being stopped.
 //!
-//! The page is the layout its parts fill: the agent column on the left, the
-//! selected agent's transcript and todos in the middle, the coordinator's
-//! composer on the right. All three are real crates: `agent_list`, `transcript`
-//! and `composer`; this module is the frame they hang in, the folder line under
-//! the list, and the header that names the agent being shown.
+//! The page is two columns (the design's `.workspace`): the swarm's agents on the
+//! left, and on the right the selected agent's conversation — the header, the
+//! transcript, and the composer's box at the foot of it. The split keeps the design's
+//! limits (180–480 for the agent column, 420 for the conversation), and a double-click
+//! puts it back where it starts.
+//!
+//! The parts are real crates — `agent_list`, `transcript` (`crates/widgets`' chips and
+//! dots are the composer's and the list's own) — and this module is the frame they hang
+//! in: the two bands, the folder line under the list, and the pages that are not the
+//! page.
 
 use std::path::Path;
 use std::rc::Rc;
 
-use agent_list::{activity_status, status_color};
 use gpui_kit::base::{InteractiveElementExt as _, ResizeHandleRenderer};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::spinner::Spinner;
@@ -21,32 +25,15 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    div, px, AnyElement, App, Context, IntoElement, Pixels, SharedString, TestSupportExt as _,
+    div, px, AnyElement, App, Context, IntoElement, MouseButton, MouseDownEvent, Pixels,
+    SharedString, TestSupportExt as _, Window,
 };
-use session::{lane_task_label, AgentKey, LaneStatus, TabModel};
-use transcript::TodoPanel;
+use session::AgentKey;
 
-use crate::panes::side_of;
 use crate::tab::{Notice, NoticeTone, TabContent, TabContentEvent, TabState};
-use store::app_state::{CENTER_MIN, LEFT_MAX, LEFT_MIN, RIGHT_MAX, RIGHT_MIN};
-
-/// The middle column's header: its own padding, one line of text and the hairline
-/// under it. The composer column pads by this, so the input begins on the same
-/// line as the transcript's first row rather than over the header (§7.3). The
-/// assertion in `chrome`'s tests is what keeps the two in step.
-pub(crate) const HEADER_HEIGHT: Pixels = px(35.);
-
-/// The status line's element id. It carries the whole line as its tooltip and as
-/// its accessible name (§7.3).
-pub const READOUT_LINE_ID: &str = "status-readout";
-
-/// The status line's size: the TUI's dim status line, small enough to stay one
-/// line however long the line is.
-const READOUT_SIZE: Pixels = px(12.);
-
-/// What the status line's tooltip wraps to: the middle column's own minimum, so
-/// the whole line is read in a card the width of the column it belongs to.
-const READOUT_TOOLTIP_WIDTH: Pixels = px(CENTER_MIN);
+use store::app_state::{CENTER_MIN, LEFT_MAX, LEFT_MIN};
+use store::design;
+use widgets::paint;
 
 /// How many characters the folder line under the agent list may take before it is
 /// elided in the middle: about what fits under a 260 px column at 11 px text.
@@ -58,11 +45,15 @@ const SCREEN_PATH_CHARS: usize = 88;
 
 impl TabContent {
     /// The content for the tab's current state.
-    pub(crate) fn render_for_state(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn render_for_state(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         match &self.state {
             TabState::Empty => self.render_empty(cx),
             TabState::Booting { folder } => self.render_booting(folder, cx),
-            TabState::Running { folder } => self.render_page(folder, cx),
+            TabState::Running { folder } => self.render_page(folder, window, cx),
             TabState::Failed {
                 folder,
                 message,
@@ -235,32 +226,60 @@ impl TabContent {
             .into_any_element()
     }
 
-    /// The tab page: agents, transcript and todos, composer (§7.3).
+    /// The tab page: the swarm's lanes, and the selected agent's conversation
+    /// (§7.3).
     ///
-    /// Three columns with a draggable split between them (§7.3), drawn by the
-    /// kit's resizable panels: the two side columns take the widths the window
-    /// remembers, the middle one takes what is left. Every tab's page shares one
-    /// [`panes::Panes`](crate::panes) state — the three columns are the same three
-    /// columns in every tab, so a split dragged in one tab is dragged in all of
-    /// them — and the window hears where the drag ended so it can write it down.
-    fn render_page(&self, folder: &Path, cx: &mut Context<Self>) -> AnyElement {
-        let panes = self.panes();
+    /// Two columns with a draggable split between them, drawn by the kit's resizable
+    /// panels: the agent column takes the width the window remembers, the
+    /// conversation takes what is left. Every tab's page shares one
+    /// [`panes::Panes`](crate::panes) state — the two columns are the same two in
+    /// every tab, so a split dragged in one tab is dragged in all of them — and the
+    /// window hears where the drag ended so it can write it down.
+    fn render_page(
+        &self,
+        folder: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let panes = crate::panes::fit(self.panes(), f32::from(window.bounds().size.width));
         div()
             .id("tab-page")
             .test_support()
             .size_full()
-            .child(self.render_columns(folder, panes, cx))
+            // The design's `pointerdown` on the document, which folds an open drawer
+            // on a press anywhere but the composer's box. This is the page's own
+            // whole surface — the lanes, the band, the transcript, the space the box
+            // sits in — so a press in any of them reaches here, and the box answers
+            // for itself: it is the composer that knows where its box was painted.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                    let composer = this.composer.clone();
+                    composer.update(cx, |composer, cx| {
+                        composer.close_drawer_at(event.position, cx)
+                    });
+                }),
+            )
+            .child(self.render_columns(folder, panes, window, cx))
             .into_any_element()
     }
 
-    /// The three columns themselves, in the group that lets the splits between
-    /// them be dragged (§7.3).
+    /// The two columns themselves, in the group that lets the split between them be
+    /// dragged.
+    ///
+    /// The agent column may be dragged out to `LEFT_MAX`, but never so far that the
+    /// conversation is squeezed below `CENTER_MIN`: the design's own
+    /// `Math.min(LEFT_MAX, width - MAIN_MIN)`, which is what makes the split depend on
+    /// the window rather than on the file.
     fn render_columns(
         &self,
         folder: &Path,
         panes: store::app_state::Panes,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let width = f32::from(window.bounds().size.width);
+        let widest = (width - CENTER_MIN).clamp(LEFT_MIN, LEFT_MAX);
         h_resizable("tab-columns")
             .when_some(self.pane_state.clone(), |group, state| {
                 group.with_state(&state)
@@ -269,61 +288,48 @@ impl TabContent {
             .child(
                 resizable_panel()
                     .size(px(panes.left))
-                    .size_range(px(LEFT_MIN)..px(LEFT_MAX))
+                    .size_range(px(LEFT_MIN)..px(widest))
                     .flex_none()
-                    .child(self.render_agent_column(folder, cx)),
+                    .child(self.render_lane_column(folder, cx)),
             )
             .child(
                 resizable_panel()
                     .size_range(px(CENTER_MIN)..Pixels::MAX)
-                    .child(self.render_center_column(cx)),
-            )
-            .child(
-                resizable_panel()
-                    .size(px(panes.right))
-                    .size_range(px(RIGHT_MIN)..px(RIGHT_MAX))
-                    .flex_none()
-                    .child(self.render_composer_column(cx)),
+                    .child(self.render_conversation_column(window, cx)),
             )
     }
 
-    /// The dividers between the three columns (§7.3): the kit's own hairline and
-    /// the pill it grows on hover, wrapped in the one gesture it has no room for —
-    /// a double-click that puts that side back to the width it starts at.
+    /// The split between the two columns: the kit's own hairline and the pill it grows
+    /// on hover, on press and while it is dragged — the design's divider, which is that
+    /// same state machine — wrapped in the one gesture it has no room for: a
+    /// double-click that puts the column back to the width it starts at.
     fn pane_hands(&self, cx: &Context<Self>) -> ResizeHandleRenderer {
         let kit = resize_handle_appearance();
         let tab = cx.entity().downgrade();
-        let state = self.pane_state.clone();
         Rc::new(move |handle, window, cx| {
-            let side_state = state.clone();
-            let side_tab = tab.clone();
-            // What the kit draws: the hairline between the columns, and the pill
-            // it grows when the pointer is over it (§7.3).
+            let tab = tab.clone();
+            // The design's `.workspace.resizing *{cursor:col-resize}`: while the split
+            // is being dragged the pointer is usually off the nine-pixel band, where
+            // nothing under it would say what the drag is doing, so the drag itself
+            // carries the cursor.
+            if handle.state().is_active() {
+                // `col-resize`, the same cursor the band itself wears while hovered.
+                cx.set_active_drag_cursor_style(gpui_kit::CursorStyle::ResizeColumn, window);
+            }
             let painted = kit(handle, window, cx);
             Some(
                 div()
-                    // Only what a double-click needs: the divider itself is the
-                    // kit's, and a keystroke must not land on this.
+                    // Only what a double-click needs: the divider itself is the kit's,
+                    // and the cursor while it is dragged is the band's own.
                     .id("pane-handle")
                     .h_full()
                     .w(px(1.))
-                    // The kit sets the cursor on the band it drags; this is the
-                    // one pixel of it that is drawn, and the pointer reads it.
                     .cursor_col_resize()
-                    .on_double_click(move |event, _, cx| {
-                        // Which split this is: the kit draws both with the same
-                        // element and tells neither of them its own name, so the
-                        // pointer's place against the two splits' own places is
-                        // what says it (§7.3).
-                        let sizes = side_state
-                            .as_ref()
-                            .map(|state| state.read(cx).sizes().to_vec())
-                            .unwrap_or_default();
-                        let side = side_of(event.position().x.as_f32(), &sizes);
-                        if let Some(tab) = side_tab.upgrade() {
-                            // The window owns the widths (§7.3); a tab only says
-                            // what was asked of it.
-                            tab.update(cx, |_, cx| cx.emit(TabContentEvent::ResetPane(side)));
+                    .on_double_click(move |_, _, cx| {
+                        if let Some(tab) = tab.upgrade() {
+                            // The window owns the width (§7.3); a tab only says what was
+                            // asked of it.
+                            tab.update(cx, |_, cx| cx.emit(TabContentEvent::ResetPane));
                         }
                     })
                     .child(painted.unwrap_or_else(|| {
@@ -338,98 +344,98 @@ impl TabContent {
         })
     }
 
-    /// The agent column: `agent_list`'s own rows, with the folder the swarm runs
-    /// in pinned under them (§7.3).
+    /// The lane column: `agent_list`'s own band and rows, with the folder the swarm
+    /// runs in pinned under them.
     ///
-    /// The list takes the room; the folder line keeps its own single row at the
-    /// bottom, so a path can never push the lanes around.
-    fn render_agent_column(&self, folder: &Path, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The list takes the room; the folder line keeps its own single row at the bottom,
+    /// so a path can never push the lanes around.
+    fn render_lane_column(&self, folder: &Path, cx: &mut Context<Self>) -> impl IntoElement {
+        let palette = design::palette(cx.theme().mode.is_dark());
         v_flex()
             .id("agent-column")
             .test_support()
-            // The panel the column sits in decides how wide it is (§7.3); the
-            // column fills whatever it is given, and the divider between them is
-            // the panel's own handle, not a border here.
+            // The panel decides how wide the column is; the column fills whatever it is
+            // given, and the divider between them is the panel's own handle.
             .w_full()
             .h_full()
+            .bg(paint::color(palette.sidebar))
             .child(div().flex_1().min_h_0().child(self.agents.clone()))
             .child(folder_line(folder, cx))
     }
 
-    /// The slim line above the transcript: whose transcript this is, what that
-    /// agent is doing, and the task it was given (§7.3).
+    /// The band over the conversation (`.ws-head`): whose transcript this is, what it
+    /// was told to do, and the one control the transcript needs.
     ///
-    /// The colours are the left column's own (`agent_list`'s status table), so the
-    /// header and the row agree at a glance. On the right sits the one control the
-    /// transcript needs: showing the thinking the rows already carry.
+    /// It is the lane column's band, at the same height and on the same surface, so the
+    /// rule under the two runs straight across the page.
     fn render_agent_header(&self, cx: &mut Context<Self>) -> AnyElement {
+        let palette = design::palette(cx.theme().mode.is_dark());
         let agent = self.selected_agent();
         let name = match agent {
             AgentKey::Coordinator => SharedString::from("main"),
-            AgentKey::Lane(n) => SharedString::from(format!("Lane {n}")),
+            AgentKey::Lane(n) => SharedString::from(format!("lane {n}")),
         };
-        // The model is where the status and the task come from; without one (a
-        // page whose swarm is not there to ask) the header says who is shown and
-        // nothing more.
-        let model = self.model();
-        let status = match (agent, model) {
-            (AgentKey::Coordinator, Some(model)) => activity_status(model.activity()),
-            (AgentKey::Lane(n), Some(model)) => model
-                .lane_rows()
-                .iter()
-                .find(|lane| lane.n == n)
-                .map(|lane| lane.status)
-                .unwrap_or(LaneStatus::Idle),
-            _ => LaneStatus::Idle,
-        };
-        let task = match (agent, model) {
-            (AgentKey::Lane(n), Some(model)) => model
-                .lane_rows()
-                .iter()
-                .find(|lane| lane.n == n)
-                .and_then(|lane| lane.task.as_deref())
-                .filter(|task| !task.is_empty())
-                .map(lane_task_label),
-            _ => None,
-        };
+        let task = self.header_task(agent);
         h_flex()
             .id("transcript-header")
             .test_support()
             .w_full()
-            .flex_shrink_0()
+            .flex_none()
+            .h(px(design::HEADER_HEIGHT))
             .items_center()
-            .gap_2()
-            .px_4()
-            .py_1()
+            .gap(px(8.))
+            .px(px(design::INSET))
+            .bg(paint::color(palette.sidebar))
             .border_b_1()
-            .border_color(cx.theme().border)
+            .border_color(paint::color(palette.border))
+            .text_color(paint::color(palette.fg))
             .child(
-                div()
-                    .text_color(status_color(status, cx.theme()))
-                    .child(SharedString::from(status.glyph().to_string())),
+                // `.ws-head{font-size:14px}` with `.ws-agent-name{font-weight:500}`.
+                div().font_medium().text_size(px(14.)).child(name),
             )
-            .child(div().font_medium().child(name))
-            .child(div().flex_1().min_w_0().when_some(task, |this, task| {
-                // One line, elided: a task is a sentence, and the transcript
-                // below is where the whole of it can be read.
-                this.child(
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(SharedString::from(task)),
-                )
-            }))
+            .child(
+                // One line, elided: a task is a sentence, and the transcript below is
+                // where the whole of it is read.
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(13.))
+                    .text_color(paint::color(palette.muted_fg))
+                    .child(task),
+            )
             .when_some(self.thinking_toggle(cx), |this, toggle| this.child(toggle))
             .into_any_element()
     }
 
-    /// The quiet control the header carries while the shown agent has thinking
-    /// text to reveal (§7.3).
+    /// What the band says the agent is doing — the design's own rule: `main` is the
+    /// coordinator, and a lane says the task it was given while it works, where it is
+    /// otherwise, and why it is down when it is.
+    fn header_task(&self, agent: AgentKey) -> SharedString {
+        let AgentKey::Lane(n) = agent else {
+            return SharedString::from("coordinator");
+        };
+        let model = self.model();
+        if let Some(reason) = model.and_then(|model| model.lane_down_reason(n)) {
+            return SharedString::from(reason);
+        }
+        let row = model.and_then(|model| model.lane_rows().iter().find(|row| row.n == n).cloned());
+        match row {
+            Some(row) if row.is_busy() => row
+                .task_label()
+                .map(SharedString::from)
+                .unwrap_or_else(|| SharedString::from(row.status.word())),
+            Some(row) => SharedString::from(row.status.word()),
+            // Nothing has been read about this lane yet: silence rather than a guess.
+            None => SharedString::from(""),
+        }
+    }
+
+    /// The quiet control the header carries while the shown agent has thinking text to
+    /// reveal.
     ///
-    /// It is the *view's* own state: switching agents shows each transcript the
-    /// way its reader left it.
+    /// It is the *view's* own state: switching agents shows each transcript the way its
+    /// reader left it.
     fn thinking_toggle(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let view = self.transcripts.get(&self.selected_agent())?.clone();
         let (has_thinking, showing) = {
@@ -455,119 +461,52 @@ impl TabContent {
         )
     }
 
-    /// The selected agent's transcript, with its todos along the bottom (§7.3).
-    fn render_center_column(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The conversation: the band, the transcript, and the composer's box at the foot
+    /// of the column (§7.3).
+    ///
+    /// Everything the reader works with is one column, top to bottom, in the order they
+    /// are used; nothing the page is *for* lives off to the side where a window has to
+    /// be wide enough to reach it. The box owns its own furniture — the todo strip, the
+    /// drawers a chip folds out, the input and the chips — and the page hands it the
+    /// height of the pane it has to live in.
+    fn render_conversation_column(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let palette = design::palette(cx.theme().mode.is_dark());
         let selected = self.selected_agent();
         let view = self.transcripts.get(&selected).cloned();
-        let todos = view
-            .as_ref()
-            .map(|view| view.read(cx).todos().to_vec())
-            .unwrap_or_default();
+        // What the input may grow to half of: the conversation column, which is the
+        // window under the tab strip (`AutoTextarea.tsx` measures this pane too).
+        let pane = px(f32::from(window.bounds().size.height) - design::STRIP_HEIGHT);
+        self.composer
+            .update(cx, |composer, cx| composer.set_pane_height(pane, cx));
         v_flex()
-            .id("transcript-column")
+            .id("conversation-column")
             .test_support()
             .flex_1()
             .min_w_0()
             .h_full()
+            .bg(paint::color(palette.bg))
             .child(self.render_agent_header(cx))
             .when(self.is_reconnecting(), |this| {
                 this.child(reconnect_badge(cx))
             })
-            // The view says what an agent with nothing to show means, and for
-            // which agent (§7.3).
-            .child(div().flex_1().min_h_0().children(view))
-            // The panel renders nothing while the agent has no todos, so this
-            // row disappears rather than leaving a gap (§7.3).
-            .child(TodoPanel::new(&todos))
-            // Under everything else, the one line that says what the agent being
-            // shown is working with (§7.3).
-            .child(status_line(status_text(self.model()), cx))
-    }
-
-    /// The coordinator's composer: the input, and the single action button
-    /// beneath it (§7.3; the readout lives at the foot of the centre column).
-    ///
-    /// A refused POST says so here — above the input that caused it, in the
-    /// server's own words, and gone on its own (§4, §9.2).
-    fn render_composer_column(&self, cx: &App) -> impl IntoElement {
-        v_flex()
-            .id("composer-column")
-            .test_support()
-            .w_full()
-            .h_full()
-            // The header's own height at the top, so what is below it starts on
-            // the line the transcript starts on (§7.3).
-            .px_4()
-            .pt(HEADER_HEIGHT)
-            .pb_4()
-            .gap_2()
+            // A refused op says so here, directly over the box that caused it.
             .when_some(self.notice(), |this, notice| {
-                this.child(notice_line(notice, cx))
+                this.child(
+                    div()
+                        .px(px(design::INSET))
+                        .pb(px(6.))
+                        .child(notice_line(notice, cx)),
+                )
             })
-            .child(
-                div()
-                    .id("composer-body")
-                    .test_support()
-                    .w_full()
-                    .flex_1()
-                    .min_h_0()
-                    .child(self.composer.clone()),
-            )
+            // The view says what an agent with nothing to show means, and for which
+            // agent.
+            .child(div().flex_1().min_h_0().children(view))
+            .child(self.composer.clone())
     }
-}
-
-/// What the status line under the transcript says: the selected topic's own
-/// `segments`, joined as the server built them (CONTRACT §4.2).
-///
-/// Nothing is composed here — not the model label, not the context figure, not the
-/// goal — so the TUI's status line and this one cannot drift apart. An agent whose
-/// topic has not been read yet has no segments at all, which is a fact about that
-/// agent rather than an empty space, and is said in the same muted voice.
-fn status_text(model: Option<&TabModel>) -> SharedString {
-    let Some(model) = model else {
-        return SharedString::from("no metrics yet");
-    };
-    let (left, _right) = session::ordered_segments(model.selected_segments());
-    let line = left
-        .iter()
-        .map(|segment| segment.text.as_str())
-        .collect::<Vec<_>>()
-        .join(" · ");
-    if line.is_empty() {
-        SharedString::from("no metrics yet")
-    } else {
-        SharedString::from(line)
-    }
-}
-
-/// The status line itself: one muted line at the foot of the middle column, with
-/// a hairline above it (§7.3).
-///
-/// The line is as long as the readout is; the column decides how much of it is
-/// drawn. What is not drawn is still *said*: the whole line is the element's
-/// accessible name, and its tooltip, wrapped rather than run off the screen.
-fn status_line(text: SharedString, cx: &App) -> impl IntoElement {
-    let tooltip = text.clone();
-    div()
-        .id(READOUT_LINE_ID)
-        .test_support()
-        .w_full()
-        .min_w_0()
-        .flex_shrink_0()
-        .truncate()
-        .px_4()
-        .pt_2()
-        .border_t_1()
-        .border_color(cx.theme().border)
-        .text_size(READOUT_SIZE)
-        .text_color(cx.theme().muted_foreground)
-        .aria_label(text.clone())
-        .tooltip(move |window, cx| {
-            let line = tooltip.clone();
-            Tooltip::element(move |_, _| div().w(READOUT_TOOLTIP_WIDTH).child(line.clone()))
-                .build(window, cx)
-        })
-        .child(text)
 }
 
 /// The folder the swarm runs in: one line under the agent list, `~`-shortened
@@ -782,7 +721,6 @@ fn centered_region(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui_kit::test::TestWindowExt as _;
 
     /// A path is elided in the middle: both ends survive, and the tail — the part
     /// that names the folder — gets the longer half.
@@ -851,88 +789,6 @@ still here";
             shorten_log(tail, None).lines().count(),
             tail.lines().count()
         );
-    }
-
-    /// `status_line`'s own view: a column of a fixed width with the line in it.
-    struct LineView(SharedString, Pixels);
-
-    impl gpui_kit::Render for LineView {
-        fn render(&mut self, _: &mut gpui_kit::Window, cx: &mut Context<Self>) -> impl IntoElement {
-            div().w(self.1).child(status_line(self.0.clone(), cx))
-        }
-    }
-
-    /// §7.3: the line is one line in a column that may be narrower than it is —
-    /// and what is not drawn is still read. The whole line is the element's
-    /// accessible name, which is what a reader who cannot see the ellipsis (and a
-    /// test) is meant to read.
-    #[gpui_kit::test]
-    fn a_status_line_wider_than_its_column_keeps_all_of_itself_as_its_name(
-        cx: &mut gpui_kit::TestAppContext,
-    ) {
-        let line: SharedString =
-            "ark-deepseek-v4.1-flash \u{b7} max \u{b7} ctx 48k/936k (5%) \u{b7} 97% cached \u{b7} \
-             goal a1b2c3d4 (active) 12k/50k \u{b7} 0123456789 0123456789 0123456789 0123456789"
-                .into();
-        cx.update(gpui_kit::init);
-        let (_view, cx) = cx.add_window_view(|_, _| LineView(line.clone(), px(200.)));
-        cx.update(|window, cx| window.render_frame(cx));
-
-        let element = cx.update(|window, _| window.find(READOUT_LINE_ID));
-        assert!(element.visible(), "the line is drawn");
-        assert_eq!(
-            element.label(),
-            Some(line.as_ref()),
-            "the whole line, drawn or not, is what the element is called"
-        );
-        assert!(
-            element.bounds().size.width <= px(200.),
-            "and it stays inside the column it was given: {:?}",
-            element.bounds()
-        );
-        // One line of 12 px text, its padding and the hairline — not two.
-        assert!(
-            element.bounds().size.height <= px(36.),
-            "one line high, however long the line is: {:?}",
-            element.bounds()
-        );
-    }
-
-    /// §7.3: what the line says is the readout of the agent being *shown*, and a
-    /// selected agent nothing is known about is a fact the line states rather
-    /// than an empty row.
-    #[test]
-    fn the_status_line_says_what_is_known_and_says_when_nothing_is() {
-        assert_eq!(
-            status_text(None),
-            "no metrics yet",
-            "no swarm to ask, nothing to say"
-        );
-
-        let mut model = TabModel::new();
-        model.on_snapshot(
-            "session",
-            &serde_json::json!({
-                "state": {
-                    "status": "idle",
-                    "segments": [
-                        { "name": "model", "order": 100, "side": "left", "text": "ark-deepseek-v4.1-flash", "data": {} },
-                        { "name": "context", "order": 300, "side": "left", "text": "ctx 48k/936k (5%)", "data": {} }
-                    ]
-                },
-                "items": []
-            }),
-        );
-        let line = status_text(Some(&model));
-        assert!(
-            line.contains("ark-deepseek-v4.1-flash") && line.contains("ctx 48k/936k"),
-            "the segments the server built, rendered as they are: {line}"
-        );
-
-        // A lane selected before anything about it has been read: the same words
-        // as a page with no model at all (§7.3).
-        model.select(AgentKey::Lane(1));
-        assert_eq!(status_text(Some(&model)), "no metrics yet");
     }
 
     /// The home and temporary directories are places too, wherever the log names

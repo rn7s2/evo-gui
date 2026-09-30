@@ -6,6 +6,10 @@ edition.workspace = true
 [dependencies]
 gpui-kit = { workspace = true }
 session = { path = "../session" }
+store = { path = "../store" }
+widgets = { path = "../widgets" }
 
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }
+serde_json = { workspace = true }
+image = "0.25"

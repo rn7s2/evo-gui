@@ -24,4 +24,3 @@ pub use empty_tab::OpenSettings;
 pub use history::{placeholder_history, HistoryRow};
 pub use launch::{check, check_spec, launch_spec, Launch, LaunchEnv};
 pub use tab::{TabContent, TabContentEvent, TabId, TabState};
-pub use tab_page::READOUT_LINE_ID;

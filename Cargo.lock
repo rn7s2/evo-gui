@@ -116,6 +116,8 @@ dependencies = [
  "gpui-kit",
  "image",
  "session",
+ "store",
+ "widgets",
 ]
 
 [[package]]
@@ -1020,7 +1022,11 @@ name = "composer"
 version = "0.1.0"
 dependencies = [
  "gpui-kit",
+ "image",
+ "serde_json",
  "session",
+ "store",
+ "widgets",
 ]
 
 [[package]]
