@@ -1,482 +1,393 @@
-//! The live event stream (§5): a resumable SSE reader on its own thread, feeding
-//! an `async-channel` the UI can await without blocking on the socket.
+//! The op stream, on its own thread (CONTRACT.md §5.3).
 //!
-//! One handle owns one connection at a time — never two streams to the same
-//! server or lane. It reconnects with `Last-Event-ID` and exponential backoff,
-//! and it says when the server it is talking to has been restarted.
+//! One [`EventStream`] holds one connection at a time and delivers what it reads
+//! as [`StreamMsg`]s. It reconnects on its own with a backoff, resuming from the
+//! last cursor it saw, and it says so when the server asks for a full re-read:
+//!
+//! * `stream.reset` — the server cannot continue from the cursor (it restarted,
+//!   or the cursor is older than the retention). The stream **parks**: it stops
+//!   reading, tells the consumer, and waits for [`EventStream::resume_from`],
+//!   which the consumer calls with the cursor of the snapshot it just took. That
+//!   is what makes the re-read gapless — snapshot first, then resume from the
+//!   position that snapshot was atomic at.
+//! * a dropped connection — reconnecting from the last cursor is enough, and
+//!   sounds ([`StreamMsg::Reconnecting`]) while it is away.
+//!
+//! Nothing here parses what an op means: a frame goes to the consumer as it
+//! arrived.
 
-use std::net::{Shutdown, TcpStream};
+use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use async_channel::{Receiver, Sender};
-use serde_json::Value;
 
-use crate::api::Client;
-use crate::error::{Error, Result};
-use crate::http::HttpClient;
+use crate::client::Client;
+use crate::protocol::{Cursor, StreamFrame, StreamResetReason};
 use crate::sse::SseParser;
 
-/// Whether a reconnect can learn that the server was restarted.
-///
-/// `/health.cursor` is the coordinator's own log cursor, so it is the right
-/// probe for `/events` — and the wrong one for a lane's stream, whose ids belong
-/// to the lane's log, not the coordinator's. A lane that was restarted is seen
-/// through the coordinator (`lane-state`, `restarts`) instead.
+/// How long a reconnect waits, doubling up to `max`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CursorProbe {
-    Health,
-    None,
+pub struct Backoff {
+    pub initial: Duration,
+    pub max: Duration,
 }
 
-/// One SSE stream: which server, which route, from where.
-#[derive(Clone, Debug)]
-pub struct StreamTarget {
-    pub http: HttpClient,
-    /// `/events` (the coordinator) or `/lanes/N/events`.
-    pub path: String,
-    /// The first cursor: `None` tails from now, `Some(0)` replays what the log
-    /// still holds, `Some(n)` starts right after event n.
-    pub since: Option<i64>,
-    pub probe: CursorProbe,
-}
-
-impl StreamTarget {
-    /// The coordinator's own event stream — every kernel, serve and swarm event.
-    pub fn coordinator(client: &Client, since: Option<i64>) -> StreamTarget {
-        StreamTarget {
-            http: client.http().clone(),
-            path: "/events".to_owned(),
-            since,
-            probe: CursorProbe::Health,
-        }
-    }
-
-    /// One lane's event stream, relayed read-only by the coordinator (§D21).
-    pub fn lane(client: &Client, n: u32, since: Option<i64>) -> StreamTarget {
-        StreamTarget {
-            http: client.http().clone(),
-            path: format!("/lanes/{n}/events"),
-            since,
-            probe: CursorProbe::None,
+impl Default for Backoff {
+    fn default() -> Backoff {
+        Backoff {
+            initial: Duration::from_millis(250),
+            max: Duration::from_secs(5),
         }
     }
 }
 
-/// How patiently a stream reconnects.
+impl Backoff {
+    /// The wait before attempt `n` (0-based).
+    fn wait(&self, attempt: u32) -> Duration {
+        let shift = attempt.min(16);
+        let millis = self.initial.as_millis() as u64 * (1u64 << shift);
+        Duration::from_millis(millis).min(self.max)
+    }
+}
+
+/// Which topics to stream, and from where.
 #[derive(Clone, Debug)]
 pub struct StreamConfig {
-    /// The first wait after a drop (§5: 0.5 s).
-    pub initial_backoff: Duration,
-    /// The longest wait (§5: 10 s).
-    pub max_backoff: Duration,
-    /// How many messages may wait unread before the reader blocks (backpressure).
-    pub capacity: usize,
-    /// Whether to reconnect at all; `false` ends the stream at the first drop.
-    pub reconnect: bool,
+    /// `session`, `swarm`, `lane:*`, …
+    pub topics: Vec<String>,
+    /// Resume from here; `None` starts at now (the hello frame says where).
+    pub cursor: Option<Cursor>,
+    pub backoff: Backoff,
 }
 
-impl Default for StreamConfig {
-    fn default() -> StreamConfig {
+impl StreamConfig {
+    pub fn new(topics: impl IntoIterator<Item = impl Into<String>>) -> StreamConfig {
         StreamConfig {
-            initial_backoff: Duration::from_millis(500),
-            max_backoff: Duration::from_secs(10),
-            capacity: 1024,
-            reconnect: true,
+            topics: topics.into_iter().map(Into::into).collect(),
+            cursor: None,
+            backoff: Backoff::default(),
         }
+    }
+
+    pub fn from(mut self, cursor: Cursor) -> StreamConfig {
+        self.cursor = Some(cursor);
+        self
     }
 }
 
-/// Why the stream says the session was reset.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ResetReason {
-    /// The server announced `hello`: a new process, its ids start again at 1.
-    Hello,
-    /// `/health` named a different process than the one the cursor belonged to:
-    /// the server restarted, and its ids begin again at 1.
-    Restarted,
-    /// An id went backwards: the same thing, seen from the numbers.
-    IdRegression,
-}
-
-/// What a consumer receives. Consume until [`StreamMsg::Ended`], or until the
-/// channel closes.
-#[derive(Clone, Debug)]
+/// What the stream tells its consumer.
+#[derive(Clone, Debug, PartialEq)]
 pub enum StreamMsg {
-    /// A connection was established (again).
-    Connected {
-        /// The cursor it resumed from.
-        cursor: Option<i64>,
-    },
-    /// The connection dropped; another attempt follows after `retry_in`.
-    Disconnected { error: String, retry_in: Duration },
-    /// One event: `id` is the resume cursor, `kind` the event's type, `data` its
-    /// JSON payload.
-    Event {
-        id: Option<i64>,
-        kind: String,
-        data: Value,
-    },
-    /// The session behind the stream restarted: refetch state and transcript
-    /// (§3, §9.1).
-    Reset { reason: ResetReason },
-    /// The stream is over; nothing more will arrive.
-    Ended,
+    /// A connection is open, from this cursor (the hello frame's).
+    Connected { cursor: Cursor },
+    /// One frame, in stream order.
+    Frame(StreamFrame),
+    /// The server cannot continue from the cursor, and the stream has parked
+    /// until [`EventStream::resume_from`]. Re-snapshot everything first.
+    Reset { reason: StreamResetReason },
+    /// The connection dropped; the next attempt is in `retry_in`.
+    Reconnecting { attempt: u32, retry_in: Duration },
+    /// The stream has stopped and nothing more will arrive.
+    Stopped,
 }
 
-/// A running stream. Dropping it stops the thread.
-#[derive(Debug)]
-pub struct EventStream {
-    rx: Receiver<StreamMsg>,
-    stop_flag: Arc<AtomicBool>,
-    socket: Arc<Mutex<Option<TcpStream>>>,
-    thread: Option<JoinHandle<()>>,
-    path: String,
+/// An order from the consumer to the stream thread.
+enum Order {
+    Resume(Cursor),
+    Stop,
 }
+
+/// A live op stream, reading on a thread of its own. Cheap to clone: every
+/// handle is the same stream.
+#[derive(Clone)]
+pub struct EventStream(Arc<StreamHandle>);
 
 impl EventStream {
-    /// Open a stream. The thread starts immediately and reconnects on its own.
-    pub fn start(target: StreamTarget, cfg: StreamConfig) -> EventStream {
-        let (tx, rx) = async_channel::bounded(cfg.capacity.max(1));
-        let stop_flag = Arc::new(AtomicBool::new(false));
-        let socket: Arc<Mutex<Option<TcpStream>>> = Arc::new(Mutex::new(None));
-        let path = target.path.clone();
+    /// Start reading. The thread ends when the stream does — on `stop`, or when
+    /// the consumer drops the `EventStream`.
+    pub fn start(client: Client, config: StreamConfig) -> EventStream {
+        let (messages_tx, messages) = async_channel::bounded(1024);
+        let (orders, orders_rx) = async_channel::bounded(8);
+        let cursor = Arc::new(Mutex::new(config.cursor.clone()));
+        let socket = Arc::new(Mutex::new(None));
+        let stopped = Arc::new(AtomicBool::new(false));
         let thread = {
-            let stop_flag = Arc::clone(&stop_flag);
+            let cursor = Arc::clone(&cursor);
             let socket = Arc::clone(&socket);
+            let stopped = Arc::clone(&stopped);
             thread::Builder::new()
-                .name(format!("sse {path}"))
-                .spawn(move || run(target, cfg, tx, stop_flag, socket))
-                .ok()
+                .name("evo-op-stream".into())
+                .spawn(move || {
+                    run(client, config, messages_tx, orders_rx, cursor, socket, stopped)
+                })
+                .expect("the stream thread starts")
         };
-        // A spawn that failed drops `tx`, which closes the channel — a consumer
-        // sees the stream end rather than waiting for events that cannot come.
-        EventStream {
-            rx,
-            stop_flag,
+        EventStream(Arc::new(StreamHandle {
+            messages,
+            orders,
+            cursor,
             socket,
-            thread,
-            path,
-        }
+            stopped,
+            thread: Mutex::new(Some(thread)),
+        }))
     }
 
-    /// The route this stream reads (`/events`, `/lanes/1/events`).
-    pub fn path(&self) -> &str {
-        &self.path
+    /// The next message; blocks until there is one, `None` once the stream has
+    /// stopped and its last message has been read.
+    pub fn recv(&self) -> Option<StreamMsg> {
+        self.messages.recv_blocking().ok()
     }
 
-    /// A second handle on the same stream — what a UI task awaits.
-    pub fn receiver(&self) -> Receiver<StreamMsg> {
-        self.rx.clone()
-    }
-
-    /// The next message, without blocking.
+    /// The next message, if one is already waiting.
     pub fn try_recv(&self) -> Option<StreamMsg> {
-        self.rx.try_recv().ok()
+        self.messages.try_recv().ok()
     }
 
-    /// The next message, blocking the calling thread. `None` once the stream is
-    /// over and drained.
-    pub fn recv_blocking(&self) -> Option<StreamMsg> {
-        self.rx.recv_blocking().ok()
+    /// Where this stream has read up to, as far as it knows.
+    pub fn cursor(&self) -> Option<Cursor> {
+        self.cursor.lock().ok().and_then(|cursor| cursor.clone())
     }
 
-    pub fn is_stopped(&self) -> bool {
-        self.stop_flag.load(Ordering::SeqCst)
+    /// Reconnect from `cursor` — the consumer's answer to a [`StreamMsg::Reset`],
+    /// after it has taken the snapshot that cursor is the position of.
+    pub fn resume_from(&self, cursor: Cursor) {
+        let _ = self.orders.send_blocking(Order::Resume(cursor));
     }
 
-    /// Stop now: signal, unblock the socket, and join the thread. Idempotent.
-    pub fn stop(&mut self) {
-        self.stop_flag.store(true, Ordering::SeqCst);
-        if let Ok(mut slot) = self.socket.lock() {
-            if let Some(socket) = slot.take() {
-                let _ = socket.shutdown(Shutdown::Both);
+    /// Stop reading and end the thread. Idempotent.
+    pub fn stop(&self) {
+        self.0.stop_stream();
+    }
+}
+
+/// The stream itself: one per `start`, shared by every handle to it. When the
+/// last handle goes, the reader stops and its thread is joined.
+pub struct StreamHandle {
+    messages: Receiver<StreamMsg>,
+    orders: Sender<Order>,
+    /// The cursor last seen, shared so a consumer can read it without asking the
+    /// thread.
+    cursor: Arc<Mutex<Option<Cursor>>>,
+    /// The socket of the connection in flight, so `stop` can unblock the reader
+    /// (a read timeout is seconds away, and a shutdown must not wait it out).
+    socket: Arc<Mutex<Option<TcpStream>>>,
+    stopped: Arc<AtomicBool>,
+    thread: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl StreamHandle {
+    /// Stop reading: the flag ends a backoff, the order ends a parked stream, and
+    /// shutting the socket down ends a read that would otherwise wait out its
+    /// timeout.
+    fn stop_stream(&self) {
+        self.stopped.store(true, Ordering::SeqCst);
+        let _ = self.orders.send_blocking(Order::Stop);
+        if let Ok(socket) = self.socket.lock() {
+            if let Some(socket) = socket.as_ref() {
+                let _ = socket.shutdown(std::net::Shutdown::Both);
             }
         }
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+    }
+}
+
+impl Drop for StreamHandle {
+    fn drop(&mut self) {
+        self.stop_stream();
+        if let Ok(mut thread) = self.thread.lock() {
+            if let Some(thread) = thread.take() {
+                let _ = thread.join();
+            }
         }
     }
 }
 
-impl Drop for EventStream {
-    fn drop(&mut self) {
-        self.stop();
+impl std::ops::Deref for EventStream {
+    type Target = StreamHandle;
+    fn deref(&self) -> &StreamHandle {
+        &self.0
     }
 }
 
-// A spawn failure leaves the channel closed, which reads as "ended"; there is
-// nothing else to do about it, and this keeps the intent visible.
-fn run(
-    target: StreamTarget,
-    cfg: StreamConfig,
-    tx: Sender<StreamMsg>,
-    stop: Arc<AtomicBool>,
-    socket: Arc<Mutex<Option<TcpStream>>>,
-) {
-    let mut cursor = target.since;
-    let mut backoff = cfg.initial_backoff;
-    // The first connection names its cursor in the query (`?since=N`, §5); a
-    // reconnect sends the standard `Last-Event-ID` header (docs/serve.md §Events).
-    let mut reconnected = false;
-    // The pid `/health` last named. A different one means the process behind the
-    // events was restarted, and its ids begin again at 1.
-    let mut server_pid: Option<u32> = None;
+impl std::fmt::Debug for EventStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EventStream")
+            .field("cursor", &self.cursor())
+            .finish_non_exhaustive()
+    }
+}
 
-    'outer: loop {
-        if stop.load(Ordering::SeqCst) {
+/// Why one connection ended.
+enum Ended {
+    /// The server asked for a re-read, and the stream is parking.
+    Reset(StreamResetReason),
+    /// The connection dropped, or was dropped by `stop`.
+    Disconnected,
+}
+
+/// The stream thread: connect, read, and decide what a broken connection means.
+fn run(
+    client: Client,
+    config: StreamConfig,
+    messages: Sender<StreamMsg>,
+    orders: Receiver<Order>,
+    cursor: Arc<Mutex<Option<Cursor>>>,
+    socket: Arc<Mutex<Option<TcpStream>>>,
+    stopped: Arc<AtomicBool>,
+) {
+    let mut attempt: u32 = 0;
+    loop {
+        if stopped.load(Ordering::SeqCst) {
             break;
         }
-        if target.probe == CursorProbe::Health {
-            match probe_health(&target.http) {
-                Ok(probe) => {
-                    match server_pid {
-                        Some(known) if known != probe.pid => {
-                            server_pid = Some(probe.pid);
-                            cursor = Some(0);
-                            if !send(
-                                &tx,
-                                StreamMsg::Reset {
-                                    reason: ResetReason::Restarted,
-                                },
-                            ) {
-                                break;
+        let since = cursor.lock().ok().and_then(|cursor| cursor.clone());
+        match read(&client, &config.topics, since, &messages, &cursor, &socket) {
+            // A re-read: park until the consumer says where to resume.
+            Ok(Ended::Reset(reason)) => {
+                let _ = messages.send_blocking(StreamMsg::Reset { reason });
+                loop {
+                    match orders.recv_blocking() {
+                        Ok(Order::Resume(from)) => {
+                            if let Ok(mut slot) = cursor.lock() {
+                                *slot = Some(from);
                             }
+                            attempt = 0;
+                            break;
                         }
-                        None => server_pid = Some(probe.pid),
-                        _ => {}
-                    }
-                    // A cursor ahead of the server's own log means the process we
-                    // were reading restarted (its ids begin again at 1).
-                    if let (Some(ours), Some(server_cursor)) = (cursor, probe.cursor) {
-                        if server_cursor < ours {
-                            cursor = Some(0);
-                            if !send(
-                                &tx,
-                                StreamMsg::Reset {
-                                    reason: ResetReason::IdRegression,
-                                },
-                            ) {
-                                break;
-                            }
+                        Ok(Order::Stop) | Err(_) => {
+                            let _ = messages.send_blocking(StreamMsg::Stopped);
+                            return;
                         }
                     }
-                }
-                Err(error) => {
-                    if !send(
-                        &tx,
-                        StreamMsg::Disconnected {
-                            error: error.to_string(),
-                            retry_in: backoff,
-                        },
-                    ) {
-                        break;
-                    }
-                    if !cfg.reconnect || !sleep_or_stop(backoff, &stop) {
-                        break;
-                    }
-                    backoff = bump(backoff, cfg.max_backoff);
-                    continue;
                 }
             }
-        }
-
-        let (path, last_event_id) = if reconnected {
-            (target.path.clone(), cursor)
-        } else {
-            (with_since(&target.path, cursor), None)
-        };
-        reconnected = true;
-
-        match target.http.open_sse(&path, last_event_id) {
-            Err(error) => {
-                if !send(
-                    &tx,
-                    StreamMsg::Disconnected {
-                        error: error.to_string(),
-                        retry_in: backoff,
-                    },
-                ) {
+            Ok(Ended::Disconnected) => {
+                if stopped.load(Ordering::SeqCst) {
                     break;
                 }
-                if !cfg.reconnect || !sleep_or_stop(backoff, &stop) {
+                let retry_in = config.backoff.wait(attempt);
+                attempt = attempt.saturating_add(1);
+                let _ = messages.send_blocking(StreamMsg::Reconnecting { attempt, retry_in });
+                if !sleep_until(retry_in, &stopped) {
                     break;
                 }
-                backoff = bump(backoff, cfg.max_backoff);
             }
-            Ok(mut connection) => {
-                if let Ok(handle) = connection.socket().try_clone() {
-                    if let Ok(mut slot) = socket.lock() {
-                        *slot = Some(handle);
-                    }
-                }
-                if !send(&tx, StreamMsg::Connected { cursor }) {
-                    break;
-                }
-                backoff = cfg.initial_backoff;
-                let mut parser = SseParser::new();
-                let mut announced_reset = false;
-                while !stop.load(Ordering::SeqCst) {
-                    let line = match connection.read_line() {
-                        Ok(Some(line)) => line,
-                        // The server closed, or the socket timed out or died.
-                        Ok(None) | Err(_) => break,
-                    };
-                    let Some(event) = parser.feed(&line) else {
-                        continue;
-                    };
-                    if let Some(id) = event.id {
-                        if let Some(previous) = cursor {
-                            if id < previous && !announced_reset {
-                                announced_reset = true;
-                                if !send(
-                                    &tx,
-                                    StreamMsg::Reset {
-                                        reason: ResetReason::IdRegression,
-                                    },
-                                ) {
-                                    break 'outer;
-                                }
-                            }
-                        }
-                        cursor = Some(id);
-                    }
-                    let kind = event.kind.clone().unwrap_or_default();
-                    let data = serde_json::from_str(&event.data)
-                        .unwrap_or_else(|_| Value::String(event.data.clone()));
-                    let hello = kind == "hello";
-                    if !send(
-                        &tx,
-                        StreamMsg::Event {
-                            id: event.id,
-                            kind,
-                            data,
-                        },
-                    ) {
-                        break 'outer;
-                    }
-                    if hello && !announced_reset {
-                        announced_reset = true;
-                        if !send(
-                            &tx,
-                            StreamMsg::Reset {
-                                reason: ResetReason::Hello,
-                            },
-                        ) {
-                            break 'outer;
-                        }
-                    }
-                }
-                if let Ok(mut slot) = socket.lock() {
-                    *slot = None;
-                }
-                if stop.load(Ordering::SeqCst) || !cfg.reconnect {
-                    break;
-                }
-                if !send(
-                    &tx,
-                    StreamMsg::Disconnected {
-                        error: "the event stream ended".to_owned(),
-                        retry_in: backoff,
-                    },
-                ) {
-                    break;
-                }
-                if !sleep_or_stop(backoff, &stop) {
-                    break;
-                }
-                backoff = bump(backoff, cfg.max_backoff);
-            }
+            Err(_) => break,
         }
     }
+    let _ = messages.send_blocking(StreamMsg::Stopped);
+}
 
+/// One connection, start to end. Sends `Connected` on hello and `Frame` for
+/// every other op; a `stream.reset` ends the connection and says why.
+fn read(
+    client: &Client,
+    topics: &[String],
+    since: Option<Cursor>,
+    messages: &Sender<StreamMsg>,
+    cursor: &Arc<Mutex<Option<Cursor>>>,
+    socket: &Arc<Mutex<Option<TcpStream>>>,
+) -> Result<Ended, crate::error::Error> {
+    let mut connection = client.open_stream(topics, since.as_ref())?;
+    if let Ok(handle) = connection.socket().try_clone() {
+        if let Ok(mut slot) = socket.lock() {
+            *slot = Some(handle);
+        }
+    }
+    let mut parser = SseParser::new();
+    let ended = loop {
+        if messages.is_closed() {
+            break Ended::Disconnected;
+        }
+        let line = match connection.read_line() {
+            Ok(Some(line)) => line,
+            // Closed, or the read timed out: either way this connection is over,
+            // and a reconnect resumes from where it left off.
+            Ok(None) | Err(_) => break Ended::Disconnected,
+        };
+        let Some(event) = parser.feed(&line) else {
+            continue;
+        };
+        let frame = StreamFrame::parse(event.kind.as_deref(), event.id.as_deref(), &event.data);
+        if let Some(from) = &frame.cursor {
+            if let Ok(mut slot) = cursor.lock() {
+                *slot = Some(from.clone());
+            }
+        }
+        if frame.is_hello() {
+            let hello = hello_cursor(&frame).unwrap_or_else(|| {
+                frame
+                    .cursor
+                    .clone()
+                    .unwrap_or_else(|| Cursor::new(String::new(), 0))
+            });
+            if let Ok(mut slot) = cursor.lock() {
+                *slot = Some(hello.clone());
+            }
+            let _ = messages.send_blocking(StreamMsg::Connected { cursor: hello });
+            continue;
+        }
+        if let Some(reason) = frame.stream_reset() {
+            break Ended::Reset(reason);
+        }
+        if messages.send_blocking(StreamMsg::Frame(frame)).is_err() {
+            break Ended::Disconnected;
+        }
+    };
     if let Ok(mut slot) = socket.lock() {
         *slot = None;
     }
-    let _ = tx.send_blocking(StreamMsg::Ended);
-    tx.close();
+    connection.close();
+    Ok(ended)
 }
 
-fn send(tx: &Sender<StreamMsg>, message: StreamMsg) -> bool {
-    tx.send_blocking(message).is_ok()
+/// The cursor a hello frame announces: its `epoch`, and its `seq`.
+fn hello_cursor(frame: &StreamFrame) -> Option<Cursor> {
+    let epoch = frame.get("epoch")?.as_str()?.to_owned();
+    let seq = frame.get("seq")?.as_u64()?;
+    Some(Cursor::new(epoch, seq))
 }
 
-struct Probe {
-    cursor: Option<i64>,
-    pid: u32,
-}
-
-fn probe_health(http: &HttpClient) -> Result<Probe> {
-    // A short patience: the probe is loopback, and a stop must not wait out the
-    // normal request timeout.
-    let reply = http.with_timeout(Duration::from_secs(5)).get("/health")?;
-    if !reply.is_success() {
-        return Err(Error::Status(reply.error()));
-    }
-    let raw = reply.json()?;
-    Ok(Probe {
-        cursor: raw.get("cursor").and_then(Value::as_i64),
-        pid: raw.get("pid").and_then(Value::as_u64).unwrap_or(0) as u32,
-    })
-}
-
-fn bump(backoff: Duration, max: Duration) -> Duration {
-    (backoff * 2).min(max)
-}
-
-/// The stream path with its cursor in the query: `/events?since=0`.
-fn with_since(path: &str, since: Option<i64>) -> String {
-    match since {
-        Some(n) => format!("{path}?since={n}"),
-        None => path.to_owned(),
-    }
-}
-
-/// Sleep in slices so a stop is noticed at once.
-fn sleep_or_stop(total: Duration, stop: &AtomicBool) -> bool {
-    let deadline = Instant::now() + total;
-    loop {
-        if stop.load(Ordering::SeqCst) {
+/// Sleep, in slices, until the stream is stopped. `false` when it was stopped.
+fn sleep_until(total: Duration, stopped: &AtomicBool) -> bool {
+    let deadline = std::time::Instant::now() + total;
+    while std::time::Instant::now() < deadline {
+        if stopped.load(Ordering::SeqCst) {
             return false;
         }
-        let now = Instant::now();
-        if now >= deadline {
-            return true;
-        }
-        thread::sleep((deadline - now).min(Duration::from_millis(25)));
+        std::thread::sleep(Duration::from_millis(20));
     }
+    !stopped.load(Ordering::SeqCst)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
-    fn the_query_names_the_cursor() {
-        assert_eq!(with_since("/events", Some(0)), "/events?since=0");
-        assert_eq!(with_since("/events", Some(57)), "/events?since=57");
-        assert_eq!(
-            with_since("/lanes/2/events", Some(1)),
-            "/lanes/2/events?since=1"
-        );
-        // No cursor: tail from now, no query at all.
-        assert_eq!(with_since("/events", None), "/events");
+    fn the_backoff_doubles_and_stops_at_the_maximum() {
+        let backoff = Backoff::default();
+        assert_eq!(backoff.wait(0), Duration::from_millis(250));
+        assert_eq!(backoff.wait(1), Duration::from_millis(500));
+        assert_eq!(backoff.wait(2), Duration::from_millis(1000));
+        assert_eq!(backoff.wait(3), Duration::from_millis(2000));
+        assert_eq!(backoff.wait(4), Duration::from_millis(5000).min(Duration::from_millis(4000)));
+        assert_eq!(backoff.wait(20), Duration::from_secs(5));
     }
 
     #[test]
-    fn backoff_doubles_and_stops_at_the_ceiling() {
-        let max = Duration::from_secs(10);
-        let mut backoff = Duration::from_millis(500);
-        let mut seen = vec![backoff];
-        for _ in 0..10 {
-            backoff = bump(backoff, max);
-            seen.push(backoff);
-        }
-        assert_eq!(seen[1], Duration::from_secs(1));
-        assert_eq!(seen[2], Duration::from_secs(2));
-        assert_eq!(*seen.last().unwrap(), max);
-        assert!(seen.windows(2).all(|pair| pair[1] >= pair[0]));
+    fn a_hello_frame_names_the_cursor_the_stream_starts_at() {
+        let frame = StreamFrame::parse(
+            Some("op"),
+            Some("7f3a.9"),
+            &json!({"op": "hello", "epoch": "7f3a", "seq": 9}).to_string(),
+        );
+        assert_eq!(hello_cursor(&frame), Some(Cursor::new("7f3a", 9)));
+
+        let without = StreamFrame::parse(Some("op"), None, r#"{"op":"hello"}"#);
+        assert_eq!(hello_cursor(&without), None);
     }
 }

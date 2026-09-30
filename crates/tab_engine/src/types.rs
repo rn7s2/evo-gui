@@ -1,56 +1,37 @@
-//! What the UI says to a tab, and what a tab says back.
+//! What the UI [asks a tab](Command) and what a [tab tells the UI](Update).
 //!
-//! One tab is one `evo-swarm serve` (§3). The engine thread owns it and turns
-//! the server's HTTP/SSE into a stream of [`Update`]s; the UI sends [`Command`]s
-//! back. Everything crosses an `async-channel`, so the UI thread never blocks.
+//! There is no session state in either direction. A tab carries the protocol's
+//! own JSON — a [`Snapshot`] because it asked for one, a [`StreamFrame`] because
+//! the server sent one, an [`OpReply`] because the UI asked for something — and
+//! the `session` crate is the only thing that knows what any of it means.
 
 use std::path::PathBuf;
 use std::time::Duration;
 
 use serde_json::Value;
 
-use swarm_client::{Envelope, Health, Resume, ServerConfig, StatusError};
+use swarm_client::{OpReply, Snapshot, StreamFrame, StreamResetReason, TopicResetReason};
 
-/// Which agent a piece of state belongs to: the coordinator, or a watched lane.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Agent {
-    Coordinator,
-    Lane(u32),
-}
-
-impl Agent {
-    pub fn lane_number(self) -> Option<u32> {
-        match self {
-            Agent::Lane(n) => Some(n),
-            Agent::Coordinator => None,
-        }
-    }
-}
-
-/// A request id the UI assigns to a `POST`, echoed back on its [`Update::PostResult`]
-/// so a reply is matched to the click that caused it.
-pub type ReqId = u64;
-
-/// Everything about one tab that is decided before it starts (§3, §6).
+/// Everything about one tab that is decided before it starts.
 #[derive(Clone, Debug)]
 pub struct TabSpec {
     /// `evo-swarm`.
     pub swarm_bin: PathBuf,
     /// The `evo-agent` the lanes run (`--evo`); `None` lets the swarm find one.
     pub agent_bin: Option<PathBuf>,
-    /// The folder the swarm runs in (cwd).
+    /// The folder the server runs in (its cwd).
     pub folder: PathBuf,
-    /// Where the server keeps its `token` and `swarm.log` (§6).
+    /// Where the server keeps its ready file, its log; created if missing.
     pub tab_dir: PathBuf,
     /// Lanes to start (`--workers`); `None` uses the swarm's own default.
     pub workers: Option<u16>,
-    /// The coordinator's model (`--model`). The swarm takes the model **id**
-    /// alone — the provider comes from how the model was registered — so there
-    /// is no provider flag to carry.
+    /// The coordinator's model (`--model ID[@PROVIDER]`).
     pub model: Option<String>,
-    /// `--thinking low|medium|high|xhigh|max`.
+    /// The lanes' model (`--lane-model ID[@PROVIDER]`).
+    pub lane_model: Option<String>,
+    /// `--thinking off|low|medium|high|xhigh`.
     pub thinking: Option<String>,
-    /// `--resume <path>`, resuming a specific session instead of the last one.
+    /// `--resume <path>`: a session to come back to.
     pub resume: Option<PathBuf>,
     /// `--no-userspace`: boot without init files or extensions.
     pub no_userspace: bool,
@@ -60,15 +41,14 @@ pub struct TabSpec {
     pub env: Vec<(String, String)>,
     /// Variables to drop from the child's environment.
     pub env_remove: Vec<String>,
-    /// The client's patience for an ordinary request (30 s), and for a stream that
-    /// has gone silent (45 s). The app leaves these alone; a test that *stops* a
-    /// server sets them short, so it can assert on the patience itself.
+    /// The client's patience for an ordinary request, and for a stream gone
+    /// silent. A test that *stops* a server sets them short, so that the
+    /// patience itself is what it asserts on.
     pub request_timeout: Duration,
     pub stream_timeout: Duration,
 }
 
 impl TabSpec {
-    /// A tab: the swarm binary, a folder, and a tab directory.
     pub fn new(
         swarm_bin: impl Into<PathBuf>,
         folder: impl Into<PathBuf>,
@@ -81,6 +61,7 @@ impl TabSpec {
             tab_dir: tab_dir.into(),
             workers: None,
             model: None,
+            lane_model: None,
             thinking: None,
             resume: None,
             no_userspace: false,
@@ -104,6 +85,11 @@ impl TabSpec {
 
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.model = Some(model.into());
+        self
+    }
+
+    pub fn with_lane_model(mut self, model: impl Into<String>) -> Self {
+        self.lane_model = Some(model.into());
         self
     }
 
@@ -137,25 +123,26 @@ impl TabSpec {
         self
     }
 
-    /// How long a request and a silent stream get before they are given up on.
-    /// Short in a test that wants to see the giving-up happen.
+    /// The client's patience, for a test that wants to see it run out.
     pub fn with_http_timeouts(mut self, request: Duration, stream: Duration) -> Self {
         self.request_timeout = request;
         self.stream_timeout = stream;
         self
     }
 
-    /// The [`ServerConfig`] this tab spawns (§3): the argv, the cwd, the tab
-    /// directory, and the environment, exactly as [`swarm_client::Server`] wants.
-    pub fn server_config(&self) -> ServerConfig {
-        let mut config = ServerConfig::swarm(&self.swarm_bin, &self.folder, &self.tab_dir)
-            .with_no_userspace(self.no_userspace);
+    /// The [`ServerConfig`](swarm_client::ServerConfig) this tab spawns: the
+    /// argv, the cwd, the tab directory and the environment.
+    pub fn server_config(&self) -> swarm_client::ServerConfig {
+        let mut config =
+            swarm_client::ServerConfig::swarm(&self.swarm_bin, &self.folder, &self.tab_dir)
+                .with_no_userspace(self.no_userspace);
         config.workers = self.workers;
         config.model = self.model.clone();
+        config.lane_model = self.lane_model.clone();
         config.thinking = self.thinking.clone();
         config.evo_bin = self.agent_bin.clone();
         if let Some(session) = &self.resume {
-            config.resume = Resume::Path(session.clone());
+            config.resume = swarm_client::Resume::Path(session.clone());
         }
         config.extra_args = self.extra_args.clone();
         config.extra_env = self.env.clone();
@@ -170,183 +157,119 @@ impl TabSpec {
 /// engine is gone.
 #[derive(Clone, Debug)]
 pub enum Command {
-    /// `POST /prompt` — the user's turn.
-    Prompt { req_id: ReqId, text: String },
-    /// `POST /steer` — mid-run input, landing at the running turn's next
-    /// boundary.
-    ///
-    /// The UI never sends this: a turn always goes through
-    /// [`Command::Prompt`], which the server queues at the running task's next
-    /// boundary (§14.7). It is kept for tests and diagnostics, and because it is
-    /// the one command serve answers `409 Not now` when nothing runs.
-    Steer { req_id: ReqId, text: String },
-    /// `POST /interrupt` — the TUI's esc.
-    Interrupt { req_id: ReqId },
-    /// Refetch a view for AGENT (rows + state); what a UI asks for after it has
-    /// dropped updates it could not keep up with.
-    Refetch(Agent),
-    /// Watch one lane's events, or none: `WatchLane(Some(n))` closes any other
-    /// lane stream first, so at most one is ever open.
-    WatchLane(Option<u32>),
-    /// Stop the server the ladder way (§3) and exit the engine.
+    /// `POST /ops` with these arguments (§5.5). The rid is the engine's: the
+    /// server dedupes by rid, so a retry after a dropped connection is free.
+    Op { op: String, args: Value },
+    /// Re-read the whole view (§5.2) — what a UI asks for when it dropped
+    /// updates it could not keep up with.
+    Snapshot,
+    /// Stop the server the ladder's way (§8) and end the engine.
     Shutdown,
 }
 
-/// How a stream is doing, so the UI can show "reconnecting in N s".
+impl Command {
+    /// The common case: one op, its arguments.
+    pub fn op(op: impl Into<String>, args: Value) -> Command {
+        Command::Op {
+            op: op.into(),
+            args,
+        }
+    }
+}
+
+/// How a stream is doing, so the UI can say "reconnecting in N s".
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StreamStatus {
-    Connected,
-    Reconnecting { retry_in: Duration },
+    Live,
+    Reconnecting { attempt: u32, retry_in: Duration },
 }
 
-/// A refusal from a `POST`, flattened to something `Clone`, so it can ride in an
-/// [`Update`]: the HTTP status (or `None` for a transport failure), whether it is
-/// the `409 Not now` the composer shows as a soft refusal, and the message.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PostError {
-    pub status: Option<u16>,
-    pub not_now: bool,
-    pub message: String,
-}
-
-impl From<swarm_client::Error> for PostError {
-    fn from(error: swarm_client::Error) -> PostError {
-        match &error {
-            swarm_client::Error::Status(status) => PostError {
-                status: Some(status.status()),
-                not_now: status.is_not_now(),
-                message: status.message().to_owned(),
-            },
-            other => PostError {
-                status: None,
-                not_now: false,
-                message: other.to_string(),
-            },
-        }
-    }
-}
-
-impl From<&StatusError> for PostError {
-    fn from(status: &StatusError) -> PostError {
-        PostError {
-            status: Some(status.status()),
-            not_now: status.is_not_now(),
-            message: status.message().to_owned(),
-        }
-    }
-}
-
-/// What a tab tells the UI. Applied to `session` models by the workspace crate.
+/// What a tab tells the UI. The `session` crate applies these; nothing here is
+/// interpreted on the way.
 #[derive(Clone, Debug)]
 pub enum Update {
-    /// The server is being started (§3).
+    /// The server is being started.
     Booting,
-    /// The server is ready: what `/health` said, its process id and its port.
-    Ready { health: Health, pid: u32, port: u16 },
-    /// The server never came up; `log_tail` is what the tab shows (§3).
+    /// The server is ready: its epoch, its process id, its port, its session.
+    Ready {
+        epoch: String,
+        pid: u32,
+        port: u16,
+        session: swarm_client::SessionRef,
+    },
+    /// The server never came up; `log_tail` is what the tab shows.
     BootFailed { message: String, log_tail: String },
-    /// A whole transcript, as `GET /transcript` returned it: rows are rebuilt
-    /// from it (§9.1). `revision` is monotonic per agent — a UI request stamped
-    /// with the revision it started at can drop its own late answer.
-    Transcript {
-        agent: Agent,
-        revision: u64,
-        raw: Value,
-    },
-    /// `GET /state`, as it arrived (the coordinator only; a lane's state comes
-    /// from its events).
-    State { revision: u64, raw: Value },
-    /// `GET /registry`, once per tab — the UI refreshes its model cache from it.
-    Registry { raw: Value },
-    /// `GET /lanes` — the swarm and its lanes.
-    Lanes { raw: Value },
-    /// One SSE event, in stream order.
-    Event {
-        agent: Agent,
-        id: Option<i64>,
-        kind: String,
-        data: Value,
-    },
-    /// The state of an agent's stream.
-    Stream { agent: Agent, status: StreamStatus },
-    /// The journal's newest `cache-stats` custom entry, or `None` when the walk
-    /// of `/journal?limit=20,100,400` found none (§7.3).
-    CacheSeed { entry: Option<Value> },
-    /// A `POST` finished: the reply envelope, or the typed refusal.
-    PostResult {
-        req_id: ReqId,
-        result: Result<Envelope, PostError>,
-    },
-    /// The server process died on its own (§3); the engine has stopped.
+    /// A snapshot (§5.2), exactly as it arrived: `topics`, `epoch` and `seq`.
+    /// The topics present are the ones this snapshot is authoritative for.
+    Snapshot(Box<Snapshot>),
+    /// One frame of the op stream (§5.3), in stream order.
+    Frame(Box<StreamFrame>),
+    /// The server cannot continue the stream from our cursor; everything is
+    /// being re-read, and the stream will resume from the new snapshot.
+    StreamReset { reason: StreamResetReason },
+    /// One topic is stale (`topic.reset`); a snapshot of it is on its way.
+    TopicReset { topic: String, reason: TopicResetReason },
+    /// The stream's state, for the "reconnecting" line.
+    Stream { status: StreamStatus },
+    /// The reply to an op the UI sent (§5.5).
+    OpReply(Box<OpReply>),
+    /// The server process died on its own; the engine has stopped.
     ServerGone,
-    /// The engine has stopped, and why the server did (§3's ladder).
-    Exited {
-        outcome: swarm_client::ShutdownOutcome,
-    },
+    /// The engine has stopped, and how the server went.
+    Exited { outcome: swarm_client::ShutdownOutcome },
+}
+
+/// The topics a tab always reads: the coordinator's own, the swarm's, and every
+/// lane's. `lane:*` is expanded by the server, so a lane that starts or restarts
+/// needs no new subscription.
+pub fn tab_topics() -> Vec<String> {
+    vec![
+        swarm_client::TOPIC_SESSION.to_owned(),
+        swarm_client::TOPIC_SWARM.to_owned(),
+        swarm_client::TOPIC_LANE_WILDCARD.to_owned(),
+    ]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
-
-    fn refusal(status: u16, message: &str) -> swarm_client::Error {
-        let raw = json!({ "ok": false, "error": message, "status": status });
-        swarm_client::Error::Status(swarm_client::StatusError::from_reply(status, raw, message))
-    }
-
-    #[test]
-    fn a_not_now_maps_to_the_soft_refusal() {
-        let post = PostError::from(refusal(409, "no run to steer — POST /prompt starts one"));
-        assert_eq!(post.status, Some(409));
-        assert!(post.not_now);
-        assert!(post.message.contains("no run to steer"));
-    }
-
-    #[test]
-    fn other_statuses_are_not_not_now() {
-        for code in [400u16, 401, 404, 422, 503] {
-            let post = PostError::from(refusal(code, "nope"));
-            assert_eq!(post.status, Some(code), "{code}");
-            assert!(!post.not_now, "{code}");
-            assert_eq!(post.message, "nope", "{code}");
-        }
-    }
-
-    #[test]
-    fn a_transport_failure_has_no_status() {
-        let post = PostError::from(swarm_client::Error::Closed);
-        assert_eq!(post.status, None);
-        assert!(!post.not_now);
-    }
 
     #[test]
     fn the_spec_becomes_the_spawn_argv() {
         let spec = TabSpec::new("/bin/evo-swarm", "/proj", "/tab")
             .with_agent_bin("/bin/evo-agent")
             .with_workers(3)
-            .with_model("m-1")
+            .with_model("m-1@anthropic")
+            .with_lane_model("l-1")
             .with_resume("/s.sexp");
         let config = spec.server_config();
         assert_eq!(
-            config.argv(8421),
+            config.argv(),
             vec![
                 "serve",
                 "--port",
-                "8421",
-                "--token-file",
-                "/tab/token",
+                "0",
+                "--ready-file",
+                "/tab/ready.json",
+                "--watch-stdin",
                 "--workers",
                 "3",
                 "--model",
-                "m-1",
+                "m-1@anthropic",
+                "--lane-model",
+                "l-1",
                 "--resume",
                 "/s.sexp",
                 "--evo",
                 "/bin/evo-agent",
             ]
         );
-        assert_eq!(config.cwd, std::path::PathBuf::from("/proj"));
-        assert_eq!(config.log_path, std::path::PathBuf::from("/tab/swarm.log"));
+        assert_eq!(config.cwd, PathBuf::from("/proj"));
+        assert_eq!(config.log_path, PathBuf::from("/tab/swarm.log"));
+    }
+
+    #[test]
+    fn the_topics_are_the_coordinators_the_swarms_and_every_lane() {
+        assert_eq!(tab_topics(), vec!["session", "swarm", "lane:*"]);
     }
 }
