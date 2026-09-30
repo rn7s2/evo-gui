@@ -27,7 +27,11 @@
 //!   dot mixes against the tab's own surface ([`BreathingDot`]);
 //! * the close button appears on the active tab and on whatever the pointer is
 //!   over, and clicking it does not select the tab it closes;
-//! * the `+` is always last, and a hovered one takes `tab_hover`.
+//! * the `+` is always the next thing after the last tab — 8px along, the
+//!   design's `.tab-add` as the last sibling in `.tab-row` — and a hovered one
+//!   takes `tab_hover`;
+//! * there is at most one empty tab to add: see
+//!   [`WorkspaceView::add_tab`](crate::WorkspaceView::add_tab).
 
 use gpui_kit::base::InteractiveElementExt as _;
 use gpui_kit::component::tooltip::Tooltip;
@@ -133,18 +137,30 @@ fn row(view: &WorkspaceView, window: &Window, cx: &mut Context<WorkspaceView>) -
 
 /// The tabs, in the box that clips them and the bar that scrolls them.
 ///
-/// The box ends where the `+` begins, so a tab is cut at that edge rather than
-/// drawn under the button. Scrolling is the inner bar's own business — it is the
-/// element the scroll handle indexes, so `scroll_to_item` finds the tab being
-/// shown.
+/// The box is as wide as the tabs it holds — one basis per tab, plus the room a
+/// corner needs at each end — so the `+` beside it lands right after the last tab,
+/// which is where the design puts it (`.tab-row` is one line of tabs, `.tab-add`
+/// the next sibling along, 8px of margin between them). It gives way only when
+/// the tabs are wider than the room, and then the `+` sits at the strip's own
+/// right edge, which is where a strip that has run out of room keeps it: the tabs
+/// are clipped where the button begins, so no tab is ever drawn under it.
+///
+/// A definite width rather than the tabs' own content: a tab is its basis wide
+/// whatever its name is (`flex: 0 1 240px`), so the row it sits in is one basis
+/// per tab even when the names are short.
+///
+/// Scrolling is the inner bar's own business — it is the element the scroll handle
+/// indexes, so `scroll_to_item` finds the tab being shown.
 fn scroller(view: &WorkspaceView, cx: &mut Context<WorkspaceView>) -> impl IntoElement {
+    let width = view.tabs().len() as f32 * design::TAB_BASIS + 2. * design::TAB_RADIUS;
     div()
         .id(SCROLL_ID)
         .test_support()
-        // `flex_1`, not merely a shrinker: the tabs' width comes from this box's
-        // width, so it has to be a definite one — the row's free space, which is
-        // what `flex_1` hands it.
-        .flex_1()
+        .w(px(width))
+        // `flex_shrink` and `min_w_0` are what a strip of more tabs than fit uses:
+        // the box comes in to the room it has, the tabs shrink with it down to
+        // their floor, and past that they scroll.
+        .flex_shrink(1.)
         .min_w_0()
         .overflow_x_hidden()
         .child(
@@ -497,7 +513,12 @@ fn close(id: TabId, shown: bool, surface: Rgb, cx: &Context<WorkspaceView>) -> A
         .into_any_element()
 }
 
-/// The `+` at the end of the strip.
+/// The `+` after the last tab (§7.1).
+///
+/// The 8px between it and the last tab is the corner room the tabs' box keeps
+/// after them — the design's `.tab-add{margin-left:8px}`, spent once, in the room
+/// the last tab's outward corner is drawn in (see [`scroller`]). A second margin
+/// here would be doubling it.
 fn add(cx: &mut Context<WorkspaceView>) -> impl IntoElement {
     let palette = palette(cx);
     div()
@@ -509,7 +530,6 @@ fn add(cx: &mut Context<WorkspaceView>) -> impl IntoElement {
         .justify_center()
         .size(px(design::ADD))
         .rounded(px(design::ADD_RADIUS))
-        .ml(px(design::ADD_GAP))
         .mb(px((design::TAB_HEIGHT - design::ADD) / 2.))
         .text_color(color(palette.tab_ink))
         .hover(move |style| {
@@ -517,8 +537,10 @@ fn add(cx: &mut Context<WorkspaceView>) -> impl IntoElement {
                 .bg(color(palette.tab_hover))
                 .text_color(color(palette.fg))
         })
+        // A new tab is the one New Swarm tab: with one on the strip already, this
+        // shows it rather than making a second (§7.1).
         .on_click(cx.listener(|this, _, window, cx| {
-            this.open_empty_tab(window, cx);
+            this.add_tab(window, cx);
         }))
         .child(glyph::plus_in(palette))
 }
@@ -607,6 +629,10 @@ mod tests {
         assert_eq!(design::TAB_GAP, 9.);
         assert_eq!(design::CLOSE, 22.);
         assert_eq!(design::ADD, 30.);
+        // The 8px between the last tab and the `+` is the corner room the tabs'
+        // box keeps after them — the design's `.tab-add{margin-left:8px}`, which
+        // is the same 8px, spent once.
+        assert_eq!(design::ADD_GAP, design::TAB_RADIUS);
         // What the strip keeps clear at its left edge is the traffic lights' room.
         assert_eq!(leading(), design::TRAFFIC_WIDTH);
     }

@@ -52,6 +52,11 @@ fn tab_label(id: u64) -> ElementId {
     ElementId::NamedInteger("tab-label".into(), id)
 }
 
+/// The tab itself, whose box is where its pixels are (§7.1).
+fn tab_box(id: u64) -> ElementId {
+    ElementId::NamedInteger("tab".into(), id)
+}
+
 /// The tab's close button (§7.1).
 fn tab_close(id: u64) -> ElementId {
     ElementId::NamedInteger("tab-close".into(), id)
@@ -59,6 +64,34 @@ fn tab_close(id: u64) -> ElementId {
 
 fn tab_id(view: &Entity<WorkspaceView>, index: usize, cx: &App) -> u64 {
     view.read(cx).tabs()[index].read(cx).id().get()
+}
+
+/// Stop a tab's engine, and wait for its thread to end.
+///
+/// A tab with a process behind it has a thread of its own, and that thread wakes
+/// the view when it has something to say — a wake from another thread is what
+/// gpui's test scheduler calls non-deterministic, and it fires the instant the
+/// wake lands after the test's last frame. Joining the engine before the frames
+/// end is what makes a test that launches a tab (a binary that is not there
+/// reaches its folder without a process) deterministic.
+macro_rules! retire_engine {
+    ($tab:expr, $cx:expr) => {{
+        let engine = $tab.update($cx, |tab, cx| tab.take_engine(cx));
+        if let Some(mut engine) = engine {
+            engine.shutdown();
+            engine.join();
+        }
+    }};
+}
+
+/// Another tab, asked for directly — what a resume, a capture or a test wants.
+///
+/// Not what the `+` or ⌘T does: a strip keeps at most one empty tab, so those
+/// show the one already there instead of adding a second (§7.1).
+fn open_another_tab(window: &mut gpui_kit::Window, view: &Entity<WorkspaceView>, cx: &mut App) {
+    view.update(cx, |view, cx| {
+        view.open_empty_tab(window, cx);
+    });
 }
 
 /// One window, one tab, nothing chosen: what the app opens with (§14.6).
@@ -73,7 +106,7 @@ fn the_app_opens_with_one_empty_tab(cx: &mut TestAppContext) {
 
         let tab = view.selected_tab().read(cx);
         assert_eq!(tab.state(), &TabState::Empty);
-        assert_eq!(tab.title().as_ref(), "New tab");
+        assert_eq!(tab.title().as_ref(), "New Swarm");
         assert_eq!(tab.folder(), None, "an empty tab has no folder yet");
     });
 
@@ -108,24 +141,130 @@ fn the_empty_tab_has_no_default_to_fall_back_on(cx: &mut TestAppContext) {
     });
 }
 
-/// The `+` appends a new empty tab and selects it (§7.1).
+/// §7.1: there is one New Swarm tab at a time. A second `+` shows the empty tab
+/// that is already there — selected, and with the keyboard, the same as clicking
+/// it — and a `+` with no empty tab on the strip opens one.
 #[gpui_kit::test]
-fn the_add_button_appends_and_selects_a_new_tab(cx: &mut TestAppContext) {
+fn a_second_add_shows_the_empty_tab_instead_of_making_another(cx: &mut TestAppContext) {
     let (handle, view) = open_workspace(cx);
 
     cx.update_window(handle.into(), |_, window, cx| {
         window.render_frame(cx);
+        // Twice: the window opened with one empty tab, and that is still the one
+        // tab the strip has.
         window.click("tab-add", cx);
+        window.click("tab-add", cx);
+        assert_eq!(view.read(cx).tabs().len(), 1);
+        assert_eq!(view.read(cx).selected_index(), 0);
+        assert_eq!(
+            view.read(cx).selected_tab().read(cx).state(),
+            &TabState::Empty
+        );
     })
     .unwrap();
+}
 
-    cx.update(|cx| {
-        let view = view.read(cx);
-        assert_eq!(view.tabs().len(), 2);
-        assert_eq!(view.selected_index(), 1, "the new tab is selected");
-        assert_eq!(view.selected_tab().read(cx).state(), &TabState::Empty);
-        assert_eq!(view.tabs()[0].read(cx).state(), &TabState::Empty);
+/// The same rule from the other side: a tab that has started something is not
+/// empty, so the `+` opens a New Swarm tab for it to sit beside (§7.1).
+#[gpui_kit::test]
+fn the_add_button_opens_a_tab_when_none_is_empty(cx: &mut TestAppContext) {
+    let home = std::env::temp_dir().join(format!("workspace-ui-one-empty-{}", std::process::id()));
+    std::fs::create_dir_all(&home).expect("a home to work in");
+    let root = home.clone();
+
+    let (handle, view) = open_window_with(cx, move |window, cx| {
+        WorkspaceView::with_config(
+            Arc::new(LaunchEnv {
+                // A tab reaches its folder without a process behind it: this test
+                // is about the tab set, and a swarm would only add noise.
+                swarm_bin: PathBuf::from("/nonexistent/evo-swarm"),
+                root: store::paths::Root::at(root),
+                ..LaunchEnv::default()
+            }),
+            window,
+            cx,
+        )
     });
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let folder = home.join("a-folder-of-its-own");
+        std::fs::create_dir_all(&folder).expect("a folder to work in");
+        let started = view.read(cx).selected_tab().clone();
+        started.update(cx, |tab, cx| {
+            tab.launch(
+                Launch::New {
+                    folder,
+                    plan: LaunchPlan::default(),
+                },
+                window,
+                cx,
+            )
+        });
+        // The launched tab runs on a thread of its own; it is stopped and joined
+        // here so the strip is what the test's frames see (see `retire_engine!`).
+        retire_engine!(started, cx);
+        window.render_frame(cx);
+
+        // The shown tab has started something: `+` opens a New Swarm tab.
+        window.click("tab-add", cx);
+        assert_eq!(view.read(cx).tabs().len(), 2);
+        assert_eq!(view.read(cx).selected_index(), 1, "the new tab is selected");
+        assert_eq!(
+            view.read(cx).selected_tab().read(cx).state(),
+            &TabState::Empty
+        );
+        assert_ne!(
+            view.read(cx).tabs()[0].read(cx).state(),
+            &TabState::Empty,
+            "the tab that started something keeps it"
+        );
+
+        // And now there is one: a second `+` shows it rather than making another.
+        window.click("tab-add", cx);
+        assert_eq!(view.read(cx).tabs().len(), 2);
+        assert_eq!(view.read(cx).selected_index(), 1);
+    })
+    .unwrap();
+}
+
+/// §7.1: the `+` is the next thing after the last tab — the design's `.tab-row`
+/// is one line of tabs with the `.tab-add` 8px along — and not the strip's own
+/// right-hand end, which would leave the room the tabs did not take empty.
+#[gpui_kit::test]
+fn the_add_button_follows_the_last_tab(cx: &mut TestAppContext) {
+    let (handle, view) = open_workspace(cx);
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        open_another_tab(window, &view, cx);
+        window.render_frame(cx);
+
+        let first = window.find(tab_box(tab_id(&view, 0, cx))).bounds();
+        let last = window.find(tab_box(tab_id(&view, 1, cx))).bounds();
+        let add = window.find("tab-add").bounds();
+
+        assert_eq!(
+            first.size.width,
+            px(store::design::TAB_BASIS),
+            "a tab is its basis wide: {first:?}"
+        );
+        assert_eq!(last.left(), first.right(), "the tabs are side by side");
+        assert_eq!(
+            add.left() - last.right(),
+            px(store::design::ADD_GAP),
+            "the + is 8px after the last tab: tab ends at {:?}, + begins at {:?}",
+            last.right(),
+            add.left()
+        );
+        assert!(
+            add.right() < window.bounds().right() - px(store::design::TAB_BASIS),
+            "and nowhere near the strip's right edge: + {:?} in a {:?} window",
+            add,
+            window.bounds()
+        );
+    })
+    .unwrap();
 }
 
 /// Clicking a tab selects it (§7.1).
@@ -136,7 +275,7 @@ fn clicking_a_tab_selects_it(cx: &mut TestAppContext) {
 
     cx.update_window(handle.into(), |_, window, cx| {
         window.render_frame(cx);
-        window.click("tab-add", cx);
+        open_another_tab(window, &view, cx);
         assert_eq!(view.read(cx).selected_index(), 1);
         window.click(tab_label(first), cx);
     })
@@ -155,7 +294,7 @@ fn closing_a_tab_selects_its_neighbour(cx: &mut TestAppContext) {
 
     cx.update_window(handle.into(), |_, window, cx| {
         window.render_frame(cx);
-        window.click("tab-add", cx);
+        open_another_tab(window, &view, cx);
         // Only the tab being shown carries a close button, so the first tab is
         // selected before it is closed — which is what a user does.
         window.click(tab_label(first), cx);
@@ -206,7 +345,7 @@ fn a_tab_shows_its_close_button_when_the_pointer_is_on_it(cx: &mut TestAppContex
 
     cx.update_window(handle.into(), |_, window, cx| {
         window.render_frame(cx);
-        window.click("tab-add", cx);
+        open_another_tab(window, &view, cx);
         let second = tab_id(&view, 1, cx);
         window.render_frame(cx);
 
@@ -250,11 +389,53 @@ fn a_tab_shows_its_close_button_when_the_pointer_is_on_it(cx: &mut TestAppContex
 
 /// ⌘T and ⌘W: the window's own add and close, which the app's key bindings call
 /// (§7.1). They are the same paths the `+` button and the tab's `×` take.
+///
+/// The window is given a swarm binary that is not there, so a tab reaches its
+/// folder without a process behind it — what these tests need of a tab is that it
+/// has stopped being empty.
 #[gpui_kit::test]
 fn the_keyboard_shortcuts_add_and_close_tabs(cx: &mut TestAppContext) {
-    let (handle, view) = open_workspace(cx);
+    let home = std::env::temp_dir().join(format!("workspace-ui-keys-{}", std::process::id()));
+    let folder = home.join("a-folder-of-its-own");
+    std::fs::create_dir_all(&folder).expect("a folder to work in");
+    let root = home.clone();
 
+    let (handle, view) = open_window_with(cx, move |window, cx| {
+        WorkspaceView::with_config(
+            Arc::new(LaunchEnv {
+                swarm_bin: PathBuf::from("/nonexistent/evo-swarm"),
+                root: store::paths::Root::at(root),
+                ..LaunchEnv::default()
+            }),
+            window,
+            cx,
+        )
+    });
+
+    // ⌘T on a strip whose one tab is empty: the tab is shown, not doubled (§7.1).
     cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        view.update(cx, |view, cx| {
+            view.add_tab(window, cx);
+        });
+        assert_eq!(view.read(cx).tabs().len(), 1, "one New Swarm tab, not two");
+    })
+    .unwrap();
+
+    // A tab that has started something is not empty, so ⌘T opens a new tab.
+    cx.update_window(handle.into(), |_, window, cx| {
+        let started = view.read(cx).selected_tab().clone();
+        started.update(cx, |tab, cx| {
+            tab.launch(
+                Launch::New {
+                    folder: folder.clone(),
+                    plan: LaunchPlan::default(),
+                },
+                window,
+                cx,
+            )
+        });
+        retire_engine!(started, cx);
         window.render_frame(cx);
         view.update(cx, |view, cx| {
             view.add_tab(window, cx);
@@ -300,9 +481,7 @@ fn the_window_lists_its_tabs_for_persistence(cx: &mut TestAppContext) {
 
     cx.update_window(handle.into(), |_, window, cx| {
         window.render_frame(cx);
-        view.update(cx, |view, cx| {
-            view.add_tab(window, cx);
-        });
+        open_another_tab(window, &view, cx);
     })
     .unwrap();
 
@@ -335,9 +514,10 @@ fn the_strip_answers_the_keyboard(cx: &mut TestAppContext) {
 
     cx.update_window(handle.into(), |_, window, cx| {
         window.render_frame(cx);
-        // Four tabs, so ⌘9 has somewhere to go and ⌘8 has nowhere.
+        // Four tabs, so ⌘9 has somewhere to go and ⌘8 has nowhere — asked for
+        // one at a time: `+` keeps a strip at one empty tab (§7.1).
         for _ in 0..3 {
-            window.click("tab-add", cx);
+            open_another_tab(window, &view, cx);
         }
         assert_eq!(view.read(cx).tabs().len(), 4);
         assert_eq!(view.read(cx).selected_index(), 3);
@@ -460,8 +640,7 @@ fn a_middle_click_closes_a_tab(cx: &mut TestAppContext) {
     let (handle, view) = open_workspace(cx);
     cx.update_window(handle.into(), |_, window, cx| {
         window.render_frame(cx);
-        window.click("tab-add", cx);
-        window.click("tab-add", cx);
+        open_another_tab(window, &view, cx);
     })
     .unwrap();
     let middle = cx.update(|cx| tab_id(&view, 1, cx));
@@ -508,7 +687,7 @@ fn a_middle_click_closes_a_tab(cx: &mut TestAppContext) {
 
     cx.update(|cx| {
         let view = view.read(cx);
-        assert_eq!(view.tabs().len(), 2, "the middle click closed one tab");
+        assert_eq!(view.tabs().len(), 1, "the middle click closed one tab");
         assert!(
             view.tabs()
                 .iter()
@@ -518,9 +697,9 @@ fn a_middle_click_closes_a_tab(cx: &mut TestAppContext) {
     });
 }
 
-/// §7.1: fourteen tabs do not fit in a window. An overflowing strip scrolls —
-/// the `+` stays where it is, at the right edge, and the tab being shown is the
-/// one on screen, whichever end of the strip it is at.
+/// §7.1: fourteen tabs do not fit in a window. An overflowing strip scrolls, the
+/// `+` stays at the strip's right edge rather than leaving the window, and the tab
+/// being shown is the one on screen, whichever end of the strip it is at.
 #[gpui_kit::test]
 fn an_overflowing_strip_keeps_the_add_button_and_shows_the_selected_tab(cx: &mut TestAppContext) {
     let (handle, view) = open_workspace(cx);
@@ -529,7 +708,7 @@ fn an_overflowing_strip_keeps_the_add_button_and_shows_the_selected_tab(cx: &mut
         window.render_frame(cx);
         view.update(cx, |view, cx| {
             for _ in 1..14 {
-                view.add_tab(window, cx);
+                view.open_empty_tab(window, cx);
             }
         });
         window.render_frame(cx);
@@ -569,24 +748,6 @@ fn an_overflowing_strip_keeps_the_add_button_and_shows_the_selected_tab(cx: &mut
         );
     })
     .unwrap();
-}
-
-/// Stop a tab's engine, and wait for its thread to end.
-///
-/// A tab with a process behind it has a thread of its own, and that thread wakes
-/// the view when it has something to say — a wake from another thread is what
-/// gpui's test scheduler calls non-deterministic, and it fires the instant the
-/// wake lands after the test's last frame. Joining the engine before the frames
-/// end is what makes a test that launches a tab (a binary that is not there
-/// reaches its folder without a process) deterministic.
-macro_rules! retire_engine {
-    ($tab:expr, $cx:expr) => {{
-        let engine = $tab.update($cx, |tab, cx| tab.take_engine(cx));
-        if let Some(mut engine) = engine {
-            engine.shutdown();
-            engine.join();
-        }
-    }};
 }
 
 /// §7.1: the window is named after what it is working on — Mission Control, ⌘`
@@ -699,7 +860,7 @@ fn the_add_button_never_sits_on_a_tab(cx: &mut TestAppContext) {
                 let tab = if index == 0 {
                     view.selected_tab().clone()
                 } else {
-                    view.add_tab(window, cx)
+                    view.open_empty_tab(window, cx)
                 };
                 tab.update(cx, |tab, cx| {
                     tab.launch(

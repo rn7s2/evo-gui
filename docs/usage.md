@@ -53,15 +53,17 @@ nobody hears is worse than one the window handles.
 ## Tabs
 
 The title bar **is** the tab strip: one tab per swarm, labelled with the folder's
-name (an unused tab says `New tab`), and hovering one shows the whole path plus
-what the tab is doing — `no folder chosen`, `starting the swarm…`, `swarm:
-running`, `swarm: reconnecting…`, `stopping the swarm…`, `failed to start`, or
-`swarm gone: the server exited`.
+name (a tab nothing has been launched from says `New Swarm`), and hovering one
+shows the whole path plus what the tab is doing — `no folder chosen`, `starting
+the swarm…`, `swarm: running`, `swarm: reconnecting…`, `stopping the swarm…`,
+`failed to start`, or `swarm gone: the server exited`.
 
 A middle click closes a tab, the way a browser's does. The `+` after the last tab
-appends a new empty tab; when the tabs need more room than there is, they scroll
-inside the strip and the `+` stays where it is. Closing a tab stops its server;
-the session stays on disk and comes back in the history list.
+opens a New Swarm tab — and when the strip already has one, it shows that one
+instead: there is one New Swarm tab at a time, and ⌘T is the same button. When the
+tabs need more room than there is, they scroll inside the strip and the `+` stays
+at the strip's right edge. Closing a tab stops its server; the session stays on
+disk and comes back in the history list.
 
 Two small marks answer questions a label cannot:
 

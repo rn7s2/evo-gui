@@ -1,7 +1,9 @@
 //! The window this app opens and the chrome it opens with (§7.1).
 //!
 //! One window, whose title bar *is* the tab strip ([`crate::tab_strip`]): one tab
-//! per swarm, plus a `+` that always appends an empty one. [`WorkspaceView`] owns
+//! per swarm, plus a `+` that adds one — and never a second empty one, since a
+//! strip has one New Swarm tab at a time (§7.1, [`WorkspaceView::add_tab`]).
+//! [`WorkspaceView`] owns
 //! the tab set, the selection and what the pointer is on; everything below the
 //! strip belongs to a [`TabContent`](crate::TabContent).
 
@@ -444,8 +446,24 @@ impl WorkspaceView {
         self.quit_hook = Some(hook);
     }
 
-    /// Open a new empty tab and select it — what ⌘T does (§7.1).
+    /// Open a tab — what ⌘T, the Window menu's New Tab and the strip's `+` do
+    /// (§7.1).
+    ///
+    /// There is at most one New Swarm tab at a time (§7.1): asked for a tab while
+    /// an empty one is on the strip, this shows that one and hands it the keyboard
+    /// — what clicking it would do — rather than stacking up empty tabs. A tab
+    /// whose launch failed, or one that is booting, is not empty: it is a swarm
+    /// with something to say, and [`Self::open_empty_tab`] is what it asks for.
     pub fn add_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<TabContent> {
+        if let Some(index) = self
+            .tabs
+            .iter()
+            .position(|tab| tab.read(cx).state() == &crate::tab::TabState::Empty)
+        {
+            let tab = self.tabs[index].clone();
+            self.select_tab(index, window, cx);
+            return tab;
+        }
         self.open_empty_tab(window, cx)
     }
 
@@ -562,7 +580,12 @@ impl WorkspaceView {
         &self.tabs[self.selected]
     }
 
-    /// Append an empty tab and select it: what the `+` does (§7.1).
+    /// Append an empty tab and select it, whatever is already on the strip: the
+    /// tab a resume opens in, the fresh one the last close leaves, a capture's
+    /// extra tab.
+    ///
+    /// What a person's "new tab" does instead is [`Self::add_tab`], which is this
+    /// only while there is no empty tab to show (§7.1).
     pub fn open_empty_tab(
         &mut self,
         window: &mut Window,
@@ -1161,7 +1184,7 @@ mod tests {
                     let tab = if index == 0 {
                         view.selected_tab().clone()
                     } else {
-                        view.add_tab(window, cx)
+                        view.open_empty_tab(window, cx)
                     };
                     ids.push(tab.read(cx).id().get());
                     tab.update(cx, |tab, cx| {
@@ -1518,7 +1541,7 @@ mod tests {
         cx.update_window(window, |_, window, cx| {
             window.render_frame(cx);
             // A second tab, driving a swarm: the state §7.1's rule is about.
-            let running = view.update(cx, |view, cx| view.add_tab(window, cx));
+            let running = view.update(cx, |view, cx| view.open_empty_tab(window, cx));
             running.update(cx, |tab, _cx| {
                 tab.state = crate::TabState::Running {
                     folder: PathBuf::from("/tmp/proj"),

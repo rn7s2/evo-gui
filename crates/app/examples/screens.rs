@@ -225,7 +225,7 @@ fn live_states(
         cx.update_window(window, |_, window, cx| {
             view.update(cx, |view, cx| {
                 (0..3)
-                    .map(|_| view.add_tab(window, cx).read(cx).id())
+                    .map(|_| view.open_empty_tab(window, cx).read(cx).id())
                     .collect::<Vec<_>>()
             })
         })?

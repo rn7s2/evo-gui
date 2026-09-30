@@ -578,11 +578,11 @@ impl TabContent {
         self.model().is_some_and(swarm_is_busy)
     }
 
-    /// The label on the tab: the folder's name, or "New tab" while empty.
+    /// The label on the tab: the folder's name, or `New Swarm` while empty.
     pub fn title(&self) -> SharedString {
         match self.folder() {
             Some(folder) => folder_name(folder),
-            None => SharedString::from("New tab"),
+            None => SharedString::from("New Swarm"),
         }
     }
 
