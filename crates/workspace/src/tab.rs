@@ -28,7 +28,7 @@ use gpui_kit::{
 use async_channel::Receiver;
 use composer::{Composer, ComposerEvent};
 use session::{
-    AgentKey, Changes, Item, ItemChange, LaunchPlan, Op, Queue, Status, StreamStatus, TabModel,
+    AgentKey, Changes, ItemChange, LaunchPlan, Op, Queue, Status, StreamStatus, TabModel,
 };
 use swarm_client::{ErrorCode, OpError, OpReply};
 use tab_engine::{EngineHandle, Update};
@@ -1655,6 +1655,7 @@ mod tests {
         point, px, size, AnyWindowHandle, Bounds, Entity, TestAppContext, WindowBounds,
         WindowOptions,
     };
+    use session::Item;
     use swarm_client::ErrorCode;
 
     /// A tab showing a page of a swarm: what a refusal's line needs, and nothing more.
@@ -1910,7 +1911,7 @@ mod tests {
         let (window, tab) = running_tab(cx);
         let view = cx.update(|cx| cx.new(TranscriptView::new));
         cx.update(|cx| {
-            tab.update(cx, |tab, cx| {
+            tab.update(cx, |tab, _| {
                 tab.transcripts.insert(AgentKey::Coordinator, view.clone());
             });
         });
