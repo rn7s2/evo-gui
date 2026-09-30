@@ -640,7 +640,7 @@ impl EmptyTabState {
     }
 
     /// The caption under the lanes chooser: the one place the empty tab says something went
-    /// wrong, something is still loading, or a lanes model will be written to a file.
+    /// wrong, something is still loading, or what a chosen lanes model will do.
     fn caption(&self) -> Option<Caption> {
         if let Some(error) = &self.catalog_error {
             // The server's own words are evidence, not a message: they go in the hover (and
@@ -2557,19 +2557,26 @@ mod tests {
             );
             assert!(window.find(PROBLEMS_ID).visible());
 
-            // A click opens the chooser the line is about — the lanes' line goes to the lanes
-            // chooser, not to the coordinator's.
+            // The keyboard starts on the folder card: not on any chooser.
             window.focus(
                 &f.tab.read(cx).choosers.state.read(cx).folder_focus.clone(),
                 cx,
             );
             window.click(ElementId::NamedInteger(PROBLEM_ID.into(), 1), cx);
-            assert_eq!(
-                window.focused(cx),
-                Some(chooser(&f, cx, Choice::Lanes).read(cx).focus_handle(cx)),
-                "the lanes line opens the lanes chooser"
-            );
+        });
 
+        // The click is the lanes' line, so the lanes chooser is what has the keyboard —
+        // not the coordinator's, which is the row above it.
+        let lanes = f.act(cx, |window, cx| window.focused(cx));
+        assert_eq!(
+            lanes,
+            f.act(cx, |_, cx| chooser(&f, cx, Choice::Lanes)
+                .read(cx)
+                .focus_handle(cx)),
+            "the lanes line opens the lanes chooser"
+        );
+
+        f.act(cx, |window, cx| {
             // A clean check takes the lines away again.
             f.tab.update(cx, |tab, cx| {
                 tab.choosers
