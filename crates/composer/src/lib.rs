@@ -612,16 +612,15 @@ impl Composer {
         }
     }
 
-    /// Whether the button accepts a click right now: enabled only when the face has
-    /// something to do and this composer has no request in flight.
-    pub fn is_action_enabled(&self, cx: &App) -> bool {
-        if self.in_flight {
-            return false;
-        }
-        match self.face() {
-            ActionFace::Send => !self.input.read(cx).value().trim().is_empty(),
-            ActionFace::StopSwarm => true,
-        }
+    /// Whether the button wears the kit's disabled face — which is what the render
+    /// hands to `.disabled(..)`, and the one testable form of it, since a `Button`
+    /// reports no disabled flag to an element snapshot.
+    ///
+    /// Only a request of this composer's own in flight greys it. An empty draft is
+    /// not a disabled button (`.composer-send` is drawn in the primary face at rest);
+    /// it is a button with nothing to send, and the click and `Enter` do nothing.
+    fn is_action_disabled(&self) -> bool {
+        self.in_flight
     }
 
     /// Put the caret in the input, as opening a tab does.
@@ -1236,7 +1235,11 @@ impl Composer {
             .label(face.label())
             // The glyph is decoration: what the button is called is the word.
             .accessibility_label(face.label())
-            .disabled(!self.is_action_enabled(cx))
+            // A request of this composer's own in flight is the only thing that greys
+            // it. An empty draft is not a disabled button: the design draws
+            // `.composer-send` in the primary face at rest, and a blank draft simply
+            // has nothing to send (or to stop), so the click and `Enter` do nothing.
+            .disabled(self.is_action_disabled())
             .on_click(cx.listener(|this, _, _, cx| match this.face() {
                 ActionFace::Send => {
                     let draft = this.input.read(cx).value().to_string();
@@ -1987,22 +1990,29 @@ mod tests {
         });
     }
 
+    /// A blank draft is not a disabled button: the design draws `.composer-send` in
+    /// the primary face at rest, so the button looks the same with nothing typed — it
+    /// just has nothing to send, and neither the click nor `Enter` does anything.
     #[gpui_kit::test]
-    fn send_is_enabled_by_a_non_blank_draft_and_by_nothing_else(cx: &mut TestAppContext) {
+    fn a_blank_draft_is_the_same_button_and_does_nothing(cx: &mut TestAppContext) {
         let f = open(cx);
         f.act(cx, |window, cx| {
             window.render_frame(cx);
             assert_eq!(window.find(BUTTON_ID).label(), Some("Send"));
+            assert!(
+                !f.composer.read(cx).is_action_disabled(),
+                "no draft, and the button is still the design's own face"
+            );
 
             // Nothing typed: nothing to send, so the click is inert.
-            assert!(!f.composer.read(cx).is_action_enabled(cx));
             window.click(BUTTON_ID, cx);
 
             // Whitespace only is blank too.
             f.set_draft("   ", window, cx);
             window.render_frame(cx);
-            assert!(!f.composer.read(cx).is_action_enabled(cx));
+            assert!(!f.composer.read(cx).is_action_disabled());
             window.click(BUTTON_ID, cx);
+            window.press("enter", cx);
         });
 
         assert!(f.events().is_empty(), "a blank draft has nothing to send");
@@ -2010,7 +2020,7 @@ mod tests {
         f.act(cx, |window, cx| {
             f.set_draft("real", window, cx);
             window.render_frame(cx);
-            assert!(f.composer.read(cx).is_action_enabled(cx));
+            assert!(!f.composer.read(cx).is_action_disabled());
             window.click(BUTTON_ID, cx);
         });
 
@@ -2024,14 +2034,19 @@ mod tests {
             window.render_frame(cx);
             f.set_draft("one", window, cx);
             window.render_frame(cx);
+            assert!(!f.composer.read(cx).is_action_disabled());
             window.click(BUTTON_ID, cx);
         });
         assert_eq!(f.events().len(), 1, "the first click sends");
 
-        // In flight: the click does nothing at all.
+        // In flight: the button wears the kit's disabled face and the click does
+        // nothing at all.
         f.act(cx, |window, cx| {
             window.render_frame(cx);
-            assert!(!f.composer.read(cx).is_action_enabled(cx));
+            assert!(
+                f.composer.read(cx).is_action_disabled(),
+                "the greyed face is only ever its own request in flight"
+            );
             window.click(BUTTON_ID, cx);
         });
         assert_eq!(f.events().len(), 1);

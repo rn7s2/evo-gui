@@ -254,8 +254,10 @@ the agent header are the same height on the same surface, so the rule under them
   read-only.
 - **The button** shares that row, and its face and function follow what is going on — never a
   Send and a Stop side by side:
-  - nothing going on: the button reads **Send** (primary), enabled only when the input has text;
-    clicking posts `input.send`.
+  - nothing going on: the button reads **Send**, in the primary face at rest whatever the draft
+    (`.composer-send` has no disabled look) — with nothing in the input there is nothing to send,
+    so the click and `Enter` do nothing; with text, clicking posts `input.send`. The one thing
+    that greys it is this composer's own request in flight.
   - anything going on — the coordinator's own run (`running`/`compacting` from `state.status`), a
     coordinator held `waiting` on its lanes, or a lane still working: the *same* button reads
     **■ Stop swarm** and clicking posts `run.interrupt` with scope `swarm` — it interrupts and

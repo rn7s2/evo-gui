@@ -327,13 +327,15 @@ running turn's next boundary, exactly as typing into the TUI does — the queued
 row is in the transcript, cancellable, until then. The draft is cleared only when
 the server accepted the send, and **Esc never touches it**.
 
-The single button's face is what it does: **Send** while nothing is going on
-(enabled once there is text), **■ Stop swarm** while anything is — the coordinator
-running its own turn, held while its lanes work, or a lane still working
-(`run.interrupt`, scope `swarm`: it stops everyone, and the coordinator is told).
-There is never a Send and a Stop side by side; `Esc` is the same interrupt with the
-keyboard, and **Enter** still sends while the swarm is busy (that is what the queue
-is for). A lane can be stopped from its own row in the left column.
+The single button's face is what it does: **Send** while nothing is going on, **■
+Stop swarm** while anything is — the coordinator running its own turn, held while
+its lanes work, or a lane still working (`run.interrupt`, scope `swarm`: it stops
+everyone, and the coordinator is told). Send is drawn in the design's primary face
+whatever the draft, so an empty input is a button that looks ready and has nothing
+to send: clicking it (or pressing **Enter**) does nothing, and only a request of its
+own in flight greys it. There is never a Send and a Stop side by side; `Esc` is the
+same interrupt with the keyboard, and **Enter** still sends while the swarm is busy
+(that is what the queue is for). A lane can be stopped from its own row in the left column.
 
 The chips row is that agent's status line, chipped: the `segments` the server
 publishes for it, in its order, so the same session reads the same here and in the
