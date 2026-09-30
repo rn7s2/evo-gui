@@ -1069,7 +1069,7 @@ impl TabContent {
         let (left, right) = session::ordered_segments(live.model.selected_segments());
         let left: Vec<session::Segment> = left.into_iter().cloned().collect();
         let right: Vec<session::Segment> = right.into_iter().cloned().collect();
-        let swarm_busy = live.model.is_swarm_busy();
+        let swarm_busy = swarm_is_busy(&live.model);
         self.composer.update(cx, |composer, cx| {
             composer.set_segments(&left, &right, cx);
             composer.set_swarm_busy(swarm_busy, cx);
@@ -1502,6 +1502,17 @@ impl TabContent {
     }
 }
 
+/// Whether the composer's button should be offering to stop the swarm (§7.5).
+///
+/// The swarm topic's own flags count *lanes*: its `busy` is how many lanes are
+/// working, and its `waiting_on_lanes` is false while the coordinator itself is
+/// working. A coordinator-only turn is busy by this model's own account, and
+/// nothing else on the page says so — which is the run a person most often wants
+/// to stop.
+fn swarm_is_busy(model: &TabModel) -> bool {
+    model.is_swarm_busy() || model.activity() != Status::Idle
+}
+
 /// Whether this tab has a clock to move (§7.3).
 ///
 /// Both clocks on the page count from an absolute start the server published — the
@@ -1734,5 +1745,43 @@ mod tests {
             ] } }),
         );
         assert!(clocks_running(&model), "a busy lane's clock counts too");
+    }
+
+    /// §7.5: the button says `■ Stop swarm` while anything is going on — the
+    /// coordinator's own run, its wait for the lanes, or a lane still working —
+    /// and `Send` when nothing is.
+    #[test]
+    fn the_button_offers_to_stop_while_anything_is_going_on() {
+        let mut model = TabModel::new();
+        assert!(!swarm_is_busy(&model), "nothing is going on");
+
+        // The coordinator's own run. The swarm topic says nothing about it: its
+        // `busy` counts lanes, and `waiting_on_lanes` is false while the
+        // coordinator works — so this one has to come from the session's status.
+        model.on_snapshot(
+            "session",
+            &serde_json::json!({ "state": { "status": "running" }, "items": [] }),
+        );
+        assert!(swarm_is_busy(&model), "the coordinator's own run");
+
+        model.on_snapshot(
+            "session",
+            &serde_json::json!({ "state": { "status": "waiting" }, "items": [] }),
+        );
+        assert!(swarm_is_busy(&model), "held for its lanes");
+
+        model.on_snapshot(
+            "session",
+            &serde_json::json!({ "state": { "status": "idle" }, "items": [] }),
+        );
+        assert!(!swarm_is_busy(&model), "and back to Send");
+
+        model.on_snapshot(
+            "swarm",
+            &serde_json::json!({ "state": { "id": "sw", "workers": 1, "status": { "busy": 1 }, "lanes": [
+                { "n": 1, "state": "working", "reports": 0 }
+            ] } }),
+        );
+        assert!(swarm_is_busy(&model), "a lane still working");
     }
 }
