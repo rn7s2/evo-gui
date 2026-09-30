@@ -15,7 +15,7 @@
     {"name": "proxy", "api": "anthropic-oauth-messages", "has_key": false, "key_env": null}
   ],
   "default_model": {"id": "ark-deepseek-v4.1-flash", "provider": "aiden"},
-  "thinking_levels": ["off", "low", "medium", "high", "xhigh"],
+  "thinking_levels": ["low", "medium", "high", "xhigh", "max"],
   "languages": [{"code": "en", "name": "English"}, {"code": "zh", "name": "中文"}],
   "ops": [
     {"name": "input.send", "args": {"type": "object"}, "precondition": "none"},

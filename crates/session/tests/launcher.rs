@@ -85,7 +85,8 @@ fn a_catalog_without_lanes_judges_a_lane_by_the_models_own_readiness() {
 fn the_ladder_is_the_catalogs_without_the_retired_rung() {
     assert_eq!(
         thinking_levels(&fixture("catalog.json")),
-        vec!["low", "medium", "high", "xhigh"]
+        vec!["low", "medium", "high", "xhigh", "max"],
+        "the catalog's own list"
     );
     // A body that lists none — or only the retired rung — is evo's own ladder.
     assert_eq!(
@@ -173,6 +174,118 @@ fn what_the_check_resolved_is_what_the_fields_show() {
         Some("claude-sonnet-5@proxy"),
         "a model the check judged unusable is still the model it resolved"
     );
+}
+
+/// §2: `check --json` resolves the two efforts and the count as a launch with no flags
+/// would — evo's own chains, including a resumed swarm's record — so the controls open on
+/// those rather than on a rung or a count this app picked.
+#[test]
+fn a_check_opens_the_sliders_and_the_count_on_what_it_resolved() {
+    let mut launcher = Launcher::new();
+    launcher.set_catalog(&fixture("catalog.json"));
+    launcher.set_check(&json!({
+        "ok": true,
+        "model": {"id": "ark-deepseek-v4.1-flash", "provider": "aiden", "ok": true},
+        "lane_model": {"id": "ark-deepseek-v4.1-flash", "provider": "aiden", "ok": true},
+        "thinking": "xhigh",
+        "lane_thinking": "low",
+        "workers": 12,
+        "problems": []
+    }));
+    assert_eq!(launcher.level(Role::Coordinator), Some("xhigh"));
+    assert_eq!(launcher.level(Role::Lanes), Some("low"));
+    assert_eq!(launcher.workers(), 12);
+    assert_eq!(
+        launcher.plan(),
+        LaunchPlan {
+            model: Some(("ark-deepseek-v4.1-flash".to_string(), "aiden".to_string())),
+            thinking: Some("xhigh".to_string()),
+            workers: Some(12),
+            lanes_model: Some(("ark-deepseek-v4.1-flash".to_string(), "aiden".to_string())),
+            lane_thinking: Some("low".to_string()),
+        }
+    );
+
+    // A count off the wire is clamped like one typed: a launch may carry 1–64.
+    launcher.set_check(&json!({"ok": true, "workers": 999, "thinking": "max"}));
+    assert_eq!(launcher.workers(), WORKERS_MAX);
+    assert_eq!(launcher.level(Role::Coordinator), Some("max"));
+
+    // A rung the ladder does not list leaves the slider on its middle, rather than on a
+    // level no flag could carry.
+    launcher.set_check(&json!({"ok": true, "thinking": "extreme"}));
+    assert_eq!(launcher.level(Role::Coordinator), Some("medium"));
+
+    // And a ladder that changed under a resolved rung moves the slider onto it.
+    launcher.set_catalog(&json!({"models": [], "thinking_levels": ["low", "high"]}));
+    assert_eq!(
+        launcher.level(Role::Coordinator),
+        Some("high"),
+        "the middle of two"
+    );
+}
+
+/// A control the person moved is theirs: a later check leaves it where they put it, while
+/// the one beside it follows.
+#[test]
+fn a_control_the_person_moved_is_not_re_resolved() {
+    let mut launcher = Launcher::new();
+    launcher.set_catalog(&fixture("catalog.json"));
+    launcher
+        .set_check(&json!({"ok": true, "thinking": "low", "lane_thinking": "low", "workers": 3}));
+    assert_eq!(launcher.level(Role::Lanes), Some("low"));
+
+    launcher.set_effort(Role::Coordinator, 4);
+    launcher.set_workers(9);
+    launcher
+        .set_check(&json!({"ok": true, "thinking": "xhigh", "lane_thinking": "max", "workers": 6}));
+    assert_eq!(
+        launcher.level(Role::Coordinator),
+        Some("max"),
+        "the slider nobody touched follows the check; the moved one stays"
+    );
+    assert_eq!(launcher.workers(), 9);
+    assert_eq!(launcher.level(Role::Lanes), Some("max"));
+
+    // And the values the launcher resolved are still re-resolved after a refresh.
+    launcher
+        .set_check(&json!({"ok": true, "thinking": "high", "lane_thinking": "high", "workers": 4}));
+    assert_eq!(launcher.level(Role::Lanes), Some("high"));
+    assert_eq!(launcher.level(Role::Coordinator), Some("max"));
+    assert_eq!(launcher.workers(), 9);
+}
+
+/// A check from an evo that did not carry those three — or none at all — leaves the
+/// controls on evo's own last values for that frame.
+#[test]
+fn a_check_without_resolved_values_leaves_evos_own() {
+    let mut launcher = Launcher::new();
+    launcher.set_catalog(&fixture("catalog.json"));
+    launcher.set_check(&json!({
+        "ok": true,
+        "model": {"id": "claude-opus-5", "provider": "anthropic", "ok": true},
+        "problems": []
+    }));
+    assert_eq!(launcher.level(Role::Coordinator), Some("medium"));
+    assert_eq!(launcher.level(Role::Lanes), Some("medium"));
+    assert_eq!(launcher.workers(), DEFAULT_WORKERS);
+
+    // Those three are part of what the window renders: a check that carries them tells it
+    // to paint again.
+    let mut launcher = Launcher::new();
+    launcher.set_catalog(&fixture("catalog.json"));
+    assert!(launcher.set_check(&json!({
+        "ok": true,
+        "thinking": "high",
+        "lane_thinking": "high",
+        "workers": 2
+    })));
+    assert!(!launcher.set_check(&json!({
+        "ok": true,
+        "thinking": "high",
+        "lane_thinking": "high",
+        "workers": 2
+    })));
 }
 
 /// A check that resolved nothing — the empty home — leaves the fields empty, and they say
