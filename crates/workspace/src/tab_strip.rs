@@ -187,7 +187,7 @@ fn tab(
             content.id(),
             content.title(),
             content.tooltip(),
-            content.is_running(),
+            content.is_working(),
             index == view.selected_index(),
         )
     };
