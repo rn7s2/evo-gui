@@ -402,8 +402,7 @@ impl TranscriptView {
             next.append(&mut data.items);
             data.items = next;
             data.retain_documents();
-            let total = data.items.len();
-            (ListChange::Prepend(total), added)
+            (ListChange::Prepend(added), added)
         });
         if added > 0 {
             self.apply_list_change(change, cx);
@@ -581,9 +580,11 @@ impl TranscriptView {
                 ListChange::Append(count) => {
                     scroller.append(count, cx);
                 }
-                // Older items went in front: the list is a different one from the
-                // scroller's point of view, at a different length.
-                ListChange::Prepend(total) => scroller.reset(total, cx),
+                // Older items went in front: an insert at the head, so the reader's
+                // place in what they were reading is kept.
+                ListChange::Prepend(count) => {
+                    scroller.splice(0..0, count, cx);
+                }
                 ListChange::Remove(range) => {
                     scroller.splice(range, 0, cx);
                 }

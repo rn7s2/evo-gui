@@ -197,6 +197,18 @@ fn items_move_by_id_and_keep_the_order_they_arrived_in(cx: &mut TestAppContext) 
             .collect();
         assert_eq!(ids, ["e_0", "e_1", "e_2"]);
     });
+    // The list draws them, in that order, without the reader losing their place: the
+    // prepend is an insert at the head, not a rebuild.
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        let older = window.find(row_id("transcript-measure", "e_0")).bounds();
+        let first = window.find(row_id("transcript-measure", "e_1")).bounds();
+        let answer = window.find(row_id("transcript-measure", "e_2")).bounds();
+        assert!(
+            older.origin.y < first.origin.y && first.origin.y < answer.origin.y,
+            "the older item is above the ones already held"
+        );
+    });
 
     // An item the topic dropped goes, and goes only once.
     view.update(cx, |view, cx| {
