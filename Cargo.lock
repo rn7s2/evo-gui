@@ -1735,12 +1735,10 @@ dependencies = [
  "anyhow",
  "async-channel",
  "gpui-kit",
- "libc",
  "serde_json",
  "session",
  "settings",
  "store",
- "swarm_client",
  "tab_engine",
  "workspace",
 ]
@@ -5189,10 +5187,8 @@ dependencies = [
  "async-channel",
  "libc",
  "serde_json",
- "session",
  "store",
  "swarm_client",
- "tab_engine",
 ]
 
 [[package]]
