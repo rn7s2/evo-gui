@@ -395,7 +395,15 @@ impl TabContent {
         let agents_subscription = cx.subscribe(
             &agents,
             |this, _list, event: &AgentListEvent, cx| match event {
-                AgentListEvent::Select(agent) => this.select_agent(*agent, cx),
+                AgentListEvent::Select(agent) => {
+                    this.select_agent(*agent, cx);
+                    // A drawer is about the agent that was selected when it was
+                    // opened: showing another agent's transcript folds it back, which
+                    // is what a press on the row does by landing outside the box —
+                    // and what the keyboard's own selection does here.
+                    this.composer
+                        .update(cx, |composer, cx| composer.close_drawer(cx));
+                }
                 // The one human action on a lane: stop it (§7.4).
                 AgentListEvent::StopLane(lane) => this.on_stop_lane(*lane),
             },
@@ -1955,5 +1963,106 @@ mod tests {
             );
         })
         .expect("the header without it");
+    }
+
+    /// §7.3: a drawer folds out inside the box and is transient — a press that lands
+    /// outside the box folds it, wherever on the page it lands, and a press inside the
+    /// box leaves it alone (the design's `pointerdown` on the document, with the box
+    /// answering for itself).
+    #[gpui_kit::test]
+    fn a_press_outside_the_box_folds_an_open_drawer(cx: &mut TestAppContext) {
+        let (window, tab) = running_tab(cx);
+        let composer = cx.update(|cx| tab.read(cx).composer.clone());
+        // The chips are the topic's own segments, so the drawer has a chip to open
+        // from: an agent with a model, put in by hand the way the server would.
+        cx.update(|cx| {
+            composer.update(cx, |composer, cx| {
+                composer.set_agent(&model_state(), "Coordinator", true, cx)
+            });
+        });
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("composer-chip-model", cx);
+            window.render_frame(cx);
+            assert!(
+                window.try_find("composer-drawer").is_some(),
+                "the drawer is out"
+            );
+
+            // A press on the transcript, which is the page's own surface and not the
+            // box: the drawer folds.
+            window.click("conversation-column", cx);
+            window.render_frame(cx);
+            assert!(
+                window.try_find("composer-drawer").is_none(),
+                "a press on the transcript folds it"
+            );
+
+            // And a press in the box — on the input, which is inside it — leaves it.
+            window.click("composer-chip-model", cx);
+            window.render_frame(cx);
+            window.click("composer-box", cx);
+            window.render_frame(cx);
+            assert!(
+                window.try_find("composer-drawer").is_some(),
+                "a press on the box itself is not a press outside it"
+            );
+        })
+        .expect("the page");
+    }
+
+    /// §7.3: the keyboard's own selection is a selection too — a drawer opened on one
+    /// agent folds back when another is shown, without a press to carry it.
+    #[gpui_kit::test]
+    fn selecting_another_agent_folds_an_open_drawer(cx: &mut TestAppContext) {
+        let (window, tab) = running_tab(cx);
+        let composer = cx.update(|cx| tab.read(cx).composer.clone());
+        cx.update(|cx| {
+            composer.update(cx, |composer, cx| {
+                composer.set_agent(&model_state(), "Coordinator", true, cx)
+            });
+        });
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("composer-chip-model", cx);
+            window.render_frame(cx);
+            assert!(
+                window.try_find("composer-drawer").is_some(),
+                "the drawer is out"
+            );
+        })
+        .expect("the page");
+        // The selection, on its own update: an entity's event reaches its subscribers
+        // when the update that emitted it returns, not inside it.
+        cx.update(|cx| {
+            tab.update(cx, |tab, cx| {
+                tab.agents.update(cx, |_list, cx| {
+                    cx.emit(agent_list::AgentListEvent::Select(AgentKey::Lane(1)))
+                });
+            });
+        });
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window.try_find("composer-drawer").is_none(),
+                "showing another agent's transcript folds the drawer"
+            );
+        })
+        .expect("the page");
+    }
+
+    /// One topic's own state, as the server publishes it: a model, so the foot row has
+    /// a chip that opens the model drawer (`GET /snapshot`).
+    fn model_state() -> session::TopicState {
+        session::TopicState::from_json(&serde_json::json!({
+            "status": "idle",
+            "model": {"id": "stub-a", "provider": "openai", "ready": true},
+            "thinking": "medium",
+            "segments": [
+                {"name": "model", "order": 100, "side": "left", "text": "stub-a", "data": {}},
+                {"name": "thinking", "order": 200, "side": "left", "text": "medium",
+                 "data": {}},
+            ],
+        }))
     }
 }

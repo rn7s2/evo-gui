@@ -22,6 +22,9 @@
 //! keeps a failed send's draft alive, and what keeps the button disabled only while
 //! its own request is in flight.
 
+use std::cell::Cell;
+use std::rc::Rc;
+
 use gpui_kit::base::input::Position;
 use gpui_kit::base::TextSelection;
 use gpui_kit::component::{
@@ -32,9 +35,9 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    div, px, radians, Animation, AnimationExt as _, AnyElement, App, BoxShadow, ClipboardItem,
-    Context, ElementId, Entity, EventEmitter, FocusHandle, Global, IntoElement, KeyBinding,
-    Keystroke, KeystrokeEvent, MouseButton, Pixels, Render, ScrollHandle, SharedString,
+    div, px, radians, Animation, AnimationExt as _, AnyElement, App, Bounds, BoxShadow,
+    ClipboardItem, Context, ElementId, Entity, EventEmitter, FocusHandle, Global, IntoElement,
+    KeyBinding, Keystroke, KeystrokeEvent, Pixels, Point, Render, ScrollHandle, SharedString,
     Subscription, TestSupportExt as _, WeakEntity, Window,
 };
 use session::{ordered_segments, Segment, Todo, TodoStatus, TopicState};
@@ -329,6 +332,9 @@ pub struct Composer {
     room: Pixels,
     /// The todo list's own scroll position, kept across frames.
     todos_scroll: ScrollHandle,
+    /// Where the box was painted last frame: what "outside the box" is measured
+    /// against when the page folds an open drawer on a press (`useOutsideClose`).
+    box_bounds: Rc<Cell<Bounds<Pixels>>>,
     /// The rail's keyboard focus, so the arrows move the effort while it is held.
     effort_focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
@@ -413,6 +419,7 @@ impl Composer {
             pending_send: None,
             room: px(320.),
             todos_scroll: ScrollHandle::new(),
+            box_bounds: Rc::new(Cell::new(Bounds::default())),
             effort_focus: cx.focus_handle(),
             _subscriptions: vec![subscription, interceptor],
         }
@@ -521,6 +528,18 @@ impl Composer {
             move |icon, t: f32| icon.rotate(radians(from + (to - from) * t)),
         )
         .into_any_element()
+    }
+
+    /// Fold the open drawer back if `at` is a press outside the box, which is what
+    /// the design's `pointerdown` listener on the document does. The page asks this
+    /// on every press it sees, so a press on the transcript, the lanes or the band
+    /// folds it, and one in the box — on the input, a chip, the strip, the drawer
+    /// itself — leaves it.
+    pub fn close_drawer_at(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
+        if self.box_bounds.get().contains(&at) {
+            return;
+        }
+        self.close_drawer(cx);
     }
 
     /// Fold the open drawer back, as selecting another agent does.
@@ -1342,9 +1361,23 @@ impl Render for Composer {
         let drawer = self.drawer_panel(palette, window, cx);
         let foot = self.foot(palette, cx);
 
+        // Where the box was painted: the page asks this against the press it sees, so
+        // that a press in the box and a press outside it are told apart by where they
+        // landed rather than by who handled them first (the input, a chip and the
+        // drawer all take their own presses).
+        let measure = {
+            let box_bounds = self.box_bounds.clone();
+            move |painted: Vec<Bounds<Pixels>>, _window: &mut Window, _cx: &mut App| {
+                if let Some(bounds) = painted.first().copied() {
+                    box_bounds.set(bounds);
+                }
+            }
+        };
+
         // The dock: the box sits on the transcript's reading measure, at the foot of
         // the conversation, and the page owns everything above it.
         div()
+            .on_children_prepainted(measure)
             .id("composer")
             .test_support()
             .flex_none()
@@ -1354,9 +1387,6 @@ impl Render for Composer {
             .px(px(INSET))
             .pt(px(4.))
             .pb(px(INSET))
-            // A press inside the box is not a press outside it: the page folds an open
-            // drawer on a click away from the box, and this is what tells it apart.
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(
                 v_flex()
                     .id("composer-box")

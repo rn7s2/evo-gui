@@ -25,8 +25,8 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    div, px, AnyElement, App, Context, IntoElement, Pixels, SharedString, TestSupportExt as _,
-    Window,
+    div, px, AnyElement, App, Context, IntoElement, MouseButton, MouseDownEvent, Pixels,
+    SharedString, TestSupportExt as _, Window,
 };
 use session::AgentKey;
 
@@ -246,6 +246,20 @@ impl TabContent {
             .id("tab-page")
             .test_support()
             .size_full()
+            // The design's `pointerdown` on the document, which folds an open drawer
+            // on a press anywhere but the composer's box. This is the page's own
+            // whole surface — the lanes, the band, the transcript, the space the box
+            // sits in — so a press in any of them reaches here, and the box answers
+            // for itself: it is the composer that knows where its box was painted.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                    let composer = this.composer.clone();
+                    composer.update(cx, |composer, cx| {
+                        composer.close_drawer_at(event.position, cx)
+                    });
+                }),
+            )
             .child(self.render_columns(folder, panes, window, cx))
             .into_any_element()
     }
