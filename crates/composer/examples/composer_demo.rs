@@ -135,7 +135,6 @@ impl Demo {
             composer.set_agent(&state, "Coordinator", true, cx);
             composer.set_catalog(
                 vec![
-                    "off".to_string(),
                     "low".to_string(),
                     "medium".to_string(),
                     "high".to_string(),

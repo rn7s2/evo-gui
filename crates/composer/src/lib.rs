@@ -32,12 +32,14 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    div, px, AnyElement, App, BoxShadow, ClipboardItem, Context, ElementId, Entity, EventEmitter,
-    FocusHandle, Global, IntoElement, KeyBinding, Keystroke, KeystrokeEvent, MouseButton, Pixels,
-    Render, ScrollHandle, SharedString, Subscription, TestSupportExt as _, WeakEntity, Window,
+    div, px, radians, Animation, AnimationExt as _, AnyElement, App, BoxShadow, ClipboardItem,
+    Context, ElementId, Entity, EventEmitter, FocusHandle, Global, IntoElement, KeyBinding,
+    Keystroke, KeystrokeEvent, MouseButton, Pixels, Render, ScrollHandle, SharedString,
+    Subscription, TestSupportExt as _, WeakEntity, Window,
 };
 use session::{ordered_segments, Segment, Todo, TodoStatus, TopicState};
 use store::design::{self, Palette, INSET, MEASURE, RADIUS};
+use widgets::effort::cubic_bezier;
 use widgets::{paint, Chip, EffortSlider};
 
 /// The input grows from the design's two lines to as much as half the conversation
@@ -88,6 +90,10 @@ const TODO_ROW: Pixels = px(18.);
 const TODO_BOX: Pixels = px(14.);
 const TODO_BOX_RADIUS: Pixels = px(3.);
 const TODO_BOX_INSET: Pixels = px(6.);
+/// The chevron's turn when the todo strip is folded: `.chev{transition:transform
+/// .12s ease}`.
+const CHEVRON_TURN: std::time::Duration = std::time::Duration::from_millis(120);
+
 /// The drawer's rows and its model items.
 const DRAWER_ROW: Pixels = px(32.);
 const DRAWER_ITEM: Pixels = px(30.);
@@ -293,6 +299,11 @@ pub struct Composer {
     drawer: Option<Drawer>,
     /// Whether the todo list is unfolded.
     todos_open: bool,
+    /// Whether the chevron was drawn pointing up the last time it was drawn, and
+    /// how many times it has turned: `.chev{transition:transform .12s ease}` needs
+    /// to know what it is turning from, and a new id to turn under.
+    chevron_up: bool,
+    chevron_turns: u64,
     /// The swarm's own busy flag: what the action button's face follows.
     busy: bool,
     /// True while this composer's own request is in flight — the only reason the
@@ -386,6 +397,8 @@ impl Composer {
             models: Vec::new(),
             drawer: None,
             todos_open: false,
+            chevron_up: false,
+            chevron_turns: 0,
             busy: false,
             in_flight: false,
             history: Vec::new(),
@@ -472,6 +485,36 @@ impl Composer {
             self.models = models;
             cx.notify();
         }
+    }
+
+    /// Unfold or fold the todo list, which is also the chevron's turn: the angle it
+    /// is coming from is the one it was last drawn at, and the turn is re-keyed so
+    /// the animation runs once per press (`.chev{transition:transform .12s ease}`).
+    fn toggle_todos(&mut self, cx: &mut Context<Self>) {
+        self.chevron_up = self.todos_open;
+        self.chevron_turns = self.chevron_turns.wrapping_add(1);
+        self.todos_open = !self.todos_open;
+        cx.notify();
+    }
+
+    /// The strip's chevron: the design's one glyph — an up chevron — drawn at 12px
+    /// and turned over the design's 120ms when the strip is folded (`up` is 0°, the
+    /// folded state the 180° the CSS rotates it to).
+    fn chevron(&self, open: bool) -> AnyElement {
+        // Up is the open strip: 0°. Folded is the 180° the CSS turns it to.
+        let angle = |up: bool| if up { 0. } else { std::f32::consts::PI };
+        let icon = Icon::new(IconName::ChevronUp).size(px(12.));
+        if self.chevron_up == open {
+            return icon.rotate(radians(angle(open))).into_any_element();
+        }
+        let (from, to) = (angle(self.chevron_up), angle(open));
+        let turn = Animation::new(CHEVRON_TURN).with_easing(cubic_bezier(0.25, 0.1, 0.25, 1.));
+        icon.with_animation(
+            ("todo-chevron", self.chevron_turns),
+            turn,
+            move |icon, t: f32| icon.rotate(radians(from + (to - from) * t)),
+        )
+        .into_any_element()
     }
 
     /// Fold the open drawer back, as selecting another agent does.
@@ -740,8 +783,7 @@ impl Composer {
                     .text_color(ink)
                     .hover(move |row| row.text_color(paint::color(palette.fg)))
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.todos_open = !this.todos_open;
-                        cx.notify();
+                        this.toggle_todos(cx);
                     }))
                     .child(
                         div()
@@ -758,14 +800,7 @@ impl Composer {
                             .ml_auto()
                             .flex_none()
                             .text_color(paint::color(palette.muted_fg))
-                            .child(
-                                Icon::new(if open {
-                                    IconName::ChevronUp
-                                } else {
-                                    IconName::ChevronDown
-                                })
-                                .size(px(12.)),
-                            ),
+                            .child(self.chevron(open)),
                     ),
             );
         if open {
@@ -1175,10 +1210,9 @@ impl Composer {
             button = button.icon(icon);
         }
 
-        match face {
-            ActionFace::Send => button.primary(),
-            ActionFace::StopSwarm => button.secondary(),
-        }
+        // One button, the design's own: primary in both faces, because it is the
+        // same button with a different word on it (`.composer-send`).
+        button.primary()
     }
 }
 
