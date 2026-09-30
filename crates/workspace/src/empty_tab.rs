@@ -10,7 +10,7 @@
 //! set_catalog                      the /catalog body (§5.6): the cache, or a server
 //! set_history_entries              the session index's rows (§2)
 //! set_history_loading / set_catalog_error  the two states with nothing to show yet
-//! → TabContentEvent::Launch        the folder plus the choosers' plan (§7.2, §9.6)
+//! → TabContentEvent::Launch        the folder plus the choosers' plan (§7.2, §1)
 //! → TabContentEvent::Resume        a history row, by lane 1's ListEvent subscription
 //! ```
 
@@ -85,7 +85,7 @@ const CAPTION_ID: &str = "lanes-caption";
 const PROBLEMS_ID: &str = "check-problems";
 const PROBLEM_ID: &str = "check-problem";
 
-/// What the caption says when the catalog could not be read at all (§9.4): one sentence
+/// What the caption says when the catalog could not be fetched at all (§5.6): one sentence
 /// about what the tab still does, because the server's own words — `http 500: The value
 /// "Bearer …"` — are evidence, not a message. They go in the line's tooltip and in
 /// `app.log`; the choosers stay usable on Default, so a swarm can still be started.
@@ -98,7 +98,7 @@ const CATALOG_STALE: &str = "Couldn't refresh the model list — using the last 
 /// The kit's `warning` is a bright amber: 13:1 on the dark theme's near-black, but 1.9:1 on
 /// the light theme's white — a 12px line nobody can read. The light theme darkens that same
 /// hue until it clears AA (`#EAB308` → `#8D6C05`, 4.9:1); the tone stays amber, which is what
-/// it means here: not an error, something to notice (§9.4).
+/// it means here: not an error, something to notice.
 fn warning_ink(theme: &Theme) -> Hsla {
     if theme.is_dark() {
         theme.warning
@@ -113,7 +113,7 @@ struct Caption {
     text: SharedString,
     tone: CaptionTone,
     /// The words behind the line, when it is a summary of something longer: the catalog
-    /// probe's own error.
+    /// command's own error.
     detail: Option<SharedString>,
 }
 
@@ -121,7 +121,7 @@ struct Caption {
 enum CaptionTone {
     /// Nothing to say yet: the catalog is on its way.
     Loading,
-    /// Something went wrong that the tab copes with (§9.4) — quiet amber, never red.
+    /// Something went wrong that the tab copes with (§5.6) — quiet amber, never red.
     Warning,
     /// Every lane will run the model chosen here (§1).
     Note,
@@ -149,7 +149,7 @@ const HISTORY_LABEL: &str = "Resumable swarms";
 /// the title, with the path and the facts under it.
 const ROW_ICON_SIZE: Pixels = px(14.);
 const ROW_TITLE_SIZE: Pixels = px(15.);
-/// The badge on a row the app had open when it last quit (§9.5).
+/// The badge on a row the app had open when it last quit (§2).
 const OPEN_AT_QUIT_ID: &str = "history-open-at-quit";
 const OPEN_AT_QUIT_TEXT: &str = "open at last quit";
 
@@ -160,7 +160,7 @@ struct ChooserItem {
     /// Stable identity of the option: what the launcher is told was chosen.
     key: SharedString,
     label: SharedString,
-    /// The detail under the label: the context window and what else the registry knows, or
+    /// The detail under the label: the context window and what else the catalog knows, or
     /// the reason the option cannot be used.
     detail: SharedString,
     available: bool,
@@ -197,7 +197,7 @@ impl SelectItem for ChooserItem {
     }
 
     /// A lanes model a lane cannot register is shown, not hidden: seeing why is the point
-    /// (§9.4).
+    /// (§5.6).
     fn disabled(&self) -> bool {
         !self.available
     }
@@ -257,7 +257,7 @@ impl Choosers {
         chosen_label(&self.state, Choice::Coordinator, cx)
     }
 
-    /// The chosen lanes model's label (§9.6).
+    /// The chosen lanes model's label.
     pub(crate) fn lanes_model(&self, cx: &App) -> SharedString {
         chosen_label(&self.state, Choice::Lanes, cx)
     }
@@ -267,7 +267,7 @@ impl Choosers {
         chosen_label(&self.state, Choice::Workers, cx)
     }
 
-    /// What the three choosers add up to (§7.2, §9.6).
+    /// What the choosers add up to (§7.2, §1).
     pub(crate) fn plan(&self, cx: &App) -> LaunchPlan {
         self.state.read(cx).launcher.plan()
     }
@@ -434,7 +434,7 @@ impl EmptyTabState {
     }
 
     /// A chooser committed an option. The launcher is the one who decides whether it means
-    /// anything: a rebuilt chooser can drop a choice that no longer exists (§9.4).
+    /// anything: a rebuilt chooser can drop a choice that no longer exists.
     fn on_choose(
         &mut self,
         which: Choice,
@@ -644,9 +644,9 @@ impl EmptyTabState {
     fn caption(&self) -> Option<Caption> {
         if let Some(error) = &self.catalog_error {
             // The server's own words are evidence, not a message: they go in the hover (and
-            // in `app.log`, where the probe wrote them) and the line says what the tab does
+            // in `app.log`, where the app wrote them) and the line says what the tab does
             // about it — nothing, which is why it still works: every chooser is on Default,
-            // and the folder card opens a swarm from there (§9.4).
+            // and the folder card opens a swarm from there.
             let text = if self.catalog {
                 // A cache was in use, so the last catalog is still in the choosers.
                 CATALOG_STALE
@@ -1099,7 +1099,7 @@ impl TabContent {
         }
     }
 
-    /// The resumable swarms, newest first (§9.5), with the two states that have no rows.
+    /// The resumable swarms, newest first (§2), with the two states that have no rows.
     fn render_history(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.history.read(cx).delegate();
         let rows = state.rows().len();
@@ -1275,7 +1275,7 @@ impl TabContent {
     }
 }
 
-/// The empty tab's history list (§9.5): the rows, and the states before there are any.
+/// The empty tab's history list (§2): the rows, and the states before there are any.
 pub(crate) struct HistoryList {
     rows: Vec<HistoryRow>,
     /// The background scan is still running.
@@ -1846,7 +1846,7 @@ mod tests {
             );
 
             // The server now says a lane can: the same registration turns available, with no
-            // probe, no api-set comparison and nothing remembered between the two bodies.
+            // API set to compare and nothing remembered between the two bodies.
             let mut live = catalog_body();
             live["lanes"]["models"][0]["ok"] = Value::Bool(true);
             live["lanes"]["models"][0]["reason"] = Value::Null;
@@ -1980,7 +1980,7 @@ mod tests {
             });
             window.render_frame(cx);
 
-            // The rows carry the folder's name, the `~` path and the meta line (§9.5).
+            // The rows carry the folder's name, the `~` path and the meta line (§2).
             assert_eq!(f.tab.read(cx).history_rows(cx).len(), 2);
             assert_eq!(f.tab.read(cx).history_rows(cx)[0].title, "foo");
             assert_eq!(f.tab.read(cx).history_rows(cx)[0].subtitle, "~/coding/foo");
@@ -2527,8 +2527,8 @@ mod tests {
             assert!(problem_lines(cx, &f.tab).is_empty());
             assert!(window.try_find(PROBLEMS_ID).is_none());
 
-            // The check's answer, as the app would hand it over: two lines, one about the
-            // coordinator's model and one about the lanes'.
+            // The check's answer, as evo's own `check --json` gives it: two problems, one
+            // about the coordinator's model and one about the lanes'.
             f.tab.update(cx, |tab, cx| {
                 tab.choosers.state.update(cx, |state, cx| {
                     state.set_problems(
@@ -2585,8 +2585,8 @@ mod tests {
     fn a_catalog_failure_reads_as_one_sentence_and_keeps_the_servers_words_for_the_hover(
         cx: &mut TestAppContext,
     ) {
-        // The error a real probe leaves behind: the server's own words, a bearer token and
-        // all. Under a chooser that reads as a broken screen (§9.4).
+        // The error a failing catalog fetch leaves behind: the command's own words, a
+        // bearer token and all. Under a chooser it reads as a broken screen.
         let raw = r#"http 500: The value "Bearer sk-live-9f3c…" is not a model"#;
         let f = open(cx);
         f.act(cx, |window, cx| {
@@ -2622,7 +2622,7 @@ mod tests {
         });
     }
 
-    /// A probe can fail while the last catalog is still in the choosers: then the line must
+    /// A fetch can fail while the last catalog is still in the choosers: then the line must
     /// not claim the list is gone when it is on the screen.
     #[gpui_kit::test]
     fn a_failed_refresh_says_the_last_catalog_is_still_in_use(cx: &mut TestAppContext) {
