@@ -1,29 +1,20 @@
-//! The empty tab's view model: the choosers built from a `/catalog` body, the launch plan
-//! they produce, the check's problems, and the history rows.
+//! The empty tab's view model: what the controls resolve to, the plan they produce, and
+//! the history rows.
 //!
 //! `catalog.json` is the body §5.6 writes, and the shape `evo-swarm catalog --json` prints
 //! (with `lanes`); `catalog-two-providers.json` is the same body with one id registered
 //! under two providers, which is what `--model id@provider` exists for. Cases neither
-//! capture reaches — a catalog with no `lanes`, a level list that is empty — are
-//! synthesized here, and each says what shape it copies.
+//! capture reaches — a catalog with no `lanes`, a ladder that lists only the retired rung —
+//! are synthesized here, and each says what shape it copies.
 
 mod common;
 
 use common::fixture;
 use serde_json::json;
 use session::{
-    coordinator_chooser, history_rows, home_short, lanes_chooser, relative_time, thinking_chooser,
-    workers_chooser, Choice, Chooser, HistoryEntry, HistorySource, LaunchPlan, Launcher,
-    DEFAULT_KEY, WORKERS_MAX,
+    history_rows, home_short, model_options, relative_time, thinking_levels, HistoryEntry,
+    HistorySource, LaunchPlan, Launcher, Role, DEFAULT_WORKERS, WORKERS_MAX, WORKERS_MIN,
 };
-
-fn labels(chooser: &Chooser) -> Vec<&str> {
-    chooser
-        .options
-        .iter()
-        .map(|option| option.label.as_str())
-        .collect()
-}
 
 fn entry(path: &str, folder: &str) -> HistoryEntry {
     HistoryEntry {
@@ -39,174 +30,263 @@ fn entry(path: &str, folder: &str) -> HistoryEntry {
     }
 }
 
-// --- choosers ----------------------------------------------------------------------
+// --- the registrations ---------------------------------------------------------------
 
 #[test]
-fn the_coordinator_chooser_lists_every_registration_after_default() {
-    let chooser = coordinator_chooser(&fixture("catalog.json"));
+fn every_registration_is_an_option_named_by_id_and_provider() {
+    let options = model_options(&fixture("catalog.json"));
     assert_eq!(
-        labels(&chooser),
-        // Sorted by provider, then id.
+        keys_of(&options),
         vec![
-            "Default",
-            "ark-deepseek-v4.1-flash",
-            "claude-opus-5",
-            "claude-sonnet-5"
-        ]
+            "claude-opus-5@anthropic",
+            "ark-deepseek-v4.1-flash@aiden",
+            "claude-sonnet-5@proxy"
+        ],
+        "the catalog's own order"
     );
-    assert_eq!(chooser.options[0].key, DEFAULT_KEY);
-    assert_eq!(chooser.options[0].detail, "evo's own default");
-    assert_eq!(chooser.options[0].model(), None);
-
-    let opus = chooser
-        .option("claude-opus-5@anthropic")
-        .expect("the key names id and provider");
-    assert_eq!(opus.label, "claude-opus-5");
+    let opus = &options[0];
+    assert_eq!(opus.id, "claude-opus-5");
+    assert_eq!(opus.provider, "anthropic");
     assert_eq!(opus.detail, "200k ctx · vision · reasons");
+    assert!(opus.ready && opus.lane_ok);
+    // A model evo cannot reach says so in its own words, and a lane cannot register it
+    // either.
+    let sonnet = &options[2];
+    assert!(!sonnet.ready);
+    assert_eq!(sonnet.ready_reason.as_deref(), Some("no credential"));
+    assert!(!sonnet.lane_ok);
     assert_eq!(
-        opus.model(),
-        Some(("claude-opus-5".to_string(), "anthropic".to_string()))
-    );
-    assert!(opus.available && opus.unavailable_reason.is_none());
-    assert_eq!(chooser.models().count(), 3, "Default is not a model");
-    assert_eq!(chooser.index_of("nope"), None);
-}
-
-/// §1: `--model id@provider` names one registration, so two registrations of one id are
-/// two choosable options — each labelled with the provider it runs.
-#[test]
-fn one_id_under_two_providers_is_two_options() {
-    let chooser = coordinator_chooser(&fixture("catalog-two-providers.json"));
-    assert_eq!(
-        labels(&chooser),
-        vec!["Default", "stub-a (stub)", "stub-b", "stub-a (stub2)"]
-    );
-    let first = chooser.option("stub-a@stub").expect("stub");
-    let second = chooser.option("stub-a@stub2").expect("stub2");
-    assert_eq!(
-        first.model(),
-        Some(("stub-a".to_string(), "stub".to_string()))
-    );
-    assert_eq!(
-        second.model(),
-        Some(("stub-a".to_string(), "stub2".to_string()))
-    );
-    assert_ne!(first.key, second.key);
-    assert_eq!(first.detail, "200k ctx · vision · reasons");
-    assert_eq!(second.detail, "100k ctx · vision · reasons");
-}
-
-/// A model evo cannot reach is visible and not choosable: it says so in evo's own words
-/// (§5.6's `ready` / `reason`).
-#[test]
-fn an_unready_model_says_why_and_cannot_be_chosen() {
-    let chooser = coordinator_chooser(&fixture("catalog-two-providers.json"));
-    let stub_b = chooser.option("stub-b@stub").expect("stub-b");
-    assert!(!stub_b.available);
-    assert_eq!(
-        stub_b.unavailable_reason.as_deref(),
-        Some("no credential for provider stub")
-    );
-    // A model with no reason of its own still says what is wrong.
-    let bare = coordinator_chooser(&json!({"models": [
-        {"id": "m", "provider": "p", "api": "x", "ready": false}
-    ]}));
-    assert_eq!(
-        bare.option("m@p").unwrap().unavailable_reason.as_deref(),
-        Some("not ready in this session")
-    );
-}
-
-/// The lanes chooser greys out exactly what the catalog's own `lanes.models` says a lane
-/// cannot register (§5.6, §9) — no api-set guessing.
-#[test]
-fn the_lanes_chooser_greys_out_what_a_lane_cannot_register() {
-    let chooser = lanes_chooser(&fixture("catalog.json"));
-    assert_eq!(chooser.options[0].detail, "follows the coordinator");
-    assert!(chooser.option("claude-opus-5@anthropic").unwrap().available);
-    assert!(
-        chooser
-            .option("ark-deepseek-v4.1-flash@aiden")
-            .unwrap()
-            .available
-    );
-    let blocked = chooser.option("claude-sonnet-5@proxy").unwrap();
-    assert!(!blocked.available);
-    assert_eq!(
-        blocked.unavailable_reason.as_deref(),
+        sonnet.lane_reason.as_deref(),
         Some("api anthropic-oauth-messages is not in a lane")
     );
+    // A registration without a provider is not one: `--model id@provider` needs both.
+    let bare = model_options(&json!({"models": [{"id": "m"}, {"id": "n", "provider": "p"}]}));
+    assert_eq!(keys_of(&bare), vec!["n@p"]);
 }
 
-/// A catalog with no `lanes` (an `evo-agent` body) has made no judgement about lanes:
-/// nothing is greyed out on its word.
+fn keys_of(options: &[session::ModelOption]) -> Vec<&str> {
+    options.iter().map(|m| m.key.as_str()).collect()
+}
+
+/// Without a `lanes` list (an `evo-agent` body) evo has made no judgement about lanes,
+/// and a model's own readiness answers for one too.
 #[test]
-fn a_catalog_without_lanes_greys_nothing_out_on_that_account() {
+fn a_catalog_without_lanes_judges_a_lane_by_the_models_own_readiness() {
     let mut body = fixture("catalog.json");
     body.as_object_mut().unwrap().remove("lanes");
-    let chooser = lanes_chooser(&body);
-    assert_eq!(chooser.models().count(), 3);
-    // …and the only thing left that can stop an option is evo's own readiness, which is
-    // the same judgement the coordinator's chooser makes.
-    assert!(chooser.option("claude-opus-5@anthropic").unwrap().available);
-    assert!(!chooser.option("claude-sonnet-5@proxy").unwrap().available);
+    let options = model_options(&body);
+    assert!(options[0].lane_ok, "ready");
+    assert!(!options[2].lane_ok, "not ready");
 }
 
+/// The ladder a **launch** may carry: `/catalog.thinking_levels` without the retired rung,
+/// and evo's own five when the catalog lists none.
 #[test]
-fn the_thinking_chooser_is_the_catalogs_levels_or_the_contracts_five() {
-    let chooser = thinking_chooser(&fixture("catalog.json"));
+fn the_ladder_is_the_catalogs_without_the_retired_rung() {
     assert_eq!(
-        labels(&chooser),
-        vec!["Default", "off", "low", "medium", "high", "xhigh"]
+        thinking_levels(&fixture("catalog.json")),
+        vec!["low", "medium", "high", "xhigh"]
     );
-    assert_eq!(chooser.options[0].detail, "as the model is configured");
-    assert_eq!(chooser.option("high").unwrap().level(), Some("high"));
-    assert_eq!(chooser.option(DEFAULT_KEY).unwrap().level(), None);
-
-    // A body that lists none falls back to §5.6's set.
-    let bare = thinking_chooser(&json!({"models": [], "thinking_levels": []}));
-    assert_eq!(bare.options.len(), 6);
-    // …and a body with its own list is believed.
-    let two = thinking_chooser(&json!({"thinking_levels": ["off", "high"]}));
-    assert_eq!(labels(&two), vec!["Default", "off", "high"]);
+    // A body that lists none — or only the retired rung — is evo's own ladder.
+    assert_eq!(
+        thinking_levels(&json!({"thinking_levels": []})),
+        vec!["low", "medium", "high", "xhigh", "max"]
+    );
+    assert_eq!(
+        thinking_levels(&json!({"thinking_levels": ["off"]})),
+        vec!["low", "medium", "high", "xhigh", "max"]
+    );
+    // A body with its own list is believed.
+    assert_eq!(
+        thinking_levels(&json!({"thinking_levels": ["off", "high", "max"]})),
+        vec!["high", "max"]
+    );
 }
 
+// --- the resolved controls -----------------------------------------------------------
+
+/// §7.2: the controls open on what evo would run now, and nothing is called "Default".
 #[test]
-fn the_workers_chooser_runs_to_the_caps_own_limit() {
-    let chooser = workers_chooser();
-    assert_eq!(chooser.options.len(), WORKERS_MAX as usize + 1);
-    assert_eq!(chooser.options[0].key, DEFAULT_KEY);
-    assert_eq!(chooser.options[0].label, "Default");
-    assert_eq!(chooser.options[1].key, "1");
-    assert_eq!(chooser.options[WORKERS_MAX as usize].key, "64");
-    assert!(chooser.options.iter().all(|option| option.available));
+fn the_controls_open_on_the_catalogs_own_resolution() {
+    let mut launcher = Launcher::new();
+    assert_eq!(launcher.workers(), DEFAULT_WORKERS);
+    assert_eq!(launcher.level(Role::Coordinator), Some("medium"));
+    assert_eq!(launcher.level(Role::Lanes), Some("medium"));
+
+    launcher.set_catalog(&fixture("catalog.json"));
+    // The catalog's own `default_model`, which both cards can run.
+    assert_eq!(
+        launcher.chosen_key(Role::Coordinator),
+        Some("ark-deepseek-v4.1-flash@aiden")
+    );
+    assert_eq!(
+        launcher.chosen_key(Role::Lanes),
+        Some("ark-deepseek-v4.1-flash@aiden")
+    );
+    assert_eq!(launcher.unresolved_note(Role::Coordinator), None);
 }
 
-// --- the launch plan ----------------------------------------------------------------
+/// Without a `default_model` the first registration each card can run is the answer — and
+/// the two cards answer differently, because a lane cannot run everything.
+#[test]
+fn without_a_default_each_card_takes_the_first_it_can_run() {
+    let mut launcher = Launcher::new();
+    launcher.set_catalog(&json!({
+        "models": [
+            {"id": "m", "provider": "p", "ready": true},
+            {"id": "l", "provider": "p", "ready": true}
+        ],
+        "lanes": {"models": [
+            {"id": "m", "provider": "p", "ok": false, "reason": "not an api a lane has"},
+            {"id": "l", "provider": "p", "ok": true}
+        ]}
+    }));
+    assert_eq!(launcher.chosen_key(Role::Coordinator), Some("m@p"));
+    assert_eq!(launcher.chosen_key(Role::Lanes), Some("l@p"));
+    assert_eq!(
+        launcher
+            .model("m@p")
+            .and_then(|model| model.reason(Role::Lanes)),
+        Some("not an api a lane has")
+    );
+}
 
+/// What `check --json` resolved is what the launch would run, so it wins over the
+/// catalog's own default — `ok` or not, with the check's own line saying why.
+#[test]
+fn what_the_check_resolved_is_what_the_fields_show() {
+    let mut launcher = Launcher::new();
+    launcher.set_catalog(&fixture("catalog.json"));
+    launcher.set_check(&json!({
+        "ok": false,
+        "model": {"id": "claude-opus-5", "provider": "anthropic", "ok": true},
+        "lane_model": {"id": "claude-sonnet-5", "provider": "proxy", "ok": false,
+                       "reason": "api anthropic-oauth-messages is not in a lane"},
+        "problems": []
+    }));
+    assert_eq!(
+        launcher.chosen_key(Role::Coordinator),
+        Some("claude-opus-5@anthropic")
+    );
+    assert_eq!(
+        launcher.chosen_key(Role::Lanes),
+        Some("claude-sonnet-5@proxy"),
+        "a model the check judged unusable is still the model it resolved"
+    );
+}
+
+/// A check that resolved nothing — the empty home — leaves the fields empty, and they say
+/// so in evo's own words rather than inventing a model.
+#[test]
+fn a_check_that_resolved_nothing_says_so_in_evos_words() {
+    let mut launcher = Launcher::new();
+    launcher.set_catalog(&json!({"models": [], "thinking_levels": []}));
+    launcher.set_check(&json!({
+        "ok": null,
+        "model": {"id": null, "provider": null, "ok": null, "reason": "no model is configured"},
+        "lane_model": {"id": null, "provider": null, "ok": null, "reason": "no model is configured"},
+        "problems": [
+            {"code": "model_unresolved", "message": "the model the swarm would run is not usable: no model is configured"}
+        ]
+    }));
+    assert_eq!(launcher.chosen_key(Role::Coordinator), None);
+    assert_eq!(
+        launcher.unresolved_note(Role::Coordinator).as_deref(),
+        Some("no model is configured")
+    );
+    // A field with nothing at all to go on still says something.
+    let mut bare = Launcher::new();
+    bare.set_check(&json!({"ok": null, "problems": []}));
+    assert_eq!(
+        bare.unresolved_note(Role::Lanes).as_deref(),
+        Some("No models are registered")
+    );
+}
+
+/// A choice stands until the registration leaves the catalog: a refresh that still lists
+/// it leaves the choice alone, and one that dropped it re-resolves.
+#[test]
+fn a_choice_outlives_a_refresh_and_falls_back_when_it_must() {
+    let mut launcher = Launcher::new();
+    let catalog = fixture("catalog.json");
+    launcher.set_catalog(&catalog);
+    assert!(launcher.choose(Role::Coordinator, "claude-opus-5@anthropic"));
+    assert!(!launcher.choose(Role::Coordinator, "nope"), "unknown key");
+    assert!(
+        !launcher.choose(Role::Coordinator, "claude-opus-5@anthropic"),
+        "the same choice again"
+    );
+    assert!(
+        !launcher.set_catalog(&catalog),
+        "the same body changes nothing"
+    );
+    assert_eq!(
+        launcher.chosen_key(Role::Coordinator),
+        Some("claude-opus-5@anthropic")
+    );
+
+    launcher.set_catalog(&json!({"models": [{"id": "other", "provider": "p", "ready": true}]}));
+    assert_eq!(
+        launcher.chosen_key(Role::Coordinator),
+        Some("other@p"),
+        "the choice left the catalog, so the card re-resolved"
+    );
+}
+
+/// The count clamps to what a launch may carry, and the slider clamps to its ladder.
+#[test]
+fn the_count_and_the_slider_clamp_to_what_a_launch_allows() {
+    let mut launcher = Launcher::new();
+    assert!(launcher.set_workers(4));
+    assert_eq!(launcher.workers(), 4);
+    assert!(!launcher.set_workers(4));
+    launcher.set_workers(0);
+    assert_eq!(launcher.workers(), WORKERS_MIN, "a count below one is one");
+    launcher.set_workers(u16::MAX);
+    assert_eq!(launcher.workers(), WORKERS_MAX, "and above 64 is 64");
+
+    let levels = launcher.levels().len();
+    assert!(launcher.set_effort(Role::Lanes, levels - 1));
+    assert_eq!(launcher.level(Role::Lanes), Some("max"));
+    assert!(!launcher.set_effort(Role::Lanes, levels - 1));
+    launcher.set_effort(Role::Lanes, levels + 9);
+    assert_eq!(
+        launcher.level(Role::Lanes),
+        Some("max"),
+        "an index past the ladder is its end"
+    );
+    // The two sliders are their own: one card's rung is not the other's.
+    assert_eq!(launcher.effort(Role::Coordinator), 1, "medium");
+}
+
+/// The plan is the five flags a launch passes (§1), always — nothing is left to evo.
 #[test]
 fn the_plan_names_the_flags_a_launch_passes() {
     let mut launcher = Launcher::new();
-    assert!(
-        launcher.plan().is_default(),
-        "Default passes no flag at all"
-    );
+    // Before any catalog there is no model to pass — but the count and the rung are
+    // already the ones the controls show, so the launch carries them from the start.
+    let fresh = launcher.plan();
+    assert_eq!(fresh.model, None);
+    assert_eq!(fresh.workers, Some(DEFAULT_WORKERS));
+    assert_eq!(fresh.thinking.as_deref(), Some("medium"));
 
-    assert!(launcher.set_catalog(&fixture("catalog.json")));
-    assert!(launcher.select(Choice::Coordinator, "claude-opus-5@anthropic"));
-    assert!(launcher.select(Choice::Lanes, "ark-deepseek-v4.1-flash@aiden"));
-    assert!(launcher.select(Choice::LaneThinking, "high"));
-    assert!(launcher.select(Choice::Workers, "4"));
+    launcher.set_catalog(&fixture("catalog.json"));
+    launcher.choose(Role::Coordinator, "claude-opus-5@anthropic");
+    launcher.choose(Role::Lanes, "claude-opus-5@anthropic");
+    launcher.set_effort(Role::Coordinator, 2);
+    launcher.set_effort(Role::Lanes, 3);
+    launcher.set_workers(4);
     let plan = launcher.plan();
     assert_eq!(
         plan.model,
         Some(("claude-opus-5".to_string(), "anthropic".to_string()))
     );
+    assert_eq!(plan.thinking.as_deref(), Some("high"));
     assert_eq!(
         plan.lanes_model,
-        Some(("ark-deepseek-v4.1-flash".to_string(), "aiden".to_string()))
+        Some(("claude-opus-5".to_string(), "anthropic".to_string()))
     );
-    assert_eq!(plan.lane_thinking.as_deref(), Some("high"));
+    assert_eq!(plan.lane_thinking.as_deref(), Some("xhigh"));
     assert_eq!(plan.workers, Some(4));
     assert!(!plan.is_default());
 
@@ -217,45 +297,8 @@ fn the_plan_names_the_flags_a_launch_passes() {
     );
     assert_eq!(
         LaunchPlan::spec(plan.lanes_model.as_ref().unwrap()),
-        "ark-deepseek-v4.1-flash@aiden"
+        "claude-opus-5@anthropic"
     );
-}
-
-#[test]
-fn choosing_nothing_leaves_each_field_at_default() {
-    let mut launcher = Launcher::new();
-    launcher.set_catalog(&fixture("catalog.json"));
-    launcher.select(Choice::Coordinator, "claude-opus-5@anthropic");
-    launcher.select(Choice::Coordinator, DEFAULT_KEY);
-    assert_eq!(launcher.selected_key(Choice::Coordinator), DEFAULT_KEY);
-    assert!(launcher.plan().is_default());
-    assert!(launcher.selected(Choice::Coordinator).is_some());
-    assert_eq!(
-        launcher.selected(Choice::Coordinator).unwrap().model(),
-        None
-    );
-}
-
-#[test]
-fn a_selection_a_rebuilt_chooser_lost_falls_back_to_default() {
-    let mut launcher = Launcher::new();
-    launcher.set_catalog(&fixture("catalog.json"));
-    assert!(launcher.select(Choice::Coordinator, "claude-opus-5@anthropic"));
-    // The next catalog does not list that registration any more.
-    launcher.set_catalog(&json!({"models": [{"id": "other", "provider": "p", "ready": true}]}));
-    assert_eq!(launcher.selected_key(Choice::Coordinator), DEFAULT_KEY);
-    assert_eq!(launcher.chooser(Choice::Coordinator).options.len(), 2);
-    // An unknown key is ignored, and so is a choice that changes nothing.
-    assert!(!launcher.select(Choice::Coordinator, "nope"));
-    assert!(!launcher.select(Choice::Coordinator, DEFAULT_KEY));
-}
-
-#[test]
-fn setting_the_same_catalog_twice_changes_nothing() {
-    let mut launcher = Launcher::new();
-    let catalog = fixture("catalog.json");
-    assert!(launcher.set_catalog(&catalog), "from nothing to a catalog");
-    assert!(!launcher.set_catalog(&catalog), "the same body again");
 }
 
 // --- history (§2) -------------------------------------------------------------------
@@ -278,11 +321,8 @@ fn history_rows_name_a_session_by_its_title_or_its_folder() {
         Some("/Users/you"),
     );
     assert_eq!(rows[0].title, "make the empty tab read the index");
-    assert_eq!(rows[0].subtitle, "~/coding/foo");
-    assert_eq!(
-        rows[0].meta,
-        "6 lanes · 2h ago · coordinator: claude-opus-5@anthropic"
-    );
+    assert_eq!(rows[0].folder_short, "~/coding/foo");
+    assert_eq!(rows[0].when, "2h ago");
     // The tooltip carries the absolute path, the instant in the caller's zone and the
     // app's own record.
     assert_eq!(
@@ -290,11 +330,11 @@ fn history_rows_name_a_session_by_its_title_or_its_folder() {
         "/Users/you/coding/foo · 1.sexp · 2026-09-29 09:29:56 +00:00 · \
          coordinator: claude-opus-5@anthropic · 6 lanes"
     );
-    // No title, no time, no lanes: the folder names the row and the meta line says
-    // nothing rather than guessing.
+    // No title, no time, no lanes: the folder names the row and the time says nothing
+    // rather than guessing.
     assert_eq!(rows[1].title, "bar");
-    assert_eq!(rows[1].subtitle, "~/coding/bar");
-    assert_eq!(rows[1].meta, "");
+    assert_eq!(rows[1].folder_short, "~/coding/bar");
+    assert_eq!(rows[1].when, "");
     assert_eq!(rows[1].tooltip, "/Users/you/coding/bar · 2.sexp");
 }
 
@@ -322,10 +362,11 @@ fn history_rows_merge_the_index_with_the_apps_own_recents() {
     );
     assert_eq!(rows.len(), 1, "one session, not two rows");
     // The newer of the two is the base, and what only one side knows survives.
-    assert_eq!(rows[0].meta, "4 lanes · just now · coordinator: m1");
+    assert_eq!(rows[0].when, "just now");
     assert_eq!(rows[0].title, "index title");
     assert!(rows[0].open_at_quit);
     assert_eq!(rows[0].source, HistorySource::Index);
+    assert!(rows[0].tooltip.contains("4 lanes"), "{}", rows[0].tooltip);
 }
 
 #[test]
@@ -339,7 +380,7 @@ fn the_launcher_keeps_the_rows_it_was_given() {
     assert!(launcher.set_history(&entries, 1_790_674_196, 8 * 3600, Some("/Users/you")));
     assert_eq!(launcher.history().len(), 1);
     assert_eq!(launcher.history()[0].title, "foo");
-    assert_eq!(launcher.history()[0].subtitle, "~/coding/foo");
+    assert_eq!(launcher.history()[0].folder_short, "~/coding/foo");
     assert!(!launcher.set_history(&entries, 1_790_674_196, 8 * 3600, Some("/Users/you")));
 }
 

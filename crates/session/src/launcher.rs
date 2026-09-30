@@ -1,140 +1,166 @@
-//! The empty tab's view model (§7.2, §9, §14.2): the model and thinking choosers, the
-//! worker-count chooser, the launch plan they add up to, the history list, and the
-//! problems `evo-swarm check --json` found with the launch they describe.
+//! The empty tab's view model (§7.2, §9, §14.2): what the launch's controls show, the
+//! plan they add up to, and the history list under them.
 //!
 //! The input is one JSON document: the `/catalog` body, exactly as
-//! `evo-swarm catalog --json` prints it (§5.6, §9). Nothing here does I/O and nothing
-//! here depends on another crate — the app hands the body in, and the window paints
-//! what comes out.
+//! `evo-swarm catalog --json` prints it (§5.6, §9), and the answer to
+//! `evo-swarm check --json` (§9). Nothing here does I/O and nothing here depends on
+//! another crate — the app hands the bodies in, and the window paints what comes out.
 //!
-//! # The choosers
+//! # The controls open on resolved values
 //!
-//! Every chooser's first option is **Default** — the state the tab starts in, and the
-//! one that passes no flag at all. Then:
+//! There is no "Default" anywhere. Every control opens on what evo would run **now**,
+//! and what it shows is what the launch passes:
 //!
-//! * the coordinator's `--model`, one option per registration;
-//! * the lanes' `--lane-model`, the same registrations, greyed out where the catalog's
-//!   own `lanes.models` says a lane cannot register one — it says why, and that reason
-//!   is what the option shows;
-//! * the lanes' `--lane-thinking`, the levels the catalog lists;
-//! * the worker count (`--workers`).
+//! * the coordinator's model — `check`'s own `model`, else `/catalog.default_model`,
+//!   else the first registration the catalog says is `ready`;
+//! * the coordinator's effort — the middle rung of `/catalog.thinking_levels`;
+//! * the lanes' model — `check`'s `lane_model`, else the default when a lane can
+//!   register it, else the first registration a lane can;
+//! * the lanes' effort — the same middle rung;
+//! * the worker count — [`DEFAULT_WORKERS`], the count `evo-swarm` itself starts with
+//!   when neither `--workers` nor the `swarm-workers` setting says otherwise.
 //!
 //! A model is chosen by its **`ID@PROVIDER` pair**: `--model id@provider` selects
-//! exactly that registration (§1), so the ambiguity rule of the old bare-id `--model`
-//! is gone — two registrations of one id are two options, each named with its provider.
+//! exactly that registration (§1), so two registrations of one id are two options, each
+//! named with its provider. An option a lane cannot register is greyed out and says why
+//! — the catalog's own `lanes.models[].ok`/`reason`, not a guess from an api set.
+//!
+//! # What evo's own surfaces do not answer
+//!
+//! Two of the five resolved values are not on any offline surface, so this module
+//! resolves them the way evo does when no flag is given and then says so openly:
+//!
+//! * the effort: evo resolves a session's level from its journal, then the agent's
+//!   override, then the `thinking` setting, and each model clamps what it is handed.
+//!   None of those is in `catalog --json` or `check --json`, so the controls open on
+//!   evo's middle rung and the launch passes it explicitly.
+//! * the worker count: `evo-swarm` reads `--workers`, then the `swarm-workers`
+//!   setting, then 6. A `setting` lives in evo's own lisp, which no offline surface
+//!   prints, so the count opens on evo's own last fallback.
+//!
+//! # The effort ladder
+//!
+//! `/catalog.thinking_levels` is what a **session** accepts; it leads with `off`, the
+//! rung evo retired (`+effort-levels+` is `low medium high xhigh max`, and both
+//! `--thinking` and `/thinking` refuse anything else). A launch flag cannot carry it —
+//! `--thinking off` is a usage error — so the ladder the slider offers is that list
+//! without the retired rung.
 //!
 //! # History (§2)
 //!
 //! [`history_rows`] turns the session index's rows, merged with the app's own recents,
 //! into display rows: the session's title (the first user text) or the folder's name,
-//! the `~`-shortened path, and a meta line of what is known (`6 lanes · 2h ago ·
-//! coordinator: …`).
-//!
+//! the `~`-shortened path, how long ago, and the whole entry for the row's tooltip.
 
 use serde_json::Value;
 
 use crate::k_tokens;
 
-/// The key of every chooser's first option: the state that passes nothing to evo.
-pub const DEFAULT_KEY: &str = "default";
-
-/// The largest worker count the chooser offers (§14.2 allows 1–64).
+/// The smallest and largest worker count a launch may carry (§14.2 allows 1–64).
+pub const WORKERS_MIN: u16 = 1;
 pub const WORKERS_MAX: u16 = 64;
 
-/// The detail line under the coordinator chooser's Default option.
-const COORDINATOR_DEFAULT: &str = "evo's own default";
+/// The count `evo-swarm` starts with when neither `--workers` nor the project's
+/// `swarm-workers` setting says otherwise (`swarm/main.lisp`).
+pub const DEFAULT_WORKERS: u16 = 6;
 
-/// The detail line under the lanes chooser's Default option: a lane follows the
-/// coordinator unless the launch says otherwise.
-const LANES_DEFAULT: &str = "follows the coordinator";
+/// The rung the effort sliders open on, and the level evo's own ladder puts in the
+/// middle. Read as a name rather than an index: a catalog that lists its levels in
+/// another order still opens on `medium`.
+const MIDDLE_LEVEL: &str = "medium";
 
-/// The detail line under the thinking chooser's Default option.
-const THINKING_DEFAULT: &str = "as the model is configured";
+/// The rung evo retired. `/catalog.thinking_levels` still leads with it — a session
+/// folds it onto the weakest live rung — but a launch flag refuses it.
+const RETIRED_LEVEL: &str = "off";
 
-/// The thinking levels of §5.6, for a catalog that printed none.
-const THINKING_LEVELS: [&str; 5] = ["off", "low", "medium", "high", "xhigh"];
+/// The thinking levels of §5.6, for a catalog that printed none: evo's own ladder.
+const LADDER: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
-/// What a lanes chooser says when the catalog reports a model is not ready: evo's own
-/// `reason` is used when it gives one.
-const NOT_READY: &str = "not ready in this session";
-
-/// Which chooser a selection belongs to.
+/// Which of the two cards a control belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Choice {
+pub enum Role {
+    /// The coordinator: `--model`, `--thinking`.
     Coordinator,
+    /// The lanes: `--lane-model`, `--lane-thinking`, `--workers`.
     Lanes,
-    LaneThinking,
-    Workers,
 }
 
-/// One option of a chooser, as the Select renders it.
+impl Role {
+    /// The two cards, in the order they are drawn.
+    pub const ALL: [Role; 2] = [Role::Coordinator, Role::Lanes];
+
+    /// What a field in this card is called.
+    pub fn title(&self) -> &'static str {
+        match self {
+            Role::Coordinator => "Coordinator",
+            Role::Lanes => "Workers",
+        }
+    }
+
+    /// Where this card's own state sits in the two-element arrays below.
+    fn slot(&self) -> usize {
+        match self {
+            Role::Coordinator => 0,
+            Role::Lanes => 1,
+        }
+    }
+}
+
+/// One card's model field: the registration it shows, and who put it there.
 ///
-/// `model_id`/`provider` are the pair the launch plan needs and are `None` on the
-/// Default option and on the thinking and worker-count options, which are not models.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ChooserOption {
-    /// Stable identity of the option: `default`, `id@provider` for a model, the level
-    /// for a thinking option, `1`…`64` for a worker count.
-    pub key: String,
-    /// What the option is called: the model's id, with its provider when evo knows two
-    /// registrations of that id.
-    pub label: String,
-    /// One compact line under the label: the context window and what else is known.
-    pub detail: String,
-    /// Whether this option can be launched as it is. Default options and worker counts
-    /// always can; a model cannot when evo says it is not ready, or when a lane cannot
-    /// register it.
-    pub available: bool,
-    /// Why not, for the unavailable ones — evo's own words where it gave them (§5.6).
-    pub unavailable_reason: Option<String>,
-    pub model_id: Option<String>,
-    pub provider: Option<String>,
-}
-
-impl ChooserOption {
-    /// The model this option names, as the launch plan wants it.
-    pub fn model(&self) -> Option<(String, String)> {
-        Some((self.model_id.clone()?, self.provider.clone()?))
-    }
-
-    /// The thinking level this option names, when it is one.
-    pub fn level(&self) -> Option<&str> {
-        (self.key != DEFAULT_KEY && self.model_id.is_none()).then_some(self.key.as_str())
-    }
-}
-
-/// One chooser: the options, Default first.
+/// The distinction is what keeps a person's own choice: a document that resolves another
+/// registration moves a field the launcher resolved, and never one they picked.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Chooser {
-    pub options: Vec<ChooserOption>,
+struct Field {
+    /// The registration the card shows, as `ID@PROVIDER`.
+    key: Option<String>,
+    /// The person picked this one, so the next document that resolves another leaves it be.
+    by_hand: bool,
 }
 
-impl Chooser {
-    /// The key of the Default option, for a UI starting fresh.
-    pub fn default_key() -> &'static str {
-        DEFAULT_KEY
+/// One registration in the catalog, as a model field offers it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelOption {
+    /// `ID@PROVIDER`: the value a model field holds, and what a flag takes.
+    pub key: String,
+    /// The registration's id, without its provider.
+    pub id: String,
+    /// The provider keyword, lower-cased.
+    pub provider: String,
+    /// The menu's second line: the context window, then what else the catalog says.
+    pub detail: String,
+    /// Whether evo can reach it now (`/catalog.models[].ready`).
+    pub ready: bool,
+    /// Why not, in evo's own words.
+    pub ready_reason: Option<String>,
+    /// Whether a **lane** can register it. Without a `lanes` list in the body this is
+    /// the model's own `ready`: an `evo-agent` catalog has no such judgement to offer.
+    pub lane_ok: bool,
+    /// Why a lane cannot, in evo's own words.
+    pub lane_reason: Option<String>,
+}
+
+impl ModelOption {
+    /// Whether this card can launch on it as it stands.
+    pub fn usable(&self, role: Role) -> bool {
+        match role {
+            Role::Coordinator => self.ready,
+            Role::Lanes => self.lane_ok,
+        }
     }
 
-    /// The option with this key, if the chooser has it.
-    pub fn option(&self, key: &str) -> Option<&ChooserOption> {
-        self.options.iter().find(|option| option.key == key)
-    }
-
-    /// Where this key sits, for a Select that takes an index.
-    pub fn index_of(&self, key: &str) -> Option<usize> {
-        self.options.iter().position(|option| option.key == key)
-    }
-
-    /// The options that name a model, Default excluded.
-    pub fn models(&self) -> impl Iterator<Item = &ChooserOption> {
-        self.options
-            .iter()
-            .filter(|option| option.key != DEFAULT_KEY && option.model_id.is_some())
+    /// Why this card cannot, in evo's own words where evo gave them.
+    pub fn reason(&self, role: Role) -> Option<&str> {
+        match role {
+            Role::Coordinator => self.ready_reason.as_deref(),
+            Role::Lanes => self.lane_reason.as_deref(),
+        }
     }
 }
 
-/// What the tab's choosers add up to (§7.2): the flags a launch passes. Every field is
-/// `None` on Default, which is a launch with no flag at all.
+/// What the controls add up to (§7.2, §1): the flags a launch passes. Every field is
+/// `Some` once the catalog has arrived; before that the tab is still loading and the
+/// plan is empty.
 ///
 /// This is a **new** swarm's plan. A swarm resumed from history takes the coordinator's
 /// own record instead — its models are the session's, not the empty tab's — so the
@@ -143,21 +169,24 @@ impl Chooser {
 pub struct LaunchPlan {
     /// The coordinator's `--model`.
     pub model: Option<(String, String)>,
+    /// The coordinator's `--thinking`.
+    pub thinking: Option<String>,
+    /// The `--workers` count.
+    pub workers: Option<u16>,
     /// The lanes' `--lane-model`.
     pub lanes_model: Option<(String, String)>,
     /// The lanes' `--lane-thinking`.
     pub lane_thinking: Option<String>,
-    /// The `--workers` count; evo's own default applies without it.
-    pub workers: Option<u16>,
 }
 
 impl LaunchPlan {
-    /// Whether this plan passes nothing at all.
+    /// Whether this plan passes nothing at all — a tab with no catalog yet.
     pub fn is_default(&self) -> bool {
         self.model.is_none()
+            && self.thinking.is_none()
+            && self.workers.is_none()
             && self.lanes_model.is_none()
             && self.lane_thinking.is_none()
-            && self.workers.is_none()
     }
 
     /// The model pair as the `ID@PROVIDER` spec a `--model` / `--lane-model` flag takes.
@@ -166,151 +195,82 @@ impl LaunchPlan {
     }
 }
 
-// --- choosers from the catalog -----------------------------------------------------
+// --- the model fields ---------------------------------------------------------------
 
-/// The coordinator's model chooser: every registration the catalog lists, sorted by
-/// provider then id. `--model id@provider` names exactly one of them (§1), so each
-/// registration is its own choice.
-pub fn coordinator_chooser(catalog: &Value) -> Chooser {
-    model_chooser(catalog, COORDINATOR_DEFAULT, |_, _| None)
-}
-
-/// The lanes' model chooser: the same registrations, but one a lane cannot register is
-/// greyed out and says why — the catalog's own `lanes.models[].ok`/`reason`, computed by
-/// `evo-swarm` from what a lane actually has (§5.6, §9).
+/// Every registration a catalog lists, in the order evo listed them, as model options.
 ///
-/// A catalog with no `lanes` (an `evo-agent` body) has no such judgement to offer, and
-/// then nothing is greyed out.
-pub fn lanes_chooser(catalog: &Value) -> Chooser {
+/// A registration without an id or a provider is not one: `--model id@provider` needs
+/// both to name exactly what it means.
+pub fn model_options(catalog: &Value) -> Vec<ModelOption> {
+    let Some(models) = catalog.get("models").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    // `lanes.models` is the swarm's own judgement of what a lane can register; an
+    // `evo-agent` catalog has none, and then a model's own `ready` answers.
     let lanes = catalog
         .get("lanes")
-        .and_then(|l| l.get("models"))
+        .and_then(|lanes| lanes.get("models"))
         .and_then(Value::as_array);
-    model_chooser(catalog, LANES_DEFAULT, |id, provider| match lanes {
-        None => None,
-        Some(lanes) => lanes
-            .iter()
-            .find(|lane| {
-                string(lane, "id").as_deref() == Some(id)
-                    && string(lane, "provider").as_deref().map(str::to_lowercase)
-                        == Some(provider.to_owned())
+
+    models
+        .iter()
+        .filter_map(|model| {
+            let id = string(model, "id")?;
+            let provider = string(model, "provider")?.to_lowercase();
+            let ready = model.get("ready").and_then(Value::as_bool).unwrap_or(false);
+            let lane = lanes.and_then(|lanes| {
+                lanes.iter().find(|lane| {
+                    string(lane, "id").as_deref() == Some(id.as_str())
+                        && string(lane, "provider")
+                            .map(|p| p.to_lowercase())
+                            .as_deref()
+                            == Some(provider.as_str())
+                })
+            });
+            // Without a `lanes` list there is no judgement to offer, and the model's
+            // own readiness answers for a lane too.
+            let (lane_ok, lane_reason) = match (lanes, lane) {
+                (Some(_), Some(lane)) => (
+                    lane.get("ok").and_then(Value::as_bool).unwrap_or(false),
+                    string(lane, "reason"),
+                ),
+                _ => (ready, None),
+            };
+            Some(ModelOption {
+                key: format!("{id}@{provider}"),
+                detail: model_detail(model),
+                id,
+                provider,
+                ready,
+                ready_reason: string(model, "reason"),
+                lane_ok,
+                lane_reason,
             })
-            .and_then(|lane| match lane.get("ok").and_then(Value::as_bool) {
-                Some(true) => None,
-                _ => Some(string(lane, "reason").unwrap_or_else(|| NOT_READY.to_string())),
-            }),
-    })
+        })
+        .collect()
 }
 
-/// The thinking chooser: the levels the catalog lists (`thinking_levels`), or the five
-/// of §5.6 when it lists none. Default passes no `--thinking` at all, which leaves the
-/// model's own configuration in place.
-pub fn thinking_chooser(catalog: &Value) -> Chooser {
-    let levels: Vec<String> = catalog
+/// The levels a **launch flag** may carry, in the catalog's own order: everything
+/// `/catalog.thinking_levels` lists but the retired `off` rung. A catalog that lists
+/// nothing (or only the retired rung) falls back to evo's own ladder.
+pub fn thinking_levels(catalog: &Value) -> Vec<String> {
+    let listed: Vec<String> = catalog
         .get("thinking_levels")
         .and_then(Value::as_array)
         .map(|levels| {
             levels
                 .iter()
                 .filter_map(Value::as_str)
+                .filter(|level| *level != RETIRED_LEVEL)
                 .map(str::to_owned)
                 .collect()
         })
-        .filter(|levels: &Vec<String>| !levels.is_empty())
-        .unwrap_or_else(|| THINKING_LEVELS.iter().map(|l| (*l).to_string()).collect());
-    let mut options = vec![default_option(THINKING_DEFAULT)];
-    options.extend(levels.into_iter().map(|level| ChooserOption {
-        key: level.clone(),
-        label: level,
-        detail: String::new(),
-        available: true,
-        unavailable_reason: None,
-        model_id: None,
-        provider: None,
-    }));
-    Chooser { options }
-}
-
-/// The worker-count chooser: Default, then 1…64.
-pub fn workers_chooser() -> Chooser {
-    let mut options = vec![ChooserOption {
-        label: "Default".to_string(),
-        detail: "evo's own default, else 6".to_string(),
-        ..default_option("")
-    }];
-    options.extend((1..=WORKERS_MAX).map(|n| ChooserOption {
-        key: n.to_string(),
-        label: n.to_string(),
-        detail: String::new(),
-        available: true,
-        unavailable_reason: None,
-        model_id: None,
-        provider: None,
-    }));
-    Chooser { options }
-}
-
-/// Every model of a catalog body as an option, Default first.
-///
-/// `unavailable` answers why a *lane* cannot run one registration; `None` means it can,
-/// or that this chooser is not the lanes'.
-fn model_chooser(
-    catalog: &Value,
-    default_detail: &str,
-    unavailable: impl Fn(&str, &str) -> Option<String>,
-) -> Chooser {
-    let Some(models) = catalog.get("models").and_then(Value::as_array) else {
-        return Chooser {
-            options: vec![default_option(default_detail)],
-        };
-    };
-
-    // Two registrations of one id are two models at launch time (§1), but a row still
-    // has to be readable: an id evo knows under more than one provider is labelled with
-    // the provider this option runs.
-    let duplicate = |id: &str| {
-        models
-            .iter()
-            .filter(|model| string(model, "id").as_deref() == Some(id))
-            .count()
-            > 1
-    };
-
-    let mut options: Vec<ChooserOption> = Vec::with_capacity(models.len());
-    for model in models {
-        let (Some(id), Some(provider)) = (string(model, "id"), string(model, "provider")) else {
-            continue;
-        };
-        let provider = provider.to_lowercase();
-        let ready = model.get("ready").and_then(Value::as_bool).unwrap_or(false);
-        let why = unavailable(&id, &provider).or_else(|| {
-            (!ready).then(|| string(model, "reason").unwrap_or_else(|| NOT_READY.to_string()))
-        });
-        options.push(ChooserOption {
-            key: format!("{id}@{provider}"),
-            label: if duplicate(&id) {
-                format!("{id} ({provider})")
-            } else {
-                id.clone()
-            },
-            detail: model_detail(model),
-            available: why.is_none(),
-            unavailable_reason: why,
-            model_id: Some(id),
-            provider: Some(provider),
-        });
+        .unwrap_or_default();
+    if listed.is_empty() {
+        LADDER.iter().map(|level| (*level).to_string()).collect()
+    } else {
+        listed
     }
-    // Stable, so two registrations with the same provider and id keep the catalog's
-    // order.
-    options.sort_by(|a, b| {
-        a.provider
-            .cmp(&b.provider)
-            .then_with(|| a.model_id.cmp(&b.model_id))
-    });
-
-    let mut all = vec![default_option(default_detail)];
-    all.extend(options);
-    Chooser { options: all }
 }
 
 /// One model's detail line: the context window, then what else the catalog says —
@@ -331,17 +291,320 @@ fn model_detail(model: &Value) -> String {
     parts.join(" · ")
 }
 
-/// The first option of every chooser.
-fn default_option(detail: &str) -> ChooserOption {
-    ChooserOption {
-        key: DEFAULT_KEY.to_string(),
-        label: "Default".to_string(),
-        detail: detail.to_string(),
-        available: true,
-        unavailable_reason: None,
-        model_id: None,
-        provider: None,
+// --- the empty tab's controls -------------------------------------------------------
+
+/// The empty tab's controls: the two model fields, the two effort sliders, the worker
+/// count and the history list.
+///
+/// Every control opens on a **resolved** value (§7.2): the two model fields from what
+/// `check --json` or the catalog resolved, the sliders from the ladder's middle rung, the
+/// count from [`DEFAULT_WORKERS`]. A value the launcher resolved is re-resolved whenever a
+/// document arrives — the check is newer than the catalog, and the catalog newer than
+/// nothing — while a field the person set themselves stays where they put it until the
+/// registration leaves the catalog.
+#[derive(Clone, Debug, Default)]
+pub struct Launcher {
+    /// The last `/catalog` body, and what `check --json` resolved the launch to: the
+    /// two documents the fields are resolved from.
+    check: Option<Value>,
+    default_model: Option<(String, String)>,
+    /// Every registration the last catalog listed.
+    models: Vec<ModelOption>,
+    /// The levels a launch flag may carry, weakest first.
+    levels: Vec<String>,
+    /// The two cards' model fields, the coordinator's first.
+    fields: [Field; 2],
+    /// Where each slider sits, as an index into [`Launcher::levels`].
+    efforts: [usize; 2],
+    /// The worker count.
+    workers: u16,
+    history: Vec<HistoryRow>,
+}
+
+impl Launcher {
+    /// A fresh tab: the ladder's own levels and evo's own worker count, and nothing to
+    /// run yet — no catalog has arrived.
+    pub fn new() -> Launcher {
+        let levels = thinking_levels(&Value::Null);
+        Launcher {
+            efforts: [middle(&levels); 2],
+            levels,
+            workers: DEFAULT_WORKERS,
+            ..Launcher::default()
+        }
     }
+
+    /// The model catalog: the `/catalog` body `evo-swarm catalog --json` prints (§5.6).
+    /// Returns whether anything the window renders changed.
+    pub fn set_catalog(&mut self, catalog: &Value) -> bool {
+        let before = self.clone();
+        self.models = model_options(catalog);
+        self.levels = thinking_levels(catalog);
+        self.default_model = catalog
+            .get("default_model")
+            .and_then(|default| Some((string(default, "id")?, string(default, "provider")?)))
+            .map(|(id, provider)| (id, provider.to_lowercase()));
+        // A ladder that got shorter (or a first one that arrived) moves the sliders onto
+        // it; a rung that is still on it is left where it is.
+        let end = self.levels.len().saturating_sub(1);
+        for effort in &mut self.efforts {
+            *effort = (*effort).min(end);
+        }
+        self.resolve();
+        self.differs(&before)
+    }
+
+    /// What `evo-swarm check --json` resolved the launch to (§9): the models, and the
+    /// words it would use if it could resolve none. Returns whether anything changed.
+    pub fn set_check(&mut self, check: &Value) -> bool {
+        let before = self.clone();
+        self.check = Some(check.clone());
+        self.resolve();
+        self.differs(&before)
+    }
+
+    /// The resumable sessions, from the session index and the app's own recents (§2).
+    /// `now` is the clock the relative times read against, `offset_seconds` the local UTC
+    /// offset the rows are shown in, `home` the directory to shorten paths around.
+    pub fn set_history(
+        &mut self,
+        entries: &[HistoryEntry],
+        now: i64,
+        offset_seconds: i32,
+        home: Option<&str>,
+    ) -> bool {
+        let rows = history_rows(entries, now, offset_seconds, home);
+        if self.history == rows {
+            return false;
+        }
+        self.history = rows;
+        true
+    }
+
+    pub fn history(&self) -> &[HistoryRow] {
+        &self.history
+    }
+
+    /// Every registration a model field may offer, in the catalog's order.
+    pub fn models(&self) -> &[ModelOption] {
+        &self.models
+    }
+
+    /// One registration by its `ID@PROVIDER`.
+    pub fn model(&self, key: &str) -> Option<&ModelOption> {
+        self.models.iter().find(|model| model.key == key)
+    }
+
+    /// The levels the effort sliders offer, weakest first.
+    pub fn levels(&self) -> &[String] {
+        &self.levels
+    }
+
+    /// The registration one card is on, if it resolved to one.
+    pub fn chosen(&self, role: Role) -> Option<&ModelOption> {
+        self.model(self.chosen_key(role)?)
+    }
+
+    /// The `ID@PROVIDER` one card is on.
+    pub fn chosen_key(&self, role: Role) -> Option<&str> {
+        self.fields[role.slot()].key.as_deref()
+    }
+
+    /// What a model field shows when nothing resolved — evo's own words where it gave
+    /// them, so the field says why it is empty rather than inventing a model.
+    pub fn unresolved_note(&self, role: Role) -> Option<String> {
+        if self.chosen(role).is_some() {
+            return None;
+        }
+        self.check
+            .as_ref()
+            .and_then(|check| {
+                check_reason(
+                    check,
+                    match role {
+                        Role::Coordinator => "model",
+                        Role::Lanes => "lane_model",
+                    },
+                )
+            })
+            .or_else(|| Some("No models are registered".to_string()))
+    }
+
+    /// Choose a registration — a person's own pick, which the launcher then leaves alone.
+    /// An unknown key is ignored: the fields are rebuilt from the catalog, and a choice
+    /// cannot outlive the option it named. Returns whether the choice changed.
+    pub fn choose(&mut self, role: Role, key: &str) -> bool {
+        if self.model(key).is_none() || self.chosen_key(role) == Some(key) {
+            return false;
+        }
+        self.fields[role.slot()] = Field {
+            key: Some(key.to_string()),
+            by_hand: true,
+        };
+        true
+    }
+
+    /// Where one card's effort slider sits.
+    pub fn effort(&self, role: Role) -> usize {
+        self.efforts[role.slot()]
+    }
+
+    /// The level one card's slider names.
+    pub fn level(&self, role: Role) -> Option<&str> {
+        self.levels.get(self.effort(role)).map(String::as_str)
+    }
+
+    /// Move one card's slider. An index past the ladder is clamped to it: the ladder can
+    /// get shorter between one catalog and the next. Returns whether it moved.
+    pub fn set_effort(&mut self, role: Role, index: usize) -> bool {
+        if self.levels.is_empty() {
+            return false;
+        }
+        let index = index.min(self.levels.len() - 1);
+        let effort = &mut self.efforts[role.slot()];
+        if *effort == index {
+            return false;
+        }
+        *effort = index;
+        true
+    }
+
+    /// The worker count.
+    pub fn workers(&self) -> u16 {
+        self.workers
+    }
+
+    /// Set the worker count, clamped to what a launch may carry: typing a count outside
+    /// 1–64 lands on the nearest end, the way the field's own stepper does. Returns
+    /// whether it changed.
+    pub fn set_workers(&mut self, count: u16) -> bool {
+        let count = count.clamp(WORKERS_MIN, WORKERS_MAX);
+        if self.workers == count {
+            return false;
+        }
+        self.workers = count;
+        true
+    }
+
+    /// What the controls add up to (§7.2): the coordinator's `--model` and `--thinking`,
+    /// `--workers`, and the lanes' `--lane-model` and `--lane-thinking`.
+    pub fn plan(&self) -> LaunchPlan {
+        LaunchPlan {
+            model: self.chosen(Role::Coordinator).map(pair),
+            thinking: self.level(Role::Coordinator).map(str::to_owned),
+            workers: Some(self.workers),
+            lanes_model: self.chosen(Role::Lanes).map(pair),
+            lane_thinking: self.level(Role::Lanes).map(str::to_owned),
+        }
+    }
+
+    /// Fill in the two model fields from what evo resolved — and leave a person's own
+    /// pick alone: only a field the launcher set itself is re-resolved.
+    fn resolve(&mut self) {
+        for role in Role::ALL {
+            let field = &self.fields[role.slot()];
+            let stands = field.by_hand
+                && field
+                    .key
+                    .as_deref()
+                    .and_then(|key| self.model(key))
+                    .is_some();
+            if stands {
+                continue;
+            }
+            self.fields[role.slot()] = Field {
+                key: self.resolved(role),
+                by_hand: false,
+            };
+        }
+    }
+
+    /// What evo resolves one card's model to, in the order §7.2 reads it.
+    fn resolved(&self, role: Role) -> Option<String> {
+        // What `check` resolved: its answer is the launch's own, `ok` or not — a model
+        // it judged unusable is still the model it resolved, and the check's own line
+        // under the cards says why.
+        if let Some(key) = self
+            .check
+            .as_ref()
+            .and_then(|check| checked_model(check, role))
+        {
+            if self.model(&key).is_some() {
+                return Some(key);
+            }
+        }
+        // Then evo's own default registration, when this card can run it.
+        let default = self
+            .default_model
+            .as_ref()
+            .map(|(id, provider)| format!("{id}@{provider}"));
+        if let Some(key) =
+            default.filter(|key| self.model(key).is_some_and(|model| model.usable(role)))
+        {
+            return Some(key);
+        }
+        // Then the first registration this card can run at all.
+        self.models
+            .iter()
+            .find(|model| model.usable(role))
+            .map(|model| model.key.clone())
+    }
+
+    /// Everything the empty tab renders. The history is not in it: it has its own entry
+    /// point, from data that arrives separately (§2).
+    fn differs(&self, before: &Launcher) -> bool {
+        self.models != before.models
+            || self.levels != before.levels
+            || self.fields != before.fields
+            || self.efforts != before.efforts
+            || self.check != before.check
+            || self.default_model != before.default_model
+    }
+}
+
+fn pair(model: &ModelOption) -> (String, String) {
+    (model.id.clone(), model.provider.clone())
+}
+
+/// Where a ladder opens: the middle rung by name, or the middle slot when a catalog
+/// names its levels differently.
+fn middle(levels: &[String]) -> usize {
+    if levels.is_empty() {
+        return 0;
+    }
+    levels
+        .iter()
+        .position(|level| level == MIDDLE_LEVEL)
+        .unwrap_or(levels.len() / 2)
+}
+
+/// The registration `check --json` resolved for one card: `model` for the coordinator,
+/// `lane_model` for the lanes. A field it left null resolved to nothing.
+fn checked_model(check: &Value, role: Role) -> Option<String> {
+    let entry = check.get(match role {
+        Role::Coordinator => "model",
+        Role::Lanes => "lane_model",
+    })?;
+    let id = string(entry, "id")?;
+    match string(entry, "provider") {
+        Some(provider) => Some(format!("{id}@{}", provider.to_lowercase())),
+        None => Some(id),
+    }
+}
+
+/// What `check --json` said about a field it could not resolve, in its own words: the
+/// `reason` of the field itself, else the message of the problem about it.
+fn check_reason(check: &Value, field: &str) -> Option<String> {
+    if let Some(reason) = string(check.get(field)?, "reason") {
+        return Some(reason);
+    }
+    check
+        .get("problems")
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|problem| string(problem, "code").is_some_and(|code| code.contains(field)))
+        .and_then(|problem| string(problem, "message"))
+        .map(|message| one_line(&message))
 }
 
 /// A JSON field as a non-empty string.
@@ -351,6 +614,24 @@ fn string(value: &Value, key: &str) -> Option<String> {
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .map(str::to_owned)
+}
+
+/// A message with its newlines folded to spaces: one line, whatever evo wrote.
+fn one_line(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut space = false;
+    for ch in text.trim().chars() {
+        if ch.is_whitespace() {
+            space = true;
+        } else {
+            if space && !out.is_empty() {
+                out.push(' ');
+            }
+            space = false;
+            out.push(ch);
+        }
+    }
+    out
 }
 
 // --- the launch path ----------------------------------------------------------------
@@ -409,13 +690,16 @@ pub struct HistoryEntry {
 }
 
 /// One row of the history list (§7.2): the session's title (or the folder's name), the
-/// folder's path shortened around the home directory, a meta line of what is known about
-/// the session, and the whole of it for the row's tooltip.
+/// folder's path shortened around the home directory, how long ago it ran, and the whole
+/// entry for the row's tooltip.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HistoryRow {
     pub title: String,
-    pub subtitle: String,
-    pub meta: String,
+    /// The `~`-shortened path of the folder the swarm ran in.
+    pub folder_short: String,
+    /// How long ago, in the list's own words: `just now`, `2h ago`, `yesterday`, `3d
+    /// ago`, `12 Sep`.
+    pub when: String,
     /// The whole entry on one line, for the tooltip: the folder's full path, the session
     /// file, the instant with its zone spelled out, both models and the lane count.
     pub tooltip: String,
@@ -429,7 +713,7 @@ pub struct HistoryRow {
     pub open_at_quit: bool,
 }
 
-/// The history rows, newest first, with unknown parts of the meta line left out.
+/// The history rows, newest first, with unknown parts left out.
 ///
 /// `now` is the clock the relative times are read against (epoch seconds) and
 /// `offset_seconds` the caller's local UTC offset, which the relative words use for their
@@ -490,14 +774,11 @@ fn history_row(
         } else {
             entry.title.clone()
         },
-        subtitle: home_short(&entry.folder, home),
-        meta: meta_line(
-            &entry.lanes,
-            entry.coordinator_model.as_deref(),
-            entry.when,
-            now,
-            offset_seconds,
-        ),
+        folder_short: home_short(&entry.folder, home),
+        when: entry
+            .when
+            .map(|when| relative_time(when, now, offset_seconds))
+            .unwrap_or_default(),
         tooltip: tooltip_line(entry, offset_seconds),
         session_path: entry.session_path.clone(),
         folder: entry.folder.clone(),
@@ -543,31 +824,6 @@ fn tooltip_line(entry: &HistoryEntry, offset_seconds: i32) -> String {
             lanes,
             if lanes == 1 { "" } else { "s" }
         ));
-    }
-    parts.join(" · ")
-}
-
-/// The meta line: what is known about the session, unknown parts left out.
-fn meta_line(
-    lanes: &Option<u32>,
-    coordinator_model: Option<&str>,
-    when: Option<i64>,
-    now: i64,
-    offset_seconds: i32,
-) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    if let Some(lanes) = lanes {
-        parts.push(format!(
-            "{} lane{}",
-            lanes,
-            if *lanes == 1 { "" } else { "s" }
-        ));
-    }
-    if let Some(when) = when {
-        parts.push(relative_time(when, now, offset_seconds));
-    }
-    if let Some(model) = coordinator_model.filter(|model| !model.is_empty()) {
-        parts.push(format!("coordinator: {}", model));
     }
     parts.join(" · ")
 }
@@ -682,185 +938,4 @@ fn offset_label(offset_seconds: i32) -> String {
         magnitude / 3600,
         (magnitude % 3600) / 60
     )
-}
-
-// --- the empty tab ------------------------------------------------------------------
-
-/// The empty tab (§7.2): the four choosers, what is chosen in each, and the history list.
-/// What `evo-swarm check --json` says about the launch they describe is the store's
-/// (`store::catalog::CheckReport`) and the tab holds it beside this.
-#[derive(Clone, Debug, Default)]
-pub struct Launcher {
-    /// The catalog the choosers were built from: the last `catalog --json` body.
-    catalog: Value,
-    coordinator: Chooser,
-    lanes: Chooser,
-    lane_thinking: Chooser,
-    workers: Chooser,
-    coordinator_key: String,
-    lanes_key: String,
-    lane_thinking_key: String,
-    workers_key: String,
-    history: Vec<HistoryRow>,
-}
-
-impl Launcher {
-    /// An empty tab before any catalog has arrived: the Default option in every chooser,
-    /// the worker counts, no history and no problems.
-    pub fn new() -> Launcher {
-        let mut launcher = Launcher {
-            coordinator_key: DEFAULT_KEY.to_string(),
-            lanes_key: DEFAULT_KEY.to_string(),
-            lane_thinking_key: DEFAULT_KEY.to_string(),
-            workers_key: DEFAULT_KEY.to_string(),
-            ..Launcher::default()
-        };
-        launcher.rebuild_choosers();
-        launcher
-    }
-
-    /// The model catalog: the `/catalog` body `evo-swarm catalog --json` prints (§5.6).
-    /// Returns whether anything the UI renders changed.
-    pub fn set_catalog(&mut self, catalog: &Value) -> bool {
-        let before = self.clone();
-        self.catalog = catalog.clone();
-        self.rebuild_choosers();
-        self.differs(&before)
-    }
-
-    /// The resumable sessions, from the session index and the app's own recents (§2).
-    /// `now` is the clock the relative times read against, `offset_seconds` the local UTC
-    /// offset the rows are shown in, `home` the directory to shorten paths around.
-    pub fn set_history(
-        &mut self,
-        entries: &[HistoryEntry],
-        now: i64,
-        offset_seconds: i32,
-        home: Option<&str>,
-    ) -> bool {
-        let rows = history_rows(entries, now, offset_seconds, home);
-        if self.history == rows {
-            return false;
-        }
-        self.history = rows;
-        true
-    }
-
-    pub fn history(&self) -> &[HistoryRow] {
-        &self.history
-    }
-
-    /// The chooser of one row of the empty tab.
-    pub fn chooser(&self, which: Choice) -> &Chooser {
-        match which {
-            Choice::Coordinator => &self.coordinator,
-            Choice::Lanes => &self.lanes,
-            Choice::LaneThinking => &self.lane_thinking,
-            Choice::Workers => &self.workers,
-        }
-    }
-
-    /// The chosen key of one row — [`DEFAULT_KEY`] until something is chosen.
-    pub fn selected_key(&self, which: Choice) -> &str {
-        match which {
-            Choice::Coordinator => &self.coordinator_key,
-            Choice::Lanes => &self.lanes_key,
-            Choice::LaneThinking => &self.lane_thinking_key,
-            Choice::Workers => &self.workers_key,
-        }
-    }
-
-    /// The chosen option — `None` only if the chooser was rebuilt without it, which
-    /// [`Launcher::select`] prevents by falling back to Default.
-    pub fn selected(&self, which: Choice) -> Option<&ChooserOption> {
-        self.chooser(which).option(self.selected_key(which))
-    }
-
-    /// Choose one option by key. An unknown key is ignored — the choosers are rebuilt from
-    /// the catalog, and a selection cannot outlive the option it named. Returns whether the
-    /// choice changed.
-    pub fn select(&mut self, which: Choice, key: &str) -> bool {
-        if self.chooser(which).option(key).is_none() || self.selected_key(which) == key {
-            return false;
-        }
-        match which {
-            Choice::Coordinator => self.coordinator_key = key.to_string(),
-            Choice::Lanes => self.lanes_key = key.to_string(),
-            Choice::LaneThinking => self.lane_thinking_key = key.to_string(),
-            Choice::Workers => self.workers_key = key.to_string(),
-        }
-        true
-    }
-
-    /// What the choosers add up to (§7.2): the coordinator's `--model`, the lanes'
-    /// `--lane-model` and `--lane-thinking`, and `--workers`. `None` everywhere is a launch
-    /// with no flag at all.
-    pub fn plan(&self) -> LaunchPlan {
-        LaunchPlan {
-            model: selected_model(&self.coordinator, &self.coordinator_key),
-            lanes_model: selected_model(&self.lanes, &self.lanes_key),
-            lane_thinking: selected_level(&self.lane_thinking, &self.lane_thinking_key),
-            workers: self
-                .workers_key
-                .parse::<u16>()
-                .ok()
-                .filter(|n| (1..=WORKERS_MAX).contains(n)),
-        }
-    }
-
-    fn rebuild_choosers(&mut self) {
-        self.coordinator = coordinator_chooser(&self.catalog);
-        self.lanes = lanes_chooser(&self.catalog);
-        self.lane_thinking = thinking_chooser(&self.catalog);
-        self.workers = workers_chooser();
-        self.keep_selections_valid();
-    }
-
-    /// A chosen key that is no longer in its chooser falls back to Default: a model can
-    /// leave the catalog between one refresh and the next.
-    fn keep_selections_valid(&mut self) {
-        let stale = [
-            !self.coordinator.option(&self.coordinator_key).is_some(),
-            !self.lanes.option(&self.lanes_key).is_some(),
-            !self.lane_thinking.option(&self.lane_thinking_key).is_some(),
-            !self.workers.option(&self.workers_key).is_some(),
-        ];
-        for (stale, key) in stale.into_iter().zip([
-            &mut self.coordinator_key,
-            &mut self.lanes_key,
-            &mut self.lane_thinking_key,
-            &mut self.workers_key,
-        ]) {
-            if stale {
-                *key = DEFAULT_KEY.to_string();
-            }
-        }
-    }
-
-    /// Everything the empty tab renders into its select widgets. The history is not in it:
-    /// it has its own entry point, from data that arrives separately (§2).
-    fn differs(&self, before: &Launcher) -> bool {
-        self.coordinator != before.coordinator
-            || self.lanes != before.lanes
-            || self.lane_thinking != before.lane_thinking
-            || self.workers != before.workers
-            || self.coordinator_key != before.coordinator_key
-            || self.lanes_key != before.lanes_key
-            || self.lane_thinking_key != before.lane_thinking_key
-            || self.workers_key != before.workers_key
-    }
-}
-
-fn selected_model(chooser: &Chooser, key: &str) -> Option<(String, String)> {
-    if key == DEFAULT_KEY {
-        return None;
-    }
-    chooser.option(key)?.model()
-}
-
-fn selected_level(chooser: &Chooser, key: &str) -> Option<String> {
-    if key == DEFAULT_KEY {
-        return None;
-    }
-    chooser.option(key)?.level().map(str::to_owned)
 }
