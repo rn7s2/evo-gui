@@ -1,9 +1,12 @@
 # Using evo-desktop
 
-One window, one tab per swarm. A **tab** is one `evo-swarm serve` process —
-a coordinator agent plus a pool of worker lanes — running in a folder you pick,
-spawned by the app and driven over evo's HTTP API. Lanes are never addressed
-directly: their tokens and ports stay inside the coordinator.
+One window, one tab per swarm. A **tab** is one `evo-swarm serve` process — a
+coordinator agent plus a pool of worker lanes — running in a folder you pick,
+spawned by the app and driven over one loopback protocol: the ready file the
+child writes, one snapshot, one stream of ops, and `POST /ops`
+([`CONTRACT.md`](../CONTRACT.md)). Lanes are not addressed by the app at all:
+they are the coordinator's own children, and their topics arrive mirrored in the
+coordinator's stream.
 
 ## Starting, and the second launch
 
@@ -12,15 +15,15 @@ runs: launching it again raises the running window and exits 0, so a second
 `open` from the Dock does not give you a second window. Every launch opens **one
 empty tab**, whatever the last session left behind: the tab set is recorded in
 `app.json` but not reopened, and the sessions that were open then come back at
-the top of the empty tab's history wearing an `open at last quit` badge. The
-app never starts a swarm by itself.
+the top of the empty tab's history wearing an `open at last quit` badge. The app
+never starts a swarm by itself.
 
-Closing the window (or `⌘Q`) is the whole quit sequence: every tab's
-swarm is stopped (a clean `POST /shutdown`, then `SIGTERM`, then `SIGKILL`, on
-threads of its own, with a 20 s deadline), `app.json` is written, and the process
-exits when the last tab is gone. If the app is terminated some other way — a
-logout, or the Dock's Quit before our key binding saw the keystroke — nothing is
-left running: the swarms are told this app's pid at launch and stop with it.
+Closing the window (or `⌘Q`) is the whole quit sequence: `app.json` is written,
+every tab's server is stopped by closing the pipe it was started with
+(`--watch-stdin`, so EOF is immediate and needs no signal), and the process
+exits. Nothing is left
+running if the app is killed instead: the pipe closes with the process, which is
+what tells each swarm its tab is gone.
 
 ## The keyboard
 
@@ -50,14 +53,14 @@ nobody hears is worse than one the window handles.
 ## Tabs
 
 The title bar **is** the tab strip: one tab per swarm, labelled with the folder's
-name (an unused tab says `New tab`), and hovering one shows the whole path plus what
-the tab is doing — `no folder chosen`, `starting the swarm…`, `swarm: running`,
-`swarm: reconnecting…`, `stopping the swarm…`, `failed to start`, or
+name (an unused tab says `New tab`), and hovering one shows the whole path plus
+what the tab is doing — `no folder chosen`, `starting the swarm…`, `swarm:
+running`, `swarm: reconnecting…`, `stopping the swarm…`, `failed to start`, or
 `swarm gone: the server exited`.
 
 A middle click closes a tab, the way a browser's does. The `+` after the last tab
 appends a new empty tab; when the tabs need more room than there is, they scroll
-inside the strip and the `+` stays where it is. Closing a tab shuts its swarm down;
+inside the strip and the `+` stays where it is. Closing a tab stops its server;
 the session stays on disk and comes back in the history list.
 
 Two small marks answer questions a label cannot:
@@ -65,9 +68,9 @@ Two small marks answer questions a label cannot:
 - A **green dot** before a tab's name while that tab's coordinator has a run in
   flight. When a background tab's run *ends*, its dot turns muted — "something
   happened here" — and looking at that tab is what clears it.
-- The **window's own title** — what Mission Control and the app switcher show — names
-  the tab being shown: `evo-gui — Evo Desktop`, or `Evo Desktop` alone on an empty
-  tab.
+- The **window's own title** — what Mission Control and the app switcher show —
+  names the tab being shown: `evo-gui — Evo Desktop`, or `Evo Desktop` alone on
+  an empty tab.
 
 ## The empty tab: choosing a swarm
 
@@ -77,10 +80,11 @@ Pick models, then a folder
 
 Coordinator model  [ Default ▾ ]            ┌────────────────────────┐
 Lanes model        [ Default ▾ ]            │  [folder icon]         │
-                   Saved to <folder>/.evo/  │  Select folder…        │
-                   swarm.lisp — shared …    │  The swarm starts in   │
-Workers            [ Default ▾ ]            │  the folder you pick   │
+Workers            [ Default ▾ ]            │  Select folder…        │
+                                            │  The swarm starts in   │
+                                            │  the folder you pick   │
                                             └────────────────────────┘
+  ⚠ lane_model_not_found: no registration … — fix the lanes model
 
 History  6 resumable
   evo-gui  [open at last quit]
@@ -88,42 +92,36 @@ History  6 resumable
   foo      ~/coding/foo     · 4 lanes · 2h ago  · coordinator: …
 ```
 
-- **Coordinator model** — passed to the swarm as `--model`. On **Default**
-  (detail line `evo's own default`) nothing is passed and evo's own default
-  applies. The menu lists every model the catalog knows, sorted by provider then
-  id, each with a detail line — `200k ctx · vision · effort low–max`. An id
-  registered under two providers can only be reached by its bare id, so only the
-  registration `--model` resolves to is choosable; the others are listed greyed,
-  saying which one the flag would pick.
-- **Lanes model** — what a *lane* starts with. evo-swarm has no flag for this,
-  so the choice is written into the project's `.evo/swarm.lisp` (below). On
-  **Default** (`follows the coordinator`) nothing is written and every lane
-  inherits the coordinator's model. The list is the same catalog, but a model a
-  lane could not register is greyed with
-  `needs an extension API — set it in swarm.lisp`: a lane only has the kernel's
-  own APIs, which the app learns from a `--no-userspace` probe. Until that probe
-  has reported, nothing is greyed out.
-- **Workers** — how many lanes, 1–64. On **Default** evo's own
-  `:swarm-workers` setting decides (else 6); when the catalog reports that
-  setting, the option reads `Default (6)` and its detail says which. Only a
-  swarm created from a folder takes this count: a resumed swarm keeps the lane
-  count its journal records.
+- **Coordinator model** — passed to the swarm as `--model ID@PROVIDER`. On
+  **Default** (`evo's own default`) nothing is passed and evo's own default
+  applies. The menu lists the models the catalog knows, sorted by provider then
+  id, each with a detail line — `200k ctx · vision · reasons`. A model
+  registered under several providers is listed per registration, and the option
+  carries the `id@provider` the flag will be given.
+- **Lanes model** — passed as `--lane-model ID@PROVIDER`, which is what the
+  lanes register. On **Default** (`follows the coordinator`) nothing is passed
+  and every lane inherits the coordinator's model. The list is the same catalog
+  filtered by `/catalog.lanes.models`: a model a lane could not register is
+  greyed with evo's own reason beside it. The app writes no project file — the
+  lanes' model is a launch flag, and `<folder>/.evo/swarm.lisp` stays yours.
+- **Lanes thinking** — `--lane-thinking`, the effort the lanes start at; Default
+  follows the coordinator's.
+- **Workers** — `--workers`, 1–64. On **Default** evo's own `:swarm-workers`
+  setting decides (else 6). Only a swarm created from a folder takes this count:
+  a resumed swarm keeps the lane count its own record kept.
 - **Select folder…** — the native folder dialog. Picking a folder starts the
   swarm there and turns the tab into a tab page; cancelling leaves the tab empty.
-  Under the card sits a line that only appears when nothing can be launched from this
-  app at all, naming the path you configured:
-  `evo-swarm not found at /usr/local/bin/evo-swarm — fix it in Settings…`. It is
-  clickable — it opens Settings — and its hover carries the whole line when the path
-  is long.
 
-Under the lanes chooser, one line carries the three states that have something
-to say: `Loading models…` until the catalog is known, the note naming the file a
-lanes model will be written to (with a `<folder>` placeholder until a folder is
-chosen), or — when the catalog could not be read — one amber sentence about what
-still works: `Couldn't load the model list — Default models will be used.`, or
-`Couldn't refresh the model list — using the last one it loaded.` when the choosers
-already hold a cached list. The server's own error is what that line hovers, and
-every chooser stays usable on **Default**, so a swarm can still be started.
+Under the choosers, one caption carries what has something to say: `Loading
+models…` until the catalog is known; `Couldn't load the model list — Default
+models will be used.` (or `Couldn't refresh the model list — using the last one
+it loaded.` when a cached catalog is already in the choosers), with evo's own
+error in the hover; and, when `evo-swarm check --json` judges the launch the
+choosers describe, one calm line per problem — the lanes model that is not
+registered, a missing key, a worker count evo refuses. A problem line is
+clickable: it opens the chooser it is about, or Settings when it is about the
+machine. The check runs again on every chooser change, so these lines describe
+what **Select folder…** would actually start.
 
 The tab's models are fixed when the swarm starts — the tab page has no model
 selector, only the readout that shows what is running.
@@ -137,47 +135,25 @@ its options, `Enter` picks, `Esc` closes it without leaving the tab (and without
 choosing). The history frame takes the arrows and `Home`/`End`; `Enter` resumes
 the selected row, the same as clicking it.
 
-### The lanes model lives in your project
-
-Choosing a lanes model writes a managed block at the **top** of
-`<folder>/.evo/swarm.lisp`:
-
-```lisp
-;;; evo-desktop:begin — the lanes' default model (managed; edit outside the markers)
-(evo.swarm:in-lanes ()
-  (evo:set-setting :model "ark-deepseek-v4.1-flash")
-  (evo:set-setting :model-provider :aiden))
-;;; evo-desktop:end
-```
-
-It is yours to edit outside the markers, and it is rewritten in place — never
-duplicated, never touching the rest of the file. The file belongs to the
-*project*, not to the tab: two tabs in one folder share it, and the newest write
-decides what the next lane initialization gets. Choosing **Default** removes the
-block, and the file itself if that was all it held.
-
 ### History
 
-The history lists every resumable swarm on disk — any folder, not only the ones
-this app started — merged with the app's own recent sessions, newest first. A session
-the app remembers whose journal is gone is not a row — nothing ever wrote it (a tab
-that was opened and quit again), or something deleted it — because `--resume` on a
-file that is not there is a launch that cannot come back. A row leads with a folder
-glyph and the folder's own name; under it sit the `~`-shortened path and what is known
-about the session, joined by `·` — the lanes, how long ago, the coordinator's model
-(`4 lanes · 2h ago · coordinator: ark-deepseek-v4.1-flash`) — each part left out when
-it is unknown. A session the app had open when it last quit wears an `open at last quit`
-pill. Hovering shows the full path, the journal's name, the absolute time, and the
+The history lists every resumable swarm `evo-agent sessions --json` reports —
+any folder, not only the ones this app started — merged with the app's own recent
+sessions, newest first. The app reads no journal: evo keeps an index and prints
+it. A row leads with the session's own title (its first user text) and the
+folder's name under it, then what is known about the session, joined by `·` —
+the lanes, how long ago, the coordinator's model (`4 lanes · 2h ago ·
+coordinator: ark-deepseek-v4.1-flash`); each part is left out when it is unknown.
+A session the app had open when it last quit wears an `open at last quit` pill.
+Hovering shows the full path, the journal's name, the absolute time, and the
 models.
 
 Click a row (or select it and press `Enter`) to open it as a new tab: the swarm
-resumes that session (`--resume`) in that folder, and the lane count comes from
-the journal (the workers chooser does not apply to it). The list has three quiet
-states of its own: `Scanning sessions…` with a spinner while the disk scan runs,
-`No resumable swarms yet`, and the scan's error in the danger colour. The calm one is
-what a first run shows: `~/.evo/sessions` does not exist until evo has written its
-first journal, and a directory that is not there yet is nothing to resume, not a
-failure to read.
+resumes that session (`--resume <that exact journal>`) in the folder it ran in,
+so two tabs in one folder can never cross sessions. The list has three quiet
+states of its own: `Scanning sessions…` while the index is being read, `No
+resumable swarms yet`, and the read's error in the danger colour. The calm one is
+what a first run shows: there is nothing to resume yet, which is not a failure.
 
 ## The tab page
 
@@ -185,13 +161,13 @@ failure to read.
 ┌──────────────────────┬────────────────────────────┬──────────────────┐
 │ 6 lanes · 2 busy     │ ● main  delegate the …     │ ┌──────────────┐ │
 │ ● main               │                            │ │ input        │ │
-│ ◐ Lane 1             │ ◐ Lane 1  SLOW: walk …     │ └──────────────┘ │
-│ ○ Lane 2             │    transcript (markdown,   │ model · max ·    │
-│ ✗ Lane 3             │    rendered live as it     │ ctx 48k/936k ·   │
-│                      │    streams)                │ 97% cached ·     │
-│                      │                            │ goal a1b2 (…)    │
-│                      ├────────────────────────────┤    [  Send  ]    │
+│ ◐ Lane 1       [Stop]│ ◐ Lane 1  SLOW: walk …     │ └──────────────┘ │
+│ ○ Lane 2             │    transcript (markdown,   │                  │
+│ ✗ Lane 3             │    rendered live as it     │    [■ Stop swarm]│
+│                      │    streams)                │                  │
+│                      ├────────────────────────────┤                  │
 │ ~/coding/evo-gui     │ ☑ todos of the agent shown │                  │
+│                      │ model · medium · ctx 48k…  │                  │
 └──────────────────────┴────────────────────────────┴──────────────────┘
 ```
 
@@ -200,7 +176,10 @@ failure to read.
 The column opens with a summary — `6 lanes · 2 busy` — and then `main`, the
 coordinator, followed by one row per lane: a status glyph, the task it is on
 (truncated), and how long the current step has taken. A lane that is down shows
-the reason in place of its task; hovering any row gives the whole story.
+the reason in place of its task; hovering any row gives the whole story. While a
+lane is working its row carries a small **Stop** — the one thing a person may do
+to a lane (`run.interrupt`, scope `lane`); the coordinator is told, and steering
+the lane stays its job.
 
 | glyph | meaning |
 |---|---|
@@ -208,7 +187,8 @@ the reason in place of its task; hovering any row gives the whole story.
 | `◐` | compacting |
 | `○` | idle |
 | `◌` | starting |
-| `✗` | down — the row says why (the lane's own `output` lines say more) |
+| `✗` | down — the row says why |
+| `◦` | stopped |
 
 Clicking a row selects that agent: it changes what the centre column shows and
 nothing else. The keyboard walks the rows with `↓`/`↑` and jumps to the ends
@@ -218,21 +198,27 @@ middle, with the full path on hover.
 
 ### Centre — the transcript, and the todos
 
-A slim header names the agent being shown (`main`, `Lane 1`) with the same
-status glyph the left column uses, the task that agent was given, and — when
-that agent's transcript carries thinking text — a **Show thinking** button that
+A slim header names the agent being shown (`main`, `Lane 1`) with the same status
+glyph the left column uses, the task that agent was given, and — when that
+agent's transcript carries thinking text — a **Show thinking** button that
 reveals it (**Hide thinking** puts it back). The toggle is per agent: switching
 agents shows each transcript the way you left it.
 
-Below it, the selected agent's transcript: your turns; the assistant's text
-rendered as markdown *while it streams*, so a half-finished message already reads
-as the finished one will; tool calls and results as one-line `name — ok/error`
-rows that open onto their arguments and result; a lane's `report` as a report
-row; `output` and status events as dim lines. Rows are a reading surface —
+Below it, the agent's items. Every item is keyed by the id the server minted, so a
+streaming row keeps its identity when a reconnect or a re-snapshot arrives: your
+turns; the assistant's text rendered as markdown *while it streams*, so a
+half-finished message already reads as the finished one will; tool calls and
+results as one-line `name — ok/error` rows that open onto their arguments and
+result (a whole result the snapshot truncated comes back from `GET /items/<id>`
+when you open it); a lane's report as a `Lane 1 report` card; notices, run
+outcomes and command notes as their own quiet lines. Rows are a reading surface —
 drag to select, `⌘C` to copy — and an assistant message carries a copy icon for
 its markdown source (it appears on hover, at the top of the message, and answers
 `Copied` when pressed), with a separate **Copy** on every fenced code block for
 the code alone.
+
+Scrolling back pages older items in from the server, across compactions: the
+scrollback is the whole session, not the model's current context.
 
 The markdown is the subset a model actually writes — headings, lists, task lists,
 tables, quotes, rules, inline code — with four decisions worth knowing:
@@ -250,9 +236,9 @@ key, a long list gets a row per item, and past four levels (or for an array of
 more than twenty), a muted `{…3 keys}` / `[…42 items]` row keeps the whole thing
 in its tooltip.
 
-Some messages in a transcript are not yours even though evo sends them in your
-voice, and each is drawn as what it is — a quiet line that opens on click, never a
-turn of its own:
+Some rows in a transcript are not yours even though evo sent them in your voice,
+and each is drawn as what it is — a quiet line that opens on click, never a turn
+of its own. Their kind comes from the server, not from their words:
 
 - **Context** — what an extension injected into the session (your global and
   project memory, IDE context): `Context · global memory`;
@@ -261,8 +247,16 @@ turn of its own:
 - **Command** — an extension answering a command you ran mid-run (`/memory`,
   `/global-memory`, `/lore`, `/notify doctor`): `Command · /global-memory`;
 - **the swarm about a lane** — a lane's report is a `Lane 1 report` card, and
-  `[lane 1] run ended …`, `failed to start`, `is down` and similar lines are one
-  line each, `Lane 1 · run ended (stop) — task: …`, red when something failed.
+  `run ended`, `failed to start`, `is down` and the like are `Lane 1 · …` lines,
+  red when something failed;
+- **a person stopped something** — `Stopped Lane 1` / `Stopped the run`, said by
+  the coordinator's own `human_action` item, so nothing is stopped behind its
+  back.
+
+A turn you send while the agent is working is drawn as a held-back card: it says
+`queued · sent at the next step`, and it carries a **Cancel** until the
+coordinator takes it. Cancelling removes the row (the input was never journaled);
+once it is taken, the card becomes the turn it is.
 
 When you scroll away from the bottom the view stops following and offers a
 **Jump to latest** button. An agent with nothing to show says so in its own words:
@@ -272,44 +266,33 @@ When you scroll away from the bottom the view stops following and offers a
 Under the transcript, the todos of the selected agent (`☑` done, `◐` in
 progress, `☐` pending), hidden when that agent has none.
 
-### Right — the input, the readout, and one button
+### Right — the input, and one button
 
 The input grows from two to eight rows. **Enter** sends, **Shift+Enter** is a
-newline, **Esc** interrupts the turn. An empty input's **↑** walks back through
-the prompts this tab has sent (**↓** walks forward again), so a prompt can be
-sent twice without retyping it; typing anything makes the recalled text a draft
-like any other. **⌘C** with nothing selected in the input copies the window's own
-selection instead, so a passage picked in the transcript can be copied while the
-caret sits in the input.
+newline, **Esc** interrupts the coordinator's turn. An empty input's **↑** walks
+back through the prompts this tab has sent (**↓** walks forward again), so a
+prompt can be sent twice without retyping it; typing anything makes the recalled
+text a draft like any other. **⌘C** with nothing selected in the input copies the
+window's own selection instead, so a passage picked in the transcript can be
+copied while the caret sits in the input.
 
-Sending while the agent is working is normal: the text lands at the running
-turn's next boundary, exactly as typing into the TUI does. The draft is cleared
-only when the send was accepted, and **Esc never touches it**. While a set of
-text is on its way to the server the button is disabled, and it re-enables when
-the server answers.
+Sending while the agent is working is normal: the text is queued and lands at the
+running turn's next boundary, exactly as typing into the TUI does — the queued
+row is in the transcript, cancellable, until then. The draft is cleared only when
+the server accepted the send, and **Esc never touches it**.
 
-The single button follows the coordinator's status, and its face is what it
-does: **Send** while idle (enabled once there is text), **■ Stop** while running
-or compacting (which interrupts). There is never a Send and a Stop side by side.
+The single button's face is what it does: **Send** while nothing is going on
+(enabled once there is text), **■ Stop swarm** while the swarm is busy or held
+while its lanes work (`run.interrupt`, scope `swarm` — it stops everyone, and the
+coordinator is told). There is never a Send and a Stop side by side. A lane can
+be stopped from its own row in the left column.
 
-The readout mirrors the TUI's status line, segment for segment, so the same
-session reads the same in both front ends:
-
-```
-ark-deepseek-v4.1-flash · max · ctx 48k/936k (5%) · 97% cached · goal a1b2c3d4 (active) 12k/50k
-```
-
-| segment | shown as |
-|---|---|
-| model | the id, or `id (provider)` when the id is registered under more than one provider |
-| thinking | the effort level, lower-cased (`low` … `max`) |
-| context | `ctx 48k/936k (5%)` — the window is left out when it is unknown |
-| cache | `97% cached` — only when the project's `cache-stats` extension has journaled totals |
-| goal | `goal <id> (<status>) <tokens>[/<budget>]` |
-
-The context figure re-anchors on every finished message, so it moves with the
-run rather than jumping when the turn settles. The line is truncated with an
-ellipsis when the column is too narrow for it; hovering shows the whole of it.
+The status line sits at the foot of the centre column: the `segments` the server
+publishes for the agent being shown, in its order, so the same session reads the
+same here and in the TUI. A core registry builds them — model, thinking, context,
+goal — and an extension's own segment (a project's `cache-stats`, say) arrives the
+same way. The line is truncated with an ellipsis when the column is too narrow;
+hovering shows the whole of it.
 
 ## Settings, About, and light or dark
 
@@ -325,8 +308,9 @@ window, and closing it is the only way it does anything: **Save** writes, and
   `/usr/local/bin/evo-swarm` and `/usr/local/bin/evo-agent`.
 - The theme is applied as you pick it, so you can judge it against the window
   behind the dialog; **Save** writes it to `app.json`.
-- New tabs use the paths you saved; a tab that is already running keeps the
-  binaries it started with, as the panel's note says.
+- New tabs use the paths you saved, and the catalog is read again with them; a
+  tab that is already running keeps the binaries it started with, as the panel's
+  note says.
 
 **About Evo Desktop** (App menu, first item) shows the app's version, each
 binary's own `--version` line, and the two paths worth knowing: where the app
@@ -344,17 +328,16 @@ following; `app.json`'s `theme` field is what is stored (`system`, `light`,
   and **Retry** and **Close**. That log is
   `~/.evo/desktop/tabs/<id>/swarm.log`.
 - **A lane is down.** Its row shows `✗` and the reason in place of its task; the
-  swarm restarts it, and the row comes back.
-- **The connection drops.** The tab reconnects with `Last-Event-ID` and
-  exponential backoff (0.5 s, doubling up to 10 s) and shows a reconnecting badge
-  on the `main` row and above the transcript. If the supervisor restarts the
-  coordinator, the same tab keeps working: the app notices the new event log and
-  refetches state and transcript.
-- **The server says no.** A refusal (`409`, busy) is a dim notice above the
-  composer, never a modal; a command that ran and failed (`422`) shows the
-  server's own error text. A POST the server never answered (`503`, or no reply
-  at all) gets a plain sentence with the raw error on hover. Notices clear
-  themselves after a few seconds.
+  swarm restarts it (`lane_event: restarted` on the coordinator's topic) and the
+  row comes back.
+- **The connection drops.** The tab reconnects with a backoff and shows a
+  reconnecting badge on the `main` row and above the transcript. A server that
+  restarted answers with another epoch, which is a `stream.reset`: the tab reads
+  everything again and keeps working — and because it re-reads, a restarted
+  swarm cannot leave half of two conversations on screen.
+- **The server says no.** An op that refuses (`busy`, `model_not_ready`,
+  `already_sent`, …) is a dim notice above the composer, never a modal, carrying
+  the server's own sentence. Notices clear themselves after a few seconds.
 - **A run ends badly.** The transcript says so in its own rows — compaction,
   provider retries, and the failure itself, once: the failing message carries it
   (`error: …`), and only a failure no message holds is said by the run's own
@@ -368,19 +351,17 @@ The app keeps its own data in `~/.evo/desktop/`:
 |---|---|
 | `app.json` | window bounds, the recorded tab set, binary paths, recent sessions, theme |
 | `lock`, `activate.sock` | the single-instance lock and its activation socket |
-| `model-cache.json` | the last model catalog, for the empty tab's choosers |
-| `probe/` | scratch folder used once to learn that catalog |
-| `tabs/<id>/tab.json` | that tab's folder, resumed session, swarm id, models, workers |
-| `tabs/<id>/token` | the swarm's bearer token, written by the server (0600) — never logged, never shown |
+| `model-cache.json` | the last `catalog --json` body, for the empty tab's choosers |
+| `tabs/<id>/ready.json` | where the server publishes its port, URL and bearer token (0600) |
 | `tabs/<id>/swarm.log` | the swarm's stdout and stderr |
 | `app.log` | the app's own log, one line per event, each with a UTC timestamp |
 
-Everything else it touches is read-only: the journals under `~/.evo/sessions`
-(which is what the history list is), a swarm's own directory under
-`~/.evo/swarm/<id>`, and the one managed block in a project's `.evo/swarm.lisp`
-described above. Model names are never hardcoded: the catalog comes from a live
-server, or from a one-off probe the first time the app runs (and again when the
-cached catalog is more than a day old).
+The token in `ready.json` is never logged and never shown. Nothing else is
+written: the app reads no journal and edits no project file. What it shows comes
+from evo itself — `evo-swarm catalog --json` for the choosers (at startup, and
+again whenever the binaries change), `evo-agent sessions --json` for the history
+list, `evo-swarm check --json` for the problem lines, and the running swarm for
+everything on the tab page. Model names are never hardcoded.
 
 ## Running it against a scripted model
 
@@ -402,12 +383,17 @@ The model answers `ok: <your text>` unless you script it in the prompt:
 
 For a longer session use `start` (prints the exports and a `stop`), and see the
 script's header for `EVO_STUB_MESSAGES`/`EVO_AGENT_REPO` if your `evo-agent`
-checkout is somewhere else.
+checkout is somewhere else. The same script is what `crates/proofs` uses in
+Rust (`docs/proofs.md`).
 
 ## Not here yet
 
-- A command surface (slash commands) and lane control endpoints — deliberate
-  v1 non-goals; lanes are watched, never typed to.
+- A command surface (slash commands): everything else is here, but a slash
+  command typed into the input is sent to the coordinator as text, exactly as
+  evo's TUI would receive it, rather than offered as a palette.
+- Steering a lane. A person can stop a lane or the whole swarm, and the
+  coordinator is told; redirecting a lane stays the coordinator's job
+  (CONTRACT §7.4).
 - Windows and Linux packaging: the bundle target is macOS.
 - Settings covers the binaries and the theme and nothing else; there is no other
   preference to change.

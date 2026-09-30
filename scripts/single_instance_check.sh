@@ -52,10 +52,10 @@ cleanup() {
         fi
     done
     if [ -n "${HOME_DIR:-}" ]; then
-        # A killed app leaves its catalog probes to notice for themselves —
-        # `EVO_SERVE_WATCH_PID` is what tells them, within a couple of seconds.
+        # A killed app leaves its tabs' servers to notice for themselves: their
+        # stdin pipe closes with the process, and EOF is the shutdown (`--watch-stdin`).
         # This is only the belt to that pair of braces.
-        pkill -f "token-file $HOME_DIR/" 2>/dev/null || true
+        pkill -f "ready-file $HOME_DIR/" 2>/dev/null || true
         rm -rf "$HOME_DIR"
     fi
 }
