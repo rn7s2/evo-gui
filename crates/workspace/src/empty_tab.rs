@@ -1737,7 +1737,7 @@ mod tests {
             assert_eq!(caption_text(cx, &f.tab), "Loading models…");
             assert!(window.find(CAPTION_ID).visible());
 
-            // Nothing has been scanned yet, so the history says so rather than showing
+            // No index has arrived yet, so the history says so rather than showing
             // placeholder rows.
             assert!(f.tab.read(cx).history_rows(cx).is_empty());
             assert!(window.find(HISTORY_HINT_ID).visible());
@@ -2009,14 +2009,14 @@ mod tests {
             );
             opened.open_at_quit = true;
             opened.source = session::HistorySource::Recent;
-            let scanned = history_entry(
+            let indexed = history_entry(
                 "/Users/you/.evo/sessions/b/2.sexp",
                 "/Users/you/coding/bar",
                 90,
             );
             f.tab.update(cx, |tab, cx| {
                 tab.set_history_entries(
-                    &[opened, scanned],
+                    &[opened, indexed],
                     1_700_000_000,
                     0,
                     Some("/Users/you"),
@@ -2304,14 +2304,14 @@ mod tests {
                 5,
             );
             opened.open_at_quit = true;
-            let scanned = history_entry(
+            let indexed = history_entry(
                 "/Users/you/.evo/sessions/b/2.sexp",
                 "/Users/you/coding/bar",
                 90,
             );
             f.tab.update(cx, |tab, cx| {
                 tab.set_history_entries(
-                    &[opened, scanned],
+                    &[opened, indexed],
                     1_700_000_000,
                     0,
                     Some("/Users/you"),
