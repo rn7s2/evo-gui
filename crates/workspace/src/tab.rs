@@ -209,10 +209,10 @@ pub enum TabContentEvent {
     /// failure. The screen the keyboard was on is gone with the old one, so the
     /// window moves it to whatever the new screen starts with (§7.1).
     ScreenChanged,
-    /// Someone double-clicked the split between the middle column and one of the
-    /// sides (§7.3): that side goes back to the width it starts at. The window
-    /// owns the widths, so the gesture is reported rather than acted on.
-    ResetPane(crate::panes::PaneSide),
+    /// Someone double-clicked the split between the agent column and the
+    /// conversation (§7.3): the column goes back to the width it starts at. The
+    /// window owns the width, so the gesture is reported rather than acted on.
+    ResetPane,
 }
 
 /// The retained view behind one tab.

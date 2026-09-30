@@ -58,7 +58,7 @@ pub use state::{
     ordered_segments, todo_status_from_str, todos_from_json, ContextInfo, GoalInfo, Job, ModelInfo,
     Segment, SessionInfo, Side, Status, SwarmLane, SwarmState, Todo, TodoStatus, TopicState,
 };
-pub use swarm::{lane_list, LaneActivity, LaneList, LaneRow, LaneStatus, SwarmInfo};
+pub use swarm::{lane_list, LaneList, LaneRow, LaneStatus, SwarmInfo};
 pub use tab::{AgentKey, Changes, ItemChange, StreamStatus, TabModel, TopicChanges};
 pub use topic::Topic;
 

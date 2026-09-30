@@ -1,8 +1,11 @@
-//! agent_list — the tab page's left column (§7.3): `main` first, then one row per lane,
-//! with the status glyph, the current task, the step clock and the selection.
+//! agent_list — the tab page's left column (§7.3): `main` first, then one row per lane.
+//!
+//! Every row is the same shape, so the column can be read down: the state glyph, the name,
+//! the task the agent was given, and — right-aligned, where the eye goes to compare rows —
+//! the state, with the step clock beside it while the agent is working.
 //!
 //! The list is a view and nothing else: it holds the coordinator's [`LaneList`] plus the
-//! few things only the UI knows (the activity, whether the coordinator's stream is
+//! few things only the UI knows (the coordinator's activity, whether its stream is
 //! reconnecting, the lanes' down reasons and the selection). It never talks to the server —
 //! the owner pushes updates in with [`AgentList::set_lanes`] / [`AgentList::set_coordinator`]
 //! and gets an [`AgentListEvent::Select`] back when a row is clicked.
@@ -41,7 +44,7 @@ const TEXT_SIZE: Pixels = px(13.);
 const SMALL_TEXT_SIZE: Pixels = px(11.);
 
 /// The glyph cell and the lead cell are fixed, so a task always starts at the same x
-/// whatever the state of the row — and the step clock never gets pushed off the row.
+/// whatever the row is showing — and the state and its clock are never pushed off the row.
 const GLYPH_WIDTH: Pixels = px(14.);
 /// The status glyphs are drawn a little larger than the row text: the theme's
 /// monospace family draws its shapes at a smaller share of the em than the UI
@@ -285,8 +288,8 @@ impl AgentList {
     fn coordinator_view(&self, theme: &Theme) -> RowView {
         let status = activity_status(self.activity);
         let word = activity_word(self.activity);
-        // The step clock takes the trailing cell a lane's own clock sits in, but only while
-        // the coordinator is actually doing something: an idle `main` says "idle", not the
+        // The step clock sits beside the state, as a lane's does, but only while the
+        // coordinator is actually doing something: an idle `main` says "idle", not the
         // seconds since a run that already ended.
         let busy = matches!(self.activity, Status::Running | Status::Compacting);
         let clock = busy.then(|| self.coordinator_clock.clone()).flatten();
@@ -308,12 +311,13 @@ impl AgentList {
             key: AgentKey::Coordinator,
             glyph: status.glyph(),
             glyph_color: status_color(status, theme),
-            // No lane number: `main` sits in the label column, so it lines up with the
-            // tasks below it, and the clock (or the activity word) takes the trailing cell.
+            // No lane number: `main` sits where the tasks below it start, so the column
+            // reads `main`, `1`, `2` … down the numbers, and `main` has no task of its own.
             lead: SharedString::default(),
-            label: "main".into(),
-            label_color: theme.foreground,
-            trailing: Some(clock.unwrap_or_else(|| word.to_string()).into()),
+            task: Some("main".into()),
+            task_color: theme.foreground,
+            state: word.into(),
+            clock: clock.map(SharedString::from),
             badge,
             stop: None,
             tooltip: tooltip.into(),
@@ -326,25 +330,26 @@ impl AgentList {
         let reason = (row.status == LaneStatus::Down)
             .then(|| self.down_reasons.get(&row.n))
             .flatten();
-        // A down lane says why instead of what it was doing; a busy one says what it is
-        // doing right now, from its own mirror; anything else says where it is in the
-        // swarm's own vocabulary.
-        let (label, label_color) = match reason {
-            Some(reason) => (reason.clone(), theme.danger),
-            None if row.is_busy() => (row.label(), theme.foreground),
-            None => (row.label(), theme.muted_foreground),
+        // The row's own line is the task the lane was given; a lane that is down says why
+        // instead, which is the one thing that matters about it at that moment. What a lane
+        // is doing *right now* is its transcript's business — the row says what it was told
+        // to do, and the state cell says whether it is getting on with it.
+        let (task, task_color) = match reason {
+            Some(reason) => (Some(reason.clone()), theme.danger),
+            None => (row.task_label(), theme.muted_foreground),
         };
         // The clock is what tells a slow step from a wedged lane, so it is only worth a
         // cell while the lane is actually working — and it is read at the owner's
         // `now` (`set_now`), which is what keeps it moving between `/lanes` reads.
-        let trailing = row.step_clock(self.now_millis);
+        let clock = row.step_clock(self.now_millis);
+        let state = row.status.word();
         let aria = format!(
             "{} lane {} {}, {}{}",
             row.glyph(),
             row.n,
-            row.state,
-            label,
-            match &trailing {
+            state,
+            task.clone().unwrap_or_default(),
+            match &clock {
                 Some(clock) => format!(", step {clock}"),
                 None => String::new(),
             }
@@ -354,9 +359,10 @@ impl AgentList {
             glyph: row.glyph(),
             glyph_color: status_color(row.status, theme),
             lead: row.n.to_string().into(),
-            label: label.into(),
-            label_color,
-            trailing: trailing.map(SharedString::from),
+            task: task.map(SharedString::from),
+            task_color,
+            state: state.into(),
+            clock: clock.map(SharedString::from),
             badge: None,
             stop: row.is_busy().then_some(key),
             tooltip: lane_tooltip(row, reason, self.now_millis).into(),
@@ -395,10 +401,12 @@ impl AgentList {
         let selected = self.is_selected(view.key);
         let rows = self.keys().len();
         let key = view.key;
-        let (label_id, clock_id) = (label_id(key), clock_id(key));
+        let (task_id, state_id, clock_id) = (task_id(key), state_id(key), clock_id(key));
         let tooltip = view.tooltip;
         let glyph = view.glyph.to_string();
-        let trailing = view.trailing;
+        let task = view.task;
+        let state = view.state;
+        let clock = view.clock;
         let badge = view.badge;
         let stop = view.stop;
 
@@ -439,16 +447,27 @@ impl AgentList {
                     .child(view.lead),
             )
             .child(
+                // The flexible cell: a lane's task, or `main`. It is always there, empty or
+                // not, so the state column starts at the same x on every row.
                 div()
-                    .id(label_id)
+                    .id(task_id)
                     .test_support()
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .text_color(view.label_color)
-                    .child(view.label),
+                    .text_color(view.task_color)
+                    .children(task),
             )
-            .when_some(trailing, |row, trailing| {
+            .child(
+                // Right-aligned, where the eye compares rows: what this agent is.
+                div()
+                    .id(state_id)
+                    .test_support()
+                    .flex_none()
+                    .text_color(theme.muted_foreground)
+                    .child(state),
+            )
+            .when_some(clock, |row, clock| {
                 row.child(
                     div()
                         .id(clock_id)
@@ -456,7 +475,7 @@ impl AgentList {
                         .flex_none()
                         .text_color(theme.muted_foreground)
                         .font_features(tabular())
-                        .child(trailing),
+                        .child(clock),
                 )
             })
             .when_some(badge, |row, badge| {
@@ -561,8 +580,13 @@ pub fn row_id(key: AgentKey) -> ElementId {
 }
 
 /// The id of a row's flexible middle, which is the part that ellipsizes.
-fn label_id(key: AgentKey) -> ElementId {
+fn task_id(key: AgentKey) -> ElementId {
     ("agent-task", row_index(key)).into()
+}
+
+/// The id of a row's right-aligned state word.
+fn state_id(key: AgentKey) -> ElementId {
+    ("agent-state", row_index(key)).into()
 }
 
 /// The id of a row's step clock.
@@ -626,14 +650,18 @@ struct RowView {
     key: AgentKey,
     glyph: char,
     glyph_color: Hsla,
-    /// `main`, or the lane's number.
+    /// The lane's number — empty for `main`, whose name is its middle cell.
     lead: SharedString,
-    /// The flexible one line: the task, why the lane is down, or its state.
-    label: SharedString,
-    label_color: Hsla,
-    /// The trailing cell: a lane's step clock, or the coordinator's activity.
-    trailing: Option<SharedString>,
-    /// `reconnecting`, shown where the activity would go while the stream is down.
+    /// The flexible one line: the task the agent was given, or `main`; why a lane is down
+    /// when it is down. `None` is an empty cell, not a missing state.
+    task: Option<SharedString>,
+    task_color: Hsla,
+    /// The right-aligned state, in the topic's own vocabulary: `idle`, `working`,
+    /// `compacting`, `down` …
+    state: SharedString,
+    /// The step clock, beside the state, while the agent is working.
+    clock: Option<SharedString>,
+    /// `reconnecting`, shown beside the state while the stream is down.
     badge: Option<SharedString>,
     /// The Stop button's lane, while the row can be stopped.
     stop: Option<AgentKey>,
@@ -742,7 +770,6 @@ mod tests {
             context_window: None,
             reports: 0,
             last_item: None,
-            activity: None,
         }
     }
 
@@ -1129,7 +1156,7 @@ mod tests {
             window.render_frame(cx);
 
             let row = window.find(row_id(AgentKey::Lane(1))).bounds();
-            let label = window.find(label_id(AgentKey::Lane(1))).bounds();
+            let label = window.find(task_id(AgentKey::Lane(1))).bounds();
             let clock_row = window.find(clock_id(AgentKey::Lane(1)));
             let clock = clock_row.bounds();
 
@@ -1321,26 +1348,26 @@ mod tests {
                 .to_string();
             assert_eq!(main, "● main, running");
             assert!(window.find(badge_id(AgentKey::Coordinator)).visible());
-            // The activity keeps its cell: the badge is added after it, not instead.
-            assert!(window.try_find(clock_id(AgentKey::Coordinator)).is_some());
+            // The state keeps its cell: the badge is added after it, not instead.
+            assert!(window.find(state_id(AgentKey::Coordinator)).visible());
         });
     }
 
-    /// The coordinator's row as the view model has it, written out.
-    fn coordinator_trailing(f: &Fixture, cx: &App) -> Option<String> {
-        f.list
-            .read(cx)
-            .coordinator_view(cx.theme())
-            .trailing
-            .map(|trailing| trailing.to_string())
+    /// The coordinator's row as the view model has it, written out: the state word and
+    /// the clock beside it.
+    fn coordinator_cells(f: &Fixture, cx: &App) -> (String, Option<String>) {
+        let view = f.list.read(cx).coordinator_view(cx.theme());
+        (
+            view.state.to_string(),
+            view.clock.map(|clock| clock.to_string()),
+        )
     }
 
-    /// The coordinator's step clock shares the trailing cell with the activity word: it is
-    /// shown while the coordinator runs or compacts, and the word is what shows otherwise —
-    /// so an idle `main` never claims a step. Lanes keep their own clock in that cell, and
-    /// the owner formats both with the same words.
+    /// The coordinator's step clock sits beside its state, as a lane's does: it is shown
+    /// while the coordinator runs or compacts, and an idle `main` never claims a step —
+    /// the state word is what shows then, in the cell the clock would take.
     #[gpui_kit::test]
-    fn the_coordinator_clock_takes_the_trailing_cell_only_while_it_works(cx: &mut TestAppContext) {
+    fn the_coordinator_clock_takes_its_cell_only_while_it_works(cx: &mut TestAppContext) {
         let f = open(cx, lanes(vec![lane(1, LaneStatus::Idle, None)]));
         f.act(cx, |window, cx| {
             // Idle: the word, even with a clock in hand.
@@ -1348,14 +1375,21 @@ mod tests {
                 list.set_coordinator(Status::Idle, false, cx);
                 list.set_coordinator_clock(Some("41s".to_string()), cx);
             });
-            assert_eq!(coordinator_trailing(&f, cx).as_deref(), Some("idle"));
+            assert_eq!(
+                coordinator_cells(&f, cx),
+                ("idle".to_string(), None),
+                "an idle main shows its state, not the seconds since a run that ended"
+            );
 
             // Running with a clock: the clock, in the cell the lanes use, and the row's aria
             // says the step as a lane row's does.
             f.list.update(cx, |list, cx| {
                 list.set_coordinator(Status::Running, false, cx);
             });
-            assert_eq!(coordinator_trailing(&f, cx).as_deref(), Some("41s"));
+            assert_eq!(
+                coordinator_cells(&f, cx),
+                ("running".to_string(), Some("41s".to_string()))
+            );
             window.render_frame(cx);
             assert!(window.find(clock_id(AgentKey::Coordinator)).visible());
             let main = window
@@ -1370,24 +1404,30 @@ mod tests {
                 list.set_coordinator(Status::Compacting, false, cx);
                 list.set_coordinator_clock(Some("3m".to_string()), cx);
             });
-            assert_eq!(coordinator_trailing(&f, cx).as_deref(), Some("3m"));
+            assert_eq!(
+                coordinator_cells(&f, cx),
+                ("compacting".to_string(), Some("3m".to_string()))
+            );
 
             // No clock (the step was never stamped, or the run just ended): the word is what
             // shows, and a blank string is no clock either.
             f.list
                 .update(cx, |list, cx| list.set_coordinator_clock(None, cx));
-            assert_eq!(coordinator_trailing(&f, cx).as_deref(), Some("compacting"));
+            assert_eq!(coordinator_cells(&f, cx), ("compacting".to_string(), None));
             f.list.update(cx, |list, cx| {
                 list.set_coordinator_clock(Some("   ".to_string()), cx)
             });
-            assert_eq!(coordinator_trailing(&f, cx).as_deref(), Some("compacting"));
+            assert_eq!(coordinator_cells(&f, cx), ("compacting".to_string(), None));
 
             // A step that just began is a real clock, not an empty cell.
             f.list.update(cx, |list, cx| {
                 list.set_coordinator(Status::Running, false, cx);
                 list.set_coordinator_clock(Some("0s".to_string()), cx);
             });
-            assert_eq!(coordinator_trailing(&f, cx).as_deref(), Some("0s"));
+            assert_eq!(
+                coordinator_cells(&f, cx),
+                ("running".to_string(), Some("0s".to_string()))
+            );
             window.render_frame(cx);
             let main = window
                 .find(row_id(AgentKey::Coordinator))

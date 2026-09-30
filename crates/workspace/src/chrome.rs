@@ -96,18 +96,17 @@ fn title_bar_background(cx: &App) -> Background {
     )
 }
 
-/// The page's widths, as the panels ended up: the first panel's and the last
-/// panel's, with the middle column left to take what remains (§7.3).
+/// The page's width, as the panels ended up: the agent column's, with the
+/// conversation left to take what remains (§7.3).
 ///
 /// `None` until the panels have laid out once — before that there is no page to
 /// measure, and nothing to remember.
 fn panes_from_sizes(sizes: &[Pixels]) -> Option<Panes> {
-    let [left, _, right] = sizes else {
+    let [left, _] = sizes else {
         return None;
     };
     Some(Panes {
         left: left.as_f32(),
-        right: right.as_f32(),
     })
 }
 
@@ -402,8 +401,7 @@ impl WorkspaceView {
         self.set_panes(fitted, cx);
         let state = self.pane_state.clone();
         state.update(cx, |state, cx| {
-            state.resize_panel(0, px(fitted.left), window, cx);
-            state.resize_panel(2, px(fitted.right), window, cx);
+            state.resize_panel(0, px(fitted.left), window, cx)
         });
     }
 
@@ -448,10 +446,10 @@ impl WorkspaceView {
         let _ = state.save(&self.config.root);
     }
 
-    /// The widths the window is showing its tab pages' side columns at (§7.3).
+    /// The width the window is showing its tab pages' agent column at (§7.3).
     ///
-    /// One pair for the window, remembered in `app.json`: the three columns are
-    /// the same three columns in every tab.
+    /// One for the window, remembered in `app.json`: the two columns are the same
+    /// two in every tab.
     pub fn panes(&self) -> Panes {
         self.panes
     }
@@ -843,21 +841,13 @@ impl WorkspaceView {
                     cx.notify();
                 }
             }
-            TabContentEvent::ResetPane(side) => {
+            TabContentEvent::ResetPane => {
                 // A double-clicked split goes back to the width it starts at
-                // (§7.3). The panels are what move; the window hears them and
-                // writes the result down, the way it does for a drag.
-                let width = match side {
-                    panes::PaneSide::Left => store::app_state::LEFT_DEFAULT,
-                    panes::PaneSide::Right => store::app_state::RIGHT_DEFAULT,
-                };
-                let index = match side {
-                    panes::PaneSide::Left => 0,
-                    panes::PaneSide::Right => 2,
-                };
+                // (§7.3). The panel is what moves; the window hears it and writes
+                // the result down, the way it does for a drag.
                 let state = self.pane_state.clone();
                 state.update(cx, |state, cx| {
-                    state.resize_panel(index, px(width), window, cx)
+                    state.resize_panel(0, px(store::app_state::LEFT_DEFAULT), window, cx)
                 });
             }
             TabContentEvent::ScreenChanged => {
@@ -1351,12 +1341,6 @@ mod tests {
         point(column.right(), page_middle(window))
     }
 
-    /// The same, on the other side: the boundary the composer column starts at.
-    fn right_divider(window: &mut gpui_kit::Window) -> gpui_kit::Point<gpui_kit::Pixels> {
-        let column = window.find("composer-column").bounds();
-        point(column.left(), page_middle(window))
-    }
-
     /// §7.1: the tab being shown must be *visible* — all of it, not just its
     /// first pixel. With more tabs than the window has room for, the strip
     /// scrolls the shown tab in; the tab's own box (and the label inside it)
@@ -1463,38 +1447,41 @@ mod tests {
         }
     }
 
-    /// §7.3: the composer starts where the transcript does. The middle column's
-    /// header sits above the transcript's first row, and the right column's input
-    /// begins on that line — it used to begin over the header, its box a full
-    /// header's height above the transcript's own top.
+    /// §7.3: the conversation is one column, top to bottom — the header, the
+    /// transcript, the composer, the status line. Everything the reader works with
+    /// is in the column the transcript is in, and the input sits under the
+    /// transcript rather than off in a column of its own.
     #[gpui_kit::test]
-    fn the_composer_starts_at_the_transcripts_first_row(cx: &mut TestAppContext) {
+    fn the_composer_sits_at_the_foot_of_the_conversation(cx: &mut TestAppContext) {
         let (_view, cx) = page_window(cx, test_root("align"), (1280., 800.));
         cx.update(|window, cx| window.render_frame(cx));
 
         let header = cx.update(|window, _| window.find("transcript-header").bounds());
-        let column = cx.update(|window, _| window.find("composer-column").bounds());
+        let column = cx.update(|window, _| window.find("conversation-column").bounds());
+        let composer = cx.update(|window, _| window.find("composer").bounds());
         let body = cx.update(|window, _| window.find("composer-body").bounds());
         assert_eq!(
-            body.top(),
-            header.bottom(),
-            "the input begins on the transcript's first row: {body:?} against {header:?}"
-        );
-        assert_eq!(
-            column.top(),
             header.top(),
-            "the two columns start together: {column:?} against {header:?}"
+            column.top(),
+            "the header is the column's first row: {header:?} against {column:?}"
         );
-        // The padding is this number, so the two must agree: the header is one
-        // line of text, its padding and its hairline, whatever the theme makes
-        // those.
+        // The header is one line of text, its padding and its hairline, whatever
+        // the theme makes those.
         assert_eq!(
             header.size.height,
             crate::tab_page::HEADER_HEIGHT,
-            "the header is the height the composer column pads by"
+            "the header is as tall as it has always been"
+        );
+        assert!(
+            composer.top() >= header.bottom(),
+            "the input is under the transcript, not over it: {composer:?} against {header:?}"
+        );
+        assert!(
+            (composer.size.width - column.size.width).abs() <= px(1.),
+            "and it is the column's own width: {composer:?} against {column:?}"
         );
 
-        // And the action is under the input, on its own row, with the room the
+        // The action is under the input, on its own row, with the room the
         // composer keeps there.
         let button = cx.update(|window, _| window.find(composer::BUTTON_ID).bounds());
         assert!(
@@ -1505,20 +1492,28 @@ mod tests {
             button.size.height <= px(28.),
             "one control high: {button:?}"
         );
+        assert!(
+            body.left() >= composer.left() && body.right() <= composer.right(),
+            "the input is drawn inside the composer: {body:?} against {composer:?}"
+        );
+        assert!(
+            body.size.width > column.size.width / 2.,
+            "and that is the column's own width, not a column of its own: {body:?} against {column:?}"
+        );
     }
 
     /// §7.3: the status line belongs to the page, not to the composer. It is the
-    /// foot of the middle column — full width, under whatever the transcript and
-    /// the todos take — and the composer's row is the input and the action alone.
+    /// conversation's last row — full width, under the transcript, the todos and
+    /// the composer — and the composer's own row is the input and the action alone.
     #[gpui_kit::test]
-    fn the_status_line_is_the_foot_of_the_middle_column(cx: &mut TestAppContext) {
+    fn the_status_line_is_the_foot_of_the_conversation(cx: &mut TestAppContext) {
         let (_view, cx) = page_window(cx, test_root("status"), (1280., 800.));
         cx.update(|window, cx| window.render_frame(cx));
 
         let line = cx.update(|window, _| window.find(crate::READOUT_LINE_ID).bounds());
-        let column = cx.update(|window, _| window.find("transcript-column").bounds());
+        let column = cx.update(|window, _| window.find("conversation-column").bounds());
         let header = cx.update(|window, _| window.find("transcript-header").bounds());
-        let composer = cx.update(|window, _| window.find("composer-column").bounds());
+        let composer = cx.update(|window, _| window.find("composer").bounds());
         assert!(
             line.bottom() == column.bottom(),
             "the line is the column's last row: {line:?} against {column:?}"
@@ -1534,11 +1529,11 @@ mod tests {
         let page = cx.update(|window, _| window.find("tab-page").bounds());
         assert!(
             line.left() >= page.left() && line.right() <= page.right(),
-            "the middle column's own foot, inside the page: {line:?} against {page:?}"
+            "the conversation's own foot, inside the page: {line:?} against {page:?}"
         );
         assert!(
-            line.right() <= composer.left(),
-            "and it stops where the composer's column begins: {line:?} against {composer:?}"
+            line.top() >= composer.bottom(),
+            "and the composer is above it: {line:?} against {composer:?}"
         );
 
         // The composer's row: the input above, the action below it. Whatever the
@@ -1567,13 +1562,13 @@ mod tests {
 
         let column = cx.update(|window, _| window.find("agent-column").bounds().size.width);
         let transcript =
-            cx.update(|window, _| window.find("transcript-column").bounds().size.width);
+            cx.update(|window, _| window.find("conversation-column").bounds().size.width);
         let from = cx.update(|window, _| left_divider(window));
         drag_split(cx, from, from + point(px(60.), px(0.)));
 
         let column_after = cx.update(|window, _| window.find("agent-column").bounds().size.width);
         let transcript_after =
-            cx.update(|window, _| window.find("transcript-column").bounds().size.width);
+            cx.update(|window, _| window.find("conversation-column").bounds().size.width);
         assert!(
             (column_after.as_f32() - column.as_f32() - 60.).abs() <= 2.,
             "the agent column follows the pointer: {column:?} then {column_after:?}"
@@ -1588,17 +1583,12 @@ mod tests {
             (panes.left - 320.).abs() < 2.,
             "260 points, 60 points more: {panes:?}"
         );
-        assert_eq!(
-            panes.right,
-            store::app_state::RIGHT_DEFAULT,
-            "the split nobody touched stayed where it was"
-        );
 
-        // The window wrote the widths down (§6): they are the app's own pair, so
-        // they outlive the window that dragged them.
+        // The window wrote the width down (§6): it is the app's own, so it
+        // outlives the window that dragged it.
         let saved = store::app_state::AppState::load(&store::paths::Root::at(root)).panes;
         assert!(
-            (saved.left - panes.left).abs() < 0.01 && (saved.right - panes.right).abs() < 0.01,
+            (saved.left - panes.left).abs() < 0.01,
             "app.json remembers the split: {saved:?} against {panes:?}"
         );
     }
@@ -1625,47 +1615,27 @@ mod tests {
             "and at its narrowest: {left}"
         );
 
-        // The other split is the other side's, and has its own range: dragging it
-        // to the right makes the composer column narrower, not wider.
-        let from = cx.update(|window, _| right_divider(window));
-        drag_split(cx, from, from + point(px(600.), px(0.)));
-        let right = view_panes(cx, &view).right;
-        assert!(
-            (right - store::app_state::RIGHT_MIN).abs() < 1.,
-            "the composer column stops at its narrowest: {right}"
-        );
-
-        let from = cx.update(|window, _| right_divider(window));
-        drag_split(cx, from, from - point(px(600.), px(0.)));
-        let right = view_panes(cx, &view).right;
-        assert!(
-            (right - store::app_state::RIGHT_MAX).abs() < 1.,
-            "and at its widest: {right}"
-        );
-
-        // The middle column is never squeezed out of the page: at the widest the
+        // The conversation is never squeezed out of the page: at the widest the
         // window allows, it still has its own room (§7.3).
-        let middle = cx.update(|window, _| window.find("transcript-column").bounds().size.width);
+        let middle = cx.update(|window, _| window.find("conversation-column").bounds().size.width);
         assert!(
             middle.as_f32() >= store::app_state::CENTER_MIN - 1.,
             "the transcript keeps its minimum: {middle:?}"
         );
     }
 
-    /// §7.3: a double-click on a split puts that side back to the width it starts
-    /// at — and leaves the other one where the reader left it.
+    /// §7.3: a double-click on the split puts the agent column back to the width
+    /// it starts at.
     #[gpui_kit::test]
-    fn double_clicking_a_split_puts_that_side_back(cx: &mut TestAppContext) {
+    fn double_clicking_the_split_puts_the_column_back(cx: &mut TestAppContext) {
         let (view, cx) = page_window(cx, test_root("reset"), (1280., 800.));
 
         let from = cx.update(|window, _| left_divider(window));
         drag_split(cx, from, from + point(px(60.), px(0.)));
-        let from = cx.update(|window, _| right_divider(window));
-        drag_split(cx, from, from - point(px(60.), px(0.)));
-        let dragged = view_panes(cx, &view);
         assert!(
-            dragged.left > 300. && dragged.right > 400.,
-            "both splits were dragged away from their defaults first: {dragged:?}"
+            view_panes(cx, &view).left > 300.,
+            "the split was dragged away from its default first: {:?}",
+            view_panes(cx, &view)
         );
 
         let at = cx.update(|window, _| left_divider(window));
@@ -1675,24 +1645,6 @@ mod tests {
         assert!(
             (panes.left - store::app_state::LEFT_DEFAULT).abs() < 1.,
             "the split that was double-clicked is back at its default: {panes:?}"
-        );
-        assert!(
-            (panes.right - dragged.right).abs() < 1.,
-            "the split nobody touched is where it was: {panes:?} against {dragged:?}"
-        );
-
-        // The other side resets too — the gesture belongs to the split it was
-        // made on, wherever that split is.
-        let at = cx.update(|window, _| right_divider(window));
-        double_click_split(cx, at);
-        let panes = view_panes(cx, &view);
-        assert!(
-            (panes.right - store::app_state::RIGHT_DEFAULT).abs() < 1.,
-            "the composer column is back at its default: {panes:?}"
-        );
-        assert!(
-            (panes.left - store::app_state::LEFT_DEFAULT).abs() < 1.,
-            "and the agent column did not move for it: {panes:?}"
         );
     }
 
@@ -1733,61 +1685,61 @@ mod tests {
         assert_eq!(cx.update(|_, cx| second.read(cx).panes()), dragged);
     }
 
-    /// §7.3, §7.1: a window narrowed under columns someone widened still shows a
-    /// page — the side columns come in so the middle one keeps its room, rather
-    /// than the transcript being squeezed to nothing.
+    /// §7.3: a window narrowed under a column someone widened still shows a page
+    /// — the agent column comes in so the conversation keeps its room, rather than
+    /// the transcript being squeezed to nothing.
+    ///
+    /// A window narrower than the smallest the app opens, because the two columns
+    /// are the page's whole width: the widest column and the conversation's
+    /// minimum fit that smallest window with room to spare, so nothing narrower
+    /// than it can force the column in.
     #[gpui_kit::test]
-    fn a_narrowed_window_brings_the_side_columns_in(cx: &mut TestAppContext) {
+    fn a_narrowed_window_brings_the_agent_column_in(cx: &mut TestAppContext) {
         let root = test_root("small");
-        // Wide enough for both columns at their widest — 480 + 420 + 640 — which
-        // is the pair the smallest window cannot hold.
         let (view, cx) = page_window(cx, root.clone(), (1600., 900.));
 
-        // Both columns dragged as wide as the page allows — 160 points for the
-        // split on the left, and the composer's 280 — a pair that fits this
-        // window, and not the app's smallest one.
         let from = cx.update(|window, _| left_divider(window));
         drag_split(cx, from, from + point(px(600.), px(0.)));
-        let from = cx.update(|window, _| right_divider(window));
-        drag_split(cx, from, from - point(px(280.), px(0.)));
         let dragged = view_panes(cx, &view);
         assert!(
-            (dragged.left - store::app_state::LEFT_MAX).abs() < 1.
-                && (dragged.right - store::app_state::RIGHT_MAX).abs() < 1.,
-            "the widest columns the window can hold: {dragged:?}"
+            (dragged.left - store::app_state::LEFT_MAX).abs() < 1.,
+            "the widest column the window can hold: {dragged:?}"
         );
 
-        // The smallest window the app opens (§7.1).
-        cx.simulate_resize(size(px(1000.), px(700.)));
+        cx.simulate_resize(size(px(820.), px(700.)));
         cx.update(|window, cx| window.render_frame(cx));
 
         let panes = view_panes(cx, &view);
         assert!(
-            panes.left + panes.right + store::app_state::CENTER_MIN <= 1000. + 1.,
-            "the three columns fit the smallest window: {panes:?}"
+            panes.left < dragged.left,
+            "the column came in for the narrow window: {panes:?}"
         );
         assert!(
-            panes.left >= store::app_state::LEFT_MIN && panes.right >= store::app_state::RIGHT_MIN,
-            "and neither side went below its own minimum: {panes:?}"
+            panes.left + store::app_state::CENTER_MIN <= 820. + 1.,
+            "and leaves the conversation its room: {panes:?}"
+        );
+        assert!(
+            panes.left >= store::app_state::LEFT_MIN,
+            "and did not go below its own minimum: {panes:?}"
         );
         let column = cx.update(|window, _| window.find("agent-column").bounds().size.width);
         assert!(
             (column.as_f32() - panes.left).abs() < 2.,
-            "the page is drawn at the fitted widths: {column:?} against {panes:?}"
+            "the page is drawn at the fitted width: {column:?} against {panes:?}"
         );
-        let transcript =
-            cx.update(|window, _| window.find("transcript-column").bounds().size.width);
+        let conversation =
+            cx.update(|window, _| window.find("conversation-column").bounds().size.width);
         assert!(
-            transcript.as_f32() >= store::app_state::CENTER_MIN - 1.,
-            "the transcript kept its room: {transcript:?}"
+            conversation.as_f32() >= store::app_state::CENTER_MIN - 1.,
+            "the conversation kept its room: {conversation:?}"
         );
 
-        // And the window remembered what it had to do (§6): the widths it could
-        // not hold are not what the next window opens with.
+        // And the window remembered what it had to do (§6): the width it could not
+        // hold is not what the next window opens with.
         let saved = store::app_state::AppState::load(&store::paths::Root::at(root)).panes;
         assert!(
-            saved.left + saved.right + store::app_state::CENTER_MIN <= 1000. + 1.,
-            "app.json kept the fitted widths: {saved:?}"
+            saved.left + store::app_state::CENTER_MIN <= 820. + 1.,
+            "app.json kept the fitted width: {saved:?}"
         );
     }
 

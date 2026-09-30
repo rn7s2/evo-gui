@@ -580,11 +580,11 @@ impl Render for Composer {
             .is_focused(window);
         let edge = if focused { theme.ring } else { theme.border };
 
-        // The composer is the top of its column (§7.3): the input, its status
-        // row, and nothing below them — the column's height belongs to the tab
-        // page, not to the composer.
+        // The composer is the input and its status row, and nothing more (§7.3):
+        // it stands at the foot of the conversation at its own height, and the
+        // page owns everything around it.
         v_flex()
-            .size_full()
+            .w_full()
             .items_stretch()
             .gap_2()
             .key_context(KEY_CONTEXT)

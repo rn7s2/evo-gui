@@ -23,7 +23,7 @@ use std::time::Duration;
 use serde_json::Value;
 
 use crate::state::Status;
-use crate::swarm::{lane_list, LaneActivity, LaneList};
+use crate::swarm::{lane_list, LaneList};
 use crate::{Item, ItemId, LaneRow, Op, Segment, SwarmState, Topic, TopicState};
 
 /// One agent of a tab: the coordinator, or lane N.
@@ -495,12 +495,7 @@ impl TabModel {
         let empty = SwarmState::default();
         let swarm = self.swarm.as_ref().unwrap_or(&empty);
         let lanes = &self.lanes;
-        let next = lane_list(swarm, |n| {
-            lanes
-                .get(&n)
-                .map(lane_activity)
-                .filter(|activity| activity.streaming.is_some() || activity.last.is_some())
-        });
+        let next = lane_list(swarm, |n| lanes.get(&n).and_then(lane_last_item));
         if next != self.lane_list {
             self.lane_list = next;
             changes.lanes = true;
@@ -508,23 +503,10 @@ impl TabModel {
     }
 }
 
-/// The activity one lane's own mirror adds to its row: what is streaming, and what landed
-/// last.
-fn lane_activity(topic: &Topic) -> LaneActivity {
-    let streaming = topic
-        .items()
-        .iter()
-        .rev()
-        .find_map(|item| item.streaming_text().map(str::to_string))
-        .map(|text| {
-            if text.trim().is_empty() {
-                "writing…".to_string()
-            } else {
-                text
-            }
-        });
-    let last = topic
+/// The newest item one lane's own mirror knows about: its kind, and a one-line summary of
+/// it. The lane's topic has it before the swarm's own summary of the lane catches up.
+fn lane_last_item(topic: &Topic) -> Option<(String, String)> {
+    topic
         .last_item()
-        .map(|item| (item.kind.label().to_string(), item.summary()));
-    LaneActivity { streaming, last }
+        .map(|item| (item.kind.label().to_string(), item.summary()))
 }

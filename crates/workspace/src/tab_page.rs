@@ -26,14 +26,12 @@ use gpui_kit::{
 use session::{lane_task_label, AgentKey, LaneStatus, TabModel};
 use transcript::TodoPanel;
 
-use crate::panes::side_of;
 use crate::tab::{Notice, NoticeTone, TabContent, TabContentEvent, TabState};
-use store::app_state::{CENTER_MIN, LEFT_MAX, LEFT_MIN, RIGHT_MAX, RIGHT_MIN};
+use store::app_state::{CENTER_MIN, LEFT_MAX, LEFT_MIN};
 
-/// The middle column's header: its own padding, one line of text and the hairline
-/// under it. The composer column pads by this, so the input begins on the same
-/// line as the transcript's first row rather than over the header (§7.3). The
-/// assertion in `chrome`'s tests is what keeps the two in step.
+/// The conversation column's header band: its own padding, one line of text and the
+/// hairline under it — as tall as this, and never less. The assertion in `chrome`'s
+/// tests is what keeps the number and the drawn header in step.
 pub(crate) const HEADER_HEIGHT: Pixels = px(35.);
 
 /// The status line's element id. It carries the whole line as its tooltip and as
@@ -235,14 +233,14 @@ impl TabContent {
             .into_any_element()
     }
 
-    /// The tab page: agents, transcript and todos, composer (§7.3).
+    /// The tab page: the agent list, and the conversation beside it (§7.3).
     ///
-    /// Three columns with a draggable split between them (§7.3), drawn by the
-    /// kit's resizable panels: the two side columns take the widths the window
-    /// remembers, the middle one takes what is left. Every tab's page shares one
-    /// [`panes::Panes`](crate::panes) state — the three columns are the same three
-    /// columns in every tab, so a split dragged in one tab is dragged in all of
-    /// them — and the window hears where the drag ended so it can write it down.
+    /// Two columns with a draggable split between them (§7.3), drawn by the kit's
+    /// resizable panels: the agent column takes the width the window remembers, and
+    /// the conversation takes what is left. Every tab's page shares one
+    /// [`panes::Panes`](crate::panes) state — the two columns are the same two in
+    /// every tab, so a split dragged in one tab is dragged in all of them — and the
+    /// window hears where the drag ended so it can write it down.
     fn render_page(&self, folder: &Path, cx: &mut Context<Self>) -> AnyElement {
         let panes = self.panes();
         div()
@@ -253,8 +251,8 @@ impl TabContent {
             .into_any_element()
     }
 
-    /// The three columns themselves, in the group that lets the splits between
-    /// them be dragged (§7.3).
+    /// The two columns themselves, in the group that lets the split between them
+    /// be dragged (§7.3).
     fn render_columns(
         &self,
         folder: &Path,
@@ -276,27 +274,18 @@ impl TabContent {
             .child(
                 resizable_panel()
                     .size_range(px(CENTER_MIN)..Pixels::MAX)
-                    .child(self.render_center_column(cx)),
-            )
-            .child(
-                resizable_panel()
-                    .size(px(panes.right))
-                    .size_range(px(RIGHT_MIN)..px(RIGHT_MAX))
-                    .flex_none()
-                    .child(self.render_composer_column(cx)),
+                    .child(self.render_conversation_column(cx)),
             )
     }
 
-    /// The dividers between the three columns (§7.3): the kit's own hairline and
-    /// the pill it grows on hover, wrapped in the one gesture it has no room for —
-    /// a double-click that puts that side back to the width it starts at.
+    /// The split between the two columns (§7.3): the kit's own hairline and the
+    /// pill it grows on hover, wrapped in the one gesture it has no room for — a
+    /// double-click that puts the column back to the width it starts at.
     fn pane_hands(&self, cx: &Context<Self>) -> ResizeHandleRenderer {
         let kit = resize_handle_appearance();
         let tab = cx.entity().downgrade();
-        let state = self.pane_state.clone();
         Rc::new(move |handle, window, cx| {
-            let side_state = state.clone();
-            let side_tab = tab.clone();
+            let tab = tab.clone();
             // What the kit draws: the hairline between the columns, and the pill
             // it grows when the pointer is over it (§7.3).
             let painted = kit(handle, window, cx);
@@ -310,20 +299,11 @@ impl TabContent {
                     // The kit sets the cursor on the band it drags; this is the
                     // one pixel of it that is drawn, and the pointer reads it.
                     .cursor_col_resize()
-                    .on_double_click(move |event, _, cx| {
-                        // Which split this is: the kit draws both with the same
-                        // element and tells neither of them its own name, so the
-                        // pointer's place against the two splits' own places is
-                        // what says it (§7.3).
-                        let sizes = side_state
-                            .as_ref()
-                            .map(|state| state.read(cx).sizes().to_vec())
-                            .unwrap_or_default();
-                        let side = side_of(event.position().x.as_f32(), &sizes);
-                        if let Some(tab) = side_tab.upgrade() {
-                            // The window owns the widths (§7.3); a tab only says
+                    .on_double_click(move |_, _, cx| {
+                        if let Some(tab) = tab.upgrade() {
+                            // The window owns the width (§7.3); a tab only says
                             // what was asked of it.
-                            tab.update(cx, |_, cx| cx.emit(TabContentEvent::ResetPane(side)));
+                            tab.update(cx, |_, cx| cx.emit(TabContentEvent::ResetPane));
                         }
                     })
                     .child(painted.unwrap_or_else(|| {
@@ -397,6 +377,7 @@ impl TabContent {
             .test_support()
             .w_full()
             .flex_shrink_0()
+            .min_h(HEADER_HEIGHT)
             .items_center()
             .gap_2()
             .px_4()
@@ -410,13 +391,13 @@ impl TabContent {
             )
             .child(div().font_medium().child(name))
             .child(div().flex_1().min_w_0().when_some(task, |this, task| {
-                // One line, elided: a task is a sentence, and the transcript
-                // below is where the whole of it can be read.
+                // The task as this conversation's title: one line, elided at
+                // whatever the header has. The transcript below is where the whole
+                // of it is read, so nothing here is worth a second line.
                 this.child(
                     div()
                         .min_w_0()
                         .truncate()
-                        .text_xs()
                         .text_color(cx.theme().muted_foreground)
                         .child(SharedString::from(task)),
                 )
@@ -455,8 +436,13 @@ impl TabContent {
         )
     }
 
-    /// The selected agent's transcript, with its todos along the bottom (§7.3).
-    fn render_center_column(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The conversation (§7.3): whose transcript this is, the transcript, the
+    /// todos while the agent has any, the composer, and the one status line.
+    ///
+    /// Everything the reader works with is one column, top to bottom, in the order
+    /// they are used — nothing the page is *for* lives off to the side where a
+    /// window has to be wide enough to reach it.
+    fn render_conversation_column(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let selected = self.selected_agent();
         let view = self.transcripts.get(&selected).cloned();
         let todos = view
@@ -464,7 +450,7 @@ impl TabContent {
             .map(|view| view.read(cx).todos().to_vec())
             .unwrap_or_default();
         v_flex()
-            .id("transcript-column")
+            .id("conversation-column")
             .test_support()
             .flex_1()
             .min_w_0()
@@ -479,26 +465,24 @@ impl TabContent {
             // The panel renders nothing while the agent has no todos, so this
             // row disappears rather than leaving a gap (§7.3).
             .child(TodoPanel::new(&todos))
+            .child(self.render_composer(cx))
             // Under everything else, the one line that says what the agent being
             // shown is working with (§7.3).
             .child(status_line(status_text(self.model()), cx))
     }
 
-    /// The coordinator's composer: the input, and the single action button
-    /// beneath it (§7.3; the readout lives at the foot of the centre column).
+    /// The coordinator's composer, at the foot of the conversation (§7.3): the
+    /// input, and the single action button beneath it.
     ///
     /// A refused POST says so here — above the input that caused it, in the
     /// server's own words, and gone on its own (§4, §9.2).
-    fn render_composer_column(&self, cx: &App) -> impl IntoElement {
+    fn render_composer(&self, cx: &App) -> impl IntoElement {
         v_flex()
-            .id("composer-column")
+            .id("composer")
             .test_support()
             .w_full()
-            .h_full()
-            // The header's own height at the top, so what is below it starts on
-            // the line the transcript starts on (§7.3).
+            .flex_shrink_0()
             .px_4()
-            .pt(HEADER_HEIGHT)
             .pb_4()
             .gap_2()
             .when_some(self.notice(), |this, notice| {
@@ -509,8 +493,6 @@ impl TabContent {
                     .id("composer-body")
                     .test_support()
                     .w_full()
-                    .flex_1()
-                    .min_h_0()
                     .child(self.composer.clone()),
             )
     }

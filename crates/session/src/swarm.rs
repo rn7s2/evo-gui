@@ -2,9 +2,10 @@
 //!
 //! This is the read-only window the left column draws. The swarm topic carries every lane
 //! transition — `starting → idle` included — and an absolute step start, so a row's clock
-//! is arithmetic rather than a stamp ([`LaneRow::step_clock`]). A lane's own topic, when
-//! the tab mirrors it, adds the live activity line the swarm's summary cannot: the last
-//! item that landed, or the assistant text still streaming.
+//! is arithmetic rather than a stamp ([`LaneRow::step_clock`]). A row is its glyph, its
+//! number, the task it was given and its state: what a lane is *doing* right now is its
+//! transcript's business, and a lane's own topic adds nothing to the row but the newest
+//! item it landed ([`LaneRow::last_item`]), which is a tooltip's.
 
 use crate::{k_tokens, short_duration, SwarmLane, SwarmState};
 
@@ -49,6 +50,19 @@ impl LaneStatus {
     pub fn is_busy(self) -> bool {
         matches!(self, LaneStatus::Working | LaneStatus::Compacting)
     }
+
+    /// The word a row's trailing cell shows: what the lane is, in the swarm's own
+    /// vocabulary — the same words the state arrived in.
+    pub fn word(self) -> &'static str {
+        match self {
+            LaneStatus::Working => "working",
+            LaneStatus::Compacting => "compacting",
+            LaneStatus::Idle => "idle",
+            LaneStatus::Starting => "starting",
+            LaneStatus::Stopped => "stopped",
+            LaneStatus::Down => "down",
+        }
+    }
 }
 
 /// The swarm itself.
@@ -85,11 +99,9 @@ pub struct LaneRow {
     pub context_tokens: Option<u64>,
     pub context_window: Option<u64>,
     pub reports: u64,
-    /// The newest thing the lane did, as the swarm summarizes it.
+    /// The newest thing the lane did, as the swarm summarizes it — or, when the tab holds
+    /// that lane's mirror, as the lane's own newest item does. A tooltip carries it.
     pub last_item: Option<(String, String)>,
-    /// The lane's live activity line, from its own mirror when the tab holds one: the
-    /// assistant text still streaming, or the last item's summary.
-    pub activity: Option<String>,
 }
 
 impl LaneRow {
@@ -113,27 +125,15 @@ impl LaneRow {
         Some(short_duration(now_millis.saturating_sub(started) / 1000))
     }
 
-    /// The task on one line, truncated.
-    pub fn task_label(&self) -> Option<String> {
-        self.task.as_deref().map(crate::lane_task_label)
-    }
-
-    /// What the row's middle cell says: why it is down, what it is doing, or where it is
-    /// in the swarm's own vocabulary.
+    /// The task on one line, for the row's middle cell: what this lane was told to do.
     ///
-    /// The live activity from the lane's mirror wins over the swarm's task summary: the
-    /// task is what the lane was given, and the activity is what it is doing with it now.
-    pub fn label(&self) -> String {
-        if let Some(activity) = self.activity.as_deref() {
-            let activity = activity.trim();
-            if !activity.is_empty() {
-                return crate::clip(activity, 60);
-            }
-        }
-        match self.task_label() {
-            Some(task) => task,
-            None => self.state.clone(),
-        }
+    /// `None` when the swarm has not been told one — a lane that has only just started —
+    /// which is an empty cell rather than the lane's state said twice.
+    pub fn task_label(&self) -> Option<String> {
+        self.task
+            .as_deref()
+            .map(crate::lane_task_label)
+            .filter(|task| !task.is_empty())
     }
 
     /// The context figure, when the swarm reports one.
@@ -188,15 +188,6 @@ impl LaneRow {
     }
 }
 
-/// One lane's own mirror, reduced to what a row adds to the swarm's summary.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct LaneActivity {
-    /// The assistant text still streaming in that lane, trimmed to one line.
-    pub streaming: Option<String>,
-    /// The newest item's kind and a one-line summary of it.
-    pub last: Option<(String, String)>,
-}
-
 /// The tab's lane list: `main` (the coordinator) is not in it — the tab draws that row
 /// itself — so this is exactly the lanes the swarm reports.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -229,13 +220,17 @@ impl LaneList {
     }
 }
 
-/// Build the list from the swarm topic, applying each lane's own activity where the tab
-/// holds that lane's mirror.
-pub fn lane_list(state: &SwarmState, activity: impl Fn(u32) -> Option<LaneActivity>) -> LaneList {
+/// Build the list from the swarm topic, with each lane's own newest item where the tab
+/// holds that lane's mirror — the lane's own topic knows the item before the swarm's
+/// summary of it does.
+pub fn lane_list(
+    state: &SwarmState,
+    last_item: impl Fn(u32) -> Option<(String, String)>,
+) -> LaneList {
     let lanes = state
         .lanes
         .iter()
-        .map(|lane| lane_row(lane, activity(lane.n)))
+        .map(|lane| lane_row(lane, last_item(lane.n)))
         .collect();
     LaneList {
         swarm: Some(SwarmInfo {
@@ -250,13 +245,7 @@ pub fn lane_list(state: &SwarmState, activity: impl Fn(u32) -> Option<LaneActivi
     }
 }
 
-fn lane_row(lane: &SwarmLane, activity: Option<LaneActivity>) -> LaneRow {
-    let activity =
-        activity.filter(|activity| activity.streaming.is_some() || activity.last.is_some());
-    let streaming = activity
-        .as_ref()
-        .and_then(|activity| activity.streaming.clone());
-    let last = activity.as_ref().and_then(|activity| activity.last.clone());
+fn lane_row(lane: &SwarmLane, last: Option<(String, String)>) -> LaneRow {
     LaneRow {
         n: lane.n,
         status: LaneStatus::from_state(&lane.state),
@@ -273,24 +262,12 @@ fn lane_row(lane: &SwarmLane, activity: Option<LaneActivity>) -> LaneRow {
         context_tokens: lane.context.as_ref().map(|context| context.tokens),
         context_window: lane.context.as_ref().and_then(|context| context.window),
         reports: lane.reports,
-        last_item: lane
-            .last_item
-            .as_ref()
-            .map(|item| (item.kind.clone(), item.summary.clone()))
-            .or_else(|| last.clone()),
-        // The lane's own mirror is the fresher source: what it is streaming, else what
-        // landed in it last, and only then the swarm's own one-line summary.
-        activity: streaming
-            .or_else(|| {
-                last.as_ref()
-                    .map(|(_, summary)| summary.clone())
-                    .filter(|summary| !summary.is_empty())
-            })
-            .or_else(|| {
-                lane.last_item
-                    .as_ref()
-                    .map(|item| item.summary.clone())
-                    .filter(|summary| !summary.is_empty())
-            }),
+        // The lane's own mirror is the fresher source: the item it just saw land, and
+        // only then the swarm's own summary of the last one.
+        last_item: last.or_else(|| {
+            lane.last_item
+                .as_ref()
+                .map(|item| (item.kind.clone(), item.summary.clone()))
+        }),
     }
 }

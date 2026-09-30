@@ -117,7 +117,6 @@ fn lane_row(step: usize, lane: u32, status: LaneStatus) -> LaneRow {
             "assistant".to_string(),
             "Reading the crate now.".to_string(),
         )),
-        activity: busy.then(|| "Reading the crate now.".to_string()),
     }
 }
 
