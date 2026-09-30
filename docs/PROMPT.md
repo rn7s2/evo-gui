@@ -9,7 +9,8 @@ exactly this, and the app must use it rather than re-implement anything.
 is one `evo-swarm serve` process (a coordinator agent plus a pool of worker lanes) that this app
 spawns in a chosen folder and drives over one loopback protocol: the child writes a **ready file**
 (port, token, epoch) once it is listening, and the app reads a **snapshot**, follows one **stream**
-of ops, and posts every action as an **op** — the whole of it is in `../evo-agent/docs/serve.md`,
+of ops, and posts every action as an **op** — the whole of it is in the agent's own
+`docs/serve.md`,
 and the binding contract between the two sides is `CONTRACT.md` in the workspace root (with the
 design rationale in `evo-serve-redesign.html` beside it). Lanes are never addressed directly: they
 are private children of the coordinator, and their topics arrive mirrored in the coordinator's own
@@ -23,8 +24,8 @@ stream. The app keeps its own data under `~/.evo/desktop/`.
 |---|---|
 | `CONTRACT.md` (workspace root) | the binding contract: launch, the protocol, the view model, the swarm |
 | `evo-serve-redesign.html` | why it is shaped that way (root causes, the removed surfaces, the plan) |
-| `../evo-agent/docs/serve.md` | the protocol as the server side documents it |
-| `../evo-agent/docs/swarm.md` | what a swarm is, and how its lanes are mirrored into topic `lane:N` |
+| `evo-agent/docs/serve.md` | the protocol as the server side documents it (evo's own checkout, beside this repo) |
+| `evo-agent/docs/swarm.md` | what a swarm is, and how its lanes are mirrored into topic `lane:N` |
 
 gpui-kit docs are markdown: `curl -s https://gpui-kit.com/llms.txt` is the index, and every page is
 `https://gpui-kit.com/<path>.md` (e.g. `/component/tabs.md`). Read at least `docs/installation`,
@@ -68,7 +69,7 @@ spawns it through `swarm_client` with stdin a pipe it holds, and **readiness is
 the ready file the child writes** — port, token, epoch — not a poll. There is no
 port picking, no token file, no `EVO_SERVE_WATCH_PID` and no kill ladder:
 dropping the pipe is what stops the child, and EOF is what tells it the tab is
-gone. `CONTRACT.md` §1/§8 and `../evo-agent/docs/serve.md` are the whole of it,
+gone. `CONTRACT.md` §1/§8 and the agent's own `docs/serve.md` are the whole of it,
 and nothing here repeats them.
 
 Two rules that stay: `--workers` only when the user asks, and never
@@ -77,7 +78,7 @@ Two rules that stay: `--workers` only when the user asks, and never
 ## 4. Endpoints you use
 
 Three reads and one write, all of them CONTRACT.md §5 and
-`../evo-agent/docs/serve.md`: `GET /snapshot` (one atomic read of every topic the
+the agent's `docs/serve.md`: `GET /snapshot` (one atomic read of every topic the
 tab shows), `GET /stream` (one SSE stream carrying every topic's ops),
 `GET /items` / `/items/<id>` / `/media/<id>/<n>` (paging back, one item whole,
 image bytes) and `GET /catalog`. Every action is `POST /ops` with the envelope of
