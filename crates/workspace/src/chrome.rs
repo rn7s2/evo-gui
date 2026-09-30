@@ -886,9 +886,22 @@ impl WorkspaceView {
                 session_path,
                 folder,
             } => {
-                // A resumed swarm is its own tab, running in the folder the
-                // session came from (§7.2, §14.2).
-                let tab = self.open_empty_tab(window, cx);
+                // The New Swarm page the row was picked on becomes the resumed
+                // swarm, as a folder pick does: a resume is that page's answer,
+                // not a second tab beside it. Only a tab that is not an empty
+                // page (none today, but a resume can be asked for from anywhere)
+                // gets a tab of its own.
+                let tab = if tab.read(cx).state() == &crate::tab::TabState::Empty {
+                    tab
+                } else {
+                    self.open_empty_tab(window, cx)
+                };
+                // The session index keeps a cwd as `…/project/`; the tab shows
+                // and remembers the folder without that trailing slash.
+                let folder = match folder.to_str().map(|f| f.trim_end_matches('/')) {
+                    Some(trimmed) if !trimmed.is_empty() => PathBuf::from(trimmed),
+                    _ => folder,
+                };
                 tab.update(cx, |content, cx| {
                     content.launch(
                         Launch::Resume {

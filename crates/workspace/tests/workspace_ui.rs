@@ -14,7 +14,7 @@ use gpui_kit::{
     WindowHandle, WindowOptions,
 };
 use session::LaunchPlan;
-use workspace::{Launch, LaunchEnv, TabState, WorkspaceView};
+use workspace::{Launch, LaunchEnv, TabContentEvent, TabState, WorkspaceView};
 
 /// Opens the app's window with one empty tab, at a deterministic size.
 fn open_workspace(cx: &mut TestAppContext) -> (WindowHandle<Root>, Entity<WorkspaceView>) {
@@ -913,6 +913,65 @@ fn the_window_is_named_after_the_folder_of_the_tab_being_shown(cx: &mut TestAppC
         view.update(cx, |view, cx| view.select_tab(0, window, cx));
         window.render_frame(cx);
         assert_eq!(view.read(cx).window_title(), named);
+    })
+    .unwrap();
+}
+
+/// Resuming a session from the New Swarm page's history turns *that* page into the
+/// resumed swarm, as picking a folder does: no second tab, and no New Swarm page
+/// left behind next to it.
+#[gpui_kit::test]
+fn resuming_from_the_history_replaces_the_new_swarm_page(cx: &mut TestAppContext) {
+    let home = std::env::temp_dir().join(format!("workspace-ui-resume-{}", std::process::id()));
+    let folder = home.join("resumed-here");
+    std::fs::create_dir_all(&folder).expect("a folder to resume in");
+    let (handle, view) = open_window_with(cx, move |window, cx| {
+        WorkspaceView::with_config(
+            Arc::new(LaunchEnv {
+                swarm_bin: PathBuf::from("/nonexistent/evo-swarm"),
+                root: store::paths::Root::at(home),
+                ..LaunchEnv::default()
+            }),
+            window,
+            cx,
+        )
+    });
+
+    let tab = cx
+        .update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let tab = view.read(cx).selected_tab().clone();
+            tab.update(cx, |_, cx| {
+                cx.emit(TabContentEvent::Resume {
+                    session_path: folder.join("session.sexp"),
+                    // As the session index keeps a cwd: with a trailing slash.
+                    folder: PathBuf::from(format!("{}/", folder.display())),
+                })
+            });
+            tab
+        })
+        .unwrap();
+    // The window hears the event once the update that emitted it has ended.
+    cx.update_window(handle.into(), |_, window, cx| {
+        for tab in view.read(cx).tabs().to_vec() {
+            retire_engine!(tab, cx);
+        }
+        window.render_frame(cx);
+        let view = view.read(cx);
+        assert_eq!(
+            view.tabs().len(),
+            1,
+            "the page became the swarm; no second tab"
+        );
+        let shown = view.selected_tab().read(cx);
+        assert_eq!(shown.id(), tab.read(cx).id(), "the same tab, not a new one");
+        assert_ne!(shown.state(), &TabState::Empty, "no New Swarm page is left");
+        assert_eq!(shown.title().as_ref(), "resumed-here");
+        assert_eq!(
+            shown.folder(),
+            Some(folder.as_path()),
+            "no trailing slash kept"
+        );
     })
     .unwrap();
 }
