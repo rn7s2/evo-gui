@@ -43,9 +43,6 @@ pub(crate) struct Palette {
     pub(crate) sidebar: Hsla,
     /// The lightest surface: a card's body, an input.
     pub(crate) input: Hsla,
-    /// A status pill's ink — the success colour most of the way to the ink, which
-    /// is what `Rows.css` mixes its `.tc-status` text from.
-    pub(crate) pill_ink: Hsla,
     pub(crate) warning: Hsla,
     pub(crate) info: Hsla,
     pub(crate) mono: SharedString,
@@ -87,10 +84,6 @@ impl Palette {
         mix(self.foreground, 10., self.background)
     }
 
-    pub(crate) fn pill_ground(&self, surface: Hsla) -> Hsla {
-        mix(self.success, 12., surface)
-    }
-
     pub(crate) fn from_app(cx: &App) -> Self {
         let theme = cx.theme();
         let colors = theme.semantic_tokens().colors;
@@ -113,7 +106,6 @@ impl Palette {
             // (`--sidebar`).
             sidebar: color(design::palette(theme.is_dark()).sidebar),
             input: color(design::palette(theme.is_dark()).input),
-            pill_ink: mix(theme.success, 85., colors.foreground),
             muted: colors.muted,
             muted_foreground: colors.muted_foreground,
             border: colors.border,

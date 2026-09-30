@@ -1241,7 +1241,12 @@ fn tool_row(
             .text_color(palette.muted_foreground)
             .child(summary),
     );
-    head = head.child(status_pill(status, pill, palette));
+    head = head.child(status_pill(
+        status,
+        pill,
+        palette,
+        tool.status == session::ToolStatus::Ok,
+    ));
 
     let mut card = div()
         .id(row_id("transcript-tool-row", &id))
@@ -1351,10 +1356,14 @@ pub(crate) fn tool_sentence(args: &Value) -> (String, String) {
 /// lets CSS cut it to the row; this keeps a head from measuring a novel.
 const TC_SUMMARY_LIMIT: usize = 120;
 
-/// The status pill a card's head carries: the success green most of the way to the
-/// ink, on a ground of the same green 12% over the surface, at a fixed 20px.
-fn status_pill(status: &str, _status_color: Hsla, palette: &Palette) -> AnyElement {
-    div()
+/// The status pill a card's head carries: the status colour most of the way to
+/// the ink, on a ground of the same colour 12% over the surface, at a fixed 20px
+/// — the design's rule for its green, applied to whatever state the card is in.
+///
+/// The design's pill carries a small tick; a state that is not a success has no
+/// tick to show, so one is drawn for the states that are done.
+fn status_pill(status: &str, colour: Hsla, palette: &Palette, tick: bool) -> AnyElement {
+    let mut pill = div()
         .flex_shrink_0()
         .h(px(20.))
         .flex()
@@ -1364,10 +1373,35 @@ fn status_pill(status: &str, _status_color: Hsla, palette: &Palette) -> AnyEleme
         .pr(px(7.))
         .rounded_full()
         .text_size(px(11.5))
-        .text_color(palette.pill_ink)
-        .bg(palette.pill_ground(palette.sidebar))
-        .child(status.to_string())
-        .into_any_element()
+        .text_color(mix(colour, 85., palette.foreground))
+        .bg(mix(colour, 12., palette.sidebar));
+    if tick {
+        // `<Tick/>` in the design: `m5 12 5 5L20 7` of a 24-unit box, 3 units of
+        // stroke, round caps — the same painter as the strip's glyphs.
+        pill = pill.child(glyph::stroked(
+            TICK_GLYPH,
+            TICK_STROKE,
+            &tick_lines(),
+            pill_ink(colour, palette),
+        ));
+    }
+    pill.child(status.to_string()).into_any_element()
+}
+
+/// The tick's own size, from the design's 11px glyph at a 3-in-24 stroke.
+const TICK_GLYPH: f32 = 11.;
+const TICK_STROKE: f32 = 1.4;
+
+/// The tick `m5 12 5 5L20 7`, scaled to [`TICK_GLYPH`].
+fn tick_lines() -> Vec<(Point<Pixels>, Point<Pixels>)> {
+    let size = TICK_GLYPH;
+    let at = |x: f32, y: f32| point(px(x / 24. * size), px(y / 24. * size));
+    vec![(at(5., 12.), at(10., 17.)), (at(10., 17.), at(20., 7.))]
+}
+
+/// The pill's ink: the status colour most of the way to the foreground.
+fn pill_ink(colour: Hsla, palette: &Palette) -> Hsla {
+    mix(colour, 85., palette.foreground)
 }
 
 /// The disclosure of a tool row: the design's chevron, turning a quarter in
@@ -1651,7 +1685,7 @@ fn report_row(id: ItemId, report: &LaneReport, palette: &Palette) -> AnyElement 
                 .child(
                     div()
                         .ml_auto()
-                        .child(status_pill("done", palette.success, palette)),
+                        .child(status_pill("done", palette.success, palette, true)),
                 )
                 .test_support(),
         );
