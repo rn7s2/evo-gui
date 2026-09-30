@@ -371,6 +371,7 @@ fn a_launchs_argv_is_the_contracts_flags() {
     ));
     launch.lane_thinking = Some("medium".to_owned());
     launch.workers = Some(6);
+    launch.agent_bin = Some(PathBuf::from("/usr/local/bin/evo-agent"));
     assert_eq!(
         launch.argv(),
         vec![
@@ -386,6 +387,8 @@ fn a_launchs_argv_is_the_contracts_flags() {
             "claude-opus-5@anthropic",
             "--thinking",
             "high",
+            "--evo",
+            "/usr/local/bin/evo-agent",
             "--workers",
             "6",
             "--lane-model",
