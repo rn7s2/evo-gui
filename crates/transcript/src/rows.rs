@@ -17,7 +17,6 @@ use std::time::Duration;
 
 use gpui_kit::base::{Easing, SelectableText};
 use gpui_kit::component::text::{TextView, TextViewMotion};
-use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{h_flex, Icon, IconName};
 use gpui_kit::TestSupportExt as _;
 use gpui_kit::{
@@ -1752,9 +1751,13 @@ fn quiet_source_line(
         line = line.child(full.clone());
     }
     line.tooltip(move |window, cx| {
-        Tooltip::new(tooltip.clone())
-            .max_w(NOTICE_TOOLTIP_WIDTH)
-            .build(window, cx)
+        widgets::tooltip::text(
+            "notice-tooltip",
+            tooltip.clone(),
+            NOTICE_TOOLTIP_WIDTH,
+            window,
+            cx,
+        )
     })
     .test_support()
     .into_any_element()
@@ -2345,7 +2348,9 @@ fn field_row(base: &ElementId, index: usize, field: &Field, palette: &Palette) -
 
     match elided {
         Some(full) => row
-            .tooltip(move |window, cx| Tooltip::new(full.clone()).max_w(px(520.)).build(window, cx))
+            .tooltip(move |window, cx| {
+                widgets::tooltip::text("row-tooltip", full.clone(), px(520.), window, cx)
+            })
             .test_support()
             .into_any_element(),
         None => row.test_support().into_any_element(),
@@ -2370,7 +2375,9 @@ fn key_cell(id: &ElementId, key: &str, palette: &Palette) -> AnyElement {
         .text_size(KEY_SIZE)
         .text_color(palette.muted_foreground)
         .child(SelectableText::new((id.clone(), "key"), key.to_string()))
-        .tooltip(move |window, cx| Tooltip::new(full.clone()).build(window, cx))
+        .tooltip(move |window, cx| {
+            widgets::tooltip::text("path-tooltip", full.clone(), px(520.), window, cx)
+        })
         .test_support()
         .into_any_element()
 }

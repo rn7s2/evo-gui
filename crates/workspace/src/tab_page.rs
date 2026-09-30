@@ -19,7 +19,6 @@ use gpui_kit::base::{InteractiveElementExt as _, ResizeHandleRenderer};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
     h_flex, h_resizable, resizable_panel, resize_handle_appearance, v_flex, ActiveTheme as _,
     IconName, Sizable as _, StyledExt as _,
@@ -580,7 +579,9 @@ fn path_text(id: &'static str, folder: &Path, limit: usize, muted: bool, cx: &Ap
         .truncate()
         .when(muted, |this| this.text_color(cx.theme().muted_foreground))
         .child(SharedString::from(shown))
-        .tooltip(move |window, cx| Tooltip::new(full.clone()).build(window, cx))
+        .tooltip(move |window, cx| {
+            widgets::tooltip::text("path-tooltip", full.clone(), px(520.), window, cx)
+        })
         .into_any_element()
 }
 
@@ -738,9 +739,7 @@ fn notice_line(notice: &Notice, cx: &App) -> AnyElement {
         })
         .when_some(detail, |this, detail| {
             this.tooltip(move |window, cx| {
-                Tooltip::new(detail.clone())
-                    .max_w(px(520.))
-                    .build(window, cx)
+                widgets::tooltip::text("notice-tooltip", detail.clone(), px(520.), window, cx)
             })
         })
         .child(div().min_w_0().truncate().child(notice.text.clone()))

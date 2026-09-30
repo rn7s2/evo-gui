@@ -39,7 +39,6 @@
 //!   [`WorkspaceView::add_tab`](crate::WorkspaceView::add_tab).
 
 use gpui_kit::base::InteractiveElementExt as _;
-use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{h_flex, ActiveTheme as _, TitleBar};
 use gpui_kit::prelude::*;
 use gpui_kit::{
@@ -306,7 +305,9 @@ fn tab(
                 .flex_1()
                 .min_w_0()
                 .truncate()
-                .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+                .tooltip(move |window, cx| {
+                    widgets::tooltip::text("tab-tooltip", tooltip.clone(), px(460.), window, cx)
+                })
                 .child(title),
         )
         .child(close(

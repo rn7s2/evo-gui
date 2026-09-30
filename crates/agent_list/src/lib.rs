@@ -25,7 +25,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::{h_flex, tooltip::Tooltip, v_flex, ActiveTheme as _, StyledExt as _};
+use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, StyledExt as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     div, px, Context, ElementId, EventEmitter, FocusHandle, FontFeatures, Hsla,
@@ -606,9 +606,7 @@ impl AgentList {
             .aria_selected(selected)
             .tooltip(move |window, cx| {
                 // A long task would otherwise make a tooltip wider than the window.
-                Tooltip::new(tooltip.clone())
-                    .max_w(px(360.))
-                    .build(window, cx)
+                widgets::tooltip::text("agent-row-tooltip", tooltip.clone(), px(360.), window, cx)
             })
     }
 }
