@@ -249,6 +249,16 @@ fn the_add_button_follows_the_last_tab(cx: &mut TestAppContext) {
             px(store::design::TAB_BASIS),
             "a tab is its basis wide: {first:?}"
         );
+        // The row starts a corner's room before the traffic area ends, so the first
+        // tab stands on the design's own x — `TRAFFIC_WIDTH + TAB_ROW_PAD.0` —
+        // which is what leaves its outward corner room outside the clip edge.
+        if cfg!(target_os = "macos") {
+            assert_eq!(
+                first.left(),
+                px(store::design::TRAFFIC_WIDTH + store::design::TAB_ROW_PAD.0),
+                "the first tab is where the design puts it: {first:?}"
+            );
+        }
         assert_eq!(last.left(), first.right(), "the tabs are side by side");
         assert_eq!(
             add.left() - last.right(),
@@ -745,6 +755,91 @@ fn an_overflowing_strip_keeps_the_add_button_and_shows_the_selected_tab(cx: &mut
             first.visible() && first.bounds().left() >= px(0.) && first.bounds().right() <= right,
             "the first tab came back into view: {:?}",
             first.bounds()
+        );
+    })
+    .unwrap();
+}
+
+/// §7.1: a strip scrolls once its tabs are at their floor — `min-width: 72px` —
+/// and the tab being shown is the one on screen, whichever end of the strip it is
+/// at. Twenty tabs in a 1280px window are past that floor, so the box is the room
+/// there is and the tabs run out of it.
+///
+/// The tabs here are asked for one at a time (`open_empty_tab`): `+` and ⌘T would
+/// show the one New Swarm tab rather than adding a second (§7.1).
+#[gpui_kit::test]
+fn a_strip_past_the_tabs_own_floor_scrolls_the_shown_tab_into_view(cx: &mut TestAppContext) {
+    const TABS: usize = 20;
+    let (handle, view) = open_workspace(cx);
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        for _ in 1..TABS {
+            open_another_tab(window, &view, cx);
+        }
+        window.render_frame(cx);
+
+        // The floor is what makes it scroll: even at 72px a tab there are more
+        // tabs than the room holds.
+        let strip = window.find("tab-strip-scroll").bounds();
+        let floor = px(TABS as f32 * store::design::TAB_MIN_WIDTH);
+        assert!(
+            strip.size.width < floor,
+            "the tabs cannot all fit at their floor: strip {strip:?} against {floor:?}"
+        );
+
+        // The newest tab is shown, and it is on screen whole — not half past the
+        // edge with its name cut mid-word.
+        let right = window.bounds().right();
+        assert_eq!(
+            view.read(cx).selected_index(),
+            TABS - 1,
+            "the newest tab is shown"
+        );
+        // The tab's own box, not its label: at the 72px floor a tab is all slot,
+        // close button and padding, and the label is elided to nothing.
+        let last = window.find(tab_box(tab_id(&view, TABS - 1, cx)));
+        assert!(
+            last.visible() && last.bounds().left() >= px(0.) && last.bounds().right() <= right,
+            "the tab being shown is in the strip's visible part: {:?}",
+            last.bounds()
+        );
+
+        // Where the tabs are clipped is where the `+` begins: nothing is drawn
+        // under the button, and the button is still in the window.
+        let add = window.find("tab-add").bounds();
+        assert!(
+            strip.right() <= add.left() && add.right() <= right,
+            "the tabs are clipped at the +: strip {strip:?}, + {add:?}, window {right:?}"
+        );
+
+        // And back: the first tab scrolls into view, at the design's own x — the
+        // strip's scroll at its start is the layout the design draws.
+        view.update(cx, |view, cx| view.select_tab(0, window, cx));
+        window.render_frame(cx);
+        let first = window.find(tab_box(tab_id(&view, 0, cx))).bounds();
+        assert!(
+            first.left() >= px(0.) && first.right() <= right,
+            "the first tab came back into view: {first:?}"
+        );
+        if cfg!(target_os = "macos") {
+            assert_eq!(
+                first.left(),
+                px(store::design::TRAFFIC_WIDTH + store::design::TAB_ROW_PAD.0),
+                "and stands where the design puts it: {first:?}"
+            );
+        }
+
+        // And one from the middle, which is neither end's scroll.
+        view.update(cx, |view, cx| view.select_tab(10, window, cx));
+        window.render_frame(cx);
+        let middle = window.find(tab_box(tab_id(&view, 10, cx)));
+        assert!(
+            middle.visible()
+                && middle.bounds().left() >= px(0.)
+                && middle.bounds().right() <= right,
+            "the tenth tab is on screen too: {:?}",
+            middle.bounds()
         );
     })
     .unwrap();

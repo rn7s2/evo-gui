@@ -27,6 +27,11 @@
 //!   dot mixes against the tab's own surface ([`BreathingDot`]);
 //! * the close button appears on the active tab and on whatever the pointer is
 //!   over, and clicking it does not select the tab it closes;
+//! * the tab being shown wears the design's hairline along its top edge — the
+//!   design's own `box-shadow`, so the same sliver shows above its rounded top
+//!   and around its corners;
+//! * the row starts short of the traffic area by the corner's own room, so the
+//!   first tab stands on the design's x with its outward corner drawn whole;
 //! * the `+` is always the next thing after the last tab — 8px along, the
 //!   design's `.tab-add` as the last sibling in `.tab-row` — and a hovered one
 //!   takes `tab_hover`;
@@ -38,14 +43,14 @@ use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{h_flex, ActiveTheme as _, TitleBar};
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    canvas, div, point, px, AnyElement, Context, ElementId, Entity, IntoElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, SharedString, TestSupportExt as _,
-    Window,
+    canvas, div, point, px, AnyElement, BoxShadow, Context, ElementId, Entity, IntoElement,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, SharedString,
+    TestSupportExt as _, Window,
 };
 use store::design::{self, Palette, Rgb};
 use widgets::dot::dot_id;
 use widgets::glyph;
-use widgets::paint::{color, mix};
+use widgets::paint::{color, mix, wash};
 use widgets::BreathingDot;
 
 use crate::chrome::WorkspaceView;
@@ -69,6 +74,14 @@ pub(crate) const ADD_ID: &str = "tab-add";
 /// because the active tab runs into the header row below it.
 const NO_RULE: f32 = 0.;
 
+/// The hairline the tab being shown wears along its top edge, and its colour: the
+/// design's `box-shadow: 0 -0.5px 0 rgba(0, 0, 0, .06)` — half a pixel of black
+/// at six percent, lifted half a pixel, which is the sliver that shows above the
+/// tab's rounded top and around its two top corners, over the strip it is about
+/// to run into.
+const TAB_EDGE: f32 = 0.5;
+const TAB_EDGE_MIX: f32 = 6.;
+
 /// The strip, with the kit's title bar around it so the window keeps its own
 /// gestures (drag, double click, window controls).
 pub(crate) fn strip(
@@ -88,9 +101,15 @@ pub(crate) fn strip(
 /// What the strip keeps clear at its left edge: the traffic lights on macOS,
 /// where the window's own chrome is; the row's own padding everywhere else, where
 /// the strip starts at the window's edge.
+///
+/// The tabs' box spends a corner's room of its own before its first tab
+/// ([`scroller`]), so the row starts that much short of the traffic area: the
+/// first tab then stands where the design's does — `TRAFFIC_WIDTH` plus the row
+/// padding the design spends inside the box — and its outward corner is drawn
+/// whole, on the box's side of the edge the tabs are clipped at.
 fn leading() -> f32 {
     if cfg!(target_os = "macos") {
-        design::TRAFFIC_WIDTH
+        design::TRAFFIC_WIDTH + design::TAB_ROW_PAD.0 - design::TAB_RADIUS
     } else {
         design::TAB_ROW_PAD.0
     }
@@ -177,6 +196,12 @@ fn scroller(view: &WorkspaceView, cx: &mut Context<WorkspaceView>) -> impl IntoE
                 // its place.
                 .pl(px(design::TAB_RADIUS))
                 .pr(px(design::TAB_RADIUS))
+                // Half a pixel of headroom above the tabs, and no more: the tab
+                // being shown wears its hairline *outside* its top edge
+                // ([`edge`]), and a box's own clip is the last word on how far a
+                // child may paint. The tabs are bottom-aligned in here, so this
+                // moves nothing: it only lets the box reach as high as the line.
+                .pt(px(TAB_EDGE))
                 .overflow_x_scroll()
                 .lock_scroll_axis()
                 .track_scroll(view.strip_scroll())
@@ -232,10 +257,14 @@ fn tab(
         .text_size(px(design::TAB_FONT))
         .cursor_default()
         .when(active || pointed, |this| this.bg(color(surface)))
+        // The hairline is the design's own `box-shadow`, and gpui's: it is drawn
+        // under the surface above, so what shows is the half-pixel of it that
+        // falls outside the tab's rounded top (see [`edge`]).
+        .when(active, |this| this.shadow(vec![edge()]))
         .text_color(color(ink))
-        .on_hover(cx.listener(move |this, over: &bool, _, cx| {
-            this.set_hovered_tab(over.then_some(index), cx)
-        }))
+        .on_hover(
+            cx.listener(move |this, over: &bool, _, cx| this.set_hovered_tab(index, *over, cx)),
+        )
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_mouse_down(
             MouseButton::Middle,
@@ -280,7 +309,13 @@ fn tab(
                 .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
                 .child(title),
         )
-        .child(close(id, active || pointed, surface, cx))
+        .child(close(
+            id,
+            active || pointed,
+            view.close_hovered() == Some(id),
+            surface,
+            cx,
+        ))
         .into_any_element()
 }
 
@@ -423,6 +458,21 @@ fn flare(colour: Rgb, place: Place) -> AnyElement {
     .into_any_element()
 }
 
+/// The hairline the tab being shown wears: the design's
+/// `box-shadow: 0 -0.5px 0 rgba(0, 0, 0, .06)`.
+///
+/// A box shadow is the box's own shape, lifted, painted under the box, so the only
+/// part of it a reader sees is the half-pixel that misses the tab: a line along its
+/// flat top and the two slivers hugging its top corners. A pointed-at tab leaves it
+/// off, exactly as the design does.
+fn edge() -> BoxShadow {
+    BoxShadow::new(
+        px(0.),
+        px(-TAB_EDGE),
+        wash(Rgb::hex(0x000000), TAB_EDGE_MIX),
+    )
+}
+
 /// The rule between two tabs: `::after` — 1px wide, from a quarter of the way
 /// down the tab to a quarter of the way up.
 fn rule(cx: &Context<WorkspaceView>) -> AnyElement {
@@ -482,7 +532,17 @@ fn slot(
 
 /// A tab's close button: a 22px circle, out of sight until its tab is the one
 /// being shown or pointed at, and never the thing that selects a tab.
-fn close(id: TabId, shown: bool, surface: Rgb, cx: &Context<WorkspaceView>) -> AnyElement {
+///
+/// The `×` is `currentColor` in the design: the tab ink at rest, and the
+/// foreground the moment the pointer is on the button — which is state of the
+/// view rather than a hover style, because the glyph is painted, not styled.
+fn close(
+    id: TabId,
+    shown: bool,
+    hovered: bool,
+    surface: Rgb,
+    cx: &Context<WorkspaceView>,
+) -> AnyElement {
     let palette = palette(cx);
     div()
         .id(ElementId::NamedInteger("tab-close".into(), id.get()))
@@ -504,12 +564,19 @@ fn close(id: TabId, shown: bool, surface: Rgb, cx: &Context<WorkspaceView>) -> A
                 )))
                 .text_color(color(palette.fg))
         })
+        .on_hover(
+            cx.listener(move |this, over: &bool, _, cx| this.set_close_hovered(id, *over, cx)),
+        )
         .on_click(cx.listener(move |this, _, window, cx| {
             // The tab itself selects on click; closing must not.
             cx.stop_propagation();
             this.close_tab(id, window, cx);
         }))
-        .child(glyph::cross_in(palette))
+        .child(if hovered {
+            glyph::cross(color(palette.fg))
+        } else {
+            glyph::cross_in(palette)
+        })
         .into_any_element()
 }
 
@@ -633,7 +700,17 @@ mod tests {
         // box keeps after them — the design's `.tab-add{margin-left:8px}`, which
         // is the same 8px, spent once.
         assert_eq!(design::ADD_GAP, design::TAB_RADIUS);
-        // What the strip keeps clear at its left edge is the traffic lights' room.
-        assert_eq!(leading(), design::TRAFFIC_WIDTH);
+        // The row starts a corner's room before the traffic area's end, so that the
+        // first tab — which the tabs' box sets a corner's room in from its own left
+        // edge — stands exactly where the design's does.
+        assert_eq!(
+            leading() + design::TAB_RADIUS,
+            design::TRAFFIC_WIDTH + design::TAB_ROW_PAD.0,
+            "the first tab's x is the design's"
+        );
+        // The hairline the shown tab wears, and the half-pixel of room the tabs'
+        // box keeps above it to be drawn in.
+        assert_eq!(TAB_EDGE, 0.5);
+        assert_eq!(TAB_EDGE_MIX, 6.);
     }
 }

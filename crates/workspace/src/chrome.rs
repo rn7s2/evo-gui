@@ -253,6 +253,13 @@ pub struct WorkspaceView {
     /// are rules about a tab's next-door tab, which no element's own hover style
     /// can express.
     hovered: Option<usize>,
+    /// The close button the pointer is on, if any.
+    ///
+    /// The `×` is `currentColor` in the design — the tab ink at rest, the
+    /// foreground while its button is pointed at — and a glyph is painted rather
+    /// than styled, so which ink to paint it in is state here, as the hovered tab
+    /// is.
+    close_hovered: Option<TabId>,
     /// A left button is down on the strip's own pixels (not on a tab): a move
     /// while it is held drags the window, which is what the kit's title bar did
     /// before the strip drew itself.
@@ -314,6 +321,7 @@ impl WorkspaceView {
             launcher: LauncherData::default(),
             finished: BTreeSet::new(),
             hovered: None,
+            close_hovered: None,
             strip_drag: false,
             window_title: None,
             close_hook_installed: false,
@@ -549,9 +557,44 @@ impl WorkspaceView {
     ///
     /// Only a change repaints: moving within one tab's pixels is not news to
     /// anyone, and a tab set can be large.
-    pub(crate) fn set_hovered_tab(&mut self, index: Option<usize>, cx: &mut Context<Self>) {
-        if self.hovered != index {
-            self.hovered = index;
+    ///
+    /// Leaving is "clear it if it is still mine": the pointer can move straight
+    /// from one tab onto the next, and the two listeners fire in whatever order
+    /// the elements are walked — an unconditional clear would wipe the fill off
+    /// the tab the pointer has already arrived on.
+    pub(crate) fn set_hovered_tab(&mut self, index: usize, over: bool, cx: &mut Context<Self>) {
+        let next = if over {
+            Some(index)
+        } else if self.hovered == Some(index) {
+            None
+        } else {
+            return;
+        };
+        if self.hovered != next {
+            self.hovered = next;
+            cx.notify();
+        }
+    }
+
+    /// The close button the pointer is on, for the strip ([`crate::tab_strip`]).
+    pub(crate) fn close_hovered(&self) -> Option<TabId> {
+        self.close_hovered
+    }
+
+    /// The pointer moved on or off the close button of the tab with this id: the
+    /// `×` is drawn in the foreground while it is pointed at, and in the tab ink
+    /// otherwise. Clearing works as [`Self::set_hovered_tab`]'s does, and for the
+    /// same reason — one `×` is a mouse move away from the next.
+    pub(crate) fn set_close_hovered(&mut self, id: TabId, over: bool, cx: &mut Context<Self>) {
+        let next = if over {
+            Some(id)
+        } else if self.close_hovered == Some(id) {
+            None
+        } else {
+            return;
+        };
+        if self.close_hovered != next {
+            self.close_hovered = next;
             cx.notify();
         }
     }
@@ -651,11 +694,21 @@ impl WorkspaceView {
     /// the tab is left where the change pushed it, half past the strip's edge,
     /// its label cut mid-word instead of elided. Waited for a frame, the answer
     /// is computed from the strip as it is.
+    ///
+    /// The first tab is the one case a reveal gets wrong: it brings the tab's own
+    /// left edge to the strip's edge, which is a corner's room past the start, and
+    /// the room the first tab's outward corner is drawn in is scrolled off with
+    /// it. The strip's start is where that tab is shown whole, so that is what it
+    /// asks for.
     fn reveal_selected_tab(&mut self, _cx: &mut Context<Self>) {
         if !self.strip_reveal {
             return;
         }
         self.strip_reveal = false;
+        if self.selected == 0 {
+            self.strip_scroll.set_offset(point(px(0.), px(0.)));
+            return;
+        }
         self.strip_scroll.scroll_to_item(self.selected);
     }
 
@@ -772,6 +825,10 @@ impl WorkspaceView {
         let was_shown = index == self.selected;
         let tab = self.tabs.remove(index);
         self.subscriptions.retain(|(closed, _)| *closed != id);
+        if self.close_hovered == Some(id) {
+            // The button the pointer was on went with the tab.
+            self.close_hovered = None;
+        }
         if let Some(engine) = tab.update(cx, |tab, cx| tab.take_engine(cx)) {
             // Nothing waits for it: the tab is already gone from the window.
             drop(engine);
@@ -979,8 +1036,8 @@ mod tests {
     use super::*;
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{
-        ElementId, InputEvent as _, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, Point,
-        TestAppContext, VisualTestContext,
+        ElementId, InputEvent as _, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
+        MouseUpEvent, Point, TestAppContext, VisualTestContext,
     };
 
     /// A window of a given size, built by `build` — the production entry point,
@@ -1251,6 +1308,134 @@ mod tests {
             })
             .unwrap();
         }
+    }
+
+    /// §7.1: the `×` is `currentColor` in the design — the tab ink until the
+    /// pointer is on the button, the foreground while it is. A glyph is painted
+    /// rather than styled, so the strip draws it from this state; what a test can
+    /// hold is that the state follows the pointer, from one `×` straight to the
+    /// next, and that a closed tab drops it.
+    #[gpui_kit::test]
+    fn the_close_button_reports_the_pointer_on_it(cx: &mut TestAppContext) {
+        let (handle, view) = window_with(cx, (1280., 800.), WorkspaceView::new);
+        let first = cx.update(|cx| view.read(cx).selected_tab().read(cx).id());
+        let second = cx
+            .update_window(handle, |_, window, cx| {
+                view.update(cx, |view, cx| view.open_empty_tab(window, cx))
+                    .read(cx)
+                    .id()
+            })
+            .unwrap();
+        let close = |id: TabId| ElementId::NamedInteger("tab-close".into(), id.get());
+
+        /// Move the pointer to `at` the way the platform does, and let the frame
+        /// after it carry whatever the move said.
+        fn move_to(window: &mut gpui_kit::Window, at: Point<Pixels>, cx: &mut gpui_kit::App) {
+            window.dispatch_event(
+                MouseMoveEvent {
+                    position: at,
+                    ..Default::default()
+                }
+                .to_platform_input(),
+                cx,
+            );
+            window.render_frame(cx);
+        }
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                view.read(cx).close_hovered(),
+                None,
+                "nothing is pointed at yet"
+            );
+
+            // The `×` of the tab being shown.
+            let shown = window.find(close(second)).bounds().center();
+            move_to(window, shown, cx);
+            assert_eq!(
+                view.read(cx).close_hovered(),
+                Some(second),
+                "the pointer is on the ×"
+            );
+
+            // Straight from one `×` onto the next, which is one mouse move: the
+            // two listeners are walked in whatever order the elements are, and
+            // the ink has to end up on the one the pointer is actually on. The
+            // other tab's `×` is out of sight (its own tab is not being shown —
+            // and it is still there, so it still hears the pointer).
+            let other = window.find(close(first)).bounds().center();
+            move_to(window, other, cx);
+            assert_eq!(
+                view.read(cx).close_hovered(),
+                Some(first),
+                "the × the pointer moved onto"
+            );
+
+            // Off the buttons, onto the shown tab's own label: the ink goes back
+            // to the tab's own.
+            let label = window
+                .find(ElementId::NamedInteger("tab-label".into(), second.get()))
+                .bounds()
+                .center();
+            move_to(window, label, cx);
+            assert_eq!(view.read(cx).close_hovered(), None);
+
+            // Closing the tab whose `×` is pointed at takes the button with it.
+            move_to(window, shown, cx);
+            assert_eq!(view.read(cx).close_hovered(), Some(second));
+            view.update(cx, |view, cx| view.close_selected_tab(window, cx));
+            assert_eq!(
+                view.read(cx).close_hovered(),
+                None,
+                "the button went with the tab"
+            );
+        })
+        .unwrap();
+    }
+
+    /// §7.1: which tab the pointer is on is state on the view — the dividers and
+    /// the outward corners are rules about a tab's next-door tab, which no
+    /// element's own hover style can express. Moving straight from one tab onto
+    /// the next is one mouse move, and the two listeners fire in whatever order
+    /// the elements are walked: the state has to end up on the tab the pointer is
+    /// actually on.
+    #[gpui_kit::test]
+    fn the_hovered_tab_follows_the_pointer_between_tabs(cx: &mut TestAppContext) {
+        let (handle, view) = window_with(cx, (1280., 800.), WorkspaceView::new);
+        let first = cx.update(|cx| view.read(cx).selected_tab().read(cx).id());
+        let second = cx
+            .update_window(handle, |_, window, cx| {
+                view.update(cx, |view, cx| view.open_empty_tab(window, cx))
+                    .read(cx)
+                    .id()
+            })
+            .unwrap();
+        let label = |id: TabId| ElementId::NamedInteger("tab-label".into(), id.get());
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).hovered_tab(), None, "no tab is pointed at");
+
+            for (index, id) in [(0usize, first), (1, second), (0, first)] {
+                let at = window.find(label(id)).bounds().center();
+                window.dispatch_event(
+                    MouseMoveEvent {
+                        position: at,
+                        ..Default::default()
+                    }
+                    .to_platform_input(),
+                    cx,
+                );
+                window.render_frame(cx);
+                assert_eq!(
+                    view.read(cx).hovered_tab(),
+                    Some(index),
+                    "the pointer moved onto tab {index}"
+                );
+            }
+        })
+        .unwrap();
     }
 
     /// §7.3: the conversation is one column, top to bottom — the header band, the
