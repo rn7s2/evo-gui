@@ -34,7 +34,7 @@ use gpui_kit::{
 use serde_json::Value;
 use session::{Choice, ChooserOption, HistoryEntry, LaunchPlan, Launcher, DEFAULT_KEY};
 use store::catalog::{CheckReport, Problem, ProblemTarget};
-use store::cli;
+use store::cli::{self, CliError};
 
 use crate::history::{rows_from_session, HistoryRow};
 use crate::tab::{TabContent, TabContentEvent};
@@ -130,13 +130,6 @@ enum CaptionTone {
 /// The folder call to action, and how its parts are drawn.
 const FOLDER_ID: &str = "select-folder";
 const FOLDER_ICON_SIZE: Pixels = px(28.);
-
-/// The line under the folder card when nothing can be launched at all: the swarm binary
-/// `app.json` names is not one that runs (§9.7), so the tab says it here instead of leaving
-/// it to the first launch to find out. It is also the id a test clicks to open Settings.
-const SWARM_MISSING_ID: &str = "swarm-missing";
-/// Two lines of it, then the tooltip: the line names a path, and a path can be long.
-const SWARM_MISSING_LINES: usize = 2;
 
 /// The history region and its states.
 const HISTORY_ID: &str = "history";
@@ -326,9 +319,6 @@ struct EmptyTabState {
     catalog: bool,
     /// The catalog could not be read: shown instead of the loading hint.
     catalog_error: Option<String>,
-    /// The swarm binary cannot be run at all (§9.7): the line under the folder card. The
-    /// app's words, so the tab does not have to know what a `--version` is.
-    swarm_problem: Option<String>,
     /// The `evo-swarm` a check runs. The app's own path from Settings, so the check is
     /// about the swarm this app would really spawn.
     swarm_bin: PathBuf,
@@ -408,7 +398,6 @@ impl EmptyTabState {
             home: std::env::var("HOME").ok(),
             catalog: false,
             catalog_error: None,
-            swarm_problem: None,
             // The app hands its own path in as soon as it can; until then this is where the
             // installed binary is (§1).
             swarm_bin: cli::swarm_bin(),
@@ -516,9 +505,9 @@ impl EmptyTabState {
     /// thread that draws: are the models resolvable, can a lane reach its API, is the key
     /// there. The answer is the choosers' state — the lines this tab shows under them.
     ///
-    /// A check that cannot run at all (no binary, a crash) is not a problem with the launch:
-    /// the tab then shows nothing, and the line under the folder card is the app's own
-    /// answer to a binary that does not run (§9.7).
+    /// A check that cannot run at all — the binary is not there, or is not one that runs —
+    /// is one more line of the same kind: it wears evo's own shape, says which path it
+    /// tried, and a click on it opens Settings, which is where a path is fixed (§13).
     fn run_check(&mut self, cx: &mut Context<Self>) {
         let spec = crate::launch::check_spec(&self.launcher.plan());
         self.check_revision += 1;
@@ -538,7 +527,7 @@ impl EmptyTabState {
                 .spawn(async move {
                     match cli::run_json(&bin, &argv) {
                         Ok(body) => CheckReport::from_json(&body).problems,
-                        Err(_) => Vec::new(),
+                        Err(error) => vec![check_failed(&error)],
                     }
                 })
                 .await;
@@ -579,13 +568,6 @@ impl EmptyTabState {
 
     fn set_catalog_error(&mut self, error: Option<String>, cx: &mut Context<Self>) {
         self.catalog_error = error.filter(|error| !error.trim().is_empty());
-        cx.notify();
-    }
-
-    /// The swarm binary cannot be run (§9.7): the line under the folder card, or `None`
-    /// once Settings points at one that runs.
-    fn set_swarm_problem(&mut self, problem: Option<String>, cx: &mut Context<Self>) {
-        self.swarm_problem = problem.filter(|problem| !problem.trim().is_empty());
         cx.notify();
     }
 
@@ -779,17 +761,13 @@ impl EmptyTabState {
                     }),
             )
             .child(
+                // The folder card's column: the card, and nothing else — a binary that
+                // cannot run is one of the check's own lines, under the choosers (§9.7).
                 v_flex()
-                    // The folder card's column: the card, and under it the one line that
-                    // says nothing can be launched from any of this yet (§9.7).
                     .flex_1()
                     .min_w_0()
                     .gap_2()
-                    .child(self.render_folder_button(cx))
-                    .when_some(
-                        self.swarm_problem.clone().map(SharedString::from),
-                        |column, problem| column.child(self.render_swarm_problem(problem, cx)),
-                    ),
+                    .child(self.render_folder_button(cx)),
             )
     }
 
@@ -842,41 +820,6 @@ impl EmptyTabState {
                 .children(lines)
                 .into_any_element(),
         )
-    }
-
-    /// The line under the folder card when the swarm binary cannot be run at all (§9.7).
-    ///
-    /// Nothing starts until the path in Settings points at a real `evo-swarm`, and this is
-    /// the screen the person is on when they would otherwise find that out by picking a
-    /// folder. So it wears the caption's own warning tone, says the path, and opens Settings
-    /// when it is clicked — the panel is the app's, and the action it answers is declared
-    /// above ([`OpenSettings`]).
-    fn render_swarm_problem(&self, problem: SharedString, cx: &Context<Self>) -> impl IntoElement {
-        // The line is elided to two lines, so what it says in full is what it hovers.
-        let hovered = problem.clone();
-        div()
-            .id(SWARM_MISSING_ID)
-            .test_support()
-            .w_full()
-            .min_w_0()
-            .text_xs()
-            .text_color(warning_ink(cx.theme()))
-            .line_clamp(SWARM_MISSING_LINES)
-            .text_ellipsis()
-            .cursor_pointer()
-            .hover(|style| style.underline())
-            // What a screen reader hears: the line itself, which the visible one may have
-            // had to cut short.
-            .aria_label(problem.clone())
-            .tooltip(move |window, cx| {
-                Tooltip::new(hovered.clone())
-                    .max_w(px(460.))
-                    .build(window, cx)
-            })
-            .on_click(|_, window, cx| {
-                window.dispatch_action(Box::new(OpenSettings), cx);
-            })
-            .child(problem)
     }
 
     fn render_caption(&self, cx: &Context<Self>) -> impl IntoElement {
@@ -999,6 +942,19 @@ fn card_hover_fill(theme: &Theme) -> Hsla {
         theme.secondary_hover
     } else {
         theme.secondary_active
+    }
+}
+
+/// The one line a check that could not run becomes (§9): evo's own answer shape, naming the
+/// binary it tried and where a path is fixed. A click on it opens Settings, which is where
+/// the path in `app.json` lives (§13, §9.7).
+///
+/// The child's own stderr is not in the line: it is evidence a person can read in
+/// `app.log`, and it may quote a value this app has no business putting on screen.
+fn check_failed(error: &CliError) -> Problem {
+    Problem {
+        code: "check_failed".to_string(),
+        message: format!("{} — fix it in Settings…", error.summary()),
     }
 }
 
@@ -1177,14 +1133,6 @@ impl TabContent {
     pub fn set_catalog_error(&mut self, error: Option<String>, cx: &mut Context<Self>) {
         let state = self.choosers.state.clone();
         state.update(cx, |state, cx| state.set_catalog_error(error, cx));
-        cx.notify();
-    }
-
-    /// The swarm binary cannot be run at all (§9.7): the line under the folder card, which
-    /// opens Settings when it is clicked.
-    pub fn set_swarm_problem(&mut self, problem: Option<String>, cx: &mut Context<Self>) {
-        let state = self.choosers.state.clone();
-        state.update(cx, |state, cx| state.set_swarm_problem(problem, cx));
         cx.notify();
     }
 
@@ -2652,11 +2600,11 @@ mod tests {
         });
     }
 
-    /// The swarm binary cannot be run at all: the tab says it under the folder card, before
-    /// anything is picked, and the line is the way to the panel that fixes it (§9.7).
+    /// §9.7: a binary `check --json` cannot run at all is one more problem line — the same
+    /// shape as evo's own, naming the path it tried — and a click on it opens Settings,
+    /// which is where a path is fixed.
     #[gpui_kit::test]
-    fn a_swarm_binary_that_cannot_be_run_is_said_under_the_folder_card(cx: &mut TestAppContext) {
-        let line = "evo-swarm not found at /usr/local/bin/evo-swarm — fix it in Settings…";
+    fn a_check_that_cannot_run_is_a_line_that_opens_settings(cx: &mut TestAppContext) {
         // What the app's own handler would do with the action; the app is not in this test,
         // so the test is the one that answers it.
         let asked = Rc::new(RefCell::new(0usize));
@@ -2666,31 +2614,38 @@ mod tests {
                 *answered.borrow_mut() += 1;
             });
         });
+        let cache = CacheDir::new(&catalog_body());
         let f = open(cx);
+        f.act(cx, |window, cx| {
+            f.tab
+                .update(cx, |tab, cx| tab.set_catalog(&cache.catalog(), window, cx));
+            // A path with nothing at it: the check cannot run, which is a problem with the
+            // machine rather than with the launch.
+            f.tab.update(cx, |tab, cx| {
+                tab.set_swarm_bin(PathBuf::from("/nonexistent/evo-swarm"), cx)
+            });
+            window.render_frame(cx);
+        });
+        // The check is a process on the app's executor: its answer lands here.
+        cx.run_until_parked();
 
         f.act(cx, |window, cx| {
             window.render_frame(cx);
-            // Nothing is claimed while the binary is fine: the line is the app's to send.
-            assert!(window.try_find(SWARM_MISSING_ID).is_none());
-
-            f.tab.update(cx, |tab, cx| {
-                tab.set_swarm_problem(Some(line.to_string()), cx)
-            });
-            window.render_frame(cx);
-
-            let drawn = window.find(SWARM_MISSING_ID);
-            assert!(drawn.visible(), "the line is on the screen");
-            assert_eq!(
-                drawn.label(),
-                Some(line),
-                "and it is the app's own sentence, path and all"
+            let lines = problem_lines(cx, &f.tab);
+            assert_eq!(lines.len(), 1, "{lines:?}");
+            assert!(
+                lines[0].contains("/nonexistent/evo-swarm"),
+                "the line names the path that failed: {lines:?}"
             );
-            // The card it belongs to is still the screen's call to action.
-            assert!(window.find(FOLDER_ID).visible());
+            assert!(
+                lines[0].contains("Settings"),
+                "and says where a path is fixed: {lines:?}"
+            );
+            assert!(window.find(PROBLEMS_ID).visible());
 
             // Clicking it opens Settings — the workspace dispatches the action and the app
             // answers it, which is the seam between the two crates.
-            window.click(SWARM_MISSING_ID, cx);
+            window.click(ElementId::NamedInteger(PROBLEM_ID.into(), 0), cx);
         });
         // A window's own action dispatch is deferred to the end of the effect cycle
         // (`Window::dispatch_action`), so what the click asked for lands here.
@@ -2703,13 +2658,19 @@ mod tests {
             "the line is not the folder card: nothing was launched"
         );
 
-        // And it goes away when the path is fixed in Settings.
+        // A binary that runs is no line at all.
         f.act(cx, |window, cx| {
-            f.tab.update(cx, |tab, cx| tab.set_swarm_problem(None, cx));
+            f.tab
+                .update(cx, |tab, cx| tab.set_swarm_bin(store::cli::swarm_bin(), cx));
             window.render_frame(cx);
+        });
+        cx.run_until_parked();
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            let lines = problem_lines(cx, &f.tab);
             assert!(
-                window.try_find(SWARM_MISSING_ID).is_none(),
-                "a binary that runs is no line"
+                !lines.iter().any(|line| line.contains("/nonexistent")),
+                "{lines:?}"
             );
         });
     }
