@@ -139,10 +139,10 @@ impl Fixture {
     /// A launch in this fixture: the project folder, this proof's ready file and
     /// log, a pipe we hold, and a port the child picks once and reports.
     pub fn spec(&self, program: Program, workers: u16) -> LaunchSpec {
-        let mut spec = LaunchSpec::new(program, &self.folder);
-        spec.ready_file = Some(LaunchSpec::ready_file_in(&self.root, &self.tab));
-        spec.watch_stdin = true;
+        let mut spec = LaunchSpec::tab(program, &self.folder, &self.root.tab_dir(&self.tab));
         spec.port = Some(0);
+        // The lanes run this fixture's own `evo-agent`, whatever `PATH` says.
+        spec.agent_bin = (program == Program::Swarm).then(|| self.bins.agent.clone());
         if program == Program::Swarm {
             spec.workers = Some(workers);
         }
@@ -157,16 +157,54 @@ impl Fixture {
         spec
     }
 
+    /// A launch that resumes one exact session (§1: never a bare `--resume`).
+    pub fn resume_spec(&self, program: Program, session: &std::path::Path) -> LaunchSpec {
+        let mut spec = self.spec(program, 0);
+        spec.resume = Some(session.to_path_buf());
+        spec
+    }
+
+    /// Another tab of the same window: the same folder, its own directory, its
+    /// own ready file and its own session.
+    pub fn new_tab(&self) -> TabId {
+        let id = TabId::new();
+        self.root.ensure_tab_dir(&id).expect("a tab directory");
+        id
+    }
+
     /// Where a server's ready file is (§1).
     pub fn ready_path(&self) -> PathBuf {
-        self.root.tab_ready(&self.tab)
+        self.ready_path_of(&self.tab)
+    }
+
+    pub fn ready_path_of(&self, tab: &TabId) -> PathBuf {
+        self.root.tab_ready(tab)
     }
 
     /// The ready file as it is *now* — after a supervisor restart it has been
     /// rewritten, which is how a client learns the new epoch, port and token.
     pub fn read_ready(&self) -> Option<swarm_client::ReadyFile> {
-        let text = fs::read_to_string(self.ready_path()).ok()?;
+        self.read_ready_of(&self.tab)
+    }
+
+    pub fn read_ready_of(&self, tab: &TabId) -> Option<swarm_client::ReadyFile> {
+        let text = fs::read_to_string(self.ready_path_of(tab)).ok()?;
         serde_json::from_str(&text).ok()
+    }
+
+    /// A server's log, the evidence a boot failure shows.
+    pub fn log_of(&self, tab: &TabId) -> String {
+        fs::read_to_string(self.root.tab_log(tab)).unwrap_or_default()
+    }
+
+    /// The command line of a live process: what a restarted child was actually
+    /// told, which is how "the exact session" is checked from outside.
+    pub fn command_line(pid: u32) -> String {
+        let out = Command::new("ps")
+            .args(["-o", "command=", "-p", &pid.to_string()])
+            .output()
+            .expect("ps");
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
     }
 
     /// A client for a ready file, of the shape a tab builds.
@@ -181,7 +219,14 @@ impl Fixture {
             Some(Program::Swarm) => self.bins.swarm.clone(),
             _ => self.bins.agent.clone(),
         };
-        let tab_dir = self.root.tab_dir(&self.tab);
+        // The tab directory is the spec's own: the ready file the argv names and
+        // the log beside it are that tab's, whichever tab of the fixture it is.
+        let tab_dir = spec
+            .ready_file
+            .as_ref()
+            .and_then(|path| path.parent())
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.root.tab_dir(&self.tab));
         let mut cfg = ServerConfig::swarm(bin, &self.folder, &tab_dir).with_argv(spec.argv());
         for (key, value) in self.env() {
             cfg = cfg.with_env(key, value);
@@ -259,6 +304,16 @@ impl Drop for Fixture {
             return;
         }
         let _ = fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// Whether two spellings name the same place: a server canonicalizes the paths
+/// it reports (`/var` is `/private/var` here), and a proof wants the two to be
+/// compared as locations.
+pub fn same_path(a: &Path, b: &Path) -> bool {
+    match (fs::canonicalize(a), fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
     }
 }
 

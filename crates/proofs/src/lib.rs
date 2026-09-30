@@ -19,7 +19,7 @@
 pub mod fixture;
 pub mod watch;
 
-pub use fixture::{Bins, Fixture, NOTE, WAIT};
+pub use fixture::{same_path, Bins, Fixture, NOTE, WAIT};
 pub use watch::{deadline_after, wait_for, Mirror, Watcher};
 
 /// One swarm at a time. A test binary runs its own tests in parallel threads and

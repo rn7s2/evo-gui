@@ -401,6 +401,40 @@ pub fn try_op(client: &Client, name: &str, args: Value) -> Value {
     serde_json::to_value(reply).expect("the reply as JSON")
 }
 
+// --- the swarm topic (§4.3) -------------------------------------------------
+
+/// The lanes of a `swarm` topic state, as `/swarm.lanes` publishes them.
+pub fn lanes(state: &Value) -> Vec<Value> {
+    state
+        .get("lanes")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// One lane's state (`starting`, `idle`, `working`, `compacting`, `down`,
+/// `stopped`), as the swarm topic reports it.
+pub fn lane_state(state: &Value, n: u64) -> Option<String> {
+    lanes(state)
+        .iter()
+        .find(|lane| lane.get("n").and_then(Value::as_u64) == Some(n))
+        .and_then(|lane| lane.get("state").and_then(Value::as_str))
+        .map(str::to_owned)
+}
+
+/// Every lane's `(n, state)`, in order — for a failure message.
+pub fn lane_states(state: &Value) -> Vec<(u64, String)> {
+    lanes(state)
+        .iter()
+        .filter_map(|lane| {
+            Some((
+                lane.get("n").and_then(Value::as_u64)?,
+                lane.get("state").and_then(Value::as_str)?.to_owned(),
+            ))
+        })
+        .collect()
+}
+
 /// `input.send` with no images, from now.
 pub fn send(client: &Client, text: &str) -> Value {
     op(
