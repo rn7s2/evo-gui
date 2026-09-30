@@ -633,3 +633,18 @@ fn home_shortening_keeps_a_path_that_is_not_under_home() {
     assert_eq!(home_short("/opt/x", None), "/opt/x");
     assert_eq!(home_short("/Users/y", Some("/Users/you")), "/Users/y");
 }
+
+#[test]
+fn a_folder_outside_home_reads_without_its_trailing_slash() {
+    assert_eq!(
+        home_short("/private/tmp/run/", Some("/Users/me")),
+        "/private/tmp/run"
+    );
+    assert_eq!(
+        home_short("/Users/me/coding/evo/", Some("/Users/me")),
+        "~/coding/evo"
+    );
+    assert_eq!(home_short("/Users/me/", Some("/Users/me")), "~");
+    assert_eq!(home_short("/", Some("/Users/me")), "/");
+    assert_eq!(home_short("/opt/x/", None), "/opt/x");
+}

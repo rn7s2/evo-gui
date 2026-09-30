@@ -745,6 +745,12 @@ fn one_line(text: &str) -> String {
 /// The folder's own path shortened around the home directory, the way the history rows
 /// show it: `/Users/you/coding/foo` with home `/Users/you` → `~/coding/foo`.
 pub fn home_short(path: &str, home: Option<&str>) -> String {
+    // A folder reads without its trailing slash wherever it is (the index keeps a
+    // cwd as `…/project/`), so `~/coding/evo` and `/tmp/run` look alike.
+    let path = match path.trim_end_matches('/') {
+        "" => path,
+        trimmed => trimmed,
+    };
     let Some(home) = home else {
         return path.to_string();
     };
