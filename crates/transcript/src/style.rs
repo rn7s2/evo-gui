@@ -3,9 +3,11 @@
 
 use gpui_kit::component::text::TextViewStyle;
 use gpui_kit::component::ActiveTheme as _;
+
 use gpui_kit::{
     px, rems, App, FontWeight, Hsla, Overflow, Pixels, SharedString, StyleRefinement, Styled as _,
 };
+use store::design;
 
 /// The widest a row's content gets.
 ///
@@ -92,11 +94,25 @@ impl Palette {
     pub(crate) fn from_app(cx: &App) -> Self {
         let theme = cx.theme();
         let colors = theme.semantic_tokens().colors;
+        let color = |token: store::design::Rgb| {
+            let rgba = gpui_kit::Rgba {
+                r: f32::from(token.r) / 255.,
+                g: f32::from(token.g) / 255.,
+                b: f32::from(token.b) / 255.,
+                a: 1.,
+            };
+            Hsla::from(rgba)
+        };
         Self {
             background: colors.background,
             foreground: colors.foreground,
-            sidebar: theme.sidebar,
-            input: theme.input,
+            // The two surfaces the design's cards are drawn on. They come from
+            // the design's own palette rather than the theme's, because the theme
+            // carries no `input.background` token: a card's body is the lightest
+            // surface in the design (`--input`), and a card's head the chrome one
+            // (`--sidebar`).
+            sidebar: color(design::palette(theme.is_dark()).sidebar),
+            input: color(design::palette(theme.is_dark()).input),
             pill_ink: mix(theme.success, 85., colors.foreground),
             muted: colors.muted,
             muted_foreground: colors.muted_foreground,
