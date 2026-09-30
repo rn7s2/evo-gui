@@ -19,7 +19,7 @@ use gpui_kit::{
     div, px, relative, Animation, AnimationExt as _, AnyElement, App, Bounds, BoxShadow, ElementId,
     FocusHandle, InteractiveElement as _, IntoElement as _, KeyDownEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, SharedString,
-    Styled as _, Window,
+    Styled as _, TestSupportExt as _, Window,
 };
 use store::design::Palette;
 
@@ -50,6 +50,24 @@ pub const TICK_SIZE: f32 = 2.;
 /// The rail's hover group: what makes the thumb's ring appear when the pointer is
 /// anywhere on the slider.
 const SLIDER_GROUP: &str = "effort-slider";
+
+/// An element id for an animation of one part of a named widget:
+/// `"<name>-<part>-motion"`.
+///
+/// An animation's id is separate from the id of the element it animates: sharing
+/// one would key the element and its motion by the same name.
+pub fn motion_id(name: &SharedString, part: &str) -> ElementId {
+    ElementId::Name(format!("{name}-{part}-motion").into())
+}
+
+/// An element id for one part of a named widget: `"<name>-<part>"`.
+///
+/// The name is the caller's and the parts are fixed, so a caller's test finds the
+/// slider, its rail or its thumb by the name the slider was built with, rather
+/// than by an id it has to wrap the widget to give it.
+pub fn part_id(name: &SharedString, part: &str) -> ElementId {
+    ElementId::Name(format!("{name}-{part}").into())
+}
 
 /// How long a move takes, and the curve it takes it on.
 pub const MOVE: Duration = Duration::from_millis(140);
@@ -136,7 +154,10 @@ pub fn inner(last: usize) -> impl Iterator<Item = usize> {
 /// and the next is remembered by the slider's element ids, and the rail's own
 /// bounds (which a click is measured against) by the element's prepaint.
 pub struct EffortSlider {
-    id: ElementId,
+    /// The caller's name for this slider, which its element ids are built from:
+    /// the root is `"<id>"`, the rail `"<id>-rail"`, the thumb `"<id>-thumb"` —
+    /// stable names a caller's test can look for without a shim around the slider.
+    id: SharedString,
     levels: Vec<SharedString>,
     level: usize,
     palette: &'static Palette,
@@ -155,14 +176,19 @@ pub struct EffortSlider {
 }
 
 impl EffortSlider {
-    /// A slider for `level`, naming the element whose ids its moves animate under.
-    pub fn new(id: impl Into<ElementId>, level: usize) -> Self {
+    /// A slider for `level`, named by the caller: every element id it registers is
+    /// built from this name, so a test can find the slider, its rail and its thumb.
+    ///
+    /// The levels are the design's five ([`LEVELS`]); a caller with the server's
+    /// own list passes it to [`EffortSlider::with_levels`]. Whatever list is given
+    /// is what is drawn: this widget has no opinion about which levels exist.
+    pub fn new(id: impl Into<SharedString>, level: usize) -> Self {
         Self::with_levels(id, LEVELS.iter().map(|l| SharedString::from(*l)), level)
     }
 
     /// The same, with the levels the server's catalog actually lists.
     pub fn with_levels(
-        id: impl Into<ElementId>,
+        id: impl Into<SharedString>,
         levels: impl IntoIterator<Item = impl Into<SharedString>>,
         level: usize,
     ) -> Self {
@@ -221,6 +247,28 @@ impl EffortSlider {
         &self.levels
     }
 
+    /// The element id a caller's test finds this slider's root by: the name it was
+    /// built with.
+    pub fn root_id(&self) -> ElementId {
+        ElementId::Name(self.id.clone())
+    }
+
+    /// The rail's own id — the part a click is measured against, and the one a
+    /// test reads to see where the slider's geometry is.
+    pub fn rail_id(&self) -> ElementId {
+        part_id(&self.id, "rail")
+    }
+
+    /// The thumb's: where the level shows.
+    pub fn thumb_id(&self) -> ElementId {
+        part_id(&self.id, "thumb")
+    }
+
+    /// The fill's: what is drawn between the rail's start and the thumb.
+    pub fn fill_id(&self) -> ElementId {
+        part_id(&self.id, "fill")
+    }
+
     pub fn render(self, window: &Window) -> AnyElement {
         let last = self.levels.len().saturating_sub(1);
         let ink = self.palette;
@@ -262,7 +310,8 @@ impl EffortSlider {
         let hover_ring = ink.fg;
 
         let mut rail = div()
-            .id(ElementId::from(format!("{:?}-rail", self.id)))
+            .id(part_id(&self.id, "rail"))
+            .test_support()
             .absolute()
             .left(px(RAIL_INSET))
             .right(px(RAIL_INSET))
@@ -287,7 +336,7 @@ impl EffortSlider {
                     .rounded(px(TRACK_RADIUS))
                     .bg(fill_ink)
                     .with_animation(
-                        ElementId::from(format!("{:?}-fill", self.id)),
+                        motion_id(&self.id, "fill"),
                         Animation::new(MOVE).with_easing({
                             let easing = easing.clone();
                             move |t| easing(t)
@@ -322,6 +371,8 @@ impl EffortSlider {
             THUMB_SIZE
         };
         let thumb = div()
+            .id(part_id(&self.id, "thumb"))
+            .test_support()
             .absolute()
             .top(px(0.))
             .left(relative(frac))
@@ -339,7 +390,7 @@ impl EffortSlider {
                 style.shadow(hover_shadows(hover_ring))
             })
             .with_animation(
-                ElementId::from(format!("{:?}-thumb", self.id)),
+                motion_id(&self.id, "thumb"),
                 Animation::new(MOVE).with_easing({
                     let easing = easing.clone();
                     move |t| easing(t)
@@ -360,7 +411,8 @@ impl EffortSlider {
         };
         let mut slider = div()
             .on_children_prepainted(measure)
-            .id(self.id.clone())
+            .id(ElementId::Name(self.id.clone()))
+            .test_support()
             .group(SLIDER_GROUP)
             .relative()
             .h(px(HEIGHT))
@@ -562,5 +614,107 @@ mod tests {
         let focused = thumb_shadows(false, true, &store::design::LIGHT);
         assert_eq!(focused.len(), 3, "a focused rail rings the thumb");
         assert_eq!(SHADOW_INK, Rgb::new(0x28, 0x1c, 0x0a));
+    }
+}
+
+/// The ids a caller's test looks for, and the levels it is handed.
+#[cfg(test)]
+mod naming {
+    use super::*;
+    use gpui_kit::test::TestWindowExt as _;
+    use gpui_kit::{div, Context, IntoElement, Render, TestAppContext};
+
+    /// Every element a test might look for is named from the name the slider was
+    /// built with — no debug formatting, no wrapper needed to give it an id.
+    #[test]
+    fn the_element_ids_are_the_callers_name() {
+        let slider = EffortSlider::new("effort", 1);
+        assert_eq!(slider.root_id(), ElementId::from("effort"));
+        assert_eq!(slider.rail_id(), ElementId::from("effort-rail"));
+        assert_eq!(slider.thumb_id(), ElementId::from("effort-thumb"));
+        assert_eq!(slider.fill_id(), ElementId::from("effort-fill"));
+        for id in [slider.rail_id(), slider.thumb_id(), slider.fill_id()] {
+            let ElementId::Name(name) = id else {
+                panic!("a named id")
+            };
+            assert!(!name.contains("Name("), "{name}");
+            assert!(!name.contains('('), "{name}");
+        }
+    }
+
+    /// `off` is not a level evo offers, and the slider does not add one: it draws
+    /// the ladder it is given, which is the catalog's.
+    #[test]
+    fn the_slider_draws_the_ladder_it_is_given() {
+        let given = EffortSlider::with_levels("effort", ["low", "medium", "high"], 2);
+        assert_eq!(given.levels(), ["low", "medium", "high"]);
+        assert_eq!(given.label(), "high");
+        assert!(!given.levels().iter().any(|level| level == "off"));
+        // The design's own ladder is the same list, and has no `off` either.
+        assert_eq!(LEVELS, ["low", "medium", "high", "xhigh", "max"]);
+        // The design's five, handed in as a caller's list, are drawn as they are.
+        let design = EffortSlider::with_levels("effort", LEVELS, 4);
+        assert_eq!(design.levels(), LEVELS);
+        assert_eq!(design.label(), "max");
+    }
+
+    /// A host: the slider on its own, as a caller mounts it — built per render,
+    /// which is how a caller draws it.
+    struct Host {
+        level: usize,
+        /// What the slider last asked for, which is what a caller's own state is
+        /// fed from.
+        seen: Rc<Cell<usize>>,
+    }
+
+    impl Render for Host {
+        fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let seen = self.seen.clone();
+            let slider = EffortSlider::new("effort", self.level)
+                .palette(&store::design::LIGHT)
+                .on_change(move |next, _window, _cx| seen.set(next));
+            div()
+                .id("slider-host")
+                .test_support()
+                .w(px(200.))
+                .child(slider.render(window))
+        }
+    }
+
+    /// In a window: the slider's root, rail and thumb are all findable by name.
+    #[gpui_kit::test]
+    fn a_rendered_slider_is_findable_by_name(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let seen = Rc::new(Cell::new(usize::MAX));
+        let (_host, cx) = cx.add_window_view(|_window, _cx| Host {
+            level: 2,
+            seen: seen.clone(),
+        });
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            for id in ["slider-host", "effort", "effort-rail", "effort-thumb"] {
+                let element = window.find(id);
+                assert!(
+                    element.bounds().size.width > px(0.),
+                    "{id}: {:?}",
+                    element.bounds()
+                );
+            }
+            let rail = window.find("effort-rail").bounds();
+            let thumb = window.find("effort-thumb").bounds();
+            assert!(
+                thumb.origin.x > rail.origin.x,
+                "the thumb sits on the rail, not at its start: {thumb:?} vs {rail:?}"
+            );
+
+            // And clicking the slider — no wrapper, no shim — picks the level under
+            // the pointer: the middle of the rail is the middle level.
+            window.click("effort", cx);
+        });
+        assert_eq!(
+            seen.get(),
+            2,
+            "a click in the middle of a five-level slider picks the middle level"
+        );
     }
 }
