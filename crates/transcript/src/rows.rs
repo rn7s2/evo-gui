@@ -64,16 +64,18 @@ const DISCLOSURE_WIDTH: Pixels = px(14.);
 /// own column. The glyph box is larger than the ink a chevron actually draws.
 /// Width of the key column of an expanded argument list: enough for a nested
 /// key like `diff.removed` without eliding it.
-pub(crate) const KEY_WIDTH: Pixels = px(112.);
+/// The key column of a tool call's arguments: `Rows.css`'s
+/// `.tc-kv{grid-template-columns: 72px 1fr}`.
+pub(crate) const KEY_WIDTH: Pixels = px(72.);
 /// How far each level of a nested payload is indented from the level above it.
 pub(crate) const NEST_INDENT: Pixels = px(12.);
 /// How deep a payload is drawn out before what is left of it is summarised.
 pub(crate) const MAX_DEPTH: usize = 4;
 /// Longest array drawn item by item.
 pub(crate) const MAX_ARRAY: usize = 20;
-/// The gap between a key and its value — and so the indent of a block whose
-/// content has no keys of its own.
-pub(crate) const COLUMN_GAP: Pixels = px(8.);
+/// The gap between a key and its value — `Rows.css`'s `.tc-kv{gap:3px 12px}` —
+/// and so the indent of a block whose content has no keys of its own.
+pub(crate) const COLUMN_GAP: Pixels = px(12.);
 /// The size a key is drawn at, in the UI font: a key is a label, not payload.
 const KEY_SIZE: Pixels = px(12.);
 /// The size a panel's caption is drawn at.
@@ -443,28 +445,63 @@ pub(crate) fn render_row(
 /// `turn N` sitting on it at the right, in the page's own colour so it reads as a
 /// label on the line rather than a break in it (`.turn-rule`).
 fn turn_separator(turn: usize, palette: &Palette) -> AnyElement {
+    // The design's `.turn-rule`: a 26px band whose floor is the hairline,
+    // `margin-top: 26px`, and a 12px label at the right whose box straddles the
+    // line by 7px (`bottom: -7px`), on the page's own colour so it reads as a
+    // label *on* the rule rather than a break in it.
+    //
+    // The 7px the label hangs below the line is reserved by the band here rather
+    // than overhung: gpui paints in tree order and has no `z-index`, so a label
+    // that hung into the next row's box would be covered by that row's own
+    // surface. The geometry the design cares about is exactly kept — the label's
+    // centre is on the line, the row after it starts below the line — and what
+    // the reserve costs is 7px of page colour under the line.
     div()
         .id(("transcript-turn", turn))
         .relative()
         .w_full()
-        .h(px(TURN_RULE))
+        // 26px of band, the 1px hairline on its floor, and the 7px the label hangs
+        // below the line reserved under it.
+        .h(px(TURN_RULE + TURN_LINE + TURN_LABEL_OVERHANG))
         .mt(TURN_GAP)
-        .border_b_1()
-        .border_color(palette.border)
         .text_size(px(12.))
         .child(
             div()
+                .id(("transcript-turn-line", turn))
+                .absolute()
+                .left(px(0.))
+                .right(px(0.))
+                .top(px(TURN_RULE))
+                .h(px(TURN_LINE))
+                .bg(palette.border)
+                .test_support(),
+        )
+        .child(
+            div()
+                .id(("transcript-turn-label", turn))
                 .absolute()
                 .right(px(0.))
-                .bottom(px(-7.))
+                .bottom(px(0.))
                 .pl(px(8.))
+                // The design's own line box for a 12px label: `line-height: 1.5`,
+                // which is what puts its centre a hair above the line.
+                .line_height(px(18.))
                 .bg(palette.background)
                 .text_color(palette.muted_foreground)
-                .child(format!("turn {turn}")),
+                .child(format!("turn {turn}"))
+                .test_support(),
         )
         .test_support()
         .into_any_element()
 }
+
+/// The hairline itself: `border-bottom: 1px` in the design.
+pub(crate) const TURN_LINE: f32 = 1.;
+
+/// How far the design's label hangs below the rule's line (`bottom: -7px`,
+/// measured from the line's own bottom edge), and so how much of the band is
+/// reserved under it.
+pub(crate) const TURN_LABEL_OVERHANG: f32 = 7.;
 
 /// The turn rule's own height: `.turn-rule { height: 26px }`.
 const TURN_RULE: f32 = 26.;
@@ -846,7 +883,7 @@ fn goal_row(
 /// A lane's transition, as the swarm published it: one line — `Lane 2 · crashed — …` —
 /// in the colour its own `severity` asks for.
 fn lane_event_row(id: ItemId, event: &LaneEvent, palette: &Palette) -> AnyElement {
-    let mut text = format!("Lane {} · {}", event.lane, event.event.label());
+    let mut text = event.event.label().to_string();
     if let Some(outcome) = event.outcome.as_deref().filter(|o| *o != "stop") {
         text.push_str(&format!(" ({outcome})"));
     }
@@ -856,9 +893,11 @@ fn lane_event_row(id: ItemId, event: &LaneEvent, palette: &Palette) -> AnyElemen
     if let Some(detail) = event.detail.as_deref() {
         text.push_str(&format!(" — {detail}"));
     }
-    quiet_line(
+    quiet_source_line(
         id,
         "transcript-lane-event",
+        Some(&format!("Lane {}", event.lane)),
+        palette.muted_foreground,
         &text,
         severity_color(event.severity, palette),
     )
@@ -867,16 +906,12 @@ fn lane_event_row(id: ItemId, event: &LaneEvent, palette: &Palette) -> AnyElemen
 /// A notice, as the server said it: severity decides how loud the line is, and the source
 /// says who is talking.
 fn notice_row(id: ItemId, notice: &Notice, palette: &Palette) -> AnyElement {
-    let mut text = String::new();
-    if let Some(source) = notice.source.label() {
-        text.push_str(source);
-        text.push_str(" · ");
-    }
-    text.push_str(&notice.text);
-    quiet_line(
+    quiet_source_line(
         id,
         "transcript-notice",
-        &text,
+        notice.source.label(),
+        palette.muted_foreground,
+        &notice.text,
         severity_color(notice.severity, palette),
     )
 }
@@ -952,11 +987,16 @@ fn compaction_row(id: ItemId, compaction: &Compaction, palette: &Palette) -> Any
 
 /// How loud a severity is: an error is the destructive colour, a warning the warning one,
 /// and anything else the quiet info colour.
-fn severity_color(severity: NoticeSeverity, palette: &Palette) -> gpui_kit::Hsla {
+/// What a system line is drawn in, by how loud it is.
+///
+/// An info line is chrome — the muted ink, no accent at all — because a line the
+/// server says in place is not a link and not a warning. Warn and error are the
+/// design's own two colours; nothing here is the primary accent.
+pub(crate) fn severity_color(severity: NoticeSeverity, palette: &Palette) -> gpui_kit::Hsla {
     match severity {
         NoticeSeverity::Error => palette.destructive,
         NoticeSeverity::Warn => palette.warning,
-        NoticeSeverity::Info => palette.info,
+        NoticeSeverity::Info => palette.muted_foreground,
     }
 }
 
@@ -1608,25 +1648,56 @@ fn load_more_row(id: ItemId, view: &WeakEntity<TranscriptView>, palette: &Palett
 
 /// One quiet line of the transcript, in a colour the caller chose.
 fn quiet_line(id: ItemId, name: &'static str, text: &str, color: gpui_kit::Hsla) -> AnyElement {
-    let full: SharedString = text.to_string().into();
+    quiet_source_line(id, name, None, color, text, color)
+}
+
+/// The same, with who said it in front: the source is chrome and stays in the
+/// muted ink, while what it says takes the line's own colour — a system line that
+/// shouts its source in the accent reads as a link, which is not what it is.
+fn quiet_source_line(
+    id: ItemId,
+    name: &'static str,
+    source: Option<&str>,
+    source_ink: gpui_kit::Hsla,
+    text: &str,
+    color: gpui_kit::Hsla,
+) -> AnyElement {
+    let full: SharedString = match source {
+        Some(source) => format!("{source} · {text}").into(),
+        None => text.to_string().into(),
+    };
     let tooltip = full.clone();
-    div()
+    let mut line = div()
         .id(row_id(name, &id))
         .w_full()
         .min_w_0()
         .truncate()
-        .text_sm()
+        .text_size(px(13.))
         .line_height(px(18.))
         .text_color(color)
-        .aria_label(full.clone())
-        .child(full)
-        .tooltip(move |window, cx| {
-            Tooltip::new(tooltip.clone())
-                .max_w(NOTICE_TOOLTIP_WIDTH)
-                .build(window, cx)
-        })
-        .test_support()
-        .into_any_element()
+        .aria_label(full.clone());
+    if let Some(source) = source {
+        line = line
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(
+                div()
+                    .flex_none()
+                    .text_color(source_ink)
+                    .child(format!("{source} ·")),
+            )
+            .child(div().min_w_0().truncate().child(text.to_string()));
+    } else {
+        line = line.child(full.clone());
+    }
+    line.tooltip(move |window, cx| {
+        Tooltip::new(tooltip.clone())
+            .max_w(NOTICE_TOOLTIP_WIDTH)
+            .build(window, cx)
+    })
+    .test_support()
+    .into_any_element()
 }
 
 /// One lane's report: what it did, in the fields the item carries — never re-parsed out of
@@ -2172,6 +2243,9 @@ fn key_cell(id: &ElementId, key: &str, palette: &Palette) -> AnyElement {
         .w(KEY_WIDTH)
         .flex_shrink_0()
         .truncate()
+        // `.tc-kv dt`: a key is payload syntax, so it is set in the mono face at
+        // 12px — the values beside it stay in the UI font.
+        .font_family(palette.mono.clone())
         .text_size(KEY_SIZE)
         .text_color(palette.muted_foreground)
         .child(SelectableText::new((id.clone(), "key"), key.to_string()))
@@ -2260,7 +2334,8 @@ fn text_block(
                 .id((id.clone(), "text"))
                 .w_full()
                 .min_w_0()
-                .font_family(palette.mono.clone())
+                // `.tc-result`: the UI font at 13/19. The design sets mono only
+                // for a call's arguments' keys and the tool's own name.
                 .text_size(px(13.))
                 .line_height(px(19.))
                 .text_color(palette.foreground)
