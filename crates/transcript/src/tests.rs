@@ -798,6 +798,57 @@ fn a_long_transcript_opens_at_its_latest_row(cx: &mut TestAppContext) {
     );
 }
 
+/// "↓ Jump to latest" goes to the tail — the latest row on screen — not to the head.
+#[gpui_kit::test]
+fn jump_to_latest_lands_on_the_tail(cx: &mut TestAppContext) {
+    let items: Vec<Item> = (0..40)
+        .map(|i| user(&format!("u_{i:02}"), "a turn of its own"))
+        .collect();
+    let (view, cx) = open!(cx, items);
+    for _ in 0..4 {
+        cx.update(|window, cx| window.render_frame(cx));
+    }
+    // The reader goes to the very top.
+    view.update(cx, |view, _| {
+        view.pin.touched();
+        view.scroll.set_offset(gpui_kit::point(px(0.), px(0.)));
+    });
+    for _ in 0..2 {
+        cx.update(|window, cx| window.render_frame(cx));
+    }
+    let transcript = cx.update(|window, _| window.find("transcript").bounds());
+    let first = cx.update(|window, _| window.find(row_id("transcript-row", "u_00")).bounds());
+    assert!(
+        first.top() >= transcript.top() - px(1.),
+        "at the head first: {first:?}"
+    );
+
+    // The reader's own way back: a press on the pill, not a call.
+    view.update(cx, |view, cx| {
+        view.pin.on_scroll(3000.);
+        cx.notify();
+    });
+    cx.update(|window, cx| window.render_frame(cx));
+    assert!(
+        cx.read(|cx| view.read(cx).is_away_from_latest(cx)),
+        "the pill shows"
+    );
+    cx.update(|window, cx| window.click(("transcript-jump", 1usize), cx));
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(500));
+    cx.run_until_parked();
+    for _ in 0..3 {
+        cx.update(|window, cx| window.render_frame(cx));
+    }
+    let last = cx.update(|window, _| window.find(row_id("transcript-row", "u_39")).bounds());
+    assert!(
+        last.bottom() <= transcript.bottom() + px(1.)
+            && last.bottom() > transcript.bottom() - px(60.),
+        "the latest row is at the pane's foot after the jump: {last:?} vs {transcript:?}"
+    );
+    assert!(cx.read(|cx| view.read(cx).is_following_tail(cx)));
+}
+
 /// The turn rule, to the pixel the design asks for: a full-width hairline whose
 /// floor the *next* row starts below, with `turn N` sitting on the line — the
 /// label's vertical centre within a pixel of it.
