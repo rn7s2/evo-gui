@@ -292,6 +292,10 @@ fn check_json_answers_about_the_launch_it_is_given() {
     let report = CheckReport::from_json(&cli::run_json(&stub.bin(), &launch.check_argv()).unwrap());
     assert!(report.ok, "no model here is the blocked one");
     assert!(report.problems.is_empty());
+    // The three resolved values come back with it.
+    assert_eq!(report.thinking.as_deref(), Some("high"));
+    assert_eq!(report.lane_thinking.as_deref(), Some("medium"));
+    assert_eq!(report.workers, Some(6));
     assert_eq!(
         stub.argvs().last().unwrap(),
         "check --json --workers 4 --model claude-opus-5@anthropic --lane-model ark-deepseek-v4.1-flash@aiden"
@@ -474,4 +478,12 @@ fn the_fixtures_are_the_contract_shapes() {
     assert!(!check["ok"].as_bool().unwrap());
     assert!(check["problems"][0]["code"].is_string());
     assert!(check["problems"][0]["message"].is_string());
+    // What a launch from here would resolve with no flags (§2): the empty tab's controls
+    // open on these rather than on a rung of its own.
+    assert!(check["thinking"].is_string(), "check has no thinking");
+    assert!(
+        check["lane_thinking"].is_string(),
+        "check has no lane_thinking"
+    );
+    assert!(check["workers"].is_u64(), "check has no workers");
 }

@@ -2,5 +2,8 @@
   "ok": true,
   "model": {"id": "claude-opus-5", "provider": "anthropic", "ok": true, "reason": null},
   "lane_model": {"id": "ark-deepseek-v4.1-flash", "provider": "aiden", "ok": true, "reason": null},
+  "thinking": "high",
+  "lane_thinking": "medium",
+  "workers": 6,
   "problems": []
 }

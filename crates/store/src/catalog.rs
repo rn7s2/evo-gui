@@ -169,6 +169,12 @@ pub struct CheckReport {
     pub ok: bool,
     pub model: Option<ModelCheck>,
     pub lane_model: Option<ModelCheck>,
+    /// The effort a launch from here would resolve, with no flags: the coordinator's and a
+    /// lane's. A client opens its sliders on these, rather than on a rung it guessed.
+    pub thinking: Option<String>,
+    pub lane_thinking: Option<String>,
+    /// The count `--workers` would default to.
+    pub workers: Option<u16>,
     pub problems: Vec<Problem>,
 }
 
@@ -269,6 +275,12 @@ impl CheckReport {
             ok: body.get("ok").and_then(Value::as_bool).unwrap_or(false),
             model: body.get("model").and_then(model_check),
             lane_model: body.get("lane_model").and_then(model_check),
+            thinking: string(body, "thinking"),
+            lane_thinking: string(body, "lane_thinking"),
+            workers: body
+                .get("workers")
+                .and_then(Value::as_u64)
+                .and_then(|count| u16::try_from(count).ok()),
             problems: body
                 .get("problems")
                 .and_then(Value::as_array)
@@ -472,6 +484,9 @@ mod tests {
             "model": {"id": "m", "provider": "aiden", "ok": true, "reason": null},
             "lane_model": {"id": "l", "provider": "aiden", "ok": false,
                            "reason": "a lane cannot register ark-chat"},
+            "thinking": "high",
+            "lane_thinking": "low",
+            "workers": 12,
             "problems": [
                 {"code": "model_not_found", "message": "no model named nope"},
                 {"code": "no_key", "message": "line one\nline two"}
@@ -483,6 +498,11 @@ mod tests {
             report.lane_model.as_ref().and_then(|m| m.reason.as_deref()),
             Some("a lane cannot register ark-chat")
         );
+        // The three values a launch would resolve with no flags (§2), which the empty
+        // tab's controls open on: an effort for each card, and the count.
+        assert_eq!(report.thinking.as_deref(), Some("high"));
+        assert_eq!(report.lane_thinking.as_deref(), Some("low"));
+        assert_eq!(report.workers, Some(12));
         assert_eq!(report.problems.len(), 2);
         assert_eq!(report.problems[0].line(), "no model named nope");
         assert_eq!(report.problems[1].line(), "line one line two");
@@ -519,6 +539,11 @@ mod tests {
         let report = CheckReport::from_json(&json!({"ok": true, "problems": []}));
         assert!(report.ok);
         assert!(report.lines().is_empty());
+        // A check from before those three were on the wire resolves to nothing, and the
+        // tab falls back to evo's own last values for that frame.
+        assert_eq!(report.thinking, None);
+        assert_eq!(report.lane_thinking, None);
+        assert_eq!(report.workers, None);
         // A problem with an empty code and message is not a line.
         let blank = CheckReport::from_json(&json!({"problems": [{"code": "", "message": " "}]}));
         assert_eq!(blank.problems[0].line(), "");

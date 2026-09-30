@@ -4,6 +4,9 @@
             "reason": "no credential for provider proxy"},
   "lane_model": {"id": "claude-sonnet-5", "provider": "proxy", "ok": false,
                  "reason": "api anthropic-oauth-messages is not in a lane"},
+  "thinking": "low",
+  "lane_thinking": "low",
+  "workers": 2,
   "problems": [
     {"code": "model_not_ready", "message": "claude-sonnet-5 has no credential; pick another model"},
     {"code": "lane_model_not_ready",
