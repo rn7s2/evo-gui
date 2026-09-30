@@ -1,15 +1,15 @@
-//! Row renderers: one function per [`RowKind`], all of them theme-tokened text.
+//! Row renderers: one function per item kind, all of them theme-tokened text.
 //!
-//! Every row is centred inside the shared reading measure and carries its own
-//! leading space, so the list can mount rows edge to edge and the transcript
-//! still reads as turns: tight inside a group of tool calls or dim lines, a
-//! little apart between the parts of one turn, and separated by a hairline when
-//! a new turn begins.
+//! Every row is centred inside the shared reading measure and carries its own leading
+//! space, so the list can mount rows edge to edge and the transcript still reads as turns:
+//! tight inside a group of tool calls or quiet lines, a little apart between the parts of
+//! one turn, and separated by a hairline when a new turn begins.
 //!
-//! Nothing here prints protocol payloads: a row is a user turn, rendered
-//! markdown, a one-line tool row that opens onto its arguments and result as a
-//! key/value list — containers drawn out as rows indented under their key — a
-//! report block, or a dim line.
+//! Nothing here sniffs at text: the item's `kind` says what it is (CONTRACT §4.1) and how
+//! loudly it is said (a notice's `severity`, a lane event's `severity`), so a row is a user
+//! turn, rendered markdown, a one-line tool row that opens onto its arguments and result
+//! as a key/value list, a structured lane report, a goal transition, a compaction divider,
+//! or a quiet line about something evo, the swarm or a person did.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -26,7 +26,10 @@ use gpui_kit::{
     Stateful, StatefulInteractiveElement as _, Styled as _, WeakEntity,
 };
 use serde_json::Value;
-use session::{DimStyle, GoalNudgeKind, Row, RowId, RowKind, ToolResult};
+use session::{
+    AssistantItem, Compaction, GoalEventKind, Item, ItemId, ItemKind, LaneEvent, LaneReport,
+    Notice, NoticeSeverity, RunOutcome, ToolItem, UserItem, UserStatus,
+};
 
 use crate::style::{text_style, Palette, BLOCK_GAP, GROUP_GAP, MEASURE, TIGHT_GAP, TURN_GAP};
 use crate::{link, markdown, TranscriptData, TranscriptView};
@@ -40,7 +43,8 @@ const STREAM_FADE_STAGGER: Duration = Duration::from_millis(30);
 /// command among them, which is one of the arguments.
 pub(crate) const ARGUMENTS_LIMIT: usize = 1_024;
 /// Longest what a tool call returned an open row shows, in characters. A result
-/// may be longer than the call that asked for it.
+/// may be longer than the call that asked for it; the whole of it is one click away
+/// (`GET /items/<id>`).
 pub(crate) const RESULT_LIMIT: usize = 2_048;
 /// The key a call's command arrives under. evo's tools name it: `bash` says
 /// `command` (`read` says `path`, `eval` says `code`).
@@ -60,18 +64,10 @@ const CARET_SIZE: Pixels = px(14.);
 /// key like `diff.removed` without eliding it.
 pub(crate) const KEY_WIDTH: Pixels = px(112.);
 /// How far each level of a nested payload is indented from the level above it.
-///
-/// The children keep their own keys — nothing is spelled `env.sub` once it is
-/// indented — so the indent is what says whose fields they are.
 pub(crate) const NEST_INDENT: Pixels = px(12.);
 /// How deep a payload is drawn out before what is left of it is summarised.
-///
-/// Four levels is as far as a reader follows a structure without losing the key
-/// it belongs to; past that the summary and its tooltip carry the rest.
 pub(crate) const MAX_DEPTH: usize = 4;
-/// Longest array drawn item by item. A longer one is summarised: the panel is a
-/// reading surface, and a hundred rows of one list is a wall rather than a
-/// payload.
+/// Longest array drawn item by item.
 pub(crate) const MAX_ARRAY: usize = 20;
 /// The gap between a key and its value — and so the indent of a block whose
 /// content has no keys of its own.
@@ -81,7 +77,7 @@ const KEY_SIZE: Pixels = px(12.);
 /// The size a panel's caption is drawn at.
 const CAPTION_SIZE: Pixels = px(11.);
 /// The size a tool row's name is drawn at, and the size of the status word
-/// beside it: one is the row's subject, the other a short word about it.
+/// beside it.
 const NAME_SIZE: Pixels = px(13.);
 const STATUS_SIZE: Pixels = px(12.);
 /// The line height of payload text, as a multiple of its size.
@@ -93,11 +89,9 @@ const REPORT_LABEL_WIDTH: Pixels = px(66.);
 /// and the first delta: one cycle of the pulse, and how long each pip is.
 const DOT_CYCLE: Duration = Duration::from_millis(1_200);
 const DOT_SIZE: Pixels = px(5.);
-/// Where each pip is in the cycle: a third of it apart, so the three read as one
-/// pulse travelling along the row rather than three separate blinks.
+/// Where each pip is in the cycle.
 pub(crate) const DOT_PHASES: [f32; 3] = [0., 1. / 3., 2. / 3.];
-/// The floor of a pip's fade. A pip is always visible: the row says the message
-/// is on its way, it does not blink at the reader.
+/// The floor of a pip's fade.
 pub(crate) const DOT_INK_FLOOR: f32 = 0.25;
 
 /// The motion a streaming assistant row is rendered with.
@@ -109,46 +103,35 @@ pub(crate) fn stream_motion() -> TextViewMotion {
 }
 
 /// The group a row declares so its copy buttons are out of the way until the
-/// reader is over it: an assistant message's own copy action and the one each of
-/// its code blocks carries both wait for hover.
+/// reader is over it.
 pub(crate) const COPY_GROUP: &str = "transcript-copy";
 
 /// How long a copy button says "Copied" after it was used.
 const COPIED_HOLD: Duration = Duration::from_millis(1_200);
 
-/// The size of a copy button's icon and label: the smallest thing in a row, so
-/// the affordance reads as a tool rather than as part of the transcript.
+/// The size of a copy button's icon and label.
 const COPY_SIZE: Pixels = px(11.);
 
 /// Which copy button was used.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum CopyTarget {
     /// An assistant message: its whole markdown source.
-    Message(RowId),
+    Message(usize),
     /// One of the message's code blocks, at the byte offset its fence opens at.
-    Block(RowId, usize),
+    Block(usize, usize),
 }
 
 /// How often each copy button has been used.
-///
-/// The count is what times the acknowledgement: it is part of the "Copied"
-/// element's id, so every click mounts a fresh one-shot animation instead of
-/// reusing a finished one, and the button is back to rest when that animation
-/// ends. The base `TextView` asks a code block's actions to be `Send + Sync`,
-/// so the count is shared through an `Arc` rather than read from the view that
-/// renders the buttons.
 #[derive(Default)]
 pub(crate) struct CopyFeedback {
     uses: Mutex<HashMap<CopyTarget, u64>>,
 }
 
 impl CopyFeedback {
-    /// How many times this button has been used.
     fn uses(&self, target: CopyTarget) -> u64 {
         self.lock().get(&target).copied().unwrap_or(0)
     }
 
-    /// Note a use, so the button renders its acknowledgement on the next frame.
     fn record(&self, target: CopyTarget) {
         *self.lock().entry(target).or_default() += 1;
     }
@@ -158,6 +141,13 @@ impl CopyFeedback {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
+}
+
+/// The element id of a cell of one row: the cell's name, and the item it belongs to. An
+/// item's id is stable, so a cell keeps its identity across a patch, a prepend and a
+/// scroll.
+pub(crate) fn row_id(name: impl Into<SharedString>, id: &str) -> ElementId {
+    (ElementId::from(name.into()), id.to_string()).into()
 }
 
 /// The row a copy button's icon and word sit in.
@@ -189,11 +179,6 @@ fn fill_copy_face<E: ParentElement>(face: E, copied: bool, with_label: bool, key
 
 /// A copy button: quiet, and out of the way until the reader hovers the row it
 /// belongs to.
-///
-/// Pressing it copies `text` — a message's markdown source, or a code block's
-/// raw code — and the button acknowledges with "Copied" for [`COPIED_HOLD`].
-/// `with_label` drops the word next to the icon, for the buttons that have to be
-/// unobtrusive (a message's own action, at the top of the row).
 fn copy_button(
     id: impl Into<ElementId>,
     target: CopyTarget,
@@ -212,8 +197,6 @@ fn copy_button(
         .py(px(1.))
         .rounded(palette.radius)
         .bg(palette.muted)
-        // A hairline, because a muted chip on a code block's own background is
-        // otherwise the same tone as what it sits on.
         .border_1()
         .border_color(palette.border)
         .text_size(COPY_SIZE)
@@ -229,23 +212,15 @@ fn copy_button(
             window.refresh();
         });
 
-    // An unused button has nothing to acknowledge, so it is the plain one until
-    // it has been pressed once.
     let key = id.clone();
     if uses == 0 {
         button.child(fill_copy_face(copy_face(), false, with_label, &key))
     } else {
-        button.child(
-            copy_face()
-                // The count is in the id on purpose: a later use is a new
-                // element, which starts the acknowledgement over rather than
-                // inheriting the finished animation of the one before it.
-                .with_animation(
-                    (id, uses.to_string()),
-                    Animation::new(COPIED_HOLD),
-                    move |face, delta| fill_copy_face(face, delta < 1., with_label, &key),
-                ),
-        )
+        button.child(copy_face().with_animation(
+            (id, uses.to_string()),
+            Animation::new(COPIED_HOLD),
+            move |face, delta| fill_copy_face(face, delta < 1., with_label, &key),
+        ))
     }
 }
 
@@ -253,64 +228,63 @@ fn copy_button(
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Group {
     User,
-    /// The reader's own words, still queued: drawn like a turn — it is one of
-    /// their messages — but with no turn boundary of its own, because it has not
-    /// opened one yet.
-    Pending,
     Assistant,
     Tool,
     Report,
-    Dim,
+    /// A quiet line: a notice, a lane event, a goal transition, a command note, a run's
+    /// outcome. They read as one block when several land together.
+    Quiet,
     /// Injected context: a note about the session, not a part of it.
     Context,
+    /// A compaction marker: a divider, which carries its own space.
+    Divider,
 }
 
 impl Group {
-    fn of(kind: &RowKind) -> Self {
+    fn of(kind: &ItemKind) -> Self {
         match kind {
-            RowKind::User { .. } => Self::User,
-            RowKind::PendingUser { .. } => Self::Pending,
-            RowKind::Assistant { .. } => Self::Assistant,
-            RowKind::Tool { .. } => Self::Tool,
-            RowKind::Report { .. } => Self::Report,
-            // A lane notice and a goal nudge are quiet lines like dim rows: what evo
-            // and the swarm say to the agent, not what the conversation is made of,
-            // and they read as one block when several land together.
-            RowKind::Dim { .. }
-            | RowKind::RunOutcome { .. }
-            | RowKind::LaneNotice { .. }
-            | RowKind::GoalNudge { .. }
-            | RowKind::CommandNote { .. } => Self::Dim,
-            RowKind::Context { .. } => Self::Context,
+            ItemKind::User(_) => Self::User,
+            ItemKind::Assistant(_) => Self::Assistant,
+            ItemKind::Tool(_) => Self::Tool,
+            ItemKind::LaneReport(_) => Self::Report,
+            ItemKind::Compaction(_) => Self::Divider,
+            ItemKind::Context(_) => Self::Context,
+            ItemKind::LaneEvent(_)
+            | ItemKind::Goal(_)
+            | ItemKind::CommandNote(_)
+            | ItemKind::HumanAction(_)
+            | ItemKind::Notice(_)
+            | ItemKind::RunOutcome(_)
+            | ItemKind::Recovery(_)
+            | ItemKind::ProviderRetry(_)
+            | ItemKind::Unknown { .. } => Self::Quiet,
         }
     }
 }
 
-/// Space above `row`, given the row before it: nothing at the top of the
-/// transcript, tight inside a group of tool or dim rows, a paragraph apart
-/// between the parts of one turn, and a turn's worth before a new turn (whose
-/// separator carries that space itself).
-fn gap_before(previous: Option<&Row>, row: &Row) -> Pixels {
+/// Space above `row`, given the row before it.
+fn gap_before(previous: Option<&Item>, row: &Item) -> Pixels {
     let Some(previous) = previous else {
         return px(0.);
     };
     let (previous, current) = (Group::of(&previous.kind), Group::of(&row.kind));
+    match current {
+        // A turn opens with its own separator, which carries the space.
+        Group::User => px(0.),
+        Group::Divider => BLOCK_GAP,
+        _ if previous == current => match current {
+            Group::Tool | Group::Quiet | Group::Context => TIGHT_GAP,
+            Group::Assistant | Group::Report | Group::User => GROUP_GAP,
+            Group::Divider => BLOCK_GAP,
+        },
+        _ => BLOCK_GAP,
+    }
+}
 
-    if current == Group::User {
-        return px(0.);
-    }
-    // A queued turn draws no boundary of its own (see `Group::Pending`), so the
-    // row carries the space the boundary would have.
-    if current == Group::Pending {
-        return BLOCK_GAP;
-    }
-    if previous == current {
-        return match current {
-            Group::Tool | Group::Dim | Group::Context => TIGHT_GAP,
-            Group::Assistant | Group::Report | Group::User | Group::Pending => GROUP_GAP,
-        };
-    }
-    BLOCK_GAP
+/// Whether a user row is a turn of the reader's that evo has taken: only those open a
+/// turn boundary. A queued row is not a turn yet, and a cancelled one never was.
+fn opens_a_turn(kind: &ItemKind) -> bool {
+    matches!(kind, ItemKind::User(user) if user.status == UserStatus::Sent)
 }
 
 /// Render the row at `index`, or an empty element when the list asks for a row
@@ -321,98 +295,135 @@ pub(crate) fn render_row(
     view: &WeakEntity<TranscriptView>,
     cx: &mut Context<TranscriptData>,
 ) -> AnyElement {
-    if data.rows.get(index).is_none() {
+    if data.items.get(index).is_none() {
         return div().into_any_element();
     }
 
     // An assistant row's document is brought up to date here, at the frame that
-    // shows the row, rather than on every delta that arrives for it: a stream
-    // that lands fifty updates between two frames is one parse, not fifty.
-    let waiting = match &data.rows[index].kind {
-        RowKind::Assistant {
-            markdown,
-            streaming,
-            ..
-        } => *streaming && markdown.trim().is_empty(),
+    // shows the row, rather than on every delta that arrives for it.
+    let waiting = match &data.items[index].kind {
+        ItemKind::Assistant(assistant) => {
+            assistant.is_streaming() && assistant.text.trim().is_empty()
+        }
         _ => false,
     };
-    if matches!(data.rows[index].kind, RowKind::Assistant { .. }) {
-        let id = data.rows[index].id;
-        data.note_rendered(id);
+    if matches!(data.items[index].kind, ItemKind::Assistant(_)) {
+        let id = data.items[index].id.clone();
+        data.note_rendered(&id);
         if !waiting {
             data.sync_document(index, cx);
         }
     }
 
-    let row = &data.rows[index];
+    let item = &data.items[index];
     let palette = Palette::from_app(cx);
-    let previous = index.checked_sub(1).and_then(|index| data.rows.get(index));
+    let previous = index.checked_sub(1).and_then(|index| data.items.get(index));
 
     let focus = data.focus.clone();
     let mut stack = div().flex().flex_col().w_full().min_w_0();
     // A user turn opens a new turn: say so, rather than printing a run marker.
-    if matches!(row.kind, RowKind::User { .. }) && previous.is_some() {
-        let turn = data.rows[..=index]
+    if opens_a_turn(&item.kind) && previous.is_some() {
+        let turn = data.items[..=index]
             .iter()
-            .filter(|row| matches!(row.kind, RowKind::User { .. }))
+            .filter(|item| opens_a_turn(&item.kind))
             .count();
         stack = stack.child(turn_separator(turn, &palette));
     }
 
-    stack = stack.child(match &row.kind {
-        RowKind::User { text, .. } => user_row(row.id, text, &palette),
-        RowKind::PendingUser { text } => pending_user_row(row.id, text, &palette),
-        RowKind::Context { key, text } => context_row(
-            row.id,
-            key,
-            text,
-            data.expanded.contains(&row.id),
+    stack = stack.child(match &item.kind {
+        ItemKind::User(user) => user_row(item.id.clone(), user, &palette, view),
+        ItemKind::Context(context) => context_row(
+            item.id.clone(),
+            &context.key,
+            &context.text,
+            data.expanded.contains(&item.id),
             view,
             &palette,
         ),
-        RowKind::Assistant { .. } => assistant_row(row, data, cx, &palette),
-        RowKind::Tool {
-            name,
-            arguments,
-            result,
-            ..
-        } => tool_row(
-            row.id,
-            name,
-            arguments,
-            result.as_ref(),
-            data.expanded.contains(&row.id),
+        ItemKind::Assistant(assistant) => assistant_row(item, assistant, data, cx, &palette),
+        ItemKind::Tool(tool) => tool_row(item, tool, data, view, &palette),
+        ItemKind::LaneReport(report) => report_row(item.id.clone(), report, &palette),
+        ItemKind::LaneEvent(event) => lane_event_row(item.id.clone(), event, &palette),
+        ItemKind::Goal(goal) => goal_row(
+            item.id.clone(),
+            goal,
+            data.expanded.contains(&item.id),
             view,
             &palette,
         ),
-        RowKind::Report { .. } => report_row(row, &palette),
-        RowKind::LaneNotice { lane, text, tone } => {
-            lane_notice_row(row.id, *lane, text, *tone, &palette)
+        ItemKind::CommandNote(note) => command_note_row(
+            item.id.clone(),
+            &note.command,
+            &note.text,
+            data.expanded.contains(&item.id),
+            view,
+            &palette,
+        ),
+        ItemKind::HumanAction(action) => quiet_row(
+            QuietRow {
+                id: item.id.clone(),
+                header: "transcript-action",
+                head: match action.lanes_label() {
+                    Some(lanes) => format!("Stopped {lanes}"),
+                    None => "Stopped the run".to_string(),
+                },
+                trailing: None,
+                text: &action.action,
+                block: "transcript-action-text",
+            },
+            data.expanded.contains(&item.id),
+            view,
+            &palette,
+        ),
+        ItemKind::Notice(notice) => notice_row(item.id.clone(), notice, &palette),
+        ItemKind::RunOutcome(outcome) => run_outcome_row(item.id.clone(), outcome, &palette),
+        ItemKind::Compaction(compaction) => compaction_row(item.id.clone(), compaction, &palette),
+        ItemKind::Recovery(recovery) => quiet_row(
+            QuietRow {
+                id: item.id.clone(),
+                header: "transcript-recovery",
+                head: match recovery.reason.as_deref() {
+                    Some(reason) => format!("Recovered · {reason}"),
+                    None => format!("Recovered · {}", recovery.status),
+                },
+                trailing: recovery.code.clone(),
+                text: &recovery.status,
+                block: "transcript-recovery-text",
+            },
+            data.expanded.contains(&item.id),
+            view,
+            &palette,
+        ),
+        ItemKind::ProviderRetry(retry) => {
+            let text = match retry.reason.as_deref() {
+                Some(reason) => format!(
+                    "Retrying provider ({}/{}) in {} ms — {reason}",
+                    retry.attempt, retry.max, retry.delay_ms
+                ),
+                None => format!(
+                    "Retrying provider ({}/{}) in {} ms",
+                    retry.attempt, retry.max, retry.delay_ms
+                ),
+            };
+            quiet_line(item.id.clone(), "transcript-retry", &text, palette.info)
         }
-        RowKind::GoalNudge { .. } => {
-            goal_nudge_row(row, data.expanded.contains(&row.id), view, &palette)
-        }
-        RowKind::CommandNote { command, text } => command_note_row(
-            row.id,
-            command,
-            text,
-            data.expanded.contains(&row.id),
-            view,
-            &palette,
+        ItemKind::Unknown { kind, text } => quiet_line(
+            item.id.clone(),
+            "transcript-unknown",
+            &format!("{kind} · {text}"),
+            palette.muted_foreground,
         ),
-        RowKind::Dim { style, text } => dim_row(row.id, *style, text, &palette),
-        RowKind::RunOutcome { outcome, text } => run_outcome_row(row.id, outcome, text, &palette),
     });
 
     div()
-        .id(("transcript-row", row.id))
+        .id(row_id("transcript-row", &item.id))
         .w_full()
-        .pt(gap_before(previous, row))
+        .pt(gap_before(previous, item))
         .flex()
         .justify_center()
         .child(
             div()
-                .id(("transcript-measure", row.id))
+                .id(row_id("transcript-measure", &item.id))
                 .w_full()
                 .min_w_0()
                 .max_w(px(MEASURE))
@@ -420,10 +431,6 @@ pub(crate) fn render_row(
                 .child(stack),
         )
         .test_support()
-        // A drag in a row takes the focus, so ⌘C reaches the window's copy —
-        // the transcript itself is not a text view with a binding of its own.
-        // It is not a tab stop: the keyboard walks into the transcript, not
-        // through every row of it.
         .track_focus(&focus)
         .tab_stop(false)
         .into_any_element()
@@ -450,81 +457,129 @@ fn turn_separator(turn: usize, palette: &Palette) -> AnyElement {
         .into_any_element()
 }
 
-/// A user turn: plain text (never a markdown document) on a muted card, with
-/// the accent bar that marks where the turn starts.
-fn user_row(id: RowId, text: &str, palette: &Palette) -> AnyElement {
-    div()
-        .id(("transcript-user", id))
+/// A user turn: plain text on a muted card, with the accent bar that marks where the turn
+/// starts. A queued turn is held back (muted, said so, and cancellable); a cancelled one is
+/// drawn as what it is rather than removed, so the reader sees what became of their words.
+fn user_row(
+    id: ItemId,
+    user: &UserItem,
+    palette: &Palette,
+    view: &WeakEntity<TranscriptView>,
+) -> AnyElement {
+    let queued = user.status == UserStatus::Queued;
+    let cancelled = user.status == UserStatus::Cancelled;
+    let accent = if queued {
+        palette.muted_foreground
+    } else if cancelled {
+        palette.border
+    } else {
+        palette.primary
+    };
+    // Words evo has not taken (or never will) are held back, not shouted.
+    let text_color = if cancelled || queued {
+        palette.muted_foreground
+    } else {
+        palette.foreground
+    };
+
+    let mut card = div()
+        .id(row_id("transcript-user", &id))
         .w_full()
         .min_w_0()
         .rounded(palette.radius)
         .bg(palette.muted)
         .border_l_3()
-        .border_color(palette.primary)
-        .px_3()
-        .py_2()
-        .text_color(palette.foreground)
-        .child(SelectableText::new(
-            ("transcript-user-text", id),
-            text.to_string(),
-        ))
-        .test_support()
-        .into_any_element()
-}
-
-/// What a queued turn says under itself: where the reader's words are.
-const QUEUED_CAPTION: &str = "queued · sent at the next step";
-
-/// The reader's words from the moment they are sent, while evo still has them
-/// queued: the same card a turn is drawn on, held back — the accent bar and the
-/// text muted — with a line under it saying so.
-///
-/// It is deliberately not a turn yet: no `turn N` boundary is drawn (nothing has
-/// opened), which is also why the row carries the space a boundary would have.
-/// The `user-input`/`steering` event that carries the text replaces this row with
-/// a real one, in the place evo put the turn — separator and all.
-fn pending_user_row(id: RowId, text: &str, palette: &Palette) -> AnyElement {
-    let caption_id = ElementId::from(("transcript-pending", id));
-    div()
-        .id(("transcript-user", id))
-        .w_full()
-        .min_w_0()
-        .rounded(palette.radius)
-        .bg(palette.muted)
-        .border_l_3()
-        .border_color(palette.muted_foreground)
+        .border_color(accent)
         .px_3()
         .py_2()
         .flex()
         .flex_col()
         .gap_1()
-        .text_color(palette.muted_foreground)
+        .text_color(text_color)
         .child(SelectableText::new(
-            ("transcript-user-text", id),
-            text.to_string(),
-        ))
-        .child(caption(&caption_id, QUEUED_CAPTION, palette))
-        .test_support()
+            row_id("transcript-user-text", &id),
+            user.text.clone(),
+        ));
+
+    if !user.images.is_empty() {
+        card = card.child(
+            div()
+                .id(row_id("transcript-user-images", &id))
+                .text_xs()
+                .text_color(palette.muted_foreground)
+                .child(image_note(user)),
+        );
+    }
+
+    if cancelled {
+        card = card.child(caption(
+            &row_id("transcript-user-cancelled", &id),
+            "cancelled",
+            palette,
+        ));
+    } else if queued {
+        card = card.child(queued_footer(id, palette, view));
+    }
+
+    card.test_support().into_any_element()
+}
+
+/// `2 images` — what a turn carried, since the bytes are fetched, never inlined here.
+fn image_note(user: &UserItem) -> String {
+    match user.images.len() {
+        1 => "1 image".to_string(),
+        n => format!("{n} images"),
+    }
+}
+
+/// What a queued turn says under itself, and the one thing that can be done about it: the
+/// status line, and the cancel button that takes the words back before evo has them.
+fn queued_footer(id: ItemId, palette: &Palette, view: &WeakEntity<TranscriptView>) -> AnyElement {
+    let caption_id = row_id("transcript-queued", &id);
+    let view = view.clone();
+    let button_id = id.clone();
+    h_flex()
+        .items_center()
+        .gap_2()
+        .child(
+            div()
+                .id(caption_id)
+                .text_size(CAPTION_SIZE)
+                .text_color(palette.muted_foreground)
+                .child("queued · sent at the next step")
+                .test_support(),
+        )
+        .child(
+            div()
+                .id(row_id("transcript-cancel", &id))
+                .px(px(6.))
+                .py(px(1.))
+                .rounded(palette.radius)
+                .border_1()
+                .border_color(palette.border)
+                .text_size(CAPTION_SIZE)
+                .line_height(px(14.))
+                .text_color(palette.muted_foreground)
+                .cursor_pointer()
+                .hover(|style| style.text_color(palette.destructive))
+                .on_click(move |_, window, cx| {
+                    let _ = view.update(cx, |view, cx| view.cancel_queued(&button_id, window, cx));
+                })
+                .child("Cancel")
+                .test_support(),
+        )
         .into_any_element()
 }
 
-/// How much of an opened context row's text is on screen at once: the rest is a
-/// scroll inside the block.
+/// How much of an opened context row's text is on screen at once.
 pub(crate) const CONTEXT_BLOCK_LINES: usize = 12;
 
-/// How wide a lane notice's tooltip may grow: one line of the swarm's words, wider than
-/// the reading measure they were cut to but not the full length of a task path.
+/// How wide a quiet line's tooltip may grow.
 const NOTICE_TOOLTIP_WIDTH: Pixels = px(520.);
 
-/// A row that is one quiet line until it is opened: something evo, the swarm or an
-/// extension steered in, named by the line and kept whole in a block under it.
-///
-/// `header` and `block` are the element names the row owns — a test reaches the line by
-/// the first and the text by the second — and `head`/`trailing` are the line itself:
-/// the part that gives way when it is longer than the measure, and a second cell that
-/// never does (a budget, say, which a reader wants whether or not the objective fits).
+/// A row that is one quiet line until it is opened.
 struct QuietRow<'a> {
-    id: RowId,
+    id: ItemId,
     header: &'static str,
     head: String,
     trailing: Option<String>,
@@ -548,14 +603,14 @@ fn quiet_row(
         block,
     } = row;
     let view = view.clone();
-    // The whole line, cut or not, for a reader who cannot see it.
     let aria = match &trailing {
         Some(trailing) => format!("{head} {trailing}"),
         None => head.clone(),
     };
 
+    let click_id = id.clone();
     let header = div()
-        .id((name, id))
+        .id(row_id(name, &id))
         .flex()
         .items_center()
         .gap_2()
@@ -564,12 +619,10 @@ fn quiet_row(
         .aria_label(aria)
         .aria_expanded(expanded)
         .on_click(move |_, _, cx| {
-            let _ = view.update(cx, |view, cx| view.toggle_expanded(id, cx));
+            let _ = view.update(cx, |view, cx| view.toggle_expanded(&click_id, cx));
         })
         .child(caret(expanded, palette))
         .child(
-            // Content-sized, and only that: a longer line takes the room it needs from
-            // nothing, so whatever follows follows it.
             div()
                 .min_w_0()
                 .flex_shrink(1.)
@@ -580,7 +633,7 @@ fn quiet_row(
         )
         .children(trailing.map(|trailing| {
             div()
-                .id((SharedString::from(format!("{name}-trailing")), id as usize))
+                .id(row_id(format!("{name}-trailing"), &id))
                 .flex_none()
                 .text_size(NAME_SIZE)
                 .text_color(palette.muted_foreground)
@@ -598,12 +651,8 @@ fn quiet_row(
 
 /// Content an extension injected (`evo:inject-context`): one quiet line saying what it
 /// is and where it came from, which opens onto the text itself.
-///
-/// It arrives as a user-role message but the reader never wrote it — a memory snapshot
-/// is kilobytes of their own private context — so it is drawn as a note rather than as a
-/// turn, and never open by default.
 fn context_row(
-    id: RowId,
+    id: ItemId,
     key: &str,
     text: &str,
     expanded: bool,
@@ -625,15 +674,9 @@ fn context_row(
     )
 }
 
-/// A command the reader ran, answered with instructions for the agent: one quiet line
-/// naming the command, opening onto the whole of what the extension said.
-///
-/// The reader typed `/global-memory <query>`, not this — what they gave the agent was
-/// the query, and evo wrapped it in instructions for the agent's own use
-/// (`scoped-memory-command`, `src/core-ext/memory.lisp:242`). Naming the command is what
-/// tells a reader why the line is there.
+/// A command the reader ran, answered with instructions for the agent.
 fn command_note_row(
-    id: RowId,
+    id: ItemId,
     command: &str,
     text: &str,
     expanded: bool,
@@ -655,9 +698,7 @@ fn command_note_row(
     )
 }
 
-/// What a context row calls its key: the two the memory extension injects have
-/// names a reader knows, and any other key is shown as its extension named it
-/// (`recovery`, and whatever an extension adds next).
+/// What a context row calls its key.
 pub(crate) fn context_label(key: &str) -> String {
     match key {
         "global-memory" => "global memory".to_string(),
@@ -666,58 +707,46 @@ pub(crate) fn context_label(key: &str) -> String {
     }
 }
 
-/// A goal nudge evo steered into its own agent: one quiet line saying which nudge it is,
-/// which goal it is about and what the budget stands at, which opens onto the whole
-/// message.
-///
-/// It arrives as a user-role message because `queue-steering` puts it in the input queue
-/// (`src/kernel/goal.lisp:149`, :153), but the reader did not write it and it is not part
-/// of the conversation: it is evo keeping its own goal going, so it is drawn as a note —
-/// closed, one line — rather than as a turn. The whole of it is a click away; the rules
-/// it carries are for the agent, not for the reader.
-fn goal_nudge_row(
-    row: &Row,
+/// A goal transition: one quiet line naming what happened to the goal, which opens onto
+/// the whole of it.
+fn goal_row(
+    id: ItemId,
+    goal: &session::GoalItem,
     expanded: bool,
     view: &WeakEntity<TranscriptView>,
     palette: &Palette,
 ) -> AnyElement {
-    let RowKind::GoalNudge {
-        kind,
-        objective,
-        budget,
-        text,
-    } = &row.kind
-    else {
-        unreachable!("goal_nudge_row draws a goal nudge")
-    };
-
-    // Which nudge, and for a continuation which goal: the objective is the part that
-    // gives way when the line is longer than the measure. The budget follows it and
-    // never gives way — a reader wants to know what is left of it either way.
-    let (head, spent) = match kind {
-        GoalNudgeKind::Continue if !objective.is_empty() => (
-            format!("Goal · continue — {objective}"),
-            (!budget.is_empty()).then(|| format!("· {budget}")),
-        ),
-        GoalNudgeKind::Continue => (
-            "Goal · continue".to_string(),
-            (!budget.is_empty()).then(|| format!("· {budget}")),
-        ),
-        // A wrap-up says in its own words that the budget is what ran out.
-        GoalNudgeKind::Wrapup => ("Goal · budget exhausted — wrap up".to_string(), None),
-        GoalNudgeKind::Updated if !objective.is_empty() => {
-            (format!("Goal · objective updated — {objective}"), None)
+    let head = match goal.event {
+        GoalEventKind::Created | GoalEventKind::ObjectiveUpdated => {
+            match goal.objective.as_deref() {
+                Some(objective) => format!("Goal · {} — {objective}", goal.event.label()),
+                None => format!("Goal · {}", goal.event.label()),
+            }
         }
-        GoalNudgeKind::Updated => ("Goal · objective updated".to_string(), None),
+        _ => format!("Goal · {}", goal.event.label()),
     };
-
+    let trailing = match (goal.budget, goal.tokens) {
+        (Some(budget), Some(tokens)) => Some(format!(
+            "· {}/{}",
+            session::k_tokens(tokens),
+            session::k_tokens(budget)
+        )),
+        (None, Some(tokens)) => Some(format!("· {}", session::k_tokens(tokens))),
+        _ => None,
+    };
+    let text = match (&goal.objective, &goal.goal_id) {
+        (Some(objective), Some(id)) => format!("{objective}\n\ngoal {id}"),
+        (Some(objective), None) => objective.clone(),
+        (None, Some(id)) => format!("goal {id}"),
+        (None, None) => goal.event.label().to_string(),
+    };
     quiet_row(
         QuietRow {
-            id: row.id,
+            id,
             header: "transcript-goal",
             head,
-            trailing: spent,
-            text,
+            trailing,
+            text: &text,
             block: "transcript-goal-text",
         },
         expanded,
@@ -726,16 +755,130 @@ fn goal_nudge_row(
     )
 }
 
+/// A lane's transition, as the swarm published it: one line — `Lane 2 · crashed — …` —
+/// in the colour its own `severity` asks for.
+fn lane_event_row(id: ItemId, event: &LaneEvent, palette: &Palette) -> AnyElement {
+    let mut text = format!("Lane {} · {}", event.lane, event.event.label());
+    if let Some(outcome) = event.outcome.as_deref().filter(|o| *o != "stop") {
+        text.push_str(&format!(" ({outcome})"));
+    }
+    if let Some(goal) = event.goal_status.as_deref() {
+        text.push_str(&format!(" · goal {goal}"));
+    }
+    if let Some(detail) = event.detail.as_deref() {
+        text.push_str(&format!(" — {detail}"));
+    }
+    quiet_line(
+        id,
+        "transcript-lane-event",
+        &text,
+        severity_color(event.severity, palette),
+    )
+}
+
+/// A notice, as the server said it: severity decides how loud the line is, and the source
+/// says who is talking.
+fn notice_row(id: ItemId, notice: &Notice, palette: &Palette) -> AnyElement {
+    let mut text = String::new();
+    if let Some(source) = notice.source.label() {
+        text.push_str(source);
+        text.push_str(" · ");
+    }
+    text.push_str(&notice.text);
+    quiet_line(
+        id,
+        "transcript-notice",
+        &text,
+        severity_color(notice.severity, palette),
+    )
+}
+
+/// A run that ended as something other than `stop`, said in the run's own vocabulary.
+fn run_outcome_row(id: ItemId, outcome: &RunOutcome, palette: &Palette) -> AnyElement {
+    let color = match outcome.outcome.as_str() {
+        "error" => palette.destructive,
+        _ => palette.info,
+    };
+    quiet_line(id, "transcript-run-outcome", &outcome.text(), color)
+}
+
+/// The point the scrollback pages across: a divider naming what was compacted away.
+fn compaction_row(id: ItemId, compaction: &Compaction, palette: &Palette) -> AnyElement {
+    let label = if compaction.manual {
+        "compacted (manual)"
+    } else {
+        "compacted"
+    };
+    let tokens = format!(
+        "{} → {}",
+        session::k_tokens(compaction.tokens_before),
+        session::k_tokens(compaction.tokens_after)
+    );
+    let mut column = div()
+        .id(row_id("transcript-compaction", &id))
+        .w_full()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .pt(GROUP_GAP)
+        .pb(GROUP_GAP)
+        .child(
+            div()
+                .w_full()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(div().flex_1().h(px(1.)).bg(palette.border))
+                .child(
+                    div()
+                        .id(row_id("transcript-compaction-label", &id))
+                        .flex_none()
+                        .text_size(CAPTION_SIZE)
+                        .text_color(palette.muted_foreground)
+                        .aria_label(format!("context {label}, {tokens}"))
+                        .child(format!("context {label} · {tokens}"))
+                        .test_support(),
+                )
+                .child(div().flex_1().h(px(1.)).bg(palette.border)),
+        );
+    if !compaction.summary.trim().is_empty() {
+        column = column.child(
+            div()
+                .id(row_id("transcript-compaction-summary", &id))
+                .w_full()
+                .min_w_0()
+                .px_3()
+                .text_size(STATUS_SIZE)
+                .line_height(px(18.))
+                .text_color(palette.muted_foreground)
+                .child(SelectableText::new(
+                    "transcript-compaction-text",
+                    compaction.summary.clone(),
+                ))
+                .test_support(),
+        );
+    }
+    column.test_support().into_any_element()
+}
+
+/// How loud a severity is: an error is the destructive colour, a warning the warning one,
+/// and anything else the quiet info colour.
+fn severity_color(severity: NoticeSeverity, palette: &Palette) -> gpui_kit::Hsla {
+    match severity {
+        NoticeSeverity::Error => palette.destructive,
+        NoticeSeverity::Warn => palette.warning,
+        NoticeSeverity::Info => palette.info,
+    }
+}
+
 /// The text of an opened quiet row: the payload face, selectable, capped at
-/// [`CONTEXT_BLOCK_LINES`] with a scroll of its own — what evo steered in is far
-/// longer than a row of a transcript.
-///
-/// `name` is the row's own element name; the block, the text inside it and the run a
-/// reader selects are `name`, `name-content` and `name-run`, which is how a test
-/// reaches the text of one.
-fn quiet_block(name: &'static str, id: RowId, text: &str, palette: &Palette) -> AnyElement {
+/// [`CONTEXT_BLOCK_LINES`] with a scroll of its own.
+fn quiet_block(name: &'static str, id: ItemId, text: &str, palette: &Palette) -> AnyElement {
+    let content: ElementId = row_id(format!("{name}-content"), &id);
+    let run: ElementId = row_id(format!("{name}-run"), &id);
     div()
-        .id((name, id))
+        .id(row_id(name, &id))
         .w_full()
         .min_w_0()
         .max_h(palette.payload_size * (PAYLOAD_LINE_HEIGHT * CONTEXT_BLOCK_LINES as f32))
@@ -745,8 +888,6 @@ fn quiet_block(name: &'static str, id: RowId, text: &str, palette: &Palette) -> 
         .border_color(palette.border)
         .px_2()
         .py_1()
-        // The block separates itself from whatever follows: the gap rules see the
-        // row, which is one line taller with the block under it.
         .mb(GROUP_GAP)
         .font_family(palette.mono.clone())
         .text_size(palette.payload_size)
@@ -754,41 +895,28 @@ fn quiet_block(name: &'static str, id: RowId, text: &str, palette: &Palette) -> 
         .text_color(palette.foreground)
         .child(
             div()
-                .id((SharedString::from(format!("{name}-content")), id as usize))
+                .id(content)
                 .w_full()
                 .min_w_0()
                 .test_support()
-                // A run of the block's own: selectable, and selected on its own, so a
-                // reader can copy it without the line above it.
-                .child(SelectableText::new(
-                    (SharedString::from(format!("{name}-run")), id as usize),
-                    text.to_string(),
-                )),
+                .child(SelectableText::new(run, text.to_string())),
         )
         .test_support()
         .into_any_element()
 }
 
-/// An assistant message: the retained markdown document, its optional thinking
-/// text, and the error that ended it, if any.
-///
-/// A message that has started but has not sent a word yet has no document to
-/// show — [`waiting_dots`] holds its place until the first delta arrives.
-fn assistant_row(row: &Row, data: &TranscriptData, cx: &App, palette: &Palette) -> AnyElement {
-    let RowKind::Assistant {
-        markdown,
-        thinking,
-        streaming,
-        error,
-    } = &row.kind
-    else {
-        // Only an assistant row is drawn this way.
-        return div().into_any_element();
-    };
-    let error = error.as_deref();
-    let id = row.id;
+/// An assistant message: the retained markdown document, its optional thinking text, and
+/// the error that ended it, if any.
+fn assistant_row(
+    item: &Item,
+    assistant: &AssistantItem,
+    data: &TranscriptData,
+    cx: &App,
+    palette: &Palette,
+) -> AnyElement {
+    let id = item.id.clone();
     let mut row = div()
-        .id(("transcript-assistant", id))
+        .id(row_id("transcript-assistant", &id))
         .group(COPY_GROUP)
         .relative()
         .w_full()
@@ -797,33 +925,26 @@ fn assistant_row(row: &Row, data: &TranscriptData, cx: &App, palette: &Palette) 
         .flex_col()
         .gap_2();
 
-    if *streaming && markdown.trim().is_empty() {
-        row = row.child(waiting_dots(id, palette));
+    if assistant.is_streaming() && assistant.text.trim().is_empty() {
+        row = row.child(waiting_dots(&id, palette));
     } else {
         row = match data.documents.get(&id) {
-            // The retained document: never recreated per delta, `set_text` extends it.
             Some(document) => {
                 let feedback = data.copy_feedback.clone();
-                let message = markdown.to_string();
+                let message = assistant.text.clone();
                 let code_palette = palette.clone();
+                let message_id = id.clone();
                 row.child(
                     TextView::new(document)
                         .style(text_style(cx))
                         .motion(stream_motion())
-                        // A link opens in the browser, if it names a scheme the
-                        // app opens at all (`link::openable`).
                         .on_link_click(link::on_click())
-                        // Image references and raw HTML are the transcript's
-                        // own business (`markdown::extensions`).
                         .markdown_extensions(markdown::extensions())
-                        // A fenced block carries its own Copy: the reader who
-                        // wants the code wants only the code, not the prose
-                        // around it.
                         .code_block_actions(move |code_block, _, _| {
                             let block = code_block.span.map(|span| span.start).unwrap_or(0);
                             copy_button(
-                                ("transcript-copy-block", id),
-                                CopyTarget::Block(id, block),
+                                (ElementId::from("transcript-copy-block"), message_id.clone()),
+                                CopyTarget::Block(copy_offset(&message_id), block),
                                 code_block.code(),
                                 &feedback,
                                 true,
@@ -834,8 +955,8 @@ fn assistant_row(row: &Row, data: &TranscriptData, cx: &App, palette: &Palette) 
                 )
                 .child(
                     copy_button(
-                        ("transcript-copy-message", id),
-                        CopyTarget::Message(id),
+                        row_id("transcript-copy-message", &id),
+                        CopyTarget::Message(copy_offset(&id)),
                         message.into(),
                         &data.copy_feedback,
                         false,
@@ -847,20 +968,18 @@ fn assistant_row(row: &Row, data: &TranscriptData, cx: &App, palette: &Palette) 
                     .test_support(),
                 )
             }
-            // Unreachable while every assistant row gets a document on the way in;
-            // fall back to the source rather than dropping the message.
             None => row.child(
                 div()
                     .text_color(palette.muted_foreground)
-                    .child(markdown.to_string()),
+                    .child(assistant.text.clone()),
             ),
         };
     }
 
-    if data.show_thinking && !thinking.is_empty() {
+    if data.show_thinking && !assistant.thinking.is_empty() {
         row = row.child(
             div()
-                .id(("transcript-thinking", id))
+                .id(row_id("transcript-thinking", &id))
                 .flex()
                 .flex_col()
                 .gap_1()
@@ -879,15 +998,15 @@ fn assistant_row(row: &Row, data: &TranscriptData, cx: &App, palette: &Palette) 
                         .italic()
                         .text_color(palette.muted_foreground)
                         .child(SelectableText::new(
-                            ("transcript-thinking-text", id),
-                            thinking.to_string(),
+                            row_id("transcript-thinking-text", &id),
+                            assistant.thinking.clone(),
                         )),
                 )
                 .test_support(),
         );
     }
 
-    if let Some(error) = error.filter(|error| !error.is_empty()) {
+    if let Some(error) = assistant.error.as_deref().filter(|error| !error.is_empty()) {
         row = row.child(
             div()
                 .text_sm()
@@ -899,23 +1018,27 @@ fn assistant_row(row: &Row, data: &TranscriptData, cx: &App, palette: &Palette) 
     row.test_support().into_any_element()
 }
 
-/// The pips that hold an assistant row's place between a message starting and
-/// its first delta.
-///
-/// They sit at a text line's height, so the transcript does not jump when the
-/// first word lands, and they are drawn through
-/// [`AnimationExt::with_animation`], which stands still under
-/// [`App::reduce_motion`] rather than scheduling frames.
-fn waiting_dots(id: RowId, palette: &Palette) -> AnyElement {
+/// A stable number for an item's element ids, which are taken as `usize`s by the copy
+/// buttons' feedback map.
+fn copy_offset(id: &str) -> usize {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    id.hash(&mut hasher);
+    hasher.finish() as usize
+}
+
+/// The pips that hold an assistant row's place between the message starting and its first
+/// delta.
+fn waiting_dots(id: &ItemId, palette: &Palette) -> AnyElement {
     let ink = palette.muted_foreground;
     h_flex()
-        .id(("transcript-waiting", id))
+        .id(row_id("transcript-waiting", id))
         .items_center()
         .gap_1()
         .py(px(8.))
         .test_support()
         .with_animation(
-            ("transcript-waiting-pulse", id),
+            row_id("transcript-waiting-pulse", id),
             Animation::new(DOT_CYCLE).repeat(),
             move |pips, delta| {
                 pips.children(DOT_PHASES.map(|phase| {
@@ -929,47 +1052,43 @@ fn waiting_dots(id: RowId, palette: &Palette) -> AnyElement {
         .into_any_element()
 }
 
-/// How lit a pip is at `delta` through the cycle, `phase` behind the first one:
-/// a triangle wave, up in the middle of its turn and dim at its ends.
+/// How lit a pip is at `delta` through the cycle.
 pub(crate) fn dot_ink(delta: f32, phase: f32) -> f32 {
     let turn = (delta + phase).rem_euclid(1.);
     let swell = 1. - ((turn - 0.5).abs() * 2.);
     DOT_INK_FLOOR + (1. - DOT_INK_FLOOR) * swell
 }
 
-/// A tool call: one compact line — `name · ok|error|running` — that opens onto
-/// the call's arguments and its result, each as a key/value list when it is
-/// JSON and as capped text when it is not.
+/// A tool call: one compact line — `name · ok|error|running` — that opens onto the call's
+/// arguments and its result. A result the server truncated says so, and offers the whole
+/// of it (`GET /items/<id>`) in place rather than pretending the tail is not there.
 fn tool_row(
-    id: RowId,
-    name: &str,
-    arguments: &str,
-    result: Option<&ToolResult>,
-    expanded: bool,
+    item: &Item,
+    tool: &ToolItem,
+    data: &TranscriptData,
     view: &WeakEntity<TranscriptView>,
     palette: &Palette,
 ) -> AnyElement {
-    let (status, status_color) = match result {
-        None => ("running", palette.warning),
-        Some(result) if result.is_error => ("error", palette.destructive),
-        Some(_) => ("ok", palette.success),
+    let id = item.id.clone();
+    let expanded = data.expanded.contains(&id);
+    let (status, status_color) = match tool.status {
+        session::ToolStatus::Running => ("running", palette.warning),
+        session::ToolStatus::Error => ("error", palette.destructive),
+        session::ToolStatus::Blocked => ("blocked", palette.destructive),
+        session::ToolStatus::Ok => ("ok", palette.success),
     };
 
-    let view = view.clone();
-    // The header is a quiet line: the name in the mono face at its own size,
-    // the status word a point smaller in the UI font, so neither shouts over
-    // the other and a run of tool calls reads as one list. It is the row's
-    // control — a click opens and closes it — so it is the one line of a tool
-    // row that is not selectable text; what the call carried is.
+    let click_view = view.clone();
+    let click_id = id.clone();
     let header = div()
-        .id(("transcript-tool", id))
+        .id(row_id("transcript-tool", &id))
         .flex()
         .items_center()
         .gap_2()
         .h(TOOL_ROW_HEIGHT)
         .cursor_pointer()
         .on_click(move |_, _, cx| {
-            let _ = view.update(cx, |view, cx| view.toggle_expanded(id, cx));
+            let _ = click_view.update(cx, |view, cx| view.toggle_expanded(&click_id, cx));
         })
         .child(caret(expanded, palette))
         .child(
@@ -979,7 +1098,7 @@ fn tool_row(
                 .font_weight(FontWeight::NORMAL)
                 .text_size(NAME_SIZE)
                 .text_color(palette.foreground)
-                .child(name.to_string()),
+                .child(tool.name.clone()),
         )
         .child(
             div()
@@ -998,7 +1117,7 @@ fn tool_row(
         .test_support();
 
     let mut row = div()
-        .id(("transcript-tool-row", id))
+        .id(row_id("transcript-tool-row", &id))
         .w_full()
         .min_w_0()
         .flex()
@@ -1006,6 +1125,8 @@ fn tool_row(
         .child(header);
 
     if expanded {
+        let full = data.full_results.get(&id);
+        let can_fetch = data.on_fetch_item.borrow().is_some();
         row = row.child(
             div()
                 .flex()
@@ -1013,16 +1134,22 @@ fn tool_row(
                 .gap_1()
                 .pt(px(2.))
                 .pb(px(4.))
-                .child(arguments_block(id, arguments, palette))
-                .child(result_block(id, result, palette)),
+                .child(arguments_block(id.clone(), &tool.args, palette))
+                .child(result_block(
+                    id.clone(),
+                    tool,
+                    full,
+                    can_fetch,
+                    view,
+                    palette,
+                )),
         );
     }
 
     row.test_support().into_any_element()
 }
 
-/// The disclosure of a tool row: a chevron at [`CARET_SIZE`] in a column of its
-/// own, so an opened row and a closed one keep their name on the same axis.
+/// The disclosure of a tool row.
 fn caret(expanded: bool, palette: &Palette) -> AnyElement {
     let chevron = if expanded {
         IconName::ChevronDown
@@ -1044,56 +1171,232 @@ fn caret(expanded: bool, palette: &Palette) -> AnyElement {
         .into_any_element()
 }
 
-/// The arguments of an open tool row: the call's JSON as a key/value list, or
-/// the text exactly as it came when it is not a JSON object.
-fn arguments_block(id: RowId, arguments: &str, palette: &Palette) -> AnyElement {
-    if arguments.is_empty() {
-        return div().into_any_element();
-    }
-    match json_fields(arguments) {
-        Some(fields) if !fields.is_empty() => fields_block(
-            ("transcript-tool-arguments", id),
-            "arguments",
-            &fields,
-            ARGUMENTS_LIMIT,
-            palette,
-        ),
-        _ => text_block(
-            ("transcript-tool-arguments", id),
-            "arguments",
-            arguments,
-            None,
-            ARGUMENTS_LIMIT,
-            palette,
-        ),
+/// The arguments of an open tool row: the call's own object as a key/value list, or the
+/// text exactly as it came when it is not one.
+fn arguments_block(id: ItemId, args: &Value, palette: &Palette) -> AnyElement {
+    match args {
+        Value::Null => div().into_any_element(),
+        Value::Object(object) if object.is_empty() => div().into_any_element(),
+        value => {
+            let text = value.to_string();
+            match json_fields(&text) {
+                Some(fields) if !fields.is_empty() => fields_block(
+                    row_id("transcript-tool-arguments", &id),
+                    "arguments",
+                    &fields,
+                    ARGUMENTS_LIMIT,
+                    palette,
+                ),
+                _ => text_block(
+                    row_id("transcript-tool-arguments", &id),
+                    "arguments",
+                    &text,
+                    None,
+                    ARGUMENTS_LIMIT,
+                    palette,
+                ),
+            }
+        }
     }
 }
 
-/// The result of an open tool row: a JSON object — or array — as the same
-/// key/value list, any other text as a capped mono block.
-fn result_block(id: RowId, result: Option<&ToolResult>, palette: &Palette) -> AnyElement {
-    let Some(result) = result.filter(|result| !result.content.is_empty()) else {
+/// The result of an open tool row, with the way to the whole of it when the server cut it.
+fn result_block(
+    id: ItemId,
+    tool: &ToolItem,
+    full: Option<&String>,
+    can_fetch: bool,
+    view: &WeakEntity<TranscriptView>,
+    palette: &Palette,
+) -> AnyElement {
+    let Some(result) = tool.result.as_ref() else {
         return div().into_any_element();
     };
-    let label = if result.is_error { "error" } else { "result" };
-
-    match json_fields(&result.content) {
-        Some(fields) if !fields.is_empty() => fields_block(
-            ("transcript-tool-result", id),
-            label,
-            &fields,
-            RESULT_LIMIT,
-            palette,
-        ),
-        _ => text_block(
-            ("transcript-tool-result", id),
-            label,
-            &result.content,
-            result.content_chars,
-            RESULT_LIMIT,
-            palette,
-        ),
+    if result.text.is_empty() {
+        return div().into_any_element();
     }
+    let label = if tool.status.is_error() {
+        "error"
+    } else {
+        "result"
+    };
+
+    // The wire copy of a result is shortened at 4 KiB (CONTRACT §4.1); the row shows
+    // less still. Either way the reader is offered the whole of it rather than the part
+    // that fits.
+    let needs_full = result.truncated || result.chars as usize > RESULT_LIMIT;
+    let mut block = div()
+        .id(row_id("transcript-tool-result-box", &id))
+        .flex()
+        .flex_col()
+        .gap_1()
+        .w_full()
+        .min_w_0();
+    match full {
+        Some(full) => {
+            block = block.child(text_block(
+                row_id("transcript-tool-result", &id),
+                label,
+                full,
+                None,
+                usize::MAX,
+                palette,
+            ));
+        }
+        None => {
+            block = block.child(match json_fields(&result.text) {
+                Some(fields) if !fields.is_empty() => fields_block(
+                    row_id("transcript-tool-result", &id),
+                    label,
+                    &fields,
+                    RESULT_LIMIT,
+                    palette,
+                ),
+                _ => text_block(
+                    row_id("transcript-tool-result", &id),
+                    label,
+                    &result.text,
+                    Some(result.chars),
+                    RESULT_LIMIT,
+                    palette,
+                ),
+            });
+            // The offer only exists when there is a way to fetch: a tab whose owner
+            // cannot read `/items/<id>` says what the panel left out instead of
+            // offering a button that would do nothing.
+            if needs_full && can_fetch {
+                block = block.child(load_more_row(id, view, palette));
+            } else if needs_full {
+                block = block.child(cap_note(
+                    row_id("transcript-tool-result-note", &id),
+                    (result.chars as usize).saturating_sub(result.text.chars().count()),
+                    palette,
+                ));
+            }
+        }
+    }
+    block.into_any_element()
+}
+
+/// What an opened row whose output the server shortened offers: the whole of it, one click
+/// away (`GET /items/<id>`).
+fn load_more_row(id: ItemId, view: &WeakEntity<TranscriptView>, palette: &Palette) -> AnyElement {
+    let view = view.clone();
+    div()
+        .id(row_id("transcript-load-more", &id))
+        .px(px(6.))
+        .py(px(1.))
+        .rounded(palette.radius)
+        .border_1()
+        .border_color(palette.border)
+        .text_size(CAPTION_SIZE)
+        .line_height(px(14.))
+        .text_color(palette.muted_foreground)
+        .cursor_pointer()
+        .hover(|style| style.text_color(palette.foreground))
+        .on_click(move |_, window, cx| {
+            let id = id.clone();
+            let _ = view.update(cx, |view, cx| view.load_full_item(&id, window, cx));
+        })
+        .child("Load the whole output")
+        .test_support()
+        .into_any_element()
+}
+
+/// One quiet line of the transcript, in a colour the caller chose.
+fn quiet_line(id: ItemId, name: &'static str, text: &str, color: gpui_kit::Hsla) -> AnyElement {
+    let full: SharedString = text.to_string().into();
+    let tooltip = full.clone();
+    div()
+        .id(row_id(name, &id))
+        .w_full()
+        .min_w_0()
+        .truncate()
+        .text_sm()
+        .line_height(px(18.))
+        .text_color(color)
+        .aria_label(full.clone())
+        .child(full)
+        .tooltip(move |window, cx| {
+            Tooltip::new(tooltip.clone())
+                .max_w(NOTICE_TOOLTIP_WIDTH)
+                .build(window, cx)
+        })
+        .test_support()
+        .into_any_element()
+}
+
+/// One lane's report: what it did, in the fields the item carries — never re-parsed out of
+/// the prose the swarm used to send.
+fn report_row(id: ItemId, report: &LaneReport, palette: &Palette) -> AnyElement {
+    let heading = format!("Lane {} report", report.lane);
+    let fields = [
+        ("done", report.done.as_str(), palette.foreground),
+        (
+            "evidence",
+            report.evidence.as_str(),
+            palette.muted_foreground,
+        ),
+        ("next", report.next.as_str(), palette.foreground),
+        ("blocked", report.blocked.as_str(), palette.destructive),
+        ("requests", report.requests.as_str(), palette.primary),
+        (
+            "goal",
+            report.goal.as_deref().unwrap_or_default(),
+            palette.muted_foreground,
+        ),
+    ];
+
+    let mut row = div()
+        .id(row_id("transcript-report", &id))
+        .w_full()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .rounded(palette.radius_lg)
+        .border_1()
+        .border_color(palette.border)
+        .px_3()
+        .py_2()
+        .child(
+            div()
+                .id(row_id("transcript-report-heading", &id))
+                .text_xs()
+                .text_color(palette.muted_foreground)
+                .aria_label(heading.clone())
+                .child(heading)
+                .test_support(),
+        );
+
+    for (label, value, color) in fields {
+        if value.is_empty() {
+            continue;
+        }
+        let value_id = row_id(format!("transcript-report-{label}"), &id);
+        row = row.child(
+            div()
+                .flex()
+                .items_start()
+                .gap_2()
+                .text_sm()
+                .child(
+                    div()
+                        .w(REPORT_LABEL_WIDTH)
+                        .flex_shrink_0()
+                        .text_color(palette.muted_foreground)
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .text_color(color)
+                        .child(SelectableText::new(value_id, value.to_string())),
+                ),
+        );
+    }
+
+    row.test_support().into_any_element()
 }
 
 /// One field — or one container — of a tool call's arguments, or of a JSON
@@ -1598,193 +1901,6 @@ fn value_cell(id: &ElementId, value: &FieldValue, palette: &Palette) -> AnyEleme
             .into_any_element(),
         FieldValue::Nested(_) => unreachable!("a container is drawn by field_row itself"),
     }
-}
-
-fn report_row(row: &Row, palette: &Palette) -> AnyElement {
-    let RowKind::Report {
-        done,
-        evidence,
-        next,
-        blocked,
-        requests,
-        goal,
-        lane,
-    } = &row.kind
-    else {
-        unreachable!("report_row draws a report row")
-    };
-    let id = row.id;
-    let heading = match lane {
-        Some(lane) => format!("Lane {lane} report"),
-        None => "report".to_string(),
-    };
-
-    let mut fields = vec![
-        ("done", done.as_str(), palette.foreground),
-        ("evidence", evidence.as_str(), palette.muted_foreground),
-        ("next", next.as_str(), palette.foreground),
-        ("blocked", blocked.as_str(), palette.destructive),
-        ("requests", requests.as_str(), palette.primary),
-    ];
-    if let Some(goal) = goal {
-        fields.push(("goal", goal.as_str(), palette.muted_foreground));
-    }
-
-    let mut row = div()
-        .id(("transcript-report", id))
-        .w_full()
-        .min_w_0()
-        .flex()
-        .flex_col()
-        .gap_1()
-        .rounded(palette.radius_lg)
-        .border_1()
-        .border_color(palette.border)
-        .px_3()
-        .py_2()
-        .child(
-            // A report the swarm passed to the coordinator is about one of its lanes,
-            // so it is headed with that lane: in the lane's own tab the heading is the
-            // one it has always had.
-            div()
-                .id(("transcript-report-heading", id))
-                .text_xs()
-                .text_color(palette.muted_foreground)
-                .aria_label(heading.clone())
-                .child(heading)
-                .test_support(),
-        );
-
-    for (label, value, color) in fields {
-        if value.is_empty() {
-            continue;
-        }
-        let value_id: ElementId = (
-            SharedString::from(format!("transcript-report-{label}")),
-            id as usize,
-        )
-            .into();
-        row = row.child(
-            div()
-                .flex()
-                .items_start()
-                .gap_2()
-                .text_sm()
-                .child(
-                    div()
-                        .w(REPORT_LABEL_WIDTH)
-                        .flex_shrink_0()
-                        .text_color(palette.muted_foreground)
-                        .child(label),
-                )
-                .child(
-                    div()
-                        .min_w_0()
-                        .text_color(color)
-                        .child(SelectableText::new(value_id, value.to_string())),
-                ),
-        );
-    }
-
-    row.test_support().into_any_element()
-}
-
-/// A line the swarm wrote to the coordinator about one of its lanes: `Lane 1 · run
-/// ended (stop) — task: …`.
-///
-/// It is not the reader's message and not the coordinator's prose — the swarm steered it
-/// in — so it keeps the swarm's own words, one line, with the lane named in front of
-/// them and the whole of it a hover away. Not a card, and not a turn: this is what the
-/// swarm is saying, while the reader's own words stay the only thing that opens a turn.
-fn lane_notice_row(
-    id: RowId,
-    lane: u32,
-    text: &str,
-    tone: DimStyle,
-    palette: &Palette,
-) -> AnyElement {
-    let color = match tone {
-        DimStyle::Error => palette.destructive,
-        _ => palette.muted_foreground,
-    };
-    let full: SharedString = format!("Lane {lane} · {text}").into();
-    let tooltip = full.clone();
-    let notice = div()
-        .id(("transcript-lane-notice", id))
-        .w_full()
-        .min_w_0()
-        .truncate()
-        .text_sm()
-        .line_height(px(18.))
-        .text_color(color)
-        // The line on screen is cut to the measure; this is the whole of what the swarm
-        // said, which is what a reader using a screen reader (or a test) is told.
-        .aria_label(full.clone())
-        .child(full);
-    // Only the lane's own line is cut: the row has no second line to fall back on, and
-    // the rest of what the swarm said is what its tooltip is for. The tooltip carries
-    // the lane's name too, since a cut line can cut the task that names it.
-    notice
-        .tooltip(move |window, cx| {
-            Tooltip::new(tooltip.clone())
-                .max_w(NOTICE_TOOLTIP_WIDTH)
-                .build(window, cx)
-        })
-        .test_support()
-        .into_any_element()
-}
-
-/// An `output` line or status event: one dim line, readable but out of the way.
-fn dim_row(id: RowId, style: DimStyle, text: &str, palette: &Palette) -> AnyElement {
-    dim_line(("transcript-dim", id), style, text, palette)
-}
-
-/// A run that ended badly, as the session wrote it: `text` is the line to show
-/// and `outcome` decides the colour — a run that failed is an error, one that
-/// was stopped or ran out of room is a notice.
-fn run_outcome_row(id: RowId, outcome: &str, text: &str, palette: &Palette) -> AnyElement {
-    dim_line(
-        ("transcript-run-outcome", id),
-        run_outcome_style(outcome),
-        text,
-        palette,
-    )
-}
-
-/// The style of a run's outcome line: `error` is an error, and every other
-/// outcome (`aborted`, `length`, whatever the swarm adds next) is a notice.
-pub(crate) fn run_outcome_style(outcome: &str) -> DimStyle {
-    if outcome == "error" {
-        DimStyle::Error
-    } else {
-        DimStyle::Notice
-    }
-}
-
-/// One dim line of the transcript.
-fn dim_line(
-    id: impl Into<gpui_kit::ElementId>,
-    style: DimStyle,
-    text: &str,
-    palette: &Palette,
-) -> AnyElement {
-    let color = match style {
-        DimStyle::Dim | DimStyle::Status => palette.muted_foreground,
-        DimStyle::Notice => palette.info,
-        DimStyle::Error => palette.destructive,
-    };
-    let id = id.into();
-
-    div()
-        .id(id.clone())
-        .w_full()
-        .min_w_0()
-        .text_sm()
-        .line_height(px(18.))
-        .text_color(color)
-        .child(SelectableText::new((id, "text"), text.to_string()))
-        .test_support()
-        .into_any_element()
 }
 
 /// A labeled panel of tool text, capped so one result cannot take the whole

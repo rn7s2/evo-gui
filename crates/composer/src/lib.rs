@@ -23,7 +23,7 @@ use gpui_kit::{
     ParentElement as _, Pixels, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
     Subscription, TestSupportExt as _, WeakEntity, Window,
 };
-use session::Activity;
+use session::Segment;
 
 /// The input grows from two rows to eight; past that it scrolls.
 const MIN_ROWS: usize = 2;
@@ -70,29 +70,36 @@ pub const READOUT_ID: &str = "composer-readout";
 
 gpui_kit::actions!(composer, [Interrupt]);
 
-/// What the composer asks its owner to do.
+/// What the composer asks its owner to do. Each is one op the owner sends
+/// (`session::OpRequest`): the composer names the action, never the endpoint.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ComposerEvent {
     /// Post this text as the coordinator's turn. It lands at the running turn's
     /// next boundary, so text sent while the agent works is queued, not lost.
+    /// The op is `input.send`.
     Send(String),
-    /// Interrupt the run (the TUI's esc). The draft is untouched.
+    /// Stop the coordinator's own run (the TUI's esc) — `run.interrupt` with scope
+    /// `session`. The draft is untouched.
     Interrupt,
+    /// Stop the whole swarm — `run.interrupt` with scope `swarm`: every lane, and the
+    /// coordinator with it (CONTRACT §7.5).
+    StopSwarm,
 }
 
 /// What the one button says — and therefore what clicking it does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ActionFace {
     Send,
-    Stop,
+    /// The swarm is busy or held while its lanes work: the one action that stops it all.
+    StopSwarm,
 }
 
 impl ActionFace {
-    /// The button's visible label: `Send`, or `Stop` behind its square glyph.
+    /// The button's visible label.
     pub fn label(self) -> &'static str {
         match self {
             Self::Send => "Send",
-            Self::Stop => "\u{25a0} Stop",
+            Self::StopSwarm => "\u{25a0} Stop swarm",
         }
     }
 
@@ -102,7 +109,7 @@ impl ActionFace {
     pub fn icon(self) -> Option<IconName> {
         match self {
             Self::Send => Some(IconName::ArrowUp),
-            Self::Stop => None,
+            Self::StopSwarm => None,
         }
     }
 }
@@ -150,12 +157,15 @@ impl Global for KeysBound {}
 pub struct Composer {
     input: Entity<TextareaState>,
     readout: SharedString,
+    /// The right-hand segments (`2 lanes`), at the row's end before the button.
+    trailing: Option<SharedString>,
     /// Whether this composer draws the status readout on its own row. The app
     /// turns it off: the line belongs to the tab page now, under the transcript,
     /// where it can speak for the agent being shown rather than for the
     /// coordinator alone (§7.3). A composer on its own — the demo — keeps it.
     show_readout: bool,
-    activity: Activity,
+    /// The swarm's own busy flag: what the action button's face follows.
+    busy: bool,
     /// True while this composer's own request is in flight — the only reason
     /// the button is disabled.
     in_flight: bool,
@@ -230,8 +240,9 @@ impl Composer {
         Self {
             input,
             readout: SharedString::default(),
+            trailing: None,
             show_readout: true,
-            activity: Activity::Idle,
+            busy: false,
             in_flight: false,
             history: Vec::new(),
             walking: None,
@@ -257,14 +268,35 @@ impl Composer {
         cx.bind_keys([KeyBinding::new("escape", Interrupt, Some(KEY_CONTEXT))]);
     }
 
-    /// The status line the owner wants shown, segment for segment as the TUI
-    /// builds it (§7.3). Long lines are ellipsized and carried whole in a tooltip.
-    pub fn set_readout(&mut self, readout: impl Into<SharedString>, cx: &mut Context<Self>) {
-        let readout = readout.into();
-        if self.readout != readout {
+    /// The status line the owner wants shown: the topic's own `segments`, rendered as
+    /// they are (CONTRACT §4.2). Nothing is composed here — the server's segment registry
+    /// built each piece, so the TUI and this row cannot drift apart.
+    ///
+    /// The left side is the line itself; the right side sits at the row's end, before the
+    /// action button. Long lines are ellipsized and carried whole in a tooltip.
+    pub fn set_segments(&mut self, left: &[Segment], right: &[Segment], cx: &mut Context<Self>) {
+        let join = |segments: &[Segment]| {
+            segments
+                .iter()
+                .map(|segment| segment.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" · ")
+        };
+        let readout: SharedString = join(left).into();
+        let trailing: Option<SharedString> = match right {
+            [] => None,
+            segments => Some(join(segments).into()),
+        };
+        if self.readout != readout || self.trailing != trailing {
             self.readout = readout;
+            self.trailing = trailing;
             cx.notify();
         }
+    }
+
+    /// The whole line the row shows, as the tooltip and the accessible name carry it.
+    pub fn readout(&self) -> &str {
+        &self.readout
     }
 
     /// Whether the readout shares the action row. Off, the row is the button
@@ -276,10 +308,12 @@ impl Composer {
         }
     }
 
-    /// The coordinator's activity, which decides the button's face.
-    pub fn set_activity(&mut self, activity: Activity, cx: &mut Context<Self>) {
-        if self.activity != activity {
-            self.activity = activity;
+    /// Whether the swarm is doing anything — `TabModel::is_swarm_busy`, which is the
+    /// coordinator's own status *and* whether it is held while its lanes work. It is what
+    /// the button's face follows.
+    pub fn set_swarm_busy(&mut self, busy: bool, cx: &mut Context<Self>) {
+        if self.busy != busy {
+            self.busy = busy;
             cx.notify();
         }
     }
@@ -297,11 +331,14 @@ impl Composer {
         cx.notify();
     }
 
-    /// The button's face for the current activity — never Send and Stop at once.
+    /// The button's face: `Send` while nothing is going on, and `Stop swarm` while the
+    /// swarm is busy or held for its lanes — the one action that means the whole swarm
+    /// (CONTRACT §7.5). The per-lane Stop lives in the agent list, where a lane is named.
     pub fn face(&self) -> ActionFace {
-        match self.activity {
-            Activity::Idle => ActionFace::Send,
-            Activity::Running | Activity::Compacting => ActionFace::Stop,
+        if self.busy {
+            ActionFace::StopSwarm
+        } else {
+            ActionFace::Send
         }
     }
 
@@ -313,7 +350,7 @@ impl Composer {
         }
         match self.face() {
             ActionFace::Send => !self.input.read(cx).value().trim().is_empty(),
-            ActionFace::Stop => true,
+            ActionFace::StopSwarm => true,
         }
     }
 
@@ -503,17 +540,18 @@ impl Composer {
             .h(ACTION_HEIGHT)
             .label(face.label())
             // The glyph is decoration: what the button is called is the word.
-            .accessibility_label(match face {
-                ActionFace::Send => "Send",
-                ActionFace::Stop => "Stop",
-            })
+            .accessibility_label(face.label())
             .disabled(!self.is_action_enabled(cx))
             .on_click(cx.listener(|this, _, _, cx| match this.face() {
                 ActionFace::Send => {
                     let draft = this.input.read(cx).value().to_string();
                     this.send(draft, cx);
                 }
-                ActionFace::Stop => this.interrupt(cx),
+                ActionFace::StopSwarm => {
+                    this.in_flight = true;
+                    cx.emit(ComposerEvent::StopSwarm);
+                    cx.notify();
+                }
             }));
         if let Some(icon) = face.icon() {
             button = button.icon(icon);
@@ -521,7 +559,7 @@ impl Composer {
 
         match face {
             ActionFace::Send => button.primary(),
-            ActionFace::Stop => button.secondary(),
+            ActionFace::StopSwarm => button.secondary(),
         }
     }
 }
@@ -591,6 +629,19 @@ impl Render for Composer {
                     // The readout is the flexible cell of this row; without it the
                     // button is the row, and stays where it was (§7.3).
                     .when_some(readout, |row, readout| row.child(readout))
+                    // The right-hand segments (`2 lanes`) sit where they belong: at the
+                    // end of the row, before the action.
+                    .when_some(self.trailing.clone(), |row, trailing| {
+                        row.child(
+                            div()
+                                .id("composer-readout-right")
+                                .test_support()
+                                .flex_none()
+                                .text_size(READOUT_SIZE)
+                                .text_color(theme.muted_foreground)
+                                .child(trailing),
+                        )
+                    })
                     .when(!self.show_readout, |row| row.justify_end())
                     .child(button),
             )
@@ -640,9 +691,9 @@ mod tests {
             ("input", self.composer.read(cx).input.entity_id())
         }
 
-        fn activity(&self, activity: Activity, cx: &mut App) {
+        fn busy(&self, busy: bool, cx: &mut App) {
             self.composer
-                .update(cx, |composer, cx| composer.set_activity(activity, cx));
+                .update(cx, |composer, cx| composer.set_swarm_busy(busy, cx));
         }
 
         /// Focus the input the way a user does, then type into it.
@@ -984,14 +1035,14 @@ mod tests {
         use gpui_kit::component::IconNamed as _;
 
         assert_eq!(ActionFace::Send.label(), "Send");
-        assert_eq!(ActionFace::Stop.label(), "\u{25a0} Stop");
+        assert_eq!(ActionFace::StopSwarm.label(), "\u{25a0} Stop swarm");
         assert_eq!(
             ActionFace::Send.icon().map(|icon| icon.path().to_string()),
             Some("icons/arrow-up.svg".to_string()),
             "Send leads with an up arrow"
         );
         assert!(
-            ActionFace::Stop.icon().is_none(),
+            ActionFace::StopSwarm.icon().is_none(),
             "Stop's square is a glyph in its label"
         );
     }
@@ -1015,7 +1066,7 @@ mod tests {
         f.act(cx, |window, cx| {
             window.render_frame(cx);
             f.type_draft("half a prompt", window, cx);
-            f.activity(Activity::Running, cx);
+            f.busy(true, cx);
             window.press("escape", cx);
         });
 
@@ -1030,7 +1081,7 @@ mod tests {
         f.act(cx, |window, cx| {
             window.render_frame(cx);
             f.type_draft("queued", window, cx);
-            f.activity(Activity::Running, cx);
+            f.busy(true, cx);
             window.render_frame(cx);
             window.press("enter", cx);
         });
@@ -1045,15 +1096,15 @@ mod tests {
             window.render_frame(cx);
             assert_eq!(window.find(BUTTON_ID).label(), Some("Send"));
 
-            f.activity(Activity::Running, cx);
+            f.busy(true, cx);
             window.render_frame(cx);
-            assert_eq!(window.find(BUTTON_ID).label(), Some("Stop"));
+            assert_eq!(window.find(BUTTON_ID).label(), Some("\u{25a0} Stop swarm"));
 
-            f.activity(Activity::Compacting, cx);
+            f.busy(true, cx);
             window.render_frame(cx);
-            assert_eq!(window.find(BUTTON_ID).label(), Some("Stop"));
+            assert_eq!(window.find(BUTTON_ID).label(), Some("\u{25a0} Stop swarm"));
 
-            f.activity(Activity::Idle, cx);
+            f.busy(false, cx);
             window.render_frame(cx);
             assert_eq!(window.find(BUTTON_ID).label(), Some("Send"));
         });
@@ -1127,28 +1178,47 @@ mod tests {
         );
     }
 
+    /// While the swarm is busy the button stops it — the whole swarm, which is the one
+    /// action a person has over it (CONTRACT §7.5) — and never sends or clears the draft.
     #[gpui_kit::test]
-    fn stop_interrupts_and_never_sends_or_clears(cx: &mut TestAppContext) {
+    fn stop_swarm_stops_it_and_never_sends_or_clears(cx: &mut TestAppContext) {
         let f = open(cx);
         f.act(cx, |window, cx| {
             window.render_frame(cx);
             f.type_draft("still working", window, cx);
-            f.activity(Activity::Compacting, cx);
+            f.busy(true, cx);
             window.render_frame(cx);
 
-            assert_eq!(window.find(BUTTON_ID).label(), Some("Stop"));
+            assert_eq!(window.find(BUTTON_ID).label(), Some("\u{25a0} Stop swarm"));
             window.click(BUTTON_ID, cx);
         });
 
-        assert_eq!(f.events(), vec![ComposerEvent::Interrupt]);
+        assert_eq!(f.events(), vec![ComposerEvent::StopSwarm]);
         assert_eq!(f.draft_now(cx), "still working");
 
-        // The interrupt's reply keeps the draft: it was an interrupt, not a send.
+        // The reply keeps the draft: it was a stop, not a send.
         f.act(cx, |window, cx| {
             f.composer.update(cx, |composer, cx| {
                 composer.request_finished(false, window, cx)
             })
         });
+        assert_eq!(f.draft_now(cx), "still working");
+    }
+
+    /// Esc is the coordinator's own run, not the swarm's: `run.interrupt` with scope
+    /// `session`, which the owner sends.
+    #[gpui_kit::test]
+    fn escape_interrupts_the_coordinators_own_run(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            f.type_draft("still working", window, cx);
+            f.busy(true, cx);
+            window.render_frame(cx);
+            window.dispatch_keystroke(Keystroke::parse("escape").expect("escape"), cx);
+        });
+
+        assert_eq!(f.events(), vec![ComposerEvent::Interrupt]);
         assert_eq!(f.draft_now(cx), "still working");
     }
 
@@ -1160,8 +1230,19 @@ mod tests {
             let line = "ark-deepseek-v4.1-flash \u{b7} max \u{b7} ctx 48k/936k (5%) \u{b7} 97% cached \u{b7} \
                         goal a1b2c3d4 (active) 12k/50k \u{b7} \
                         0123456789 0123456789 0123456789 0123456789 0123456789";
-            f.composer
-                .update(cx, |composer, cx| composer.set_readout(line, cx));
+            f.composer.update(cx, |composer, cx| {
+                composer.set_segments(
+                    &[Segment {
+                        name: "line".to_string(),
+                        order: 1,
+                        side: session::Side::Left,
+                        text: line.to_string(),
+                        data: Default::default(),
+                    }],
+                    &[],
+                    cx,
+                )
+            });
             window.render_frame(cx);
 
             let readout = window.find(READOUT_ID);
@@ -1202,8 +1283,19 @@ mod tests {
     fn without_the_readout_the_row_is_the_button_at_its_right(cx: &mut TestAppContext) {
         let f = open(cx);
         f.act(cx, |window, cx| {
-            f.composer
-                .update(cx, |composer, cx| composer.set_readout("ctx 48k/936k", cx));
+            f.composer.update(cx, |composer, cx| {
+                composer.set_segments(
+                    &[Segment {
+                        name: "context".to_string(),
+                        order: 1,
+                        side: session::Side::Left,
+                        text: "ctx 48k/936k".to_string(),
+                        data: Default::default(),
+                    }],
+                    &[],
+                    cx,
+                )
+            });
             f.composer
                 .update(cx, |composer, cx| composer.set_show_readout(false, cx));
             window.render_frame(cx);

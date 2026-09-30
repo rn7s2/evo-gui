@@ -14,8 +14,13 @@ use crate::{AppendField, Item, ItemId};
 pub enum Op {
     /// The stream's first frame: where it starts, and which process it belongs to.
     Hello { epoch: String, seq: u64 },
-    /// A new item, positioned after `after` (or at the end when `None`).
-    ItemAdd { item: Item, after: Option<ItemId> },
+    /// A new item, positioned after `after` (or at the end when `None`). The item is
+    /// boxed because it is far larger than any other frame, and the enum is built and
+    /// dropped once per frame.
+    ItemAdd {
+        item: Box<Item>,
+        after: Option<ItemId>,
+    },
     /// Streamed text appended to an item's field.
     ItemAppend {
         id: ItemId,
@@ -50,7 +55,7 @@ impl Op {
                 seq: u64_field(data, "seq"),
             },
             "item.add" => Op::ItemAdd {
-                item: Item::from_json(data.get("item")?)?,
+                item: Box::new(Item::from_json(data.get("item")?)?),
                 after: data
                     .get("after")
                     .and_then(Value::as_str)
