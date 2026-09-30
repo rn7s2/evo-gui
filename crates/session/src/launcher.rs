@@ -30,10 +30,6 @@
 //! the `~`-shortened path, and a meta line of what is known (`6 lanes · 2h ago ·
 //! coordinator: …`).
 //!
-//! # The check (§9)
-//!
-//! [`Problem`] is one line of `evo-swarm check --json`'s `problems`: a calm sentence
-//! that, when a person clicks it, opens the chooser ([`ProblemTarget`]) it is about.
 
 use serde_json::Value;
 
@@ -186,7 +182,10 @@ pub fn coordinator_chooser(catalog: &Value) -> Chooser {
 /// A catalog with no `lanes` (an `evo-agent` body) has no such judgement to offer, and
 /// then nothing is greyed out.
 pub fn lanes_chooser(catalog: &Value) -> Chooser {
-    let lanes = catalog.get("lanes").and_then(|l| l.get("models")).and_then(Value::as_array);
+    let lanes = catalog
+        .get("lanes")
+        .and_then(|l| l.get("models"))
+        .and_then(Value::as_array);
     model_chooser(catalog, LANES_DEFAULT, |id, provider| match lanes {
         None => None,
         Some(lanes) => lanes
@@ -198,9 +197,7 @@ pub fn lanes_chooser(catalog: &Value) -> Chooser {
             })
             .and_then(|lane| match lane.get("ok").and_then(Value::as_bool) {
                 Some(true) => None,
-                _ => Some(
-                    string(lane, "reason").unwrap_or_else(|| NOT_READY.to_string()),
-                ),
+                _ => Some(string(lane, "reason").unwrap_or_else(|| NOT_READY.to_string())),
             }),
     })
 }
@@ -286,8 +283,9 @@ fn model_chooser(
         };
         let provider = provider.to_lowercase();
         let ready = model.get("ready").and_then(Value::as_bool).unwrap_or(false);
-        let why = unavailable(&id, &provider)
-            .or_else(|| (!ready).then(|| string(model, "reason").unwrap_or_else(|| NOT_READY.to_string())));
+        let why = unavailable(&id, &provider).or_else(|| {
+            (!ready).then(|| string(model, "reason").unwrap_or_else(|| NOT_READY.to_string()))
+        });
         options.push(ChooserOption {
             key: format!("{id}@{provider}"),
             label: if duplicate(&id) {
@@ -353,90 +351,6 @@ fn string(value: &Value, key: &str) -> Option<String> {
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .map(str::to_owned)
-}
-
-// --- the check's problems (§9) ------------------------------------------------------
-
-/// One line of `evo-swarm check --json`'s `problems`: what is wrong with the launch the
-/// choosers describe, in evo's own words, one line.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Problem {
-    /// evo's code (`model_not_ready`, `lane_model_not_ready`, …), which is also what
-    /// decides where a click goes.
-    pub code: String,
-    pub message: String,
-}
-
-impl Problem {
-    /// The line the empty tab shows: the message, folded onto one line — a line the
-    /// reader can act on, never a paragraph.
-    pub fn line(&self) -> String {
-        let text = one_line(&self.message);
-        if text.is_empty() {
-            self.code.clone()
-        } else {
-            text
-        }
-    }
-
-    /// Where a click on this line goes: the chooser (or the setting) it is about.
-    pub fn target(&self) -> ProblemTarget {
-        let code = self.code.to_ascii_lowercase();
-        if code.contains("lane_model") || code.contains("lanes") {
-            ProblemTarget::Lanes
-        } else if code.contains("lane_thinking") || code.contains("thinking") {
-            ProblemTarget::LaneThinking
-        } else if code.contains("worker") {
-            ProblemTarget::Workers
-        } else if code.contains("model") {
-            ProblemTarget::Coordinator
-        } else {
-            // Everything else is about the machine the swarm would run on — a missing
-            // binary, a folder that cannot be written — which is Settings' business.
-            ProblemTarget::Settings
-        }
-    }
-}
-
-/// What a problem line opens when it is clicked (§9).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ProblemTarget {
-    Coordinator,
-    Lanes,
-    LaneThinking,
-    Workers,
-    Settings,
-}
-
-impl ProblemTarget {
-    /// The chooser this target opens, when it is one.
-    pub fn choice(&self) -> Option<Choice> {
-        match self {
-            ProblemTarget::Coordinator => Some(Choice::Coordinator),
-            ProblemTarget::Lanes => Some(Choice::Lanes),
-            ProblemTarget::LaneThinking => Some(Choice::LaneThinking),
-            ProblemTarget::Workers => Some(Choice::Workers),
-            ProblemTarget::Settings => None,
-        }
-    }
-}
-
-/// A message with its newlines folded to spaces.
-fn one_line(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut space = false;
-    for ch in text.trim().chars() {
-        if ch.is_whitespace() {
-            space = true;
-        } else {
-            if space && !out.is_empty() {
-                out.push(' ');
-            }
-            space = false;
-            out.push(ch);
-        }
-    }
-    out
 }
 
 // --- the launch path ----------------------------------------------------------------
@@ -561,7 +475,12 @@ pub fn history_rows(
         .collect()
 }
 
-fn history_row(entry: &HistoryEntry, now: i64, offset_seconds: i32, home: Option<&str>) -> HistoryRow {
+fn history_row(
+    entry: &HistoryEntry,
+    now: i64,
+    offset_seconds: i32,
+    home: Option<&str>,
+) -> HistoryRow {
     let folder_name = base_name(&entry.folder);
     HistoryRow {
         // The session's own title names it when the index kept one — the first thing the
@@ -619,7 +538,11 @@ fn tooltip_line(entry: &HistoryEntry, offset_seconds: i32) -> String {
         }
     }
     if let Some(lanes) = entry.lanes {
-        parts.push(format!("{} lane{}", lanes, if lanes == 1 { "" } else { "s" }));
+        parts.push(format!(
+            "{} lane{}",
+            lanes,
+            if lanes == 1 { "" } else { "s" }
+        ));
     }
     parts.join(" · ")
 }
@@ -634,7 +557,11 @@ fn meta_line(
 ) -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Some(lanes) = lanes {
-        parts.push(format!("{} lane{}", lanes, if *lanes == 1 { "" } else { "s" }));
+        parts.push(format!(
+            "{} lane{}",
+            lanes,
+            if *lanes == 1 { "" } else { "s" }
+        ));
     }
     if let Some(when) = when {
         parts.push(relative_time(when, now, offset_seconds));
@@ -759,8 +686,9 @@ fn offset_label(offset_seconds: i32) -> String {
 
 // --- the empty tab ------------------------------------------------------------------
 
-/// The empty tab (§7.2): the four choosers, what is chosen in each, the history list, and
-/// what `evo-swarm check --json` said about the launch they describe.
+/// The empty tab (§7.2): the four choosers, what is chosen in each, and the history list.
+/// What `evo-swarm check --json` says about the launch they describe is the store's
+/// (`store::catalog::CheckReport`) and the tab holds it beside this.
 #[derive(Clone, Debug, Default)]
 pub struct Launcher {
     /// The catalog the choosers were built from: the last `catalog --json` body.
@@ -774,7 +702,6 @@ pub struct Launcher {
     lane_thinking_key: String,
     workers_key: String,
     history: Vec<HistoryRow>,
-    problems: Vec<Problem>,
 }
 
 impl Launcher {
@@ -801,16 +728,6 @@ impl Launcher {
         self.differs(&before)
     }
 
-    /// What `evo-swarm check --json` said about this launch (§9): the lines the empty tab
-    /// shows under the choosers. Returns whether they changed.
-    pub fn set_problems(&mut self, problems: &[Problem]) -> bool {
-        if self.problems == problems {
-            return false;
-        }
-        self.problems = problems.to_vec();
-        true
-    }
-
     /// The resumable sessions, from the session index and the app's own recents (§2).
     /// `now` is the clock the relative times read against, `offset_seconds` the local UTC
     /// offset the rows are shown in, `home` the directory to shorten paths around.
@@ -827,12 +744,6 @@ impl Launcher {
         }
         self.history = rows;
         true
-    }
-
-    /// The lines of the last check, in evo's order — empty when it found nothing, or when
-    /// it has not run yet.
-    pub fn problems(&self) -> &[Problem] {
-        &self.problems
     }
 
     pub fn history(&self) -> &[HistoryRow] {
@@ -926,9 +837,8 @@ impl Launcher {
         }
     }
 
-    /// Everything the empty tab renders into its select widgets. The history and the
-    /// problems are not in it: each has its own entry point, from data that arrives
-    /// separately.
+    /// Everything the empty tab renders into its select widgets. The history is not in it:
+    /// it has its own entry point, from data that arrives separately (§2).
     fn differs(&self, before: &Launcher) -> bool {
         self.coordinator != before.coordinator
             || self.lanes != before.lanes

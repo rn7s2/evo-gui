@@ -49,6 +49,7 @@ class State:
         }
         self.replies = {}          # op name -> reply body (without rid/seq)
         self.replies_by_rid = {}   # rid -> the reply already given (idempotence)
+        self.log = []              # (seq, payload), what a resume replays
         self.requests = []         # every request this server saw
         self.streams = []          # Stream, one per open SSE connection
         self.forget_next = False   # the next `since` is too old
@@ -267,6 +268,12 @@ class Handler(BaseHTTPRequestHandler):
                 stream.push({"op": "stream.reset", "reason": "restarted", "seq": seq})
             elif int(since_seq or 0) > seq:
                 stream.push({"op": "stream.reset", "reason": "cursor_unknown", "seq": seq})
+            else:
+                # The retained op log: a resume replays what it missed, exactly as
+                # the contract's 10-minute retention does.
+                for missed in state.log:
+                    if missed["seq"] > int(since_seq or 0):
+                        stream.push(missed)
         if forget:
             stream.push({"op": "stream.reset", "reason": "cursor_too_old", "seq": seq})
         stream.write(epoch, seq, None, self.server)
@@ -367,6 +374,7 @@ class Handler(BaseHTTPRequestHandler):
             epoch = state.epoch
             payload = dict(body.get("op") or {})
             payload["seq"] = payload.get("seq", seq)
+            state.log.append(payload)
         state.broadcast(payload)
         self.reply(200, {"ok": True, "epoch": epoch, "seq": payload["seq"]})
 

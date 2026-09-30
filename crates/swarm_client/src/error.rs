@@ -82,7 +82,7 @@ impl fmt::Display for Error {
             Error::Json(e) => write!(f, "json: {e}"),
             Error::Status(s) => write!(f, "{s}"),
             Error::Timeout(m) => write!(f, "timeout: {m}"),
-            Error::Boot(b) => write!(f, "boot failed: {}", b.message),
+            Error::Boot(b) => write!(f, "boot failed: {}", b.reason),
             Error::Cancelled(outcome) => write!(f, "boot cancelled ({outcome:?})"),
             Error::Closed => write!(f, "connection closed"),
             Error::Config(m) => write!(f, "config: {m}"),
@@ -112,11 +112,12 @@ impl From<serde_json::Error> for Error {
     }
 }
 
-/// A server that did not come up.
+/// A server that did not come up: the child exited during startup, or it never
+/// wrote its ready file. A tab shows `reason` and offers Retry.
 #[derive(Clone, Debug)]
 pub struct BootFailure {
     /// What was wrong, phrased for a person.
-    pub message: String,
+    pub reason: String,
     /// The last lines of the server's log — what the tab shows (§3).
     pub log_tail: String,
     pub log_path: Option<PathBuf>,

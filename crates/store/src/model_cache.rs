@@ -14,7 +14,7 @@ use serde_json::Value;
 use std::io;
 use std::path::Path;
 
-use crate::catalog::{Catalog, LaneModel, Model, ModelRef};
+use crate::catalog::{Catalog, Model};
 use crate::paths::{self, Root};
 use crate::time;
 
@@ -79,23 +79,6 @@ impl ModelCache {
     /// Every registered model.
     pub fn models(&self) -> Vec<Model> {
         self.catalog.models()
-    }
-
-    /// The models a lane can register, when the body says — `None` when it does
-    /// not (an `evo-agent` catalog has no `lanes`).
-    pub fn lane_models(&self) -> Option<Vec<LaneModel>> {
-        self.catalog.lane_models()
-    }
-
-    /// evo's own default model, when the catalog named one.
-    pub fn default_model(&self) -> Option<ModelRef> {
-        self.catalog.default_model()
-    }
-
-    /// Whether a lane can run one registration: the catalog's `lanes.models`
-    /// when it has them, else the model's own `ready`.
-    pub fn lane_model_ok(&self, id: &str, provider: Option<&str>) -> bool {
-        self.catalog.lane_model_ok(id, provider)
     }
 
     /// Entries evo could not encode (§5.6).
@@ -175,14 +158,17 @@ mod tests {
         assert_eq!(cache.models().len(), 2);
         assert_eq!(cache.program, "evo-swarm");
         assert!(cache.fetched_epoch().is_some());
-        assert_eq!(
-            cache.default_model(),
-            Some(ModelRef::new("ark-deepseek-v4.1-flash", Some("aiden")))
-        );
-        let lanes = cache.lane_models().expect("the swarm catalog has lanes");
+        let lanes = cache
+            .catalog()
+            .lane_models()
+            .expect("the swarm catalog has lanes");
         assert_eq!(lanes.len(), 2);
-        assert!(cache.lane_model_ok("claude-opus-5", Some("anthropic")));
-        assert!(!cache.lane_model_ok("ark-deepseek-v4.1-flash", Some("aiden")));
+        assert!(cache
+            .catalog()
+            .lane_model_ok("claude-opus-5", Some("anthropic")));
+        assert!(!cache
+            .catalog()
+            .lane_model_ok("ark-deepseek-v4.1-flash", Some("aiden")));
     }
 
     #[test]
@@ -206,9 +192,8 @@ mod tests {
     fn an_empty_cache_is_empty() {
         assert!(ModelCache::default().is_empty());
         assert!(ModelCache::default().models().is_empty());
-        assert!(ModelCache::default().lane_models().is_none());
+        assert!(ModelCache::default().catalog().lane_models().is_none());
         assert_eq!(ModelCache::default().fetched_epoch(), None);
-        assert!(ModelCache::default().default_model().is_none());
         // A file that is not there is an empty cache, not an error.
         let root = temp_root("missing");
         assert!(ModelCache::load(&root).is_empty());
@@ -220,8 +205,10 @@ mod tests {
         let mut body = catalog();
         body.as_object_mut().unwrap().remove("lanes");
         let cache = ModelCache::from_catalog("evo-agent", body);
-        assert!(cache.lane_models().is_none());
-        assert!(cache.lane_model_ok("claude-opus-5", Some("anthropic")));
-        assert!(!cache.lane_model_ok("never-registered", None));
+        assert!(cache.catalog().lane_models().is_none());
+        assert!(cache
+            .catalog()
+            .lane_model_ok("claude-opus-5", Some("anthropic")));
+        assert!(!cache.catalog().lane_model_ok("never-registered", None));
     }
 }

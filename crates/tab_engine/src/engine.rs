@@ -182,7 +182,7 @@ fn run(
         Ok(server) => server,
         Err(error) => {
             engine.send(Update::BootFailed {
-                message: boot_message(&error),
+                reason: boot_message(&error),
                 log_tail: error.log_tail().unwrap_or_default().to_owned(),
             });
             return;
@@ -203,7 +203,7 @@ fn run(
         Ok(snapshot) => snapshot,
         Err(error) => {
             engine.send(Update::BootFailed {
-                message: format!("the server answered the ready file but not a snapshot: {error}"),
+                reason: format!("the server answered the ready file but not a snapshot: {error}"),
                 log_tail: server.log_tail(40),
             });
             let outcome = server
@@ -238,7 +238,7 @@ fn run(
 /// Why a boot failed, in one line, for a tab's caption.
 fn boot_message(error: &swarm_client::Error) -> String {
     match error {
-        swarm_client::Error::Boot(failure) => failure.message.clone(),
+        swarm_client::Error::Boot(failure) => failure.reason.clone(),
         other => other.to_string(),
     }
 }
@@ -416,7 +416,7 @@ mod tests {
     #[test]
     fn a_boot_exit_is_read_back_as_a_message() {
         let error = swarm_client::Error::Boot(Box::new(swarm_client::BootFailure {
-            message: "the server exited during startup (exit status: 3)".into(),
+            reason: "the server exited during startup (exit status: 3)".into(),
             log_tail: "boom".into(),
             log_path: None,
             exit_code: Some(3),

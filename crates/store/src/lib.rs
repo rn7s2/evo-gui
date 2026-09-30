@@ -39,7 +39,9 @@ pub mod tab;
 pub mod time;
 
 pub use app_state::{AppState, Binaries, Recent, Theme, WindowBounds, SCHEMA_VERSION};
-pub use catalog::{Catalog, CheckReport, LaneModel, Model, ModelCheck, ModelRef, Problem};
+pub use catalog::{
+    Catalog, CheckReport, LaneModel, Model, ModelCheck, ModelRef, Problem, ProblemTarget,
+};
 pub use history::{HistoryEntry, HistorySource, Session, SessionsQuery};
 pub use launch::{LaunchSpec, Program};
 pub use model_cache::ModelCache;

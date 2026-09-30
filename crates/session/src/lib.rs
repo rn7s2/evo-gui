@@ -49,9 +49,9 @@ pub use item::{
     Recovery, RunOutcome, ToolItem, ToolResult, ToolStatus, Usage, UserItem, UserStatus,
 };
 pub use launcher::{
-    coordinator_chooser, history_rows, home_short, lanes_chooser, relative_time,
-    thinking_chooser, workers_chooser, Choice, Chooser, ChooserOption, HistoryEntry, HistoryRow,
-    HistorySource, LaunchPlan, Launcher, Problem, ProblemTarget, DEFAULT_KEY, WORKERS_MAX,
+    coordinator_chooser, history_rows, home_short, lanes_chooser, relative_time, thinking_chooser,
+    workers_chooser, Choice, Chooser, ChooserOption, HistoryEntry, HistoryRow, HistorySource,
+    LaunchPlan, Launcher, DEFAULT_KEY, WORKERS_MAX,
 };
 pub use op::{topic_of, LoreScope, Op, OpRequest, OpSink, Queue, Scope};
 pub use state::{
