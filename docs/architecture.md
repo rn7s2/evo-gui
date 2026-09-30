@@ -53,8 +53,10 @@ verified; a title-only message is not acceptable. Every message ends with the tr
 ## Layout decisions
 
 - The status readout is drawn at the foot of the centre column
-  (`workspace::READOUT_LINE_ID`), and the composer carries its own row under the input
-  (`composer::READOUT_ID`); both render the topic's `segments`, in the order the server
-  publishes them.
+  (`workspace::READOUT_LINE_ID`) and renders the shown agent's `segments` in the order
+  the server publishes them. `composer::READOUT_ID` is the same line for a composer used
+  on its own (the component's own demo); the tab page turns it off
+  (`set_show_readout(false)`), so the app draws it once, where every agent's segments
+  can be shown rather than the coordinator's alone.
 - The left and right columns are resizable by dragging the splits (defaults 260 / 360 px),
   and the widths are shared by every tab and kept in `app.json`.
