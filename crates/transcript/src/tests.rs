@@ -12,7 +12,7 @@ use session::{Item, ItemKind};
 
 use crate::rows::{
     cap_fields, cap_text, json_fields, row_id, take_chars, Cap, FieldValue, CONTEXT_BLOCK_LINES,
-    RESULT_LIMIT, VALUE_LIMIT,
+    RESULT_LIMIT, TURN_LABEL_OVERHANG, VALUE_LIMIT,
 };
 use crate::{TodoPanel, TranscriptView};
 
@@ -823,4 +823,144 @@ fn a_long_transcript_opens_at_its_latest_row(cx: &mut TestAppContext) {
         last.bottom() > transcript.bottom() - px(60.),
         "and at the bottom of it, not floating above: {last:?} vs {transcript:?}"
     );
+}
+
+/// The turn rule, to the pixel the design asks for: a full-width hairline whose
+/// floor the *next* row starts below, with `turn N` sitting on the line — the
+/// label's vertical centre within a pixel of it.
+#[gpui_kit::test]
+fn a_turn_rule_puts_its_label_on_the_line(cx: &mut TestAppContext) {
+    let (_view, cx) = open!(
+        cx,
+        vec![
+            user("u_1", "the first turn"),
+            user("u_2", "the second turn"),
+        ]
+    );
+    // Two frames: one to lay the rule out, one for the row that follows it.
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        window.render_frame(cx);
+    });
+    cx.update(|window, _| {
+        let line = window.find(("transcript-turn-line", 2usize)).bounds();
+        let label = window.find(("transcript-turn-label", 2usize)).bounds();
+        // The two turns' *cards*: the row wrapper carries the rule above it, so the
+        // card is what says where a turn actually starts.
+        let row = window.find(row_id("transcript-user", "u_2")).bounds();
+        let first = window.find(row_id("transcript-user", "u_1")).bounds();
+
+        // The line is the row's own width: a hairline across the measure, not a
+        // stub beside the label.
+        assert!(
+            line.size.width >= row.size.width - px(1.),
+            "the line spans the row: {line:?} vs {row:?}"
+        );
+        assert_eq!(line.size.height, px(1.));
+
+        // The label is *on* the line: its box crosses it — the design's
+        // `bottom: -7px` — and its vertical centre is within a couple of pixels of
+        // it (a 12px label on a 1.5 line box is 2px above the line by the design's
+        // own arithmetic).
+        assert!(
+            label.origin.y < line.origin.y && label.bottom() > line.bottom(),
+            "the label straddles the line: {label:?} vs {line:?}"
+        );
+        let label_centre = label.origin.y + label.size.height / 2.;
+        let line_centre = line.origin.y + line.size.height / 2.;
+        assert!(
+            (label_centre - line_centre).abs() <= px(2.),
+            "the label sits on the line: {label:?} vs {line:?}"
+        );
+        assert_eq!(
+            label.bottom() - line.bottom(),
+            px(TURN_LABEL_OVERHANG),
+            "and hangs the design's 7px below the line"
+        );
+
+        // The rule has the design's own 26px above it, and the turn below it
+        // starts *below the line* rather than over it — which is what keeps the
+        // label readable: in the design the label is painted over the next row and
+        // the row's 8px of padding is what it overlaps.
+        assert!(
+            row.origin.y >= line.bottom(),
+            "the next turn starts below the line: {row:?} vs {line:?}"
+        );
+        assert!(
+            line.origin.y >= first.bottom() + px(26.),
+            "26px of air above the rule: {line:?} vs {first:?}"
+        );
+    });
+}
+
+/// An ephemeral system line is not part of the conversation: `session ready` is
+/// said at every boot and dropped; a durable notice — the kind the journal keeps —
+/// is the record and stays.
+#[gpui_kit::test]
+fn a_notice_the_server_does_not_keep_is_not_in_the_transcript(cx: &mut TestAppContext) {
+    let mut ephemeral = notice("e_1", "info", "session ready");
+    if let ItemKind::Notice(notice) = &mut ephemeral.kind {
+        notice.durable = false;
+        notice.source = session::NoticeSource::Serve;
+    }
+    let mut kept = notice("e_2", "warn", "the provider is unreachable");
+    if let ItemKind::Notice(notice) = &mut kept.kind {
+        notice.durable = true;
+    }
+
+    let (view, cx) = open!(cx, vec![ephemeral, kept]);
+    cx.update(|window, cx| window.render_frame(cx));
+    cx.update(|window, _| {
+        assert!(
+            window
+                .try_find(row_id("transcript-notice", "e_1"))
+                .is_none(),
+            "the ephemeral line is not drawn"
+        );
+        assert!(
+            window
+                .try_find(row_id("transcript-notice", "e_2"))
+                .is_some(),
+            "a durable one is"
+        );
+    });
+    // And it is not held either: an item that arrives later is dropped the same
+    // way, so the transcript never holds a line it will not draw.
+    let later = {
+        let mut item = notice("e_3", "info", "session ready");
+        if let ItemKind::Notice(notice) = &mut item.kind {
+            notice.durable = false;
+        }
+        item
+    };
+    view.update(cx, |view, cx| {
+        assert!(!view.upsert(later, cx), "an ephemeral line changes nothing");
+        assert_eq!(view.items(cx).len(), 1, "only the durable one is held");
+    });
+}
+
+/// A system line is drawn in the ink its severity earns: info is chrome, warn and
+/// error are the design's two colours — and none of them is the accent a link
+/// would be drawn in.
+#[gpui_kit::test]
+fn a_system_line_is_not_drawn_in_the_accent(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (host, cx) = cx.add_window_view(|_window, cx| TranscriptHost::new(cx));
+    let _ = host;
+    cx.update(|_window, cx| {
+        let palette = crate::style::Palette::from_app(cx);
+        use session::NoticeSeverity::*;
+        assert_eq!(
+            crate::rows::severity_color(Info, &palette),
+            palette.muted_foreground,
+            "an info line is chrome"
+        );
+        assert_eq!(crate::rows::severity_color(Warn, &palette), palette.warning);
+        assert_eq!(
+            crate::rows::severity_color(Error, &palette),
+            palette.destructive
+        );
+        assert_ne!(crate::rows::severity_color(Info, &palette), palette.primary);
+        assert_ne!(crate::rows::severity_color(Info, &palette), palette.info);
+    });
 }

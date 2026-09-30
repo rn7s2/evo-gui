@@ -361,7 +361,7 @@ impl TranscriptView {
     /// Replace the whole list, as a snapshot or a `topic.reset` does.
     pub fn replace(&mut self, items: Vec<Item>, cx: &mut Context<Self>) {
         self.data.update(cx, |data, _| {
-            data.items = items;
+            data.items = items.into_iter().filter(is_part_of_the_record).collect();
             data.retain_documents();
         });
         cx.notify();
@@ -373,6 +373,7 @@ impl TranscriptView {
         let added = self.data.update(cx, |data, _| {
             let fresh: Vec<Item> = items
                 .into_iter()
+                .filter(is_part_of_the_record)
                 .filter(|item| !data.items.iter().any(|held| held.id == item.id))
                 .collect();
             if fresh.is_empty() {
@@ -391,7 +392,15 @@ impl TranscriptView {
     }
 
     /// Add or replace one item, by its id. Returns whether the view changed.
+    ///
+    /// A notice the server does not keep in the journal is not part of the
+    /// conversation: it is a status line about the machine — `session ready`, at
+    /// the top of every session — and it is dropped here rather than drawn at the
+    /// head of every transcript.
     pub fn upsert(&mut self, item: Item, cx: &mut Context<Self>) -> bool {
+        if !is_part_of_the_record(&item) {
+            return false;
+        }
         let changed = self
             .data
             .update(cx, |data, _| match data.index_of(&item.id) {
@@ -566,6 +575,16 @@ impl TranscriptView {
             handler(id, window, cx);
         }
     }
+}
+
+/// Whether an item belongs in the conversation.
+///
+/// Only one kind is ever dropped: a notice the server itself does not keep
+/// (`durable: false`, §4.1) — a line about the machine saying it is ready, said
+/// again at every boot. Everything else, including a durable notice, is the
+/// record.
+fn is_part_of_the_record(item: &Item) -> bool {
+    !matches!(&item.kind, ItemKind::Notice(notice) if !notice.durable)
 }
 
 /// What an empty transcript says, per agent.
