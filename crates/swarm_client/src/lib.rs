@@ -58,8 +58,8 @@ pub use protocol::{
     TOPIC_SESSION, TOPIC_SWARM,
 };
 pub use server::{
-    log_tail, process_alive, BootCancel, Server, ServerConfig, Shutdown, ShutdownOutcome,
-    StdinClose, SCRUB_ENV,
+    group_alive, log_tail, process_alive, reap_spawned, spawned_groups, BootCancel, Server,
+    ServerConfig, Shutdown, ShutdownOutcome, StdinClose, SCRUB_ENV,
 };
 pub use sse::{SseEvent, SseParser};
 pub use stream::{Backoff, EventStream, StreamConfig, StreamMsg};

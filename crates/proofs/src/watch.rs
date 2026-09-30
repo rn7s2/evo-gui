@@ -290,17 +290,17 @@ impl Watcher {
             StreamMsg::Connected { cursor } => {
                 self.cursor = Some(cursor);
             }
+            // `hello` never arrives as a frame: `swarm_client` takes it as the
+            // connection's own cursor (that is what `Connected` is) and carries on
+            // to the ops. So a proof that wants to know where a stream started asks
+            // [`Watcher::cursor`], not the frames.
             StreamMsg::Frame(frame) => {
-                if frame.is_hello() {
-                    self.cursor = frame.cursor.clone();
-                } else {
-                    self.mirror.apply(&frame.data);
-                    if let Some(reason) = frame.topic_reset() {
-                        self.topic_resets.push(reason.as_str().to_owned());
-                    }
-                    if let Some(reason) = frame.stream_reset() {
-                        self.stream_resets.push(reason.as_str().to_owned());
-                    }
+                self.mirror.apply(&frame.data);
+                if let Some(reason) = frame.topic_reset() {
+                    self.topic_resets.push(reason.as_str().to_owned());
+                }
+                if let Some(reason) = frame.stream_reset() {
+                    self.stream_resets.push(reason.as_str().to_owned());
                 }
                 if let Some(cursor) = &frame.cursor {
                     self.cursor = Some(cursor.clone());
@@ -317,6 +317,12 @@ impl Watcher {
     /// its own after a reset.
     pub fn reseed(&mut self, snapshot: &Value) {
         self.mirror.apply_snapshot(snapshot);
+    }
+
+    /// The cursor this watcher's stream started at, or has resumed to: what the
+    /// server's `hello` named.
+    pub fn cursor(&self) -> Option<&Cursor> {
+        self.cursor.as_ref()
     }
 
     /// The frame the caller is waiting for.

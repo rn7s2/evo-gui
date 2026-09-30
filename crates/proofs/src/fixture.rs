@@ -158,8 +158,12 @@ impl Fixture {
     }
 
     /// A launch that resumes one exact session (§1: never a bare `--resume`).
+    ///
+    /// No `--workers`: a resumed swarm keeps the lane count its own record kept,
+    /// and the app passes the flag for a folder-created swarm only.
     pub fn resume_spec(&self, program: Program, session: &std::path::Path) -> LaunchSpec {
         let mut spec = self.spec(program, 0);
+        spec.workers = None;
         spec.resume = Some(session.to_path_buf());
         spec
     }
@@ -264,6 +268,12 @@ impl Fixture {
     /// offline CLIs (`store::cli` spawns with this process's environment). One
     /// proof per test binary, so this is the only thing setting them.
     pub fn enter(&self) {
+        // The offline CLIs are spawned with *this* process's environment, so what
+        // a child must not inherit — a lane's own supervision markers, a stale
+        // test token, the real provider keys — must not be in it either.
+        for key in SCRUB {
+            std::env::remove_var(key);
+        }
         std::env::set_var("HOME", &self.home);
         std::env::set_var("EVO_HOME", format!("{}/", self.home.join(".evo").display()));
         std::env::set_var("EVO_AGENT_BIN", &self.bins.agent);
@@ -285,65 +295,6 @@ impl Fixture {
             .expect("the stub home's init.lisp");
     }
 
-    /// Every process of this fixture's, and only this fixture's.
-    ///
-    /// Found by the one thing they all have in common: their command line names
-    /// this fixture's own directory — the tab directory the app passes a server,
-    /// or a lane's. A pid is not enough. The ready file publishes the *session's*
-    /// pid and leaves `supervisor_pid` null, so the process the app actually
-    /// spawned (and the one that would restart the session) is named nowhere on
-    /// disk; a supervisor that outlives its session is exactly the leak this
-    /// exists to prevent. The directory is unique to this fixture — a temp path
-    /// with this process's pid in it — so nothing else can match.
-    fn processes(&self) -> Vec<u32> {
-        let mut needles = vec![self.dir.display().to_string()];
-        if let Ok(canonical) = fs::canonicalize(&self.dir) {
-            needles.push(canonical.display().to_string());
-        }
-        let Ok(out) = Command::new("ps").args(["-eo", "pid=,command="]).output() else {
-            return Vec::new();
-        };
-        let ours = std::process::id();
-        let text = String::from_utf8_lossy(&out.stdout);
-        let mut pids = Vec::new();
-        for line in text.lines() {
-            let line = line.trim_start();
-            let Some((pid, command)) = line.split_once(char::is_whitespace) else {
-                continue;
-            };
-            let Ok(pid) = pid.trim().parse::<u32>() else {
-                continue;
-            };
-            if pid == ours || !needles.iter().any(|needle| command.contains(needle)) {
-                continue;
-            }
-            pids.push(pid);
-        }
-        pids
-    }
-
-    /// Stop every process still alive in this fixture, and give them `wait` to go.
-    ///
-    /// All of them are signalled in the same round: telling a session to stop has
-    /// no point while the supervisor above it is being told nothing, since its
-    /// whole job is to start it again.
-    fn reap(&self, signal: libc::c_int, wait: Duration) {
-        let deadline = std::time::Instant::now() + wait;
-        loop {
-            let pids = self.processes();
-            if pids.is_empty() {
-                return;
-            }
-            for pid in &pids {
-                unsafe { libc::kill(*pid as libc::pid_t, signal) };
-            }
-            if std::time::Instant::now() >= deadline {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-    }
-
     /// How many stub requests have been made, and what the last few asked for —
     /// what a proof reads when it wants to know what evo *sent*.
     pub fn stub_requests(&self) -> serde_json::Value {
@@ -357,15 +308,16 @@ impl Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        // A fixture's servers are the fixture's too. A proof's own `Server` stops
-        // itself — it holds the child's pipe, and EOF is the whole signal — but a
-        // server the *app* started (a capture, a UI test) belongs to nobody's
-        // `Drop`, and closes its pipe only when the process running the app ends,
-        // after which nothing is left to escalate. So whatever is still alive in
-        // this fixture's own tab directories, and is still ours by its own command
-        // line, is stopped here: politely, then not.
-        self.reap(libc::SIGTERM, Duration::from_secs(3));
-        self.reap(libc::SIGKILL, Duration::ZERO);
+        // A fixture's servers are the fixture's too, and the handle is their own
+        // process group — the groups this process started, and nothing else. A
+        // proof's own `Server` stops itself (it holds the child's pipe, and EOF is
+        // the whole signal), but a server the *app* started belongs to nobody's
+        // `Drop`: the app's quit leaves before the client it would have escalated
+        // with. `reap_spawned` stops both, by `killpg` on groups *we* created.
+        let killed = swarm_client::reap_spawned(Duration::from_secs(3));
+        if killed > 0 {
+            println!("{NOTE} reaped {killed} process group(s) the fixture started");
+        }
         self.stub.stop();
         if std::env::var_os("EVO_PROOFS_KEEP").is_some() {
             println!("{NOTE} kept {}", self.dir.display());
