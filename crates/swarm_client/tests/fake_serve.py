@@ -351,6 +351,16 @@ class Handler(BaseHTTPRequestHandler):
         match = re.match(r"^/media/([^/]+)/(\d+)$", path)
         if not match:
             return self.reply(404, {"ok": False, "error": "no such media"})
+        item_id = match.group(1)
+        with self.server.state.lock:
+            known = any(
+                item.get("id") == item_id
+                for stored in self.server.state.topics.values()
+                for item in stored.get("items", [])
+            )
+        if not known:
+            # Bytes belong to an item the server has; anything else is 404.
+            return self.reply(404, {"ok": False, "error": "no such media"})
         self.reply(200, b"fake-image-bytes", content_type="image/png")
 
     # --- control -----------------------------------------------------------
