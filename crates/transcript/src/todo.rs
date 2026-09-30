@@ -1,24 +1,34 @@
 //! The todo panel of the selected agent (§7.3, center bottom).
 
 use gpui_kit::component::scroll::Scrollbar;
-use gpui_kit::component::{Icon, IconName};
 use gpui_kit::{
-    div, px, AnyElement, App, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
-    RenderOnce, ScrollHandle, StatefulInteractiveElement as _, Styled as _, TestSupportExt as _,
-    Window,
+    div, point, px, AnyElement, App, FontWeight, InteractiveElement as _, IntoElement,
+    ParentElement as _, RenderOnce, ScrollHandle, StatefulInteractiveElement as _, Styled as _,
+    TestSupportExt as _, Window,
 };
 use session::{Todo, TodoStatus};
+use widgets::glyph;
 
 use crate::style::{Palette, MEASURE};
 
 /// How tall the list may grow before it scrolls on its own, so a long todo
 /// list never pushes the transcript away.
-pub(crate) const MAX_LIST_HEIGHT: gpui_kit::Pixels = px(132.);
+pub(crate) const MAX_LIST_HEIGHT: gpui_kit::Pixels = px(156.);
 /// Width of the glyph column: one column, whatever the glyph in it.
 const GLYPH_COLUMN: gpui_kit::Pixels = px(18.);
-/// The one glyph size: ☑, ◐ and ☐ are drawn at this size and no other, so the
-/// three read as one column rather than three weights of font glyph.
-const GLYPH_SIZE: gpui_kit::Pixels = px(12.);
+/// The one glyph size: `Workspace.css`'s `.todo-box` is 14px square, and ☑, ◐
+/// and ☐ are drawn at this size and no other, so the three read as one column
+/// rather than three weights of font glyph.
+const GLYPH_SIZE: gpui_kit::Pixels = px(14.);
+/// The box's corner: `.todo-box .frame{rx:3}`.
+const GLYPH_RADIUS: gpui_kit::Pixels = px(3.);
+/// The frame's stroke: `.todo-box .frame{stroke-width:1.2}`.
+const FRAME_STROKE: f32 = 1.2;
+/// The pending frame is drawn at 70% (`opacity:.7`); a done or in-progress one
+/// is the ink at full weight.
+const FRAME_OPACITY: f32 = 0.7;
+/// The tick's stroke: `.todo-box.done .tick{stroke-width:1.6}`.
+const TICK_STROKE: f32 = 1.6;
 /// The panel's scroll state: one list, whose scroll position is remembered
 /// across frames by the window.
 const LIST_ID: &str = "todo-list";
@@ -26,6 +36,14 @@ const SCROLLBAR_ID: &str = "todo-scrollbar";
 
 /// A compact list of the selected agent's todos: status glyph + text, under a
 /// `Todos done/total` header, aligned with the transcript's reading measure.
+///
+/// This is the design's `.todo-strip` minus its fold: the 32px `.todo-strip-row`
+/// with the chevron that turns belongs to whoever owns the layout around it (the
+/// composer draws that row for its own drawer, `crates/composer`), and the strip
+/// reads the same either way. Nothing draws this panel yet — `workspace`'s tab
+/// page feeds it through [`crate::TranscriptView::set_todos`], and where the
+/// strip sits is the tab page's to decide (the design puts it between the
+/// transcript and the composer).
 ///
 /// The panel renders nothing while the agent has no todos, so a caller can
 /// place it unconditionally; [`TodoPanel::is_empty`] exposes the same fact.
@@ -79,11 +97,13 @@ impl RenderOnce for TodoPanel {
             .min_w_0()
             .flex()
             .flex_col()
-            .px_4()
-            .pt(px(10.))
-            .pb(px(10.))
-            .border_t_1()
+            // `.todo-strip{border-bottom:1px solid var(--border);background:
+            // var(--sidebar)}`: the strip sits on the chrome surface with a rule
+            // under it, and its own list carries the padding.
+            .bg(palette.sidebar)
+            .border_b_1()
             .border_color(palette.border)
+            .pb(px(4.))
             // The same measure as the rows above, so the panel's text starts on
             // the same left edge as the transcript's.
             .child(
@@ -94,7 +114,10 @@ impl RenderOnce for TodoPanel {
                         .max_w(px(MEASURE))
                         .flex()
                         .flex_col()
+                        // `.todo-strip-list{gap:4px;padding:8px 14px 4px}`.
                         .gap_1()
+                        .px(px(14.))
+                        .pt(px(8.))
                         .child(
                             div()
                                 .id("todo-header")
@@ -103,7 +126,7 @@ impl RenderOnce for TodoPanel {
                                 .gap_2()
                                 .text_xs()
                                 .font_weight(FontWeight::MEDIUM)
-                                .text_color(palette.muted_foreground)
+                                .text_color(palette.foreground)
                                 .child(format!("Todos {done}/{total}"))
                                 .test_support(),
                         )
@@ -181,12 +204,22 @@ fn todo_item(index: usize, todo: &Todo, palette: &Palette) -> impl IntoElement {
                 .child(todo_glyph(todo.status, palette))
                 .test_support(),
         )
-        .child(
-            div()
+        .child({
+            // `.todo-item.done .todo-text{text-decoration:line-through}` with the
+            // design's own decoration colour, 55% of the muted ink.
+            let text = div()
                 .min_w_0()
                 .text_color(text_color)
-                .child(todo.text.clone()),
-        )
+                .child(todo.text.clone());
+            if todo.status == TodoStatus::Done {
+                text.line_through().text_decoration_color(gpui_kit::Hsla {
+                    a: 0.55,
+                    ..palette.muted_foreground
+                })
+            } else {
+                text
+            }
+        })
         .test_support()
 }
 
@@ -195,9 +228,8 @@ fn todo_item(index: usize, todo: &Todo, palette: &Palette) -> impl IntoElement {
 /// carry the same weight.
 fn todo_glyph(status: TodoStatus, palette: &Palette) -> AnyElement {
     let glyph = match status {
-        TodoStatus::Done => disc_icon(palette),
-        TodoStatus::InProgress => disc(palette, Half::Filled),
-        TodoStatus::Pending => disc(palette, Half::Empty),
+        TodoStatus::Done => done_box(palette),
+        in_progress => open_box(in_progress, palette),
     };
 
     div()
@@ -209,36 +241,58 @@ fn todo_glyph(status: TodoStatus, palette: &Palette) -> AnyElement {
         .into_any_element()
 }
 
-fn disc_icon(palette: &Palette) -> AnyElement {
-    Icon::new(IconName::CircleCheck)
+/// The done box: the frame filled with the ink, the tick cut out of it in the
+/// sidebar colour — `Workspace.css`'s `.todo-box.done`.
+fn done_box(palette: &Palette) -> AnyElement {
+    // The design's path, `M4 7.2 6.1 9.2 10 4.9` in a 14-unit box, at 14px.
+    let tick = vec![
+        (point(px(4.), px(7.2)), point(px(6.1), px(9.2))),
+        (point(px(6.1), px(9.2)), point(px(10.), px(4.9))),
+    ];
+    div()
         .size(GLYPH_SIZE)
-        .text_color(palette.muted_foreground)
+        .rounded(GLYPH_RADIUS)
+        .bg(palette.muted_foreground)
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(glyph::stroked(
+            GLYPH_SIZE.into(),
+            TICK_STROKE,
+            &tick,
+            palette.sidebar,
+        ))
         .into_any_element()
 }
 
-/// Which half of a disc is filled.
-#[derive(PartialEq)]
-enum Half {
-    Filled,
-    Empty,
-}
-
-fn disc(palette: &Palette, half: Half) -> AnyElement {
-    let color = match half {
-        Half::Filled => palette.primary,
-        Half::Empty => palette.muted_foreground,
+/// An open box: the frame, at 70% of the muted ink when there is nothing to say
+/// about it, at the foreground's full weight while it is the work in hand, and
+/// with the inner square the design fills it with.
+///
+/// The frame is a 1.2px border on a 3px corner; the inner square is 6×6 with a
+/// 1.5px corner (`x:4 y:4 width:6 height:6 rx:1.5`).
+fn open_box(status: TodoStatus, palette: &Palette) -> AnyElement {
+    let (ink, opacity) = match status {
+        TodoStatus::InProgress => (palette.foreground, 1.),
+        _ => (palette.muted_foreground, FRAME_OPACITY),
     };
-
-    let disc = div()
+    let box_ = div()
         .size(GLYPH_SIZE)
-        .rounded_full()
-        .border_1()
-        .border_color(color)
-        .overflow_hidden();
-
-    match half {
-        Half::Filled => disc.child(div().w((GLYPH_SIZE - px(2.)) / 2.).h_full().bg(color)),
-        Half::Empty => disc,
+        .rounded(GLYPH_RADIUS)
+        .border(px(FRAME_STROKE))
+        .border_color(ink)
+        .opacity(opacity)
+        .flex()
+        .items_center()
+        .justify_center();
+    match status {
+        TodoStatus::InProgress => box_.child(
+            div()
+                .size(GLYPH_SIZE - px(2. * 4.))
+                .rounded(px(1.5))
+                .bg(ink),
+        ),
+        _ => box_,
     }
     .into_any_element()
 }
