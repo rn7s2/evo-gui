@@ -117,7 +117,6 @@ pub fn history_entries(entries: &[store::history::HistoryEntry]) -> Vec<HistoryE
         .map(|entry| HistoryEntry {
             session_path: entry.session.to_string_lossy().into_owned(),
             folder: entry.folder.to_string_lossy().into_owned(),
-            title: entry.title.clone(),
             when: entry.when_epoch.map(|epoch| epoch as i64),
             // The app records 0 for a session it did not start; the list's
             // `Option` means "unknown", and a row with no count is better than a
@@ -237,7 +236,6 @@ mod tests {
             when_epoch,
             session_id: "a".to_owned(),
             swarm_id: "s".to_owned(),
-            title: "wire the lanes chooser to the catalog".to_owned(),
             workers: lanes,
             lanes,
             models: TabModels {
@@ -256,7 +254,6 @@ mod tests {
         let entry = &entries[0];
         assert_eq!(entry.session_path, "/sessions/a.sexp");
         assert_eq!(entry.folder, "/coding/foo");
-        assert_eq!(entry.title, "wire the lanes chooser to the catalog");
         assert_eq!(entry.when, Some(1_700_000_000));
         assert_eq!(entry.lanes, Some(4));
         assert_eq!(entry.coordinator_model.as_deref(), Some("coord-1"));
@@ -314,5 +311,46 @@ mod tests {
         assert_eq!(data.history.len(), 1);
         assert_eq!(data.history_error.as_deref(), Some("no such binary"));
         assert_eq!(data.home.as_deref(), Some("/Users/x"));
+    }
+
+    /// The whole chain for one row, from an index body to the line it shows: the index's
+    /// `title` is what a session's first user-role entry says, and for a session evo
+    /// started itself that is evo's scaffolding — a goal's continuation prompt, a lane's
+    /// brief — so it does not name the row. The folder does.
+    #[test]
+    fn an_index_title_from_evos_own_scaffolding_does_not_name_a_row() {
+        let body = serde_json::json!({
+            "sessions": [{
+                "id": "e82d8f3835d28a23",
+                "path": "/Users/you/.evo/sessions/x/1.sexp",
+                "cwd": "/Users/you/coding/evo-gui/",
+                "program": "evo-swarm",
+                "swarm_id": "20260930T132823-4fa5",
+                "title": "You are idle but your goal is still active. Continue working toward \
+                          it now.",
+                "created_at": 1_756_000_000_000u64,
+                "updated_at": 1_756_000_300_000u64,
+                "entries": 926
+            }]
+        });
+        let stored: Vec<store::history::HistoryEntry> = store::history::parse(&body)
+            .iter()
+            .map(store::history::from_session)
+            .collect();
+        let rows = session::history_rows(
+            &history_entries(&stored),
+            1_756_000_300,
+            0,
+            Some("/Users/you"),
+        );
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].title, "evo-gui", "the folder names the row");
+        assert_eq!(rows[0].folder_short, "~/coding/evo-gui");
+        assert!(
+            !rows[0].tooltip.contains("You are idle"),
+            "and evo's scaffolding is not smuggled into the tooltip either: {}",
+            rows[0].tooltip
+        );
     }
 }

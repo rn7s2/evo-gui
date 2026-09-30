@@ -21,7 +21,6 @@ fn entry(path: &str, folder: &str) -> HistoryEntry {
     HistoryEntry {
         session_path: path.to_string(),
         folder: folder.to_string(),
-        title: String::new(),
         when: None,
         lanes: None,
         coordinator_model: None,
@@ -531,11 +530,10 @@ fn a_failed_check_leaves_the_shown_fallbacks_out_of_the_plan() {
 // --- history (§2) -------------------------------------------------------------------
 
 #[test]
-fn history_rows_name_a_session_by_its_title_or_its_folder() {
+fn history_rows_name_a_session_by_its_folder() {
     let rows = history_rows(
         &[
             HistoryEntry {
-                title: "make the empty tab read the index".to_string(),
                 when: Some(1_790_674_196),
                 lanes: Some(6),
                 coordinator_model: Some("claude-opus-5@anthropic".to_string()),
@@ -547,7 +545,7 @@ fn history_rows_name_a_session_by_its_title_or_its_folder() {
         0,
         Some("/Users/you"),
     );
-    assert_eq!(rows[0].title, "make the empty tab read the index");
+    assert_eq!(rows[0].title, "foo");
     assert_eq!(rows[0].folder_short, "~/coding/foo");
     assert_eq!(rows[0].when, "2h ago");
     // The tooltip carries the absolute path, the instant in the caller's zone and the
@@ -557,8 +555,8 @@ fn history_rows_name_a_session_by_its_title_or_its_folder() {
         "/Users/you/coding/foo · 1.sexp · 2026-09-29 09:29:56 +00:00 · \
          coordinator: claude-opus-5@anthropic · 6 lanes"
     );
-    // No title, no time, no lanes: the folder names the row and the time says nothing
-    // rather than guessing.
+    // No time, no lanes: the folder names the row and the time says nothing rather than
+    // guessing.
     assert_eq!(rows[1].title, "bar");
     assert_eq!(rows[1].folder_short, "~/coding/bar");
     assert_eq!(rows[1].when, "");
@@ -578,7 +576,6 @@ fn history_rows_merge_the_index_with_the_apps_own_recents() {
                 ..entry("/j/1.sexp", "/f")
             },
             HistoryEntry {
-                title: "index title".to_string(),
                 when: Some(200),
                 ..entry("/j/1.sexp", "/f")
             },
@@ -590,7 +587,7 @@ fn history_rows_merge_the_index_with_the_apps_own_recents() {
     assert_eq!(rows.len(), 1, "one session, not two rows");
     // The newer of the two is the base, and what only one side knows survives.
     assert_eq!(rows[0].when, "just now");
-    assert_eq!(rows[0].title, "index title");
+    assert_eq!(rows[0].title, "f");
     assert!(rows[0].open_at_quit);
     assert_eq!(rows[0].source, HistorySource::Index);
     assert!(rows[0].tooltip.contains("4 lanes"), "{}", rows[0].tooltip);

@@ -11,6 +11,14 @@
 //! Session = {id, path, cwd, program, swarm_id|null, title, created_at, updated_at, entries}
 //! ```
 //!
+//! The `title` the index carries is **not read**: it is the first text of the
+//! session's first user-role entry, and evo's own scaffolding arrives that way — a
+//! goal's continuation prompt ("You are idle but your goal is still active…"), a
+//! lane's brief ("FRESH SESSION: you are lane 2…"), a repo brief. In this machine's
+//! index every one of the forty titles is scaffolding, so a row named by it would be
+//! named by evo rather than by the person. Rows are named by their folder instead;
+//! `docs/api-gaps.md` records what the index would have to carry for that to change.
+//!
 //! Two things the index cannot say, and this module keeps from the app's own
 //! record (`app.json`'s recents): the models a session ran with, its lane count,
 //! and whether the tab was open at the last quit. [`merge`] puts the two sides
@@ -38,8 +46,6 @@ pub struct Session {
     pub program: String,
     /// The swarm id, for a coordinator.
     pub swarm_id: Option<String>,
-    /// The first user text, ≤ 80 chars, one line.
-    pub title: String,
     /// Epoch milliseconds.
     pub created_at: u64,
     /// Epoch milliseconds.
@@ -60,7 +66,6 @@ impl Session {
             cwd: PathBuf::from(string(value, "cwd").unwrap_or_default()),
             program: string(value, "program").unwrap_or_default(),
             swarm_id: string(value, "swarm_id"),
-            title: string(value, "title").unwrap_or_default(),
             created_at: millis(value, "created_at"),
             updated_at: millis(value, "updated_at"),
             entries: value.get("entries").and_then(Value::as_u64).unwrap_or(0),
@@ -168,8 +173,6 @@ pub struct HistoryEntry {
     pub session_id: String,
     /// The swarm id evo assigned (`20260929T051622-d540`), when it named one.
     pub swarm_id: String,
-    /// The first user text, ≤ 80 chars — the row's own label when it has one.
-    pub title: String,
     /// Worker count, when the app remembers starting one.
     pub workers: u32,
     /// Lane count, when the app remembers it.
@@ -185,21 +188,6 @@ pub struct HistoryEntry {
 }
 
 impl HistoryEntry {
-    /// The folder's last path component, for a row label.
-    pub fn folder_name(&self) -> String {
-        crate::tab::folder_label(&self.folder)
-    }
-
-    /// What the row is called: the session's own title when the index has one,
-    /// else the folder's name.
-    pub fn label(&self) -> String {
-        if self.title.trim().is_empty() {
-            self.folder_name()
-        } else {
-            self.title.clone()
-        }
-    }
-
     /// The recency key, in epoch seconds.
     pub fn mtime(&self) -> u64 {
         self.when_epoch.unwrap_or(0)
@@ -221,7 +209,6 @@ pub fn from_session(session: &Session) -> HistoryEntry {
         when_epoch: Some(session.updated_epoch()),
         session_id: session.id.clone(),
         swarm_id: session.swarm_id.clone().unwrap_or_default(),
-        title: session.title.clone(),
         workers: 0,
         lanes: 0,
         models: TabModels::default(),
@@ -284,7 +271,6 @@ fn entry_from_recent(recent: &Recent) -> HistoryEntry {
         when_epoch,
         session_id: session_id_of(&recent.session),
         swarm_id: String::new(),
-        title: String::new(),
         workers: recent.lanes,
         lanes: recent.lanes,
         models: recent.models.clone(),
@@ -368,6 +354,11 @@ mod tests {
     }
 
     /// An index body in the contract's shape (§2), newest first.
+    ///
+    /// The `title`s are the index's own — the first text of the session's first user-role
+    /// entry — and the first one is deliberately evo's goal-continuation scaffolding:
+    /// nothing here reads a title, and a row is named by its folder instead (see the
+    /// module doc, and `docs/api-gaps.md`).
     fn index() -> Value {
         serde_json::json!({
             "sessions": [
@@ -375,7 +366,7 @@ mod tests {
                     "id": "bbbb2222", "path": journal("b").display().to_string(),
                     "cwd": "/Users/x/foo", "program": "evo-swarm",
                     "swarm_id": "20260929T020000-bbbb",
-                    "title": "make the history list read the index",
+                    "title": "You are idle but your goal is still active. Continue working",
                     "created_at": 1_756_000_000_000u64,
                     "updated_at": 1_756_000_300_000u64,
                     "entries": 42
@@ -399,7 +390,6 @@ mod tests {
         assert_eq!(first.cwd, PathBuf::from("/Users/x/foo"));
         assert_eq!(first.program, "evo-swarm");
         assert_eq!(first.swarm_id.as_deref(), Some("20260929T020000-bbbb"));
-        assert_eq!(first.title, "make the history list read the index");
         assert_eq!(first.updated_epoch(), 1_756_000_300);
         assert_eq!(first.updated_text(), "2025-08-24T01:51:40Z");
         assert!(first.is_resumable());
@@ -472,7 +462,7 @@ mod tests {
         );
         // …and it sorts first, because it was open at the last quit.
         assert_eq!(entries[1].session_id, "aaaa1111");
-        assert_eq!(entries[1].label(), "bar", "no title → the folder's name");
+        assert_eq!(entries[1].folder, PathBuf::from("/Users/x/bar"));
     }
 
     #[test]
@@ -489,7 +479,7 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].source, HistorySource::Recent);
         assert_eq!(entries[0].lanes, 2);
-        assert_eq!(entries[0].label(), "gone");
+        assert_eq!(entries[0].folder, PathBuf::from("/Users/x/gone"));
     }
 
     #[test]

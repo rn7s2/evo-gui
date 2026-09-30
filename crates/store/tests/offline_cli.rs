@@ -162,10 +162,7 @@ fn sessions_json_becomes_history_rows() {
         sessions[0].swarm_id.as_deref(),
         Some("20260929T090956-ed99")
     );
-    assert_eq!(
-        sessions[0].title,
-        "make the empty tab read the session index"
-    );
+    assert_eq!(sessions[0].cwd, PathBuf::from("/Users/x/coding/evo"));
     assert_eq!(sessions[0].updated_epoch(), 1_790_674_196);
     assert_eq!(sessions[0].updated_text(), "2026-09-29T09:29:56Z");
     // The argv is exactly the contract's (§2): the resumable swarms, wherever
@@ -214,7 +211,7 @@ fn the_index_and_the_apps_recents_become_one_list() {
     );
     let first = &entries[0];
     assert_eq!(first.session_id, "ed99c60d1dee3c3f");
-    assert_eq!(first.label(), "make the empty tab read the session index");
+    assert_eq!(first.folder, PathBuf::from("/Users/x/coding/evo"));
     assert_eq!(first.lanes, 6);
     assert_eq!(first.models.coordinator.as_deref(), Some("claude-opus-5"));
     assert_eq!(
@@ -223,14 +220,11 @@ fn the_index_and_the_apps_recents_become_one_list() {
     );
     assert_eq!(first.source, history::HistorySource::Index);
     assert!(first.open_at_quit, "only the app can say this");
-    // Newest first, and a row with no title falls back to the folder's name.
+    // Newest first. A row is named by its folder, and the index's own `title`s in
+    // this fixture are never read (`docs/api-gaps.md` says why).
     assert!(entries[0].mtime() >= entries[1].mtime());
-    assert_eq!(entries[1].label(), "wire the lanes chooser to the catalog");
-    assert_eq!(
-        entries[2].label(),
-        "bar",
-        "a session with no title falls back to the folder's name"
-    );
+    assert_eq!(entries[1].folder, PathBuf::from("/Users/x/coding/foo"));
+    assert_eq!(entries[2].folder, PathBuf::from("/Users/x/coding/bar"));
     assert_eq!(
         entries[1].resume_args().1,
         entries[1].session,

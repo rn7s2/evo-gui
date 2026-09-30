@@ -17,6 +17,7 @@ use proofs::fixture::{same_path, Fixture, NOTE, WAIT};
 use proofs::watch::{deadline_after, send, snapshot, wait_for, Watcher};
 use store::history::{self, SessionsQuery};
 use store::launch::Program;
+use store::tab::folder_label;
 
 /// A tab's server is a swarm: the history the app lists is the sessions `evo-swarm`
 /// ran, and resuming one is the exact journal path the ready file named.
@@ -85,10 +86,13 @@ fn t06_history_resume() {
         listed.when_epoch.is_some(),
         "the row has a time to sort and phrase by: {listed:?}"
     );
+    // The row's primary line is the folder's own name: the index's `title` is the first
+    // text of the session's first user-role entry, which for a session evo started itself
+    // is evo's own scaffolding (`docs/api-gaps.md`).
     println!(
         "{NOTE} the index row after {:?}: {} ({})",
         started.elapsed(),
-        listed.label(),
+        folder_label(&listed.folder),
         listed.when
     );
 

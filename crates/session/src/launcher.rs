@@ -73,8 +73,8 @@
 //! # History (§2)
 //!
 //! [`history_rows`] turns the session index's rows, merged with the app's own recents,
-//! into display rows: the session's title (the first user text) or the folder's name,
-//! the `~`-shortened path, how long ago, and the whole entry for the row's tooltip.
+//! into display rows: the folder's own name, the `~`-shortened path, how long ago, and the
+//! whole entry for the row's tooltip.
 
 use serde_json::Value;
 
@@ -780,8 +780,6 @@ pub struct HistoryEntry {
     pub session_path: String,
     /// Absolute path of the folder the swarm ran in.
     pub folder: String,
-    /// The first user text the index kept, or empty when it had none.
-    pub title: String,
     /// Last written, in epoch seconds.
     pub when: Option<i64>,
     /// The lane count the app remembers starting, when it remembers one.
@@ -795,11 +793,13 @@ pub struct HistoryEntry {
     pub open_at_quit: bool,
 }
 
-/// One row of the history list (§7.2): the session's title (or the folder's name), the
-/// folder's path shortened around the home directory, how long ago it ran, and the whole
-/// entry for the row's tooltip.
+/// One row of the history list (§7.2): the folder's own name, the folder's path shortened
+/// around the home directory, how long ago it ran, and the whole entry for the row's
+/// tooltip.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HistoryRow {
+    /// The folder's own name — the row's primary line. Not the index's `title`: see
+    /// [`history_row`].
     pub title: String,
     /// The `~`-shortened path of the folder the swarm ran in.
     pub folder_short: String,
@@ -851,9 +851,6 @@ pub fn history_rows(
                 if base.lanes_model.is_none() {
                     base.lanes_model = entry.lanes_model.clone();
                 }
-                if base.title.is_empty() {
-                    base.title = entry.title.clone();
-                }
                 base.open_at_quit |= entry.open_at_quit;
             }
             None => merged.push(entry.clone()),
@@ -871,15 +868,13 @@ fn history_row(
     offset_seconds: i32,
     home: Option<&str>,
 ) -> HistoryRow {
-    let folder_name = base_name(&entry.folder);
     HistoryRow {
-        // The session's own title names it when the index kept one — the first thing the
-        // person typed — and the folder is the fallback.
-        title: if entry.title.trim().is_empty() {
-            folder_name
-        } else {
-            entry.title.clone()
-        },
+        // The folder names the row. The index's own `title` is the first text of the
+        // session's first user-role entry, and for a session evo started itself that text
+        // is evo's — a goal's continuation prompt, a lane's brief — not something a person
+        // wrote, so it cannot name the row (`docs/api-gaps.md` records what the index
+        // would have to carry for a session's own words to be usable here).
+        title: base_name(&entry.folder),
         folder_short: home_short(&entry.folder, home),
         when: entry
             .when

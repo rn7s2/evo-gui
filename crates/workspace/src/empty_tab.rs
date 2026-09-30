@@ -2062,11 +2062,10 @@ mod tests {
         }
     }
 
-    fn entry(session: &str, folder: &str, title: &str, open: bool) -> HistoryEntry {
+    fn entry(session: &str, folder: &str, open: bool) -> HistoryEntry {
         HistoryEntry {
             session_path: session.to_string(),
             folder: folder.to_string(),
-            title: title.to_string(),
             when: Some(1_700_000_000),
             lanes: Some(4),
             coordinator_model: Some("claude-opus-4.5@anthropic".to_string()),
@@ -2725,8 +2724,8 @@ mod tests {
         f.history(
             cx,
             &[
-                entry("/j/1.sexp", "/Users/you/coding/foo", "make the tab", true),
-                entry("/j/2.sexp", "/Users/you/coding/bar", "wire it up", false),
+                entry("/j/1.sexp", "/Users/you/coding/foo", true),
+                entry("/j/2.sexp", "/Users/you/coding/bar", false),
             ],
             "/Users/you",
         );

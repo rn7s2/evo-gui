@@ -73,7 +73,7 @@ mod tests {
 
     fn session_row() -> session::HistoryRow {
         session::HistoryRow {
-            title: "wire the history list to the session index".to_string(),
+            title: "foo".to_string(),
             folder_short: "~/coding/foo".to_string(),
             when: "2h ago".to_string(),
             tooltip: "/Users/you/coding/foo · 2026-09-29 09:25:44 UTC (+00:00)".to_string(),
@@ -90,7 +90,10 @@ mod tests {
     fn a_row_keeps_the_model_display_text_and_adds_the_two_paths() {
         let row = HistoryRow::from_session(&session_row());
 
-        assert_eq!(row.title, "wire the history list to the session index");
+        assert_eq!(
+            row.title, "foo",
+            "the row's own primary line, whatever it is"
+        );
         assert_eq!(row.folder_short, "~/coding/foo");
         assert_eq!(row.when, "2h ago");
         assert!(row.tooltip.starts_with("/Users/you/coding/foo"));
