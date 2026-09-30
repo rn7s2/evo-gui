@@ -42,6 +42,7 @@ pub mod api;
 pub mod error;
 pub mod http;
 pub mod probe;
+pub mod protocol;
 pub mod redact;
 pub mod server;
 pub mod sse;
