@@ -24,7 +24,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use gpui_kit::component::{h_flex, tooltip::Tooltip, v_flex, ActiveTheme as _, Theme};
+use gpui_kit::component::{h_flex, tooltip::Tooltip, v_flex, ActiveTheme as _, StyledExt as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     div, px, Context, ElementId, EventEmitter, FocusHandle, FontFeatures, Hsla,
@@ -32,29 +32,40 @@ use gpui_kit::{
     SharedString, StatefulInteractiveElement as _, Styled as _, TestSupportExt as _, Window,
 };
 use session::{AgentKey, LaneList, LaneRow, LaneStatus, Status};
+use store::design::{self, Palette, HEADER_HEIGHT, INSET, RADIUS};
+use widgets::{paint, BreathingDot};
 
 /// The column's width in the tab page (§7.3). The owner sizes the column; this is the
 /// number the design was drawn against, and what the demo uses.
 pub const COLUMN_WIDTH: Pixels = px(260.);
 
-/// One row is one line of 13 px text: compact enough that a whole swarm fits without
-/// scrolling, tall enough to click (§7.3).
-const ROW_HEIGHT: Pixels = px(28.);
-const TEXT_SIZE: Pixels = px(13.);
-const SMALL_TEXT_SIZE: Pixels = px(11.);
+/// One row of the design's lane list: 32px, 9px between its cells, 10px of its own
+/// inset, and one line of 13px text (`.ws-lane`).
+const LANE_ROW: f32 = 32.;
+const LANE_GAP: f32 = 9.;
+const LANE_PAD: f32 = 10.;
+const LANE_FONT: Pixels = px(13.);
+/// The list's own inset and the gap between rows (`.ws-lane-list{padding:6px}`).
+const LIST_PAD: f32 = 6.;
+/// The band's two sizes: `.ws-head-title{font-size:13px}` and
+/// `.ws-head-meta{font-size:12px}`.
+const TITLE_SIZE: Pixels = px(13.);
+const META_SIZE: Pixels = px(12.);
+/// A row's state: `.ws-lane-state{font-size:12px}`.
+const STATE_SIZE: Pixels = px(12.);
+/// The Stop control and the `reconnecting` badge, which the design has no size for:
+/// the chrome's own small print.
+const STOP_SIZE: Pixels = px(11.);
 
-/// The glyph cell and the lead cell are fixed, so a task always starts at the same x
-/// whatever the row is showing — and the state and its clock are never pushed off the row.
-const GLYPH_WIDTH: Pixels = px(14.);
-/// The status glyphs are drawn a little larger than the row text: the theme's
-/// monospace family draws its shapes at a smaller share of the em than the UI
-/// font, and this lands `○` and `◌` at the ten logical pixels they occupy there.
-const GLYPH_TEXT_SIZE: Pixels = px(16.);
-const LEAD_WIDTH: Pixels = px(16.);
-
-/// Rows are inset by this much; the owner aligns its title bar's own inset to it, so the
-/// first row reads as the same column as the tab labels above it.
-const ROW_INSET: Pixels = px(8.);
+/// The row's fill on hover and while selected: the ink a few percent into the sidebar
+/// (`--row-surface: color-mix(in srgb, var(--fg) 5%|9%, var(--sidebar))`). The theme
+/// carries the same two mixes; the dot needs them as tokens of its own, so they are
+/// named here too.
+const HOVER_MIX: f32 = 5.;
+const SELECTED_MIX: f32 = 9.;
+/// An idle dot's ring in a workspace row: `.dot-idle{opacity:.8}` — the tab strip's
+/// own ring is `IDLE_OPACITY`, and the two are not the same weight.
+const WORKSPACE_IDLE: f32 = 0.8;
 
 /// How wide a tooltip line is allowed to get, in characters: about one and a half columns,
 /// which fits a worktree path beside its label and still keeps a long task or a long
@@ -255,42 +266,51 @@ impl AgentList {
             cx.emit(AgentListEvent::Select(keys[next]));
         }
     }
-
-    /// The small muted summary above the rows: how many lanes, how many busy.
-    fn header(&self, theme: &Theme) -> Option<impl IntoElement> {
-        if self.lanes.swarm.is_none() && self.lanes.lanes.is_empty() {
-            // Nothing is known yet: a tab that has not fetched `/lanes` shows no header
-            // rather than a wrong `0 lanes`.
-            return None;
-        }
-        let count = self.lanes.lanes.len();
-        let text = format!(
-            "{} {} · {} busy",
-            count,
-            if count == 1 { "lane" } else { "lanes" },
-            self.lanes.busy()
-        );
-        Some(
-            h_flex()
-                .id(SUMMARY_ID)
-                .test_support()
-                .w_full()
-                .flex_none()
-                .px(ROW_INSET)
-                .pb_1()
-                .text_size(SMALL_TEXT_SIZE)
-                .text_color(theme.muted_foreground)
-                .aria_label(text.clone())
-                .child(text),
-        )
+    /// The band the column opens with: what it holds, and how much of it is working
+    /// (`.ws-head`, `.ws-head-title`, `.ws-head-meta`).
+    ///
+    /// It is the same band, at the same height and on the same surface, as the one over
+    /// the conversation, so the rule under the two runs straight across the page.
+    fn header(&self, palette: &'static Palette) -> impl IntoElement {
+        let lanes = self.lanes.lanes.len();
+        let meta = format!("{} of {} busy", self.lanes.busy(), lanes);
+        h_flex()
+            .h(px(HEADER_HEIGHT))
+            .flex_none()
+            .w_full()
+            .items_center()
+            .gap(px(8.))
+            .px(px(INSET))
+            .bg(paint::color(palette.sidebar))
+            .border_b_1()
+            .border_color(paint::color(palette.border))
+            .child(
+                div()
+                    .font_semibold()
+                    .text_size(TITLE_SIZE)
+                    .text_color(paint::color(palette.fg))
+                    .child("Lanes"),
+            )
+            .child(
+                div()
+                    .id(SUMMARY_ID)
+                    .test_support()
+                    .ml_auto()
+                    .text_size(META_SIZE)
+                    .text_color(paint::color(palette.muted_fg))
+                    .aria_label(meta.clone())
+                    .child(meta),
+            )
     }
 
-    fn coordinator_view(&self, theme: &Theme) -> RowView {
+    /// The coordinator's row: `main`, its task cell says what it is (the swarm's
+    /// coordinator), and the state cell says what it is doing.
+    fn coordinator_view(&self, palette: &'static Palette) -> RowView {
         let status = activity_status(self.activity);
         let word = activity_word(self.activity);
-        // The step clock sits beside the state, as a lane's does, but only while the
-        // coordinator is actually doing something: an idle `main` says "idle", not the
-        // seconds since a run that already ended.
+        // The clock sits in the state cell while the coordinator is actually working,
+        // as a lane's does: an idle `main` says `idle`, not the seconds since a run
+        // that already ended.
         let busy = matches!(self.activity, Status::Running | Status::Compacting);
         let clock = busy.then(|| self.coordinator_clock.clone()).flatten();
         let badge = self
@@ -303,52 +323,65 @@ impl AgentList {
         if self.coordinator_reconnecting {
             tooltip.push_str("\nstream reconnecting");
         }
-        let aria_step = match &clock {
-            Some(clock) => format!(", step {clock}"),
-            None => String::new(),
-        };
+        let step = clock
+            .as_ref()
+            .map(|clock| format!(", step {clock}"))
+            .unwrap_or_default();
+        let state: SharedString = clock.unwrap_or_else(|| word.to_string()).into();
         RowView {
             key: AgentKey::Coordinator,
-            glyph: status.glyph(),
-            glyph_color: status_color(status, theme),
-            // No lane number: `main` sits where the tasks below it start, so the column
-            // reads `main`, `1`, `2` … down the numbers, and `main` has no task of its own.
-            lead: SharedString::default(),
-            task: Some("main".into()),
-            task_color: theme.foreground,
-            state: word.into(),
-            clock: clock.map(SharedString::from),
+            name: "main".into(),
+            busy: status.is_busy(),
+            task: Some("coordinator".into()),
+            task_color: paint::color(palette.muted_fg),
+            state,
+            state_color: paint::color(palette.muted_fg),
             badge,
             stop: None,
             tooltip: tooltip.into(),
-            aria: format!("{} main, {word}{aria_step}", status.glyph()).into(),
+            aria: format!("main, {word}{step}").into(),
         }
     }
 
-    fn lane_view(&self, row: &LaneRow, theme: &Theme) -> RowView {
+    /// One lane's row.
+    fn lane_view(&self, row: &LaneRow, palette: &'static Palette) -> RowView {
         let key = AgentKey::Lane(row.n);
         let reason = (row.status == LaneStatus::Down)
             .then(|| self.down_reasons.get(&row.n))
             .flatten();
-        // The row's own line is the task the lane was given; a lane that is down says why
-        // instead, which is the one thing that matters about it at that moment. What a lane
-        // is doing *right now* is its transcript's business — the row says what it was told
-        // to do, and the state cell says whether it is getting on with it.
+        // The row's middle cell is the task the lane was given, and only while it is
+        // working: an idle lane's last task is not what it is doing now, and the state
+        // cell already says `idle`. A lane that is down says why instead, which is the
+        // one thing that matters about it at that moment.
         let (task, task_color) = match reason {
-            Some(reason) => (Some(reason.clone()), theme.danger),
-            None => (row.task_label(), theme.muted_foreground),
+            Some(reason) => (Some(reason.clone()), paint::color(palette.destructive)),
+            // A lane that died saying nothing still says what it had been doing.
+            None if row.is_busy() || row.status == LaneStatus::Down => {
+                (row.task_label(), paint::color(palette.muted_fg))
+            }
+            None => (None, paint::color(palette.muted_fg)),
         };
-        // The clock is what tells a slow step from a wedged lane, so it is only worth a
-        // cell while the lane is actually working — and it is read at the owner's
-        // `now` (`set_now`), which is what keeps it moving between `/lanes` reads.
+        // The clock is what tells a slow step from a wedged lane, so it is the state
+        // cell while the lane works — read at the owner's `now` (`set_now`), which is
+        // what keeps it moving between `/lanes` reads.
         let clock = row.step_clock(self.now_millis);
-        let state = row.status.word();
+        let word = row.status.word();
+        let state: SharedString = clock
+            .clone()
+            .map(SharedString::from)
+            .unwrap_or_else(|| word.into());
+        let state_color = if row.status == LaneStatus::Down {
+            paint::color(palette.destructive)
+        } else {
+            paint::color(palette.muted_fg)
+        };
         let aria = format!(
-            "{} lane {} {}, {}{}",
-            row.glyph(),
+            "lane {}, {word}{}{}",
             row.n,
-            state,
-            task.clone().unwrap_or_default(),
+            match &task {
+                Some(task) => format!(", {task}"),
+                None => String::new(),
+            },
             match &clock {
                 Some(clock) => format!(", step {clock}"),
                 None => String::new(),
@@ -356,13 +389,12 @@ impl AgentList {
         );
         RowView {
             key,
-            glyph: row.glyph(),
-            glyph_color: status_color(row.status, theme),
-            lead: row.n.to_string().into(),
+            name: format!("lane {}", row.n).into(),
+            busy: row.is_busy(),
             task: task.map(SharedString::from),
             task_color,
-            state: state.into(),
-            clock: clock.map(SharedString::from),
+            state,
+            state_color,
             badge: None,
             stop: row.is_busy().then_some(key),
             tooltip: lane_tooltip(row, reason, self.now_millis).into(),
@@ -372,19 +404,31 @@ impl AgentList {
 
     /// The Stop button of one lane's row: `run.interrupt` with scope `lane`, sent by the
     /// owner when it hears [`AgentListEvent::StopLane`].
-    fn stop_button(&self, lane: u32, theme: &Theme, cx: &Context<Self>) -> impl IntoElement {
+    ///
+    /// The design has no room for it on the row, so it is the row's own control while
+    /// the pointer is on that row: a lane that is working is the one a reader wants to
+    /// stop, and it is the only thing this column can ask the swarm to do.
+    fn stop_button(
+        &self,
+        lane: u32,
+        palette: &'static Palette,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
         div()
-            .id(("agent-stop", lane as u64))
+            .id(stop_id(lane))
             .test_support()
             .flex_none()
-            .px_1()
-            .rounded(theme.radius)
+            .invisible()
+            .px(px(4.))
+            .py(px(1.))
+            .rounded(px(RADIUS))
             .border_1()
-            .border_color(theme.border)
-            .text_size(SMALL_TEXT_SIZE)
-            .text_color(theme.muted_foreground)
+            .border_color(paint::color(palette.border))
+            .text_size(STOP_SIZE)
+            .text_color(paint::color(palette.muted_fg))
             .cursor_pointer()
-            .hover(|style| style.text_color(theme.danger))
+            .group_hover("lane", |stop| stop.visible())
+            .hover(move |stop| stop.text_color(paint::color(palette.destructive)))
             .aria_label(format!("Stop lane {lane}"))
             .on_click(cx.listener(move |_, _, _, cx| {
                 // A click on the button is not a click on the row: the row must not also
@@ -395,60 +439,63 @@ impl AgentList {
             .child("Stop")
     }
 
-    /// Draw one row. The whole row is the click target, so a click anywhere selects.
-    fn row(&self, view: RowView, cx: &Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
+    /// Draw one row: dot, name, the task it was given, and the state at the end.
+    fn row(
+        &self,
+        view: RowView,
+        palette: &'static Palette,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
         let selected = self.is_selected(view.key);
         let rows = self.keys().len();
         let key = view.key;
-        let (task_id, state_id, clock_id) = (task_id(key), state_id(key), clock_id(key));
+        let (task_id, state_id, badge_id) = (task_id(key), state_id(key), badge_id(key));
         let tooltip = view.tooltip;
-        let glyph = view.glyph.to_string();
         let task = view.task;
         let state = view.state;
-        let clock = view.clock;
         let badge = view.badge;
         let stop = view.stop;
+        // The row's own fill, and the one the dot breathes against: on hover and while
+        // selected the dot has a new surface, as the design's `--row-surface` does.
+        let hover = paint::mix(palette.fg, HOVER_MIX, palette.sidebar);
+        let active = paint::mix(palette.fg, SELECTED_MIX, palette.sidebar);
+        let surface = if selected { active } else { palette.sidebar };
+        let name = view.name;
 
         h_flex()
             .id(row_id(key))
-            .h(ROW_HEIGHT)
+            .test_support()
+            .group("lane")
+            .h(px(LANE_ROW))
             .w_full()
             .flex_none()
-            .px(ROW_INSET)
-            .gap_1()
             .items_center()
-            .rounded(theme.radius)
-            .text_size(TEXT_SIZE)
-            .when(selected, |row| row.bg(theme.list_active))
-            .when(!selected, |row| row.hover(|row| row.bg(theme.list_hover)))
+            .gap(px(LANE_GAP))
+            .px(px(LANE_PAD))
+            .rounded(px(RADIUS))
+            .bg(paint::color(surface))
+            .when(!selected, |row| {
+                row.hover(move |row| row.bg(paint::color(hover)))
+            })
+            .text_size(LANE_FONT)
+            .text_color(paint::color(palette.fg))
+            .child({
+                let busy = view.busy;
+                let slot = format!("agent-{key:?}");
+                BreathingDot::new(widgets::dot::dot_id(slot), busy)
+                    .palette(palette)
+                    .surface(surface)
+                    .idle_opacity(WORKSPACE_IDLE)
+                    .render()
+            })
             .child(
-                // Fixed glyph cell: the icon column stays put while states change.
-                //
-                // The glyphs are drawn in the theme's monospace family: the UI font's
-                // `◌` is a dotted ring a third of the em wide, which at row size is a
-                // smudge of sub-pixel dots, while a monospace family draws it as a
-                // dashed ring the same size as the other four.
-                h_flex()
-                    .w(GLYPH_WIDTH)
+                div()
                     .flex_none()
-                    .justify_center()
-                    .items_center()
-                    .font_family(theme.mono_font_family.clone())
-                    .text_size(GLYPH_TEXT_SIZE)
-                    .text_color(view.glyph_color)
-                    .child(glyph),
+                    .when(selected, |name| name.font_medium())
+                    .child(name),
             )
             .child(
-                h_flex()
-                    .w(LEAD_WIDTH)
-                    .flex_none()
-                    .text_color(theme.muted_foreground)
-                    .child(view.lead),
-            )
-            .child(
-                // The flexible cell: a lane's task, or `main`. It is always there, empty or
-                // not, so the state column starts at the same x on every row.
+                // The flexible cell: the task, or nothing to say.
                 div()
                     .id(task_id)
                     .test_support()
@@ -459,53 +506,46 @@ impl AgentList {
                     .children(task),
             )
             .child(
-                // Right-aligned, where the eye compares rows: what this agent is.
+                // Right-aligned, where the eye compares rows: the state, or the clock
+                // while it is working.
                 div()
                     .id(state_id)
                     .test_support()
                     .flex_none()
-                    .text_color(theme.muted_foreground)
+                    .text_size(STATE_SIZE)
+                    .text_color(view.state_color)
+                    .font_features(tabular())
+                    .aria_label(state.clone())
                     .child(state),
             )
-            .when_some(clock, |row, clock| {
-                row.child(
-                    div()
-                        .id(clock_id)
-                        .test_support()
-                        .flex_none()
-                        .text_color(theme.muted_foreground)
-                        .font_features(tabular())
-                        .child(clock),
-                )
-            })
             .when_some(badge, |row, badge| {
                 row.child(
                     div()
-                        .id(badge_id(key))
+                        .id(badge_id)
                         .test_support()
                         .flex_none()
-                        .px_1()
-                        .rounded(theme.radius)
-                        .bg(theme.warning.opacity(0.18))
-                        .text_color(theme.warning)
-                        .text_size(SMALL_TEXT_SIZE)
+                        .px(px(4.))
+                        .rounded(px(RADIUS))
+                        .bg(paint::color(palette.warning).opacity(0.18))
+                        .text_color(paint::color(palette.warning))
+                        .text_size(STOP_SIZE)
                         .child(badge),
                 )
             })
-            // The one thing a person may do to a lane (CONTRACT §7.4): stop it. It
-            // appears while the row can be stopped, not on every row.
+            // The one thing a person may do to a lane (CONTRACT §7.4): stop it, while
+            // the pointer is on the row that can be stopped.
             .when_some(stop, |row, stop| {
                 let lane = stop.lane().unwrap_or_default();
-                row.child(self.stop_button(lane, theme, cx))
+                row.child(self.stop_button(lane, palette, cx))
             })
             .on_click(cx.listener(move |this, _, window, cx| {
-                // A click is also how the list takes the keyboard: the arrows walk the rows
-                // from whatever the pointer picked (§7.3).
+                // A click is also how the list takes the keyboard: the arrows walk the
+                // rows from whatever the pointer picked (§7.3).
                 this.focus_handle.focus(window, cx);
                 cx.emit(AgentListEvent::Select(key));
             }))
-            // One option of a list box, in the order the arrows walk it: a screen reader can
-            // then say where the selection is, which is what the highlight says on screen.
+            // One option of a list box, in the order the arrows walk it: a screen reader
+            // can then say where the selection is, which is what the fill says on screen.
             .role(Role::ListBoxOption)
             .aria_position_in_set(row_index(key) as usize + 1)
             .aria_size_of_set(rows)
@@ -517,21 +557,19 @@ impl AgentList {
                     .max_w(px(360.))
                     .build(window, cx)
             })
-            .test_support()
     }
 }
 
 impl Render for AgentList {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme().clone();
-        let focused = self.focus_handle.is_focused(window);
-        let coordinator = self.coordinator_view(&theme);
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let palette = design::palette(cx.theme().mode.is_dark());
+        let coordinator = self.coordinator_view(palette);
         let lanes: Vec<RowView> = self
             .lanes
             .lanes
             .clone()
             .iter()
-            .map(|row| self.lane_view(row, &theme))
+            .map(|row| self.lane_view(row, palette))
             .collect();
 
         let mut rows = v_flex()
@@ -540,35 +578,37 @@ impl Render for AgentList {
             .w_full()
             .flex_1()
             .min_h_0()
-            .gap_0p5()
+            .gap(px(2.))
+            .p(px(LIST_PAD))
             .overflow_y_scroll()
             .role(Role::ListBox)
             .aria_label(LIST_LABEL);
-        rows = rows.child(self.row(coordinator, cx));
+        rows = rows.child(self.row(coordinator, palette, cx));
         for lane in lanes {
-            rows = rows.child(self.row(lane, cx));
+            rows = rows.child(self.row(lane, palette, cx));
         }
 
         v_flex()
+            .id("agent-column-list")
+            .test_support()
             .w_full()
             .h_full()
-            .py_1()
-            // The column is the tab stop (§7.3): the frame around it is focused rather than
-            // any row, so the arrows can walk the rows without a row of its own having to be
-            // a control. The border is always laid out and only coloured in when focused, so
-            // taking focus does not move the rows by a pixel.
+            .bg(paint::color(palette.sidebar))
+            // The column is the tab stop (§7.3): the frame around it is focused rather
+            // than any row, so the arrows can walk the rows without a row of its own
+            // having to be a control. The border is always laid out and only coloured in
+            // when focused, so taking focus does not move the rows by a pixel.
             .track_focus(&self.focus_handle)
             .tab_stop(true)
             .on_key_down(cx.listener(Self::key_down))
-            .rounded(theme.radius)
+            // The column is a tab stop, so it says when the keyboard has it — and only
+            // then: a click that selects a lane is not a reason to outline the whole
+            // column, which is what `:focus-visible` means and what the design draws.
             .border_1()
-            .border_color(if focused {
-                theme.ring
-            } else {
-                theme.transparent
-            })
-            .text_color(theme.foreground)
-            .children(self.header(&theme))
+            .border_color(gpui_kit::Hsla::default())
+            .focus_visible(move |style| style.border_color(paint::color(palette.primary)))
+            .text_color(paint::color(palette.fg))
+            .child(self.header(palette))
             .child(rows)
     }
 }
@@ -579,6 +619,11 @@ pub fn row_id(key: AgentKey) -> ElementId {
     ("agent-row", row_index(key)).into()
 }
 
+/// The id of a lane's Stop control.
+fn stop_id(lane: u32) -> ElementId {
+    ("agent-stop", u64::from(lane)).into()
+}
+
 /// The id of a row's flexible middle, which is the part that ellipsizes.
 fn task_id(key: AgentKey) -> ElementId {
     ("agent-task", row_index(key)).into()
@@ -587,11 +632,6 @@ fn task_id(key: AgentKey) -> ElementId {
 /// The id of a row's right-aligned state word.
 fn state_id(key: AgentKey) -> ElementId {
     ("agent-state", row_index(key)).into()
-}
-
-/// The id of a row's step clock.
-fn clock_id(key: AgentKey) -> ElementId {
-    ("agent-clock", row_index(key)).into()
 }
 
 /// The id of the `reconnecting` badge, which only the coordinator's row can have.
@@ -623,22 +663,6 @@ pub fn activity_word(activity: Status) -> &'static str {
     activity.label()
 }
 
-/// The status glyph's color (§7.3): work is the live accent, compaction a warning, idle and
-/// a lane that is still coming up both the muted foreground, and down the danger red. The
-/// glyph shape carries the meaning — the dashed `◌` is what says "not up yet" — so the
-/// color only speeds it up, and fading a starting lane on top of that only made it harder
-/// to read.
-pub fn status_color(status: LaneStatus, theme: &Theme) -> Hsla {
-    match status {
-        LaneStatus::Working => theme.success,
-        LaneStatus::Compacting => theme.warning,
-        LaneStatus::Idle => theme.muted_foreground,
-        LaneStatus::Starting => theme.muted_foreground,
-        LaneStatus::Stopped => theme.muted_foreground,
-        LaneStatus::Down => theme.danger,
-    }
-}
-
 /// Tabular figures, so a step clock ticking from `9s` to `10s` does not shuffle the row.
 fn tabular() -> FontFeatures {
     FontFeatures(Arc::new(vec![("tnum".to_string(), 1)]))
@@ -648,20 +672,18 @@ fn tabular() -> FontFeatures {
 /// a row is the same whatever it is showing.
 struct RowView {
     key: AgentKey,
-    glyph: char,
-    glyph_color: Hsla,
-    /// The lane's number — empty for `main`, whose name is its middle cell.
-    lead: SharedString,
-    /// The flexible one line: the task the agent was given, or `main`; why a lane is down
-    /// when it is down. `None` is an empty cell, not a missing state.
+    /// `main`, or `lane 3`: what the row is called, beside its dot.
+    name: SharedString,
+    /// Whether this agent is working — what the dot breathes for.
+    busy: bool,
+    /// The flexible one line: the task it was given while it works, `coordinator` for
+    /// `main`, or why a lane is down. `None` is an empty cell, not a missing state.
     task: Option<SharedString>,
     task_color: Hsla,
-    /// The right-aligned state, in the topic's own vocabulary: `idle`, `working`,
-    /// `compacting`, `down` …
+    /// The right-aligned state: the step clock while it works, else the word.
     state: SharedString,
-    /// The step clock, beside the state, while the agent is working.
-    clock: Option<SharedString>,
-    /// `reconnecting`, shown beside the state while the stream is down.
+    state_color: Hsla,
+    /// `reconnecting`, shown beside the state while the coordinator's stream is down.
     badge: Option<SharedString>,
     /// The Stop button's lane, while the row can be stopped.
     stop: Option<AgentKey>,
@@ -867,19 +889,21 @@ mod tests {
                     && two.origin.y < three.origin.y,
                 "rows are out of order: {main:?} {one:?} {two:?} {three:?}"
             );
-            // Compact rows (§7.3), and every row the same height.
-            assert!(
-                main.size.height == ROW_HEIGHT,
-                "row height {} is not {}",
-                main.size.height,
-                ROW_HEIGHT
+            // The design's rows: every one 32px, whatever it is showing.
+            assert_eq!(main.size.height, px(LANE_ROW), "a row is 32px tall");
+            assert_eq!(
+                window.find(row_id(AgentKey::Lane(1))).bounds().size.height,
+                px(LANE_ROW)
             );
             assert!(one.size.height == two.size.height && two.size.height == three.size.height);
         });
     }
 
+    /// Every state says its own word, and a lane that is working says its clock in
+    /// that cell instead — the dot is what says busy, and the word would be the same
+    /// for every working row.
     #[gpui_kit::test]
-    fn every_status_gets_its_glyph_and_its_word(cx: &mut TestAppContext) {
+    fn every_state_says_its_own_word(cx: &mut TestAppContext) {
         let f = open(
             cx,
             lanes(vec![
@@ -899,25 +923,36 @@ mod tests {
                 (4, LaneStatus::Starting),
                 (5, LaneStatus::Down),
             ] {
-                let label = window
-                    .find(row_id(AgentKey::Lane(n)))
+                let key = AgentKey::Lane(n);
+                let aria = window
+                    .find(row_id(key))
                     .label()
                     .unwrap_or_default()
                     .to_string();
                 assert!(
-                    label.starts_with(status.glyph()),
-                    "lane {n} should lead with {}: {label}",
-                    status.glyph()
+                    aria.contains(&format!("lane {n}")),
+                    "lane {n} should name itself: {aria}"
                 );
                 assert!(
-                    label.contains(status_from_state_word(status)),
-                    "lane {n} should say {}: {label}",
-                    status_from_state_word(status)
+                    aria.contains(status.word()),
+                    "lane {n} should say {}: {aria}",
+                    status.word()
                 );
-                assert!(
-                    label.contains(&format!("lane {n}")),
-                    "lane {n} should name itself: {label}"
-                );
+                let state = window
+                    .find(state_id(key))
+                    .label()
+                    .unwrap_or_default()
+                    .to_string();
+                if status.is_busy() {
+                    assert_ne!(
+                        state,
+                        status.word(),
+                        "lane {n} is working: its cell is the step clock"
+                    );
+                    assert!(aria.contains("step "), "and the aria says the step: {aria}");
+                } else {
+                    assert_eq!(state, status.word(), "lane {n}'s cell is its word");
+                }
             }
         });
     }
@@ -936,30 +971,26 @@ mod tests {
         );
         f.act(cx, |window, cx| {
             window.render_frame(cx);
+
+            // A lane with something to stop has the control — and only while the
+            // pointer is on its row, which is the room the design leaves for it.
+            assert!(window.try_find(stop_id(1)).is_some());
             assert!(
-                window.try_find(("agent-stop", 1u64)).is_some(),
-                "a working lane can be stopped"
-            );
-            assert!(
-                window.try_find(("agent-stop", 2u64)).is_none(),
+                window.try_find(stop_id(2)).is_none(),
                 "an idle lane has nothing to stop"
             );
-            window.click(("agent-stop", 1u64), cx);
-        });
-        assert_eq!(f.events(), vec![AgentListEvent::StopLane(1)]);
-    }
+            let row = window.find(row_id(AgentKey::Lane(1))).bounds();
+            window.simulate_mouse_move(row.center(), cx);
+            window.render_frame(cx);
+            assert!(window.find(stop_id(1)).visible());
 
-    /// The word the aria label carries for each status, which is the swarm's own state
-    /// vocabulary.
-    fn status_from_state_word(status: LaneStatus) -> &'static str {
-        match status {
-            LaneStatus::Working => "working",
-            LaneStatus::Compacting => "compacting",
-            LaneStatus::Idle => "idle",
-            LaneStatus::Starting => "starting",
-            LaneStatus::Stopped => "stopped",
-            LaneStatus::Down => "down",
-        }
+            window.click(stop_id(1), cx);
+        });
+        assert_eq!(
+            f.events(),
+            vec![AgentListEvent::StopLane(1)],
+            "a click names the lane it stops"
+        );
     }
 
     #[gpui_kit::test]
@@ -982,7 +1013,7 @@ mod tests {
                 .label()
                 .unwrap_or_default()
                 .to_string();
-            assert!(row.starts_with("○ lane 2"), "{row}");
+            assert!(row.starts_with("lane 2, idle"), "{row}");
         });
     }
 
@@ -1147,39 +1178,55 @@ mod tests {
         });
     }
 
+    /// A long task is elided by the cell that holds it, and the state at the row's
+    /// end — the clock while the lane works — is never pushed off it.
     #[gpui_kit::test]
-    fn a_long_task_ellipsizes_and_never_pushes_the_clock_out(cx: &mut TestAppContext) {
+    fn a_long_task_ellipsizes_and_never_pushes_the_state_out(cx: &mut TestAppContext) {
         let long = "port the transcript reducer to the new event shape and keep every row \
                     measured while it streams";
-        let f = open(cx, lanes(vec![lane(1, LaneStatus::Working, Some(long))]));
+        let f = open(
+            cx,
+            lanes(vec![
+                lane(1, LaneStatus::Working, Some(long)),
+                lane(2, LaneStatus::Idle, None),
+            ]),
+        );
         f.act(cx, |window, cx| {
             window.render_frame(cx);
 
             let row = window.find(row_id(AgentKey::Lane(1))).bounds();
-            let label = window.find(task_id(AgentKey::Lane(1))).bounds();
-            let clock_row = window.find(clock_id(AgentKey::Lane(1)));
-            let clock = clock_row.bounds();
+            let task = window.find(task_id(AgentKey::Lane(1))).bounds();
+            let state = window.find(state_id(AgentKey::Lane(1)));
 
             assert!(
                 row.size.width <= COLUMN_WIDTH && row.origin.x >= px(0.),
                 "the row overflows the column: {row:?}"
             );
             assert!(
-                label.size.height <= px(22.),
-                "the task wrapped onto another line: {label:?}"
+                task.size.height < px(LANE_ROW),
+                "the task wrapped onto another line: {task:?}"
             );
             assert!(
-                label.right() <= clock.origin.x,
-                "the task runs into the clock: {label:?} vs {clock:?}"
+                task.right() <= state.bounds().left(),
+                "the task runs into the state: {task:?} vs {:?}",
+                state.bounds()
             );
             assert!(
-                clock.right() <= row.right(),
-                "the clock left the row: {clock:?} vs {row:?}"
+                state.bounds().right() <= row.right(),
+                "the state left the row: {:?} vs {row:?}",
+                state.bounds()
             );
-            assert!(clock_row.visible());
-
-            // A lane that is not working has no clock to show.
-            assert!(window.try_find(clock_id(AgentKey::Lane(2))).is_none());
+            // A working lane's state cell is its step clock; an idle one's is its word.
+            assert!(
+                state.label().is_some_and(|state| state != "working"),
+                "the clock, not the word: {:?}",
+                state.label()
+            );
+            assert_eq!(
+                window.find(state_id(AgentKey::Lane(2))).label(),
+                Some("idle"),
+                "an idle lane says so in the same cell"
+            );
         });
     }
 
@@ -1221,8 +1268,12 @@ mod tests {
                 window.find(row_id(AgentKey::Lane(1))).selected(),
                 Some(false)
             );
-            // The update did land: lane 3 is working now, so it has a clock.
-            assert!(window.try_find(clock_id(AgentKey::Lane(3))).is_some());
+            // The update did land: lane 3 is working now, so its state cell counts.
+            assert_ne!(
+                window.find(state_id(AgentKey::Lane(3))).label(),
+                Some("working"),
+                "a working lane's cell is its clock"
+            );
         });
     }
 
@@ -1315,8 +1366,8 @@ mod tests {
             window.render_frame(cx);
             assert_eq!(
                 window.find(SUMMARY_ID).label(),
-                Some("3 lanes · 2 busy"),
-                "the summary should count the rows the list is drawing"
+                Some("2 of 3 busy"),
+                "the band counts the lanes the list is drawing"
             );
         });
     }
@@ -1331,7 +1382,7 @@ mod tests {
                 .label()
                 .unwrap_or_default()
                 .to_string();
-            assert_eq!(main, "○ main, idle");
+            assert_eq!(main, "main, idle");
             assert!(
                 window.try_find(badge_id(AgentKey::Coordinator)).is_none(),
                 "no badge while the stream is up"
@@ -1346,21 +1397,19 @@ mod tests {
                 .label()
                 .unwrap_or_default()
                 .to_string();
-            assert_eq!(main, "● main, running");
+            assert_eq!(main, "main, running");
             assert!(window.find(badge_id(AgentKey::Coordinator)).visible());
             // The state keeps its cell: the badge is added after it, not instead.
             assert!(window.find(state_id(AgentKey::Coordinator)).visible());
         });
     }
 
-    /// The coordinator's row as the view model has it, written out: the state word and
-    /// the clock beside it.
+    /// The coordinator's row as the view model has it, written out: the state cell,
+    /// which is the word or the clock.
     fn coordinator_cells(f: &Fixture, cx: &App) -> (String, Option<String>) {
-        let view = f.list.read(cx).coordinator_view(cx.theme());
-        (
-            view.state.to_string(),
-            view.clock.map(|clock| clock.to_string()),
-        )
+        let palette = design::palette(cx.theme().mode.is_dark());
+        let view = f.list.read(cx).coordinator_view(palette);
+        (view.state.to_string(), None)
     }
 
     /// The coordinator's step clock sits beside its state, as a lane's does: it is shown
@@ -1376,8 +1425,8 @@ mod tests {
                 list.set_coordinator_clock(Some("41s".to_string()), cx);
             });
             assert_eq!(
-                coordinator_cells(&f, cx),
-                ("idle".to_string(), None),
+                coordinator_cells(&f, cx).0,
+                "idle",
                 "an idle main shows its state, not the seconds since a run that ended"
             );
 
@@ -1387,17 +1436,22 @@ mod tests {
                 list.set_coordinator(Status::Running, false, cx);
             });
             assert_eq!(
-                coordinator_cells(&f, cx),
-                ("running".to_string(), Some("41s".to_string()))
+                coordinator_cells(&f, cx).0,
+                "41s",
+                "working: the step clock"
             );
             window.render_frame(cx);
-            assert!(window.find(clock_id(AgentKey::Coordinator)).visible());
+            assert_eq!(
+                window.find(state_id(AgentKey::Coordinator)).label(),
+                Some("41s"),
+                "the coordinator's own step, in the state cell"
+            );
             let main = window
                 .find(row_id(AgentKey::Coordinator))
                 .label()
                 .unwrap_or_default()
                 .to_string();
-            assert_eq!(main, "● main, running, step 41s");
+            assert_eq!(main, "main, running, step 41s");
 
             // A compaction is work too.
             f.list.update(cx, |list, cx| {
@@ -1405,8 +1459,9 @@ mod tests {
                 list.set_coordinator_clock(Some("3m".to_string()), cx);
             });
             assert_eq!(
-                coordinator_cells(&f, cx),
-                ("compacting".to_string(), Some("3m".to_string()))
+                coordinator_cells(&f, cx).0,
+                "3m",
+                "a compaction is work too"
             );
 
             // No clock (the step was never stamped, or the run just ended): the word is what
@@ -1424,58 +1479,14 @@ mod tests {
                 list.set_coordinator(Status::Running, false, cx);
                 list.set_coordinator_clock(Some("0s".to_string()), cx);
             });
-            assert_eq!(
-                coordinator_cells(&f, cx),
-                ("running".to_string(), Some("0s".to_string()))
-            );
+            assert_eq!(coordinator_cells(&f, cx).0, "0s", "a step that just began");
             window.render_frame(cx);
             let main = window
                 .find(row_id(AgentKey::Coordinator))
                 .label()
                 .unwrap_or_default()
                 .to_string();
-            assert_eq!(main, "● main, running, step 0s");
-        });
-    }
-
-    #[gpui_kit::test]
-    fn the_status_colors_come_from_the_theme(cx: &mut TestAppContext) {
-        cx.update(gpui_kit::init);
-        cx.read(|cx| {
-            let theme = cx.theme();
-            assert_eq!(status_color(LaneStatus::Working, theme), theme.success);
-            assert_eq!(status_color(LaneStatus::Compacting, theme), theme.warning);
-            assert_eq!(
-                status_color(LaneStatus::Idle, theme),
-                theme.muted_foreground
-            );
-            assert_eq!(status_color(LaneStatus::Down, theme), theme.danger);
-            // A starting lane is the same muted tone as an idle one, at full opacity: the
-            // dashed glyph is what says "not up yet", and a faded one was unreadable at 1x.
-            assert_eq!(
-                status_color(LaneStatus::Starting, theme),
-                theme.muted_foreground
-            );
-            assert_eq!(theme.muted_foreground.a, 1.);
-            // The colours separate work, compaction and down from the two resting states;
-            // idle and starting share a colour on purpose, and the glyphs separate them.
-            let resting = [LaneStatus::Idle, LaneStatus::Starting];
-            for status in [
-                LaneStatus::Working,
-                LaneStatus::Compacting,
-                LaneStatus::Down,
-            ] {
-                assert!(
-                    !resting.contains(&status),
-                    "{status:?} is not a resting state"
-                );
-                assert_ne!(status_color(status, theme), theme.muted_foreground);
-            }
-            assert_ne!(
-                LaneStatus::Idle.glyph(),
-                LaneStatus::Starting.glyph(),
-                "the two resting states are told apart by their glyphs"
-            );
+            assert_eq!(main, "main, running, step 0s");
         });
     }
 
