@@ -16,6 +16,7 @@ tab_engine = { path = "../tab_engine" }
 transcript = { path = "../transcript" }
 agent_list = { path = "../agent_list" }
 composer = { path = "../composer" }
+widgets = { path = "../widgets" }
 
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }

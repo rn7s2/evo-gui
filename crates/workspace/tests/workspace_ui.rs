@@ -90,17 +90,21 @@ fn the_app_opens_with_one_empty_tab(cx: &mut TestAppContext) {
     .unwrap();
 }
 
-/// Every chooser starts at `Default` — each one is only passed when chosen
-/// (§7.2).
+/// A tab with no catalog yet has no model to name and says so in evo's own words —
+/// nothing is called `Default` (§7.2) — and the count is already the one the launch
+/// passes.
 #[gpui_kit::test]
-fn the_empty_tab_defaults_every_chooser(cx: &mut TestAppContext) {
+fn the_empty_tab_has_no_default_to_fall_back_on(cx: &mut TestAppContext) {
     let (_handle, view) = open_workspace(cx);
 
     cx.update(|cx| {
         let tab = view.read(cx).selected_tab().read(cx);
-        assert_eq!(tab.coordinator_model(cx).as_ref(), "Default");
-        assert_eq!(tab.lanes_model(cx).as_ref(), "Default");
-        assert_eq!(tab.workers(cx).as_ref(), "Default");
+        assert_eq!(
+            tab.coordinator_model(cx).as_ref(),
+            "No models are registered"
+        );
+        assert_eq!(tab.lanes_model(cx).as_ref(), "No models are registered");
+        assert_eq!(tab.workers(cx).as_ref(), "6");
     });
 }
 

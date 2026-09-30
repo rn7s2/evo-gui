@@ -109,6 +109,9 @@ pub fn launch_spec(env: &LaunchEnv, launch: &Launch, id: &store::paths::TabId) -
     spec.resume = launch.session().cloned();
     if let Some(plan) = launch.plan() {
         spec.model = plan.model.as_ref().map(model_ref);
+        // The coordinator's own ladder rung: the empty tab resolves one and shows it, so
+        // the launch passes it (§7.2) rather than leaving the level to evo.
+        spec.thinking = plan.thinking.clone();
         spec.lane_model = plan.lanes_model.as_ref().map(model_ref);
         spec.lane_thinking = plan.lane_thinking.clone();
         spec.workers = plan.workers;
@@ -193,7 +196,7 @@ pub fn start(env: &LaunchEnv, launch: &Launch) -> std::io::Result<Started> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use session::{LaunchPlan, DEFAULT_KEY};
+    use session::LaunchPlan;
 
     fn plan(
         model: Option<(&str, &str)>,
@@ -202,9 +205,10 @@ mod tests {
     ) -> LaunchPlan {
         LaunchPlan {
             model: model.map(|(id, provider)| (id.to_string(), provider.to_string())),
+            thinking: None,
+            workers,
             lanes_model: lanes.map(|(id, provider)| (id.to_string(), provider.to_string())),
             lane_thinking: None,
-            workers,
         }
     }
 
@@ -336,6 +340,7 @@ mod tests {
         // Default everywhere is still a launch worth checking.
         assert_eq!(
             check_spec(&LaunchPlan {
+                thinking: Some("high".to_string()),
                 lane_thinking: Some("high".to_string()),
                 ..LaunchPlan::default()
             })
@@ -349,6 +354,5 @@ mod tests {
         assert!(!asked.iter().any(|flag| flag == "--ready-file"));
         assert!(!asked.iter().any(|flag| flag == "--watch-stdin"));
         assert!(LaunchPlan::default().is_default());
-        assert_eq!(DEFAULT_KEY, "default");
     }
 }

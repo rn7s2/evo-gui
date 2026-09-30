@@ -1,185 +1,231 @@
 //! The empty tab (§7.2): what a new tab shows before a folder is chosen.
 //!
-//! One centred column — a header, the three choosers with the folder button beside them,
-//! then the resumable swarms — and nothing else. The choosers' options, the note under the
-//! lanes select and the history rows all come from [`session::Launcher`]; this module owns
-//! only what the session model cannot know: the select widgets, the folder dialog, whether
-//! the catalog has arrived, and whether the session index is still being fetched.
+//! One centred column on the page's own surface: a header, the two role cards with the
+//! folder card beside them, the check's own lines under the cards, and the resumable
+//! swarms. The controls' values, the catalog behind them and the history rows all come
+//! from [`session::Launcher`]; this module owns only what the session model cannot know:
+//! the widgets, the folder dialog, whether the catalog has arrived, and whether the
+//! session index is still being fetched.
 //!
 //! ```text
 //! set_catalog                      the /catalog body (§5.6): the cache, or a server
 //! set_history_entries              the session index's rows (§2)
 //! set_history_loading / set_catalog_error  the two states with nothing to show yet
-//! → TabContentEvent::Launch        the folder plus the choosers' plan (§7.2, §1)
-//! → TabContentEvent::Resume        a history row, by lane 1's ListEvent subscription
+//! → TabContentEvent::Launch        the folder plus the controls' plan (§7.2, §1)
+//! → TabContentEvent::Resume        a history row, by the row's own click
 //! ```
+//!
+//! Every control opens on a **resolved** value (§7.2) and nothing is called "Default":
+//! the coordinator card is the model and effort the launch passes as `--model` and
+//! `--thinking`, the workers card the count, the lanes' model and the lanes' effort
+//! (`--workers`, `--lane-model`, `--lane-thinking`). See [`session::Launcher`] for how
+//! each is resolved, and for the two evo does not publish offline.
+//!
+//! Colours and numbers come from [`store::design`] — the design's own `L`/`DARK`
+//! palettes and the radii — through `cx.theme()` where the kit has the token and
+//! through [`store::design`] itself where the design names a number. The design's
+//! `color-mix` is [`widgets::wash`].
 
 use std::path::PathBuf;
 
 use gpui_kit::base::Button;
-use gpui_kit::component::list::{List, ListDelegate, ListItem, ListState};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::list::{ListDelegate, ListItem, ListState};
 use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
-use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::{
-    h_flex, v_flex, ActiveTheme as _, Colorize as _, Icon, IconName, IndexPath, Sizable as _,
-    StyledExt as _, Theme,
+    h_flex, v_flex, ActiveTheme as _, Icon, IconName, IndexPath, Sizable as _, StyledExt as _,
+    Theme,
 };
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    div, px, relative, AnyElement, App, Context, ElementId, Entity, FocusHandle, Focusable as _,
-    Hsla, IntoElement, KeyDownEvent, Pixels, Role, SharedString, Subscription, TestSupportExt as _,
-    WeakEntity, Window,
+    div, px, AnyElement, App, BoxShadow, Context, ElementId, Entity, FocusHandle, Focusable as _,
+    Hsla, IntoElement, MouseButton, MouseDownEvent, Pixels, SharedString, Subscription,
+    TestSupportExt as _, TextAlign, WeakEntity, Window,
 };
 use serde_json::Value;
-use session::{Choice, ChooserOption, HistoryEntry, LaunchPlan, Launcher, DEFAULT_KEY};
+use session::{HistoryEntry, LaunchPlan, Launcher, ModelOption, Role as Card};
 use store::catalog::{CheckReport, Problem, ProblemTarget};
 use store::cli::{self, CliError};
+use store::design;
 
 use crate::history::{rows_from_session, HistoryRow};
 use crate::tab::{TabContent, TabContentEvent};
 
-/// The launcher's measure (§7.2): one centred column, wide enough for the three rows and
-/// the folder button beside them.
-const BLOCK_WIDTH: Pixels = px(880.);
+// --- the design's numbers -----------------------------------------------------------
+
+/// `.empty{padding:58px 32px 44px}`, with the page's own bottom padding
+/// (`.empty{padding-bottom:32px!important}`).
+const PAGE_TOP: Pixels = px(58.);
+const PAGE_X: Pixels = px(32.);
+const PAGE_BOTTOM: Pixels = px(32.);
+/// `.empty-head{margin-bottom:20px}`.
+const HEAD_GAP: Pixels = px(20.);
+/// `.launch-layout{grid-template-columns:minmax(0,1fr) 240px;gap:16px}`.
+const LAYOUT_GAP: Pixels = px(16.);
+const FOLDER_COLUMN: Pixels = px(240.);
+/// `.role-stack{gap:10px}`, `.role-stack .config-group{padding:12px 14px}`.
+const CARD_GAP: Pixels = px(10.);
+const CARD_PAD_X: Pixels = px(14.);
+const CARD_PAD_Y: Pixels = px(12.);
+/// `.config-heading{height:28px;margin-bottom:8px;grid-template-columns:minmax(0,1fr) 180px;column-gap:14px}`.
+const CARD_HEADING_H: Pixels = px(28.);
+const CARD_HEADING_GAP: Pixels = px(8.);
+/// `.role-fields{grid-template-columns:minmax(0,1fr) 180px;gap:14px}`.
+const FIELD_COLUMN: Pixels = px(180.);
+const FIELD_GAP: Pixels = px(14.);
+/// `.field label{margin-bottom:4px}`.
+const LABEL_GAP: Pixels = px(4.);
+/// `.shad-select-wrap{height:34px}`, `.select-summary{padding:0 34px 0 10px}`.
+const SELECT_H: Pixels = px(34.);
+const SELECT_PAD: Pixels = px(10.);
+/// `.number-input{height:28px}` and `.number-input button{width:25px}`.
+const COUNT_H: Pixels = px(28.);
+const COUNT_STEP: Pixels = px(25.);
+/// `.history{margin-top:24px}`, `.history-head{gap:8px;margin-bottom:8px}`.
+const HISTORY_GAP: Pixels = px(24.);
+const HISTORY_HEAD_GAP: Pixels = px(8.);
+/// `.history-row{min-height:58px;gap:12px;padding:8px 12px}`.
+const ROW_MIN_H: Pixels = px(58.);
+const ROW_GAP: Pixels = px(12.);
+const ROW_PAD_X: Pixels = px(12.);
+const ROW_PAD_Y: Pixels = px(8.);
+/// `.badge{padding:0 7px}`, `.folder-card-large{padding:20px;gap:8px}` and
+/// `.folder-card-large .folder-icon{margin-bottom:3px}`.
+const BADGE_PAD_X: Pixels = px(7.);
+const FOLDER_PAD: Pixels = px(20.);
+const FOLDER_GAP: Pixels = px(8.);
+const FOLDER_ICON_GAP: Pixels = px(3.);
+const FOLDER_ICON: Pixels = px(36.);
+/// `.folder-card-large .folder-hint{max-width:180px}`.
+const FOLDER_HINT_W: Pixels = px(180.);
+
+/// The type sizes: `.empty-title{font-size:20px;line-height:28px}`, `.field label{12px}`,
+/// `.select-summary span{13px;line-height:18px}`, `.config-title{14px}`, `.badge{11px}`
+/// and `.folder-card-large .folder-label{14px}`.
+const TITLE_SIZE: Pixels = px(20.);
+const TITLE_LINE: Pixels = px(28.);
+const SMALL: Pixels = px(12.);
+const TINY: Pixels = px(11.);
+const FIELD_TEXT: Pixels = px(13.);
+const FIELD_LINE: Pixels = px(18.);
+const CARD_TITLE: Pixels = px(14.);
+
+/// The check's problem lines under the cards (§9): one calm line each, and a click opens
+/// the control the line is about. There are none when the launch is fine.
+const PROBLEMS_ID: &str = "check-problems";
+const PROBLEM_ID: &str = "check-problem";
+
+/// The folder card, and the two role cards' own ids.
+const FOLDER_ID: &str = "select-folder";
+const COORDINATOR_CARD_ID: &str = "config-group-coordinator";
+const WORKERS_CARD_ID: &str = "config-group-workers";
+
+/// The two model fields, the two effort sliders and the count control.
+const COORDINATOR_MODEL_ID: &str = "coordinator-model";
+const WORKERS_MODEL_ID: &str = "workers-model";
+const COORDINATOR_EFFORT_ID: &str = "coordinator-effort";
+const WORKERS_EFFORT_ID: &str = "workers-effort";
+const COUNT_ID: &str = "workers-count";
+const COUNT_BOX_ID: &str = "workers-count-box";
+const COUNT_FIELD_ID: &str = "workers-count-field";
+const COUNT_MINUS_ID: &str = "workers-count-minus";
+const COUNT_PLUS_ID: &str = "workers-count-plus";
+
+/// The history region and its states.
+const HISTORY_ID: &str = "history";
+const HISTORY_LIST_ID: &str = "history-list";
+const HISTORY_ROW_ID: &str = "history-row";
+const HISTORY_HINT_ID: &str = "history-hint";
+const HISTORY_COUNT_ID: &str = "history-count";
+/// What the history section is called, for a screen reader: the rows name themselves, but
+/// the list around them has no name of its own.
+const HISTORY_LABEL: &str = "Resumable swarms";
+const ROW_ICON: Pixels = px(16.);
+const OPEN_AT_QUIT_ID: &str = "history-open-at-quit";
+const OPEN_AT_QUIT_TEXT: &str = "open at last quit";
+const RESUME_ARROW: &str = "›";
+
+/// What the words in the page are: the design's own copy, and the two labels the fields
+/// wear.
+const TITLE: &str = "New Swarm";
+const SUBTITLE: &str = "Choose how it runs, then select a project folder.";
+const COORDINATOR_TITLE: &str = "Coordinator";
+const WORKERS_TITLE: &str = "Workers";
+const MODEL_LABEL: &str = "Model";
+const EFFORT_LABEL: &str = "Effort";
+const COUNT_LABEL: &str = "Count";
+const FOLDER_LABEL: &str = "Select folder…";
+const FOLDER_HINT: &str = "The swarm starts in the folder you pick";
+const HISTORY_TITLE: &str = "History";
 
 gpui_kit::actions!(
     workspace,
     [
-        /// Open the app's Settings panel — what the "evo-swarm not found" line under the
-        /// folder card does (§9.7).
+        /// Open the app's Settings panel — what a problem line about the machine rather
+        /// than the launch opens (§9.7).
         ///
-        /// The panel and the paths in it are the *app's*; the workspace only knows that the
-        /// person asked for it. So the empty tab, which is what draws the line, declares the
-        /// action, and the app answers it (`evo_desktop`'s Settings… handler).
+        /// The panel and the paths in it are the *app's*; the workspace only knows that
+        /// the person asked for it. So the empty tab, which is what draws the line,
+        /// declares the action, and the app answers it (`evo_desktop`'s Settings…).
         OpenSettings,
     ]
 );
 
-/// How far down the block starts, as a fraction of the window: the top of a 1000 px window
-/// is not where the eye should land.
-const BLOCK_TOP: f32 = 0.12;
-
-/// A chooser row: a fixed label column, then the select.
-const LABEL_WIDTH: Pixels = px(150.);
-const SELECT_WIDTH: Pixels = px(420.);
-/// The popup is wider than the trigger because an option carries its detail line.
-const MENU_WIDTH: Pixels = px(460.);
-
-/// The gap between the chooser rows, and between them and the folder button.
-const ROW_GAP: Pixels = px(16.);
-
-/// The caption under the lanes chooser: **one** small line, drawn only when there is
-/// something to say — what the catalog could not do, or what a chosen lanes model means.
-/// When there is nothing the row is not there at all: the space it used to reserve was a
-/// blank gap the height of a chooser row between "Lanes model" and "Lane thinking".
-///
-/// It starts where the selects do, not under the labels. The minimum is one small line, so
-/// a caption's own leading cannot move the rows below it by more than that.
-const CAPTION_LINES: usize = 1;
-const CAPTION_LINE_HEIGHT: Pixels = px(16.);
-/// [`LABEL_WIDTH`] plus the row's own gap: the selects' left edge.
-const CAPTION_INDENT: Pixels = px(166.);
-const CAPTION_ID: &str = "lanes-caption";
-
-/// The check's problem lines under the choosers (§9): one calm line each, and a click opens
-/// the chooser the line is about. There are none when the launch is fine.
-const PROBLEMS_ID: &str = "check-problems";
-const PROBLEM_ID: &str = "check-problem";
-
-/// What the caption says when the catalog could not be fetched at all (§5.6): one sentence
-/// about what the tab still does, because the server's own words — `http 500: The value
-/// "Bearer …"` — are evidence, not a message. They go in the line's tooltip and in
-/// `app.log`; the choosers stay usable on Default, so a swarm can still be started.
-const CATALOG_FAILED: &str = "Couldn't load the model list — Default models will be used.";
-/// … and when the catalog could not be fetched but the last one is still in the choosers.
-const CATALOG_STALE: &str = "Couldn't refresh the model list — using the last one it loaded.";
-
-/// The caption's warning tone, for the one line that is not the page's quiet grey.
-///
-/// The kit's `warning` is a bright amber: 13:1 on the dark theme's near-black, but 1.9:1 on
-/// the light theme's white — a 12px line nobody can read. The light theme darkens that same
-/// hue until it clears AA (`#EAB308` → `#8D6C05`, 4.9:1); the tone stays amber, which is what
-/// it means here: not an error, something to notice.
+/// The colour a line that is not the page's quiet grey wears: the design's `warning`, an
+/// olive on the light page and an amber on the dark one — readable either way.
 fn warning_ink(theme: &Theme) -> Hsla {
-    if theme.is_dark() {
-        theme.warning
-    } else {
-        theme.warning.darken(0.4)
-    }
+    theme.warning
 }
 
-/// The caption's own shape: the one line it shows, the tone it wears, and the longer version
-/// of itself for the hover.
-struct Caption {
-    text: SharedString,
-    tone: CaptionTone,
-    /// The words behind the line, when it is a summary of something longer: the catalog
-    /// command's own error.
-    detail: Option<SharedString>,
+/// `box-shadow: 0 0 0 <spread>px <colour>` — the ring the design draws on a focused field.
+fn ring(spread: f32, color: Hsla) -> BoxShadow {
+    BoxShadow::new(px(0.), px(0.), color)
+        .blur_radius(px(0.))
+        .spread_radius(px(spread))
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum CaptionTone {
-    /// Nothing to say yet: the catalog is on its way.
-    Loading,
-    /// Something went wrong that the tab copes with (§5.6) — quiet amber, never red.
-    Warning,
-    /// Every lane will run the model chosen here (§1).
-    Note,
-}
-
-/// The folder call to action, and how its parts are drawn.
-const FOLDER_ID: &str = "select-folder";
-const FOLDER_ICON_SIZE: Pixels = px(28.);
-
-/// The history region and its states.
-const HISTORY_ID: &str = "history";
-const HISTORY_ROW_ID: &str = "history-row";
-const HISTORY_HINT_ID: &str = "history-hint";
-/// What the history section is called, for a screen reader: the list's items name
-/// themselves, but the list around them has no name of its own.
-const HISTORY_LABEL: &str = "Resumable swarms";
-/// A history row reads like a document: a small folder glyph, then the folder's own name as
-/// the title, with the path and the facts under it.
-const ROW_ICON_SIZE: Pixels = px(14.);
-const ROW_TITLE_SIZE: Pixels = px(15.);
-/// The badge on a row the app had open when it last quit (§2).
-const OPEN_AT_QUIT_ID: &str = "history-open-at-quit";
-const OPEN_AT_QUIT_TEXT: &str = "open at last quit";
-
-/// One option of a chooser, as the Select draws it: the label, a muted detail line under
-/// it, and — for a model a lane could not register — the reason it is greyed out.
+/// One registration, as a model field offers it: what the design's `<option>` carries,
+/// plus evo's own reason when this card cannot run it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct ChooserItem {
-    /// Stable identity of the option: what the launcher is told was chosen.
+struct ModelItem {
+    /// `ID@PROVIDER`: what choosing this option selects.
     key: SharedString,
-    label: SharedString,
-    /// The detail under the label: the context window and what else the catalog knows, or
-    /// the reason the option cannot be used.
+    /// The registration's id, and the provider that makes it one registration.
+    id: SharedString,
+    provider: SharedString,
+    /// The menu's second line: the context window, or why this card cannot run it.
     detail: SharedString,
     available: bool,
 }
 
-impl From<&ChooserOption> for ChooserItem {
-    fn from(option: &ChooserOption) -> Self {
-        ChooserItem {
-            key: SharedString::from(option.key.clone()),
-            label: SharedString::from(option.label.clone()),
-            detail: SharedString::from(match &option.unavailable_reason {
-                Some(reason) => reason.clone(),
-                None => option.detail.clone(),
+impl From<(&ModelOption, Card)> for ModelItem {
+    fn from((model, role): (&ModelOption, Card)) -> Self {
+        let reason = model
+            .reason(role)
+            .unwrap_or("not usable in this session")
+            .to_string();
+        ModelItem {
+            key: SharedString::from(model.key.clone()),
+            id: SharedString::from(model.id.clone()),
+            provider: SharedString::from(model.provider.clone()),
+            detail: SharedString::from(if model.usable(role) {
+                model.detail.clone()
+            } else {
+                reason
             }),
-            available: option.available,
+            available: model.usable(role),
         }
     }
 }
 
-impl SelectItem for ChooserItem {
+impl SelectItem for ModelItem {
     type Value = SharedString;
 
+    /// What a screen reader hears, and what the menu's own first line is.
     fn title(&self) -> SharedString {
-        self.label.clone()
+        self.id.clone()
     }
 
     fn value(&self) -> &Self::Value {
@@ -188,26 +234,41 @@ impl SelectItem for ChooserItem {
 
     fn matches(&self, query: &str) -> bool {
         let query = query.to_lowercase();
-        self.label.to_lowercase().contains(&query) || self.detail.to_lowercase().contains(&query)
+        self.id.to_lowercase().contains(&query)
+            || self.provider.to_lowercase().contains(&query)
+            || self.detail.to_lowercase().contains(&query)
     }
 
-    /// A lanes model a lane cannot register is shown, not hidden: seeing why is the point
-    /// (§5.6).
+    /// A model this card cannot run is shown, not hidden: seeing why is the point (§5.6).
     fn disabled(&self) -> bool {
         !self.available
+    }
+
+    /// The trigger's own line, which is the design's markup: `<b>provider</b> · id`.
+    fn display_title(&self) -> Option<AnyElement> {
+        Some(
+            h_flex()
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .child(div().flex_none().font_medium().child(self.provider.clone()))
+                .child(div().flex_none().child(" · "))
+                .child(div().min_w_0().child(self.id.clone()))
+                .into_any_element(),
+        )
     }
 
     fn render(&self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let detail_color = if self.available {
             cx.theme().muted_foreground
         } else {
-            cx.theme().warning
+            warning_ink(cx.theme())
         };
         let detail = self.detail.clone();
         v_flex()
             .gap_0p5()
             .py_0p5()
-            .child(div().child(self.label.clone()))
+            .child(div().child(self.id.clone()))
             .when(!detail.is_empty(), |row| {
                 row.child(div().text_xs().text_color(detail_color).child(detail))
             })
@@ -227,18 +288,29 @@ enum FolderPicker {
     Fixed(Option<PathBuf>),
 }
 
-/// The empty tab's model and the widgets over it.
+/// Where a check's answer comes from: the swarm binary, or an answer already known.
+#[derive(Clone, Default)]
+enum CheckProbe {
+    /// Run it: `evo-swarm check --json`, on the app's own executor.
+    #[default]
+    Command,
+    /// Answer with this report, starting no process. For tests, which must not wait on a
+    /// swarm binary.
+    Fixed(Box<CheckReport>),
+}
+
+/// The empty tab's controls and the widgets over them.
 ///
-/// It is an entity of its own so the selects' own events can update the model: a click in a
-/// chooser moves [`session::Launcher`]'s selection, which is what the caption and the launch
-/// plan read.
+/// It is an entity of its own so the widgets' own events can update the model: a click in
+/// a model menu moves [`session::Launcher`]'s choice, which is what the check and the
+/// launch plan read.
 pub(crate) struct Choosers {
     state: Entity<EmptyTabState>,
 }
 
 impl Choosers {
-    /// The three choosers need the window they will be rendered in, and the tab they will
-    /// report a launch to.
+    /// The two model fields need the window they will be rendered in, and the tab they
+    /// will report a launch to.
     pub(crate) fn new(window: &mut Window, cx: &mut Context<TabContent>) -> Self {
         let tab = cx.weak_entity();
         Choosers {
@@ -246,243 +318,264 @@ impl Choosers {
         }
     }
 
-    /// The chosen coordinator model's label (`Default` untouched) — the tab strip's own
-    /// language, and what §3's `--model` would take.
+    /// The coordinator's model (`--model`) — what the tab strip shows, and what a launch
+    /// passes. [`session::Launcher`] resolves it, so it is never "Default".
     pub(crate) fn coordinator_model(&self, cx: &App) -> SharedString {
-        chosen_label(&self.state, Choice::Coordinator, cx)
+        model_label(&self.state, Card::Coordinator, cx)
     }
 
-    /// The chosen lanes model's label.
+    /// The lanes' model (`--lane-model`).
     pub(crate) fn lanes_model(&self, cx: &App) -> SharedString {
-        chosen_label(&self.state, Choice::Lanes, cx)
+        model_label(&self.state, Card::Lanes, cx)
     }
 
-    /// The chosen worker count's label (`Default` leaves it to evo).
+    /// The worker count (`--workers`), as its own digits.
     pub(crate) fn workers(&self, cx: &App) -> SharedString {
-        chosen_label(&self.state, Choice::Workers, cx)
+        SharedString::from(self.state.read(cx).launcher.workers().to_string())
     }
 
-    /// What the choosers add up to (§7.2, §1).
+    /// What the controls add up to (§7.2, §1).
     pub(crate) fn plan(&self, cx: &App) -> LaunchPlan {
         self.state.read(cx).launcher.plan()
     }
 
-    /// Put the keyboard where the empty tab begins: the coordinator chooser — the
-    /// first tab stop of the three rows — or, if that chooser cannot take the
-    /// focus, the folder card beside them.
+    /// Put the keyboard where the empty tab begins: the coordinator card's model field —
+    /// the first control on the page — or, if that cannot take the focus, the folder card.
     ///
-    /// The window is the owner's: selecting an empty tab lands the keyboard in it
-    /// (§7.1's polish), which is the window's own `TabContent::focus_primary` to
-    /// call. Answers whether anything took the focus; a window that takes no focus
-    /// at all (a capture, a window on its way out) answers `false` and is left
-    /// alone.
-    ///
-    /// The seam is what the window calls: `TabContent::focus_primary` routes an
-    /// empty tab's keyboard here (§7.1's polish).
+    /// The window is the owner's: selecting an empty tab lands the keyboard in it (§7.1's
+    /// polish), which is the window's own `TabContent::focus_primary` to call. Answers
+    /// whether anything took the focus; a window that takes no focus at all (a capture, a
+    /// window on its way out) answers `false` and is left alone.
     pub fn focus_primary(&self, window: &mut Window, cx: &mut App) -> bool {
-        // Read out of the state first: focusing borrows the window and the app, and
-        // the state is borrowed through both.
-        let (chooser, folder) = {
+        // Read out of the state first: focusing borrows the window and the app, and the
+        // state is borrowed through both.
+        let (field, folder) = {
             let state = self.state.read(cx);
-            (state.coordinator.clone(), state.folder_focus.clone())
+            (
+                state.coordinator.read(cx).focus_handle(cx),
+                state.folder_focus.clone(),
+            )
         };
-        let primary = chooser.read(cx).focus_handle(cx);
-        window.focus(&primary, cx);
-        if window.focused(cx).as_ref() == Some(&primary) {
+        window.focus(&field, cx);
+        if window.focused(cx).as_ref() == Some(&field) {
             return true;
         }
-        // The first chooser would not have the keyboard: the folder card is the next
-        // thing on the tab that can.
+        // The model field would not have the keyboard: the folder card is the next thing
+        // on the page that can.
         window.focus(&folder, cx);
         window.focused(cx).as_ref() == Some(&folder)
     }
 }
 
-fn chosen_label(state: &Entity<EmptyTabState>, which: Choice, cx: &App) -> SharedString {
-    state
-        .read(cx)
-        .launcher
-        .selected(which)
-        .map(|option| SharedString::from(option.label.clone()))
-        .unwrap_or_else(|| SharedString::from(DEFAULT_KEY))
+/// What a model field shows, for the tab strip and the tab's own title: the registration
+/// the launch passes, or evo's own words when it resolved none.
+fn model_label(state: &Entity<EmptyTabState>, role: Card, cx: &App) -> SharedString {
+    let state = state.read(cx);
+    match state.launcher.chosen(role) {
+        Some(model) => SharedString::from(model.key.clone()),
+        None => SharedString::from(
+            state
+                .launcher
+                .unresolved_note(role)
+                .unwrap_or_else(|| "no model configured".to_string()),
+        ),
+    }
 }
 
 struct EmptyTabState {
-    /// The choosers' model: options, the chosen keys, and the history rows (§7.2, §2).
+    /// The controls' model: what is resolved, the options behind it, the levels and the
+    /// history rows (§7.2, §2).
     launcher: Launcher,
-    coordinator: Entity<SelectState<Vec<ChooserItem>>>,
-    lanes: Entity<SelectState<Vec<ChooserItem>>>,
-    lane_thinking: Entity<SelectState<Vec<ChooserItem>>>,
-    workers: Entity<SelectState<Vec<ChooserItem>>>,
+    coordinator: Entity<SelectState<Vec<ModelItem>>>,
+    workers: Entity<SelectState<Vec<ModelItem>>>,
+    /// The count field, and the two steppers beside it.
+    count: Entity<InputState>,
     /// The home directory the `~` paths are shortened around.
     home: Option<String>,
     /// The catalog has arrived, from the cache or from a server: until it has, the model
-    /// choosers hold nothing but Default.
+    /// fields hold nothing to choose from.
     catalog: bool,
-    /// The catalog could not be read: shown instead of the loading hint.
+    /// The catalog could not be read: shown under the cards, where the check's lines are.
     catalog_error: Option<String>,
     /// The `evo-swarm` a check runs. The app's own path from Settings, so the check is
     /// about the swarm this app would really spawn.
     swarm_bin: PathBuf,
-    /// What the last check found wrong with the launch the choosers describe (§9). One line
-    /// each, in evo's own words; empty when the launch is fine.
+    /// What the last check found wrong with the launch the controls describe (§9). One
+    /// line each, in evo's own words; empty when the launch is fine.
     problems: Vec<Problem>,
-    /// Bumped on every check asked: an answer that is no longer the newest is dropped before
-    /// it is applied.
+    /// Bumped on every check asked: an answer that is no longer the newest is dropped
+    /// before it is applied.
     check_revision: u64,
     /// Where a check's answer comes from.
     check_probe: CheckProbe,
     /// Where a folder pick answers from.
     picker: FolderPicker,
-    /// The folder card's own focus handle, so keyboard traversal and the focus ring have
+    /// The count box's own steppers are being held: `:active`.
+    stepping: [bool; 2],
+    /// The history list's two states (§2): still being fetched, or it could not be read.
+    history_loading: bool,
+    history_error: Option<String>,
+    /// The folder card's own focus handle, so keyboard traversal and its focus ring have
     /// somewhere to land.
     folder_focus: FocusHandle,
-    history_focus: FocusHandle,
+    /// The two sliders' focus handles: a click on a rail focuses it, which is what makes
+    /// the arrows work.
+    effort_focus: [FocusHandle; 2],
     /// The tab that owns this state: what a launch is emitted on.
     tab: WeakEntity<TabContent>,
     _subscriptions: Vec<Subscription>,
 }
 
-/// Where a check's answer comes from: the swarm binary, or an answer already known.
-#[derive(Clone, Default)]
-enum CheckProbe {
-    /// Run it: `evo-swarm check --json`, on the app's own executor.
-    #[default]
-    Command,
-    /// Answer from this list, starting no process. For tests, which must not wait on a
-    /// swarm binary.
-    Fixed(Vec<Problem>),
-}
-
 impl EmptyTabState {
     fn new(window: &mut Window, tab: WeakEntity<TabContent>, cx: &mut Context<Self>) -> Self {
         let launcher = Launcher::new();
-        let coordinator = chooser_state(&launcher, Choice::Coordinator, window, cx);
-        let lanes = chooser_state(&launcher, Choice::Lanes, window, cx);
-        let lane_thinking = chooser_state(&launcher, Choice::LaneThinking, window, cx);
-        let workers = chooser_state(&launcher, Choice::Workers, window, cx);
+        let coordinator = model_state(&launcher, Card::Coordinator, window, cx);
+        let workers = model_state(&launcher, Card::Lanes, window, cx);
+        let count = cx.new(|cx| {
+            let mut state = InputState::new(window, cx)
+                .default_value(launcher.workers().to_string())
+                .placeholder("1");
+            // `.number-input input{text-align:center}`.
+            state.set_text_align(TextAlign::Center, cx);
+            state
+        });
+
         let subscriptions = vec![
             cx.subscribe_in(
                 &coordinator,
                 window,
-                |this, _, event: &SelectEvent<Vec<ChooserItem>>, window, cx| {
-                    this.on_choose(Choice::Coordinator, event, window, cx)
-                },
-            ),
-            cx.subscribe_in(
-                &lanes,
-                window,
-                |this, _, event: &SelectEvent<Vec<ChooserItem>>, window, cx| {
-                    this.on_choose(Choice::Lanes, event, window, cx)
-                },
-            ),
-            cx.subscribe_in(
-                &lane_thinking,
-                window,
-                |this, _, event: &SelectEvent<Vec<ChooserItem>>, window, cx| {
-                    this.on_choose(Choice::LaneThinking, event, window, cx)
+                |this, _, event: &SelectEvent<Vec<ModelItem>>, window, cx| {
+                    this.on_choose(Card::Coordinator, event, window, cx)
                 },
             ),
             cx.subscribe_in(
                 &workers,
                 window,
-                |this, _, event: &SelectEvent<Vec<ChooserItem>>, window, cx| {
-                    this.on_choose(Choice::Workers, event, window, cx)
+                |this, _, event: &SelectEvent<Vec<ModelItem>>, window, cx| {
+                    this.on_choose(Card::Lanes, event, window, cx)
                 },
             ),
+            cx.subscribe_in(&count, window, |this, _, event: &InputEvent, window, cx| {
+                this.on_type(event, window, cx)
+            }),
         ];
+
         EmptyTabState {
             launcher,
             coordinator,
-            lanes,
-            lane_thinking,
             workers,
+            count,
             home: std::env::var("HOME").ok(),
             catalog: false,
             catalog_error: None,
-            // The app hands its own path in as soon as it can; until then this is where the
-            // installed binary is (§1).
+            // The app hands its own path in as soon as it can; until then this is where
+            // the installed binary is (§1).
             swarm_bin: cli::swarm_bin(),
             problems: Vec::new(),
             check_revision: 0,
             check_probe: CheckProbe::default(),
             picker: FolderPicker::Dialog,
+            stepping: [false; 2],
+            history_loading: false,
+            history_error: None,
             folder_focus: cx.focus_handle(),
-            history_focus: cx.focus_handle().tab_stop(true),
+            effort_focus: [cx.focus_handle(), cx.focus_handle()],
             tab,
             _subscriptions: subscriptions,
         }
     }
 
-    /// The select widget of one chooser row: what a click on a problem line focuses.
-    fn select(&self, which: Choice) -> Entity<SelectState<Vec<ChooserItem>>> {
-        match which {
-            Choice::Coordinator => self.coordinator.clone(),
-            Choice::Lanes => self.lanes.clone(),
-            Choice::LaneThinking => self.lane_thinking.clone(),
-            Choice::Workers => self.workers.clone(),
-        }
-    }
-
-    /// A chooser committed an option. The launcher is the one who decides whether it means
-    /// anything: a rebuilt chooser can drop a choice that no longer exists.
+    /// A model menu committed an option: the launcher decides whether it means anything —
+    /// a rebuilt field can drop a choice that no longer exists.
     fn on_choose(
         &mut self,
-        which: Choice,
-        event: &SelectEvent<Vec<ChooserItem>>,
+        role: Card,
+        event: &SelectEvent<Vec<ModelItem>>,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let SelectEvent::Confirm(Some(key)) = event else {
             return;
         };
-        if self.launcher.select(which, key) {
+        if self.launcher.choose(role, key) {
             // A different launch is a different answer: ask again (§9).
             self.run_check(cx);
             cx.notify();
         }
     }
 
-    /// Rebuild the selects from the launcher: the catalog arrived, or the project's worker
-    /// count did.
-    fn sync_choosers(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        for which in [
-            Choice::Coordinator,
-            Choice::Lanes,
-            Choice::LaneThinking,
-            Choice::Workers,
+    /// The count field was typed in. The design's own rule: a number that cannot be a
+    /// count is the nearest count it can be, and the field is put back to what the model
+    /// says — `Math.max(1, Math.min(64, n || 1))`, with an empty box reading 1.
+    fn on_type(&mut self, event: &InputEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if !matches!(event, InputEvent::Change) {
+            return;
+        }
+        let typed = self.count.read(cx).value();
+        let count = typed
+            .trim()
+            .parse::<u16>()
+            .unwrap_or(0)
+            .clamp(session::WORKERS_MIN, session::WORKERS_MAX);
+        if self.launcher.set_workers(count) {
+            cx.notify();
+        }
+        if typed.as_ref() != count.to_string() {
+            self.count.update(cx, |state, cx| {
+                state.set_value(count.to_string(), window, cx)
+            });
+        }
+    }
+
+    /// One of the count box's steppers: `−` is one fewer, `+` one more, both clamped.
+    fn step_count(&mut self, up: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let current = self.launcher.workers();
+        let next = if up {
+            current.saturating_add(1)
+        } else {
+            current.saturating_sub(1)
+        };
+        if self.launcher.set_workers(next) {
+            let count = self.launcher.workers().to_string();
+            self.count
+                .update(cx, |state, cx| state.set_value(count, window, cx));
+            cx.notify();
+        }
+    }
+
+    /// Rebuild the two model fields and the count from the launcher: the catalog arrived,
+    /// or the resolved values changed with it.
+    fn sync_fields(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for (role, field) in [
+            (Card::Coordinator, self.coordinator.clone()),
+            (Card::Lanes, self.workers.clone()),
         ] {
-            let state = self.select(which);
-            let items: Vec<ChooserItem> = self
-                .launcher
-                .chooser(which)
-                .options
-                .iter()
-                .map(ChooserItem::from)
-                .collect();
-            let selected = self
-                .launcher
-                .chooser(which)
-                .index_of(self.launcher.selected_key(which))
-                .map(|row| IndexPath::default().row(row));
-            state.update(cx, |state, cx| {
+            let items = model_items(&self.launcher, role);
+            let selected = selected_row(&self.launcher, role, &items);
+            field.update(cx, |state, cx| {
                 state.set_items(items, window, cx);
                 state.set_selected_index(selected, window, cx);
             });
+        }
+        let workers = self.launcher.workers().to_string();
+        if self.count.read(cx).value().as_ref() != workers {
+            self.count
+                .update(cx, |state, cx| state.set_value(workers, window, cx));
         }
     }
 
     /// The catalog: the `/catalog` body (§5.6) the disk cache holds, or the one the running
     /// server just answered with.
     ///
-    /// The body carries everything the choosers need — the models with their `ready`/`reason`,
-    /// and the `lanes.models` list with evo's own `ok`/`reason` for each registration a lane
-    /// may run — so nothing here has to compare API sets.
+    /// The body carries everything the controls need — the models with their
+    /// `ready`/`reason`, the `lanes.models` list with evo's own `ok`/`reason` for each
+    /// registration a lane may run, the default registration and the levels a session takes
+    /// — so nothing here has to compare API sets.
     fn set_catalog(&mut self, catalog: &Value, window: &mut Window, cx: &mut Context<Self>) {
         self.catalog = true;
         self.catalog_error = None;
         self.launcher.set_catalog(catalog);
-        self.sync_choosers(window, cx);
+        self.sync_fields(window, cx);
         self.run_check(cx);
         cx.notify();
     }
@@ -496,27 +589,30 @@ impl EmptyTabState {
         self.run_check(cx);
     }
 
-    /// What a check found, without running one: the tab's answer for a test.
+    /// What a check found, without running one: the tab's answer for a test. The whole
+    /// report, because its models are what the fields resolve to — not only its lines.
     #[allow(dead_code)]
-    fn set_problems(&mut self, problems: Vec<Problem>, cx: &mut Context<Self>) {
-        self.check_probe = CheckProbe::Fixed(problems);
+    fn set_check_report(&mut self, report: CheckReport, cx: &mut Context<Self>) {
+        self.check_probe = CheckProbe::Fixed(Box::new(report));
         self.run_check(cx);
     }
 
-    /// Ask `evo-swarm check --json` about the launch the choosers describe (§9), off the
+    /// Ask `evo-swarm check --json` about the launch the controls describe (§9), off the
     /// thread that draws: are the models resolvable, can a lane reach its API, is the key
-    /// there. The answer is the choosers' state — the lines this tab shows under them.
+    /// there. The answer is both the lines under the cards and what the fields resolve to.
     ///
     /// A check that cannot run at all — the binary is not there, or is not one that runs —
     /// is one more line of the same kind: it wears evo's own shape, says which path it
     /// tried, and a click on it opens Settings, which is where a path is fixed (§13).
     fn run_check(&mut self, cx: &mut Context<Self>) {
-        let spec = crate::launch::check_spec(&self.launcher.plan());
+        let plan = self.launcher.plan();
+        let spec = crate::launch::check_spec(&plan);
         self.check_revision += 1;
         let revision = self.check_revision;
 
-        if let CheckProbe::Fixed(problems) = self.check_probe.clone() {
-            self.settle(&problems, revision, cx);
+        if let CheckProbe::Fixed(report) = self.check_probe.clone() {
+            self.launcher.set_check(&check_body(&report));
+            self.settle(&report.problems, revision, cx);
             return;
         }
 
@@ -524,50 +620,63 @@ impl EmptyTabState {
         let argv = spec.check_argv();
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
             // A process, but not on the thread that draws: the app's own executor runs it.
-            let problems = cx
+            let outcome = cx
                 .background_executor()
                 .spawn(async move {
-                    // `check` exits 1 when it found problems and prints them
-                    // anyway (§2), so the document is read on that exit too: those
-                    // problems are exactly what these lines are.
+                    // `check` exits 1 when it found problems and prints them anyway (§2),
+                    // so the document is read on that exit too: those problems are exactly
+                    // what these lines are.
                     match cli::run_json_reporting(&bin, &argv) {
-                        Ok(body) => CheckReport::from_json(&body).problems,
-                        Err(error) => vec![check_failed(&error)],
+                        Ok(body) => CheckReport::from_json(&body),
+                        Err(error) => CheckReport {
+                            problems: vec![check_failed(&error)],
+                            ..CheckReport::default()
+                        },
                     }
                 })
                 .await;
-            let _ = this.update(cx, |state, cx| state.settle(&problems, revision, cx));
+            let report = check_body(&outcome);
+            let problems = outcome.problems;
+            let _ = this.update(cx, move |state, cx| {
+                if state.check_revision != revision {
+                    return;
+                }
+                state.launcher.set_check(&report);
+                state.settle(&problems, revision, cx);
+            });
         })
         .detach();
     }
 
     /// Take a check's answer, if it is still the answer to the newest question asked.
     fn settle(&mut self, problems: &[Problem], revision: u64, cx: &mut Context<Self>) {
-        if self.check_revision != revision || self.problems == problems {
+        if self.check_revision != revision {
             return;
         }
-        self.problems = problems.to_vec();
+        if self.problems != problems {
+            self.problems = problems.to_vec();
+        }
         cx.notify();
     }
 
-    /// A click on a problem line: the chooser the line is about takes the keyboard — so the
-    /// arrows are already on it — or, for anything about the machine rather than the launch,
-    /// the app's Settings panel opens.
+    /// A click on a problem line: the field the line is about takes the keyboard — so the
+    /// keyboard is already where the fix is — or, for anything about the machine rather
+    /// than the launch, the app's Settings panel opens.
     fn open_target(&mut self, target: ProblemTarget, window: &mut Window, cx: &mut Context<Self>) {
-        // A problem about the machine the swarm would run on — a binary that is not there —
-        // is not about anything on this screen: the app's Settings panel is where it is
+        // A problem about the machine the swarm would run on — a binary that is not there
+        // — is not about anything on this screen: the app's Settings panel is where it is
         // fixed (§13, §9.7).
-        let Some(which) = (match target {
-            ProblemTarget::Model => Some(Choice::Coordinator),
-            ProblemTarget::LaneModel => Some(Choice::Lanes),
-            ProblemTarget::Thinking => Some(Choice::LaneThinking),
-            ProblemTarget::Workers => Some(Choice::Workers),
+        let handle = match target {
+            ProblemTarget::Model => Some(self.coordinator.read(cx).focus_handle(cx)),
+            ProblemTarget::LaneModel => Some(self.workers.read(cx).focus_handle(cx)),
+            ProblemTarget::Thinking => Some(self.effort_focus[slot(Card::Coordinator)].clone()),
+            ProblemTarget::Workers => Some(self.count.read(cx).focus_handle(cx)),
             ProblemTarget::Other => None,
-        }) else {
+        };
+        let Some(handle) = handle else {
             window.dispatch_action(Box::new(OpenSettings), cx);
             return;
         };
-        let handle = self.select(which).read(cx).focus_handle(cx);
         window.focus(&handle, cx);
     }
 
@@ -591,9 +700,9 @@ impl EmptyTabState {
 
     /// Ask for a folder, then launch in it (§7.2).
     ///
-    /// The dialog is `rfd`'s async one: the UI thread neither blocks on it nor waits for it,
-    /// its answer arrives on the GPUI foreground executor, and cancelling it leaves the tab
-    /// empty.
+    /// The dialog is `rfd`'s async one: the UI thread neither blocks on it nor waits for
+    /// it, its answer arrives on the GPUI foreground executor, and cancelling it leaves the
+    /// tab empty.
     fn pick_folder(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let answer = match self.picker.clone() {
             FolderPicker::Fixed(answer) => answer,
@@ -626,169 +735,382 @@ impl EmptyTabState {
         }
     }
 
-    /// The caption under the lanes chooser: the one place the empty tab says something went
-    /// wrong, something is still loading, or what a chosen lanes model will do.
-    fn caption(&self) -> Option<Caption> {
-        if let Some(error) = &self.catalog_error {
-            // The server's own words are evidence, not a message: they go in the hover (and
-            // in `app.log`, where the app wrote them) and the line says what the tab does
-            // about it — nothing, which is why it still works: every chooser is on Default,
-            // and the folder card opens a swarm from there.
-            let text = if self.catalog {
-                // A cache was in use, so the last catalog is still in the choosers.
-                CATALOG_STALE
-            } else {
-                CATALOG_FAILED
-            };
-            return Some(Caption {
-                text: SharedString::from(text),
-                tone: CaptionTone::Warning,
-                detail: Some(SharedString::from(error.clone())),
-            });
-        }
-        if !self.catalog {
-            return Some(Caption {
-                text: SharedString::from("Loading models…"),
-                tone: CaptionTone::Loading,
-                detail: None,
-            });
-        }
-        let lanes = self.launcher.selected(Choice::Lanes)?;
-        if lanes.key == DEFAULT_KEY {
-            // Default passes no flag: every lane runs what the coordinator runs, or what the
-            // project's own `swarm.lisp` says (§1).
-            return None;
-        }
-        // A lane's model is a launch flag now — the app never writes the project's
-        // `swarm.lisp` — so the note says what the flag means (§1, F3).
-        Some(Caption {
-            text: SharedString::from(format!("Every lane runs {} (--lane-model)", lanes.key)),
-            tone: CaptionTone::Note,
-            detail: None,
-        })
-    }
+    // --- the pieces the page is made of ---------------------------------------------
 
     fn header(&self, cx: &Context<Self>) -> impl IntoElement {
         v_flex()
-            .gap_1()
-            .child(div().text_lg().font_semibold().child("New swarm"))
+            .id("empty-head")
+            .test_support()
+            .flex_none()
+            .mb(HEAD_GAP)
             .child(
                 div()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("Pick models, then a folder"),
+                    .text_size(TITLE_SIZE)
+                    .line_height(TITLE_LINE)
+                    .font_semibold()
+                    .child(TITLE),
             )
-    }
-
-    /// One chooser row: the label, then the select.
-    fn chooser_row(
-        &self,
-        label: &'static str,
-        id: &'static str,
-        state: &Entity<SelectState<Vec<ChooserItem>>>,
-        cx: &Context<Self>,
-    ) -> impl IntoElement {
-        h_flex()
-            .w_full()
-            .items_center()
-            .gap_4()
-            // Space opens the menu, the way Enter and the arrows already do (`gpui-base` binds
-            // those in the select's own key context, and nothing binds Space): the key arrives
-            // here from the select's trigger, which is inside this row.
-            .on_key_down(cx.listener(Self::chooser_key))
             .child(
                 div()
-                    .w(LABEL_WIDTH)
-                    .flex_none()
+                    .text_size(px(design::FONT_BASE - 2.))
                     .text_color(cx.theme().muted_foreground)
-                    .child(label),
-            )
-            .child(
-                Select::new(state)
-                    .id(id)
-                    .w(SELECT_WIDTH)
-                    .menu_width(MENU_WIDTH)
-                    .accessibility_label(label),
+                    .child(SUBTITLE),
             )
     }
 
-    /// The chooser's own keys. Only Space is missing from the kit's bindings: the arrows
-    /// open a closed select, `enter` opens it, and `escape` closes it without the tab going
-    /// anywhere — all of those are the select's own actions, dispatched to the focused
-    /// control. Space is the one key a user is as likely to try, so it takes the same path
-    /// the other two do: the select's `Confirm` action, which opens the menu on the value it
-    /// already has instead of moving the highlight.
-    fn chooser_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if event.keystroke.key != "space" {
-            return;
-        }
-        // The focused select opens itself; this row only knows the key was pressed inside it.
-        window.dispatch_action(
-            Box::new(gpui_kit::base::actions::Confirm { secondary: false }),
-            cx,
-        );
-        cx.stop_propagation();
-    }
-
-    fn render_choosers(&self, cx: &Context<Self>) -> impl IntoElement {
-        h_flex()
+    /// One role card: its title, the count control when it has one, and the two fields.
+    fn role_card(&self, role: Card, window: &Window, cx: &Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let (title, id) = match role {
+            Card::Coordinator => (COORDINATOR_TITLE, COORDINATOR_CARD_ID),
+            Card::Lanes => (WORKERS_TITLE, WORKERS_CARD_ID),
+        };
+        v_flex()
+            .id(id)
+            .test_support()
             .w_full()
-            .items_stretch()
-            .gap_6()
+            .min_w_0()
+            .px(CARD_PAD_X)
+            .py(CARD_PAD_Y)
+            .rounded(theme.radius_lg)
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.background)
             .child(
-                v_flex()
-                    // The chooser column, and the button takes exactly what is left of the
-                    // block beside it.
-                    .w(px(586.))
-                    .flex_none()
-                    .gap(ROW_GAP)
-                    .child(self.chooser_row(
-                        "Coordinator model",
-                        "coordinator-model",
-                        &self.coordinator,
-                        cx,
-                    ))
+                h_flex()
+                    .id(ElementId::Name(format!("{id}-heading").into()))
+                    .test_support()
+                    .w_full()
+                    .h(CARD_HEADING_H)
+                    .mb(CARD_HEADING_GAP)
+                    .gap(FIELD_GAP)
+                    .items_center()
                     .child(
-                        v_flex()
-                            .gap_1()
-                            .child(self.chooser_row("Lanes model", "lanes-model", &self.lanes, cx))
-                            // The caption's row exists only when there is a caption: a
-                            // reserved one was a blank gap the height of a chooser row.
-                            .when_some(self.render_caption(cx), |column, caption| {
-                                column.child(caption)
-                            }),
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(CARD_TITLE)
+                            .font_semibold()
+                            .child(title),
                     )
-                    .child(self.chooser_row(
-                        "Lane thinking",
-                        "lane-thinking",
-                        &self.lane_thinking,
-                        cx,
-                    ))
-                    .child(self.chooser_row("Workers", "workers", &self.workers, cx))
-                    .when_some(self.render_problems(cx), |rows, problems| {
-                        rows.child(problems)
+                    .when(role == Card::Lanes, |heading| {
+                        heading.child(
+                            div()
+                                .w(FIELD_COLUMN)
+                                .flex_none()
+                                .child(self.count_box(window, cx)),
+                        )
                     }),
             )
             .child(
-                // The folder card's column: the card, and nothing else — a binary that
-                // cannot run is one of the check's own lines, under the choosers (§9.7).
-                v_flex()
-                    .flex_1()
+                h_flex()
+                    .w_full()
                     .min_w_0()
-                    .gap_2()
-                    .child(self.render_folder_button(cx)),
+                    .gap(FIELD_GAP)
+                    .items_end()
+                    .child(self.model_field(role, cx))
+                    .child(
+                        div()
+                            .w(FIELD_COLUMN)
+                            .flex_none()
+                            .child(self.effort_field(role, window, cx)),
+                    ),
             )
     }
 
-    /// What `evo-swarm check --json` found wrong with this launch (§9): one calm line each,
-    /// and a click opens the chooser the line is about. Nothing at all when the launch is
-    /// fine, which is the usual case.
+    /// The model field: the design's `.field` — a label, then the select's own box.
+    fn model_field(&self, role: Card, cx: &Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let (id, field, label) = match role {
+            Card::Coordinator => (COORDINATOR_MODEL_ID, &self.coordinator, "Coordinator model"),
+            Card::Lanes => (WORKERS_MODEL_ID, &self.workers, "Workers model"),
+        };
+        // The design's `:focus-within`: the box around the control wears the ring, and
+        // the handle is the control's own, so there is no second tab stop to land on.
+        let handle = match role {
+            Card::Coordinator => self.coordinator.read(cx).focus_handle(cx),
+            Card::Lanes => self.workers.read(cx).focus_handle(cx),
+        };
+        let border = theme.border;
+        let primary = theme.primary;
+        let muted = theme.muted;
+        // A field that resolved no model says so in the box, in evo's own words: the click
+        // still opens the menu, which is where another registration would come from.
+        let note = self
+            .launcher
+            .unresolved_note(role)
+            .unwrap_or_else(|| "no model configured".to_string());
+        v_flex()
+            .flex_1()
+            .min_w_0()
+            .child(
+                div()
+                    .mb(LABEL_GAP)
+                    .text_size(SMALL)
+                    .text_color(theme.muted_foreground)
+                    .child(MODEL_LABEL),
+            )
+            .child(
+                div()
+                    .id(ElementId::Name(format!("{id}-box").into()))
+                    .test_support()
+                    .relative()
+                    .w_full()
+                    .h(SELECT_H)
+                    .track_focus(&handle)
+                    // `:focus-within`: the ring is the design's `0 0 0 2px var(--muted)`
+                    // over a primary border. Painted by the element that carries the
+                    // handle, so it follows the keyboard without a re-render of the page.
+                    .focus(move |style| style.border_color(primary).shadow(vec![ring(2., muted)]))
+                    .child(
+                        Select::new(field)
+                            .id(id)
+                            .appearance(false)
+                            .focus_ring(false)
+                            // A field that resolved no model says so in the box, in evo's
+                            // own words: the click still opens the menu, which is where
+                            // another registration would come from.
+                            .placeholder(note)
+                            .w_full()
+                            .h(SELECT_H)
+                            .px(SELECT_PAD)
+                            .rounded(px(design::RADIUS))
+                            .border_1()
+                            .border_color(border)
+                            .bg(theme.background)
+                            .text_size(FIELD_TEXT)
+                            .line_height(FIELD_LINE)
+                            .text_color(theme.foreground)
+                            .menu_width(px(340.))
+                            .accessibility_label(label),
+                    ),
+            )
+    }
+
+    /// The effort field: the label row — the level's own name on the right, as the design
+    /// puts it — and the slider under it.
+    fn effort_field(&self, role: Card, window: &Window, cx: &Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let level = self
+            .launcher
+            .level(role)
+            .map(str::to_owned)
+            .unwrap_or_else(|| "—".to_string());
+        v_flex()
+            .w_full()
+            .min_w_0()
+            .child(
+                h_flex()
+                    .w_full()
+                    .items_center()
+                    .justify_between()
+                    .mb(LABEL_GAP)
+                    .child(
+                        div()
+                            .text_size(SMALL)
+                            .text_color(theme.muted_foreground)
+                            .child(EFFORT_LABEL),
+                    )
+                    .child(
+                        div()
+                            .text_size(SMALL)
+                            .font_medium()
+                            .text_color(theme.foreground)
+                            .child(level),
+                    ),
+            )
+            .child(self.effort_slider(role, window, cx))
+    }
+
+    /// The slider itself: the shared widget, with this page's levels and palette.
+    ///
+    /// `--thinking` / `--lane-thinking` take the levels the catalog lists, so the slider
+    /// offers exactly those — the caller owns the label, the widget the rail.
+    fn effort_slider(&self, role: Card, window: &Window, cx: &Context<Self>) -> AnyElement {
+        let id = match role {
+            Card::Coordinator => COORDINATOR_EFFORT_ID,
+            Card::Lanes => WORKERS_EFFORT_ID,
+        };
+        // The widget's own elements are not observed, so the slot a test (or a click
+        // measured against it) names is this box around it. Hit testing still lands on the
+        // rail inside: the child is what is under the pointer.
+        let wrapper = div().id(id).test_support().w_full();
+        let levels: Vec<SharedString> = self
+            .launcher
+            .levels()
+            .iter()
+            .map(|level| SharedString::from(level.clone()))
+            .collect();
+        let weak = cx.entity().downgrade();
+        let slider = widgets::EffortSlider::with_levels(
+            ElementId::Name(format!("{id}-rail-y").into()),
+            levels,
+            self.launcher.effort(role),
+        )
+        .palette(design::palette(cx.theme().is_dark()))
+        .focus(self.effort_focus[slot(role)].clone())
+        .notify({
+            let weak = weak.clone();
+            move |cx: &mut App| {
+                let _ = weak.update(cx, |_, cx| cx.notify());
+            }
+        })
+        .on_change(move |level, _window, cx| {
+            let _ = weak.update(cx, |state, cx| {
+                if state.launcher.set_effort(role, level) {
+                    cx.notify();
+                }
+            });
+        })
+        .render(window);
+        wrapper.child(slider).into_any_element()
+    }
+
+    /// The count control: `.worker-count` — a label, then the box the `−`/`+` steppers and
+    /// the field share.
+    fn count_box(&self, _window: &Window, cx: &Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let handle = self.count.read(cx).focus_handle(cx);
+        let border = theme.border;
+        let primary = theme.primary;
+        let muted = theme.muted;
+        let ink = theme.muted_foreground;
+        // The design's steppers are one tone, with no hover or pressed rule of their own:
+        // `.number-input button{border:0;background:var(--muted);color:var(--muted-fg)}`.
+        let step = |id: &'static str, label: &'static str, up: bool, cx: &Context<Self>| {
+            Button::new(id)
+                .rounded(px(0.))
+                .bg(muted)
+                .text_color(ink)
+                .w(COUNT_STEP)
+                .h_full()
+                .flex_none()
+                .text_size(SMALL)
+                .child(label)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                        this.stepping[usize::from(up)] = true;
+                        this.step_count(up, window, cx);
+                        cx.notify();
+                    }),
+                )
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &gpui_kit::MouseUpEvent, _, cx| {
+                        if this.stepping[usize::from(up)] {
+                            this.stepping[usize::from(up)] = false;
+                            cx.notify();
+                        }
+                    }),
+                )
+        };
+        h_flex()
+            .id(COUNT_ID)
+            .test_support()
+            .w_full()
+            .h(COUNT_H)
+            .items_center()
+            .gap(px(8.))
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(SMALL)
+                    .text_color(theme.muted_foreground)
+                    .child(COUNT_LABEL),
+            )
+            .child(
+                h_flex()
+                    .id(COUNT_BOX_ID)
+                    .test_support()
+                    .flex_1()
+                    .min_w_0()
+                    .h(COUNT_H)
+                    .items_center()
+                    .overflow_hidden()
+                    .rounded(px(design::RADIUS))
+                    .border_1()
+                    .border_color(border)
+                    .track_focus(&handle)
+                    // `.number-input:focus-within{border-color:var(--primary);box-shadow:0 0 0 2px var(--muted)}`
+                    .focus(move |style| style.border_color(primary).shadow(vec![ring(2., muted)]))
+                    .child(step(COUNT_MINUS_ID, "−", false, cx))
+                    .child(
+                        div()
+                            .id(COUNT_FIELD_ID)
+                            .test_support()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .child(
+                                // `.number-input input{border:0;background:transparent}`:
+                                // the box's own surface is the card's, and the field only
+                                // holds the digits.
+                                Input::new(&self.count)
+                                    .appearance(false)
+                                    .bg(theme.transparent)
+                                    .h_full()
+                                    .text_size(SMALL)
+                                    .aria_label(COUNT_LABEL),
+                            ),
+                    )
+                    .child(step(COUNT_PLUS_ID, "+", true, cx)),
+            )
+    }
+
+    /// The folder card (§7.2): the one thing on the page that is not a control's value —
+    /// pick the folder the swarm runs in.
+    fn folder_card(&self, cx: &Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let face = theme.secondary;
+        let hover_face = theme.muted;
+        let border = theme.border;
+        let accent = theme.primary;
+        let ring = theme.ring;
+        Button::new(FOLDER_ID)
+            .track_focus(&self.folder_focus)
+            .accessibility_label(FOLDER_LABEL)
+            .bg(face)
+            .text_color(theme.foreground)
+            .w(FOLDER_COLUMN)
+            .flex_none()
+            .p(FOLDER_PAD)
+            .rounded(theme.radius_lg)
+            .border_1()
+            .border_color(border)
+            // `.folder-card-large:hover{border-color:var(--primary);background:var(--muted)}`
+            .hover(move |style| style.border_color(accent).bg(hover_face))
+            .focus_visible(move |style| style.border_color(ring))
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(FOLDER_GAP)
+            .on_click(cx.listener(|this, _, window, cx| this.pick_folder(window, cx)))
+            .child(
+                div().mb(FOLDER_ICON_GAP).child(
+                    Icon::new(IconName::Folder)
+                        .with_size(FOLDER_ICON)
+                        .text_color(theme.foreground),
+                ),
+            )
+            .child(div().text_size(px(14.)).font_medium().child(FOLDER_LABEL))
+            .child(
+                div()
+                    .max_w(FOLDER_HINT_W)
+                    .text_size(SMALL)
+                    .line_height(px(16.))
+                    .text_center()
+                    .text_color(theme.muted_foreground)
+                    .child(FOLDER_HINT),
+            )
+    }
+
+    /// What `evo-swarm check --json` found wrong with this launch (§9), and what the
+    /// catalog could not do: one calm line each, under the two cards, with a click on a
+    /// check line opening the field it is about. Nothing at all when everything is fine.
     fn render_problems(&self, cx: &Context<Self>) -> Option<AnyElement> {
-        if self.problems.is_empty() {
-            return None;
-        }
-        let ink = warning_ink(cx.theme());
-        let lines: Vec<AnyElement> =
+        let mut lines: Vec<AnyElement> =
             self.problems
                 .iter()
                 .enumerate()
@@ -801,12 +1123,10 @@ impl EmptyTabState {
                         .test_support()
                         .w_full()
                         .min_w_0()
-                        .text_xs()
-                        .text_color(ink)
+                        .text_size(SMALL)
+                        .text_color(warning_ink(cx.theme()))
                         .cursor_pointer()
                         .hover(|style| style.underline())
-                        // What a screen reader hears, and what the hover shows: the message
-                        // evo wrote, one line.
                         .aria_label(line.clone())
                         .tooltip(move |window, cx| {
                             Tooltip::new(hovered.clone())
@@ -820,127 +1140,338 @@ impl EmptyTabState {
                         .into_any_element()
                 })
                 .collect();
+        // The catalog's own trouble is one more line of the same kind: what the page does
+        // without it, with the server's own words in the hover.
+        if let Some(error) = &self.catalog_error {
+            let text = if self.catalog {
+                CATALOG_STALE
+            } else {
+                CATALOG_FAILED
+            };
+            let detail = SharedString::from(error.clone());
+            lines.push(
+                div()
+                    .id("catalog-problem")
+                    .test_support()
+                    .w_full()
+                    .min_w_0()
+                    .text_size(SMALL)
+                    .text_color(warning_ink(cx.theme()))
+                    .tooltip(move |window, cx| {
+                        Tooltip::new(detail.clone())
+                            .max_w(px(460.))
+                            .build(window, cx)
+                    })
+                    .child(text)
+                    .into_any_element(),
+            );
+        }
+        if lines.is_empty() {
+            return None;
+        }
         Some(
             v_flex()
                 .id(PROBLEMS_ID)
                 .test_support()
-                .ml(CAPTION_INDENT)
+                .w_full()
                 .gap_1()
                 .children(lines)
                 .into_any_element(),
         )
     }
 
-    /// The caption, or nothing at all: a row with no caption is a row the tab does not
-    /// draw, which is what keeps the choosers from having a hole in them.
-    fn render_caption(&self, cx: &Context<Self>) -> Option<AnyElement> {
-        let caption = self.caption()?;
-        // The one tone that is not the page's quiet grey: a catalog that could not be read
-        // is worth noticing, and it is not a mistake the person made — amber, not red.
-        let color = match caption.tone {
-            CaptionTone::Warning => warning_ink(cx.theme()),
-            _ => cx.theme().muted_foreground,
+    /// The configuration and the folder beside it: `.launch-layout`.
+    fn launch_layout(&self, window: &Window, cx: &Context<Self>) -> impl IntoElement {
+        h_flex()
+            .id("launch-layout")
+            .test_support()
+            .w_full()
+            .items_stretch()
+            .gap(LAYOUT_GAP)
+            .child(
+                v_flex()
+                    .id("role-stack")
+                    .test_support()
+                    .flex_1()
+                    .min_w_0()
+                    .gap(CARD_GAP)
+                    .child(self.role_card(Card::Coordinator, window, cx))
+                    .child(self.role_card(Card::Lanes, window, cx))
+                    // The check's own lines belong under the cards they are about.
+                    .when_some(self.render_problems(cx), |stack, problems| {
+                        stack.child(problems)
+                    }),
+            )
+            .child(self.folder_card(cx))
+    }
+
+    /// The resumable swarms: a fixed head, then a list that scrolls in whatever height is
+    /// left — the header and the cards never move for it.
+    fn history_section(&self, cx: &Context<Self>) -> impl IntoElement {
+        let rows = self.launcher.history();
+        let count = match rows.len() {
+            0 => SharedString::default(),
+            1 => SharedString::from("1 resumable"),
+            n => SharedString::from(format!("{n} resumable")),
         };
-        // What the hover says: the catalog fetch's own words where there are any, the line
-        // itself otherwise — a note that had to be elided still has to be readable in full.
-        let tooltip = caption
-            .detail
-            .clone()
-            .unwrap_or_else(|| caption.text.clone());
-        Some(
-            div()
-                .id(CAPTION_ID)
+        v_flex()
+            .id(HISTORY_ID)
+            .test_support()
+            .w_full()
+            .flex_1()
+            .min_h_0()
+            .mt(HISTORY_GAP)
+            .child(
+                h_flex()
+                    .id("history-head")
+                    .test_support()
+                    .flex_none()
+                    .w_full()
+                    .items_center()
+                    .gap(HISTORY_HEAD_GAP)
+                    .mb(HISTORY_HEAD_GAP)
+                    .child(
+                        div()
+                            .text_size(CARD_TITLE)
+                            .font_semibold()
+                            .child(HISTORY_TITLE),
+                    )
+                    .child(
+                        div()
+                            .id(HISTORY_COUNT_ID)
+                            .test_support()
+                            .text_size(SMALL)
+                            .text_color(cx.theme().muted_foreground)
+                            .child(count),
+                    ),
+            )
+            .child(self.history_body(cx))
+    }
+
+    /// The list itself, or the one line that stands in for it: it is still being fetched,
+    /// it could not be fetched, there is nothing to resume, or the rows.
+    fn history_body(&self, cx: &Context<Self>) -> AnyElement {
+        let rows = self.launcher.history();
+        if rows.is_empty() {
+            let note = match (&self.history_error, self.history_loading) {
+                (Some(error), _) => SharedString::from(error.clone()),
+                (None, true) => SharedString::from("Looking for sessions…"),
+                (None, false) => SharedString::from("No swarms to resume yet."),
+            };
+            return div()
+                .id(HISTORY_HINT_ID)
                 .test_support()
-                .ml(CAPTION_INDENT)
-                .min_w_0()
-                // One small line's worth: enough that the row below never jumps by a
-                // whole chooser row when a caption comes and goes, and no more.
-                .min_h(CAPTION_LINE_HEIGHT)
+                .w_full()
+                .pb(px(8.))
+                .text_size(CARD_TITLE)
+                .text_color(cx.theme().muted_foreground)
+                .child(note)
+                .into_any_element();
+        }
+        let theme = cx.theme();
+        let rows: Vec<AnyElement> = rows
+            .iter()
+            .enumerate()
+            .map(|(ix, row)| self.history_row(ix, row, cx).into_any_element())
+            .collect();
+        div()
+            .id(HISTORY_LIST_ID)
+            .test_support()
+            .w_full()
+            // `.history-list{flex:0 1 auto;min-height:0;overflow-y:auto}`: it takes its
+            // content's height until the page runs out, then scrolls in place.
+            .flex_grow_0()
+            .flex_shrink_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .role(gpui_kit::Role::Group)
+            .aria_label(HISTORY_LABEL)
+            .rounded(theme.radius_lg)
+            .border_1()
+            .border_color(theme.border)
+            .children(rows)
+            .into_any_element()
+    }
+
+    /// One history row: the folder glyph, the title with the badge the app's own recents
+    /// earn, the path and how long ago under it, and the arrow that says what a click does.
+    fn history_row(
+        &self,
+        ix: usize,
+        row: &session::HistoryRow,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        let theme = cx.theme();
+        let muted = theme.muted_foreground;
+        let session = PathBuf::from(&row.session_path);
+        let folder = PathBuf::from(&row.folder);
+        let badge = row.open_at_quit.then(|| {
+            div()
+                .id(ElementId::NamedInteger(OPEN_AT_QUIT_ID.into(), ix as u64))
+                .test_support()
                 .flex_none()
-                // One line, then an ellipsis: `line_clamp` alone would simply cut the line
-                // mid-word at the box edge, so the caption asks for the overflow ellipsis
-                // too — that is the pair GPUI renders as a clamped, ellipsized line.
-                .line_clamp(CAPTION_LINES)
-                .text_ellipsis()
-                .text_xs()
-                .text_color(color)
-                .tooltip(move |window, cx| {
+                .px(BADGE_PAD_X)
+                .py(px(1.))
+                .rounded(px(999.))
+                .bg(theme.muted)
+                .text_color(muted)
+                .text_size(TINY)
+                .child(OPEN_AT_QUIT_TEXT)
+                .into_any_element()
+        });
+        Button::new(ElementId::NamedInteger(HISTORY_ROW_ID.into(), ix as u64))
+            .bg(theme.transparent)
+            .text_color(theme.foreground)
+            .w_full()
+            .min_h(ROW_MIN_H)
+            .flex_none()
+            .px(ROW_PAD_X)
+            .py(ROW_PAD_Y)
+            .rounded(px(0.))
+            .gap(ROW_GAP)
+            .justify_start()
+            .when(ix > 0, |row| row.border_t_1().border_color(theme.border))
+            .tooltip({
+                let tooltip = SharedString::from(row.tooltip.clone());
+                move |window, cx| {
                     Tooltip::new(tooltip.clone())
                         .max_w(px(460.))
                         .build(window, cx)
-                })
-                .child(caption.text)
-                .into_any_element(),
-        )
-    }
-
-    /// The folder call to action (§7.2): the choosers add up to one decision — where the
-    /// swarm runs — so the space beside them is a drop target: a dashed outline with the
-    /// icon, the label and what picking a folder means inside it, exactly as tall as the
-    /// chooser column beside it. No fill: it is a space that invites a folder, not a block
-    /// sitting on the page.
-    fn render_folder_button(&self, cx: &Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let border = theme.border;
-        let accent = theme.primary;
-        let ring = theme.ring;
-        // Under the pointer the target says so: the outline takes the accent colour over a
-        // whisper of the theme's own surface — quiet enough that the page still reads as
-        // one page, and visible enough to be a target.
-        let wash = theme.secondary.opacity(HOVER_WASH);
-        // The icon is the one spot of colour on the screen, so it takes the theme's blue-ish
-        // info tone: a near-black or near-white `primary` would be a slab (light) or the
-        // whole target in the foreground colour (dark).
-        let icon_color = theme.info;
-        Button::new(FOLDER_ID)
-            .track_focus(&self.folder_focus)
-            .accessibility_label("Select folder…")
-            // The target is the column's fill: it takes exactly the height the chooser rows
-            // beside it give (§7.2).
-            .w_full()
-            .flex_1()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .gap_2()
-            .p_4()
-            .rounded(theme.radius_lg)
-            .border_1()
-            .border_dashed()
-            .border_color(border)
-            .hover(move |style| style.border_color(accent).bg(wash))
-            // Keyboard focus takes the theme's focus ring — a tab stop should read as focus,
-            // not as a second hover.
-            .focus_visible(move |style| style.border_color(ring).bg(wash))
-            .on_click(cx.listener(|this, _, window, cx| this.pick_folder(window, cx)))
-            .child(
-                Icon::new(IconName::Folder)
-                    .with_size(FOLDER_ICON_SIZE)
-                    .text_color(icon_color),
-            )
-            .child(div().text_sm().font_medium().child("Select folder…"))
+                }
+            })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let _ = this.tab.update(cx, |tab, cx| {
+                    tab.request_resume(session.clone(), folder.clone(), cx)
+                });
+            }))
             .child(
                 div()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child("The swarm starts in the folder you pick"),
+                    .flex_none()
+                    .child(Icon::new(IconName::Folder).with_size(ROW_ICON)),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .items_start()
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .min_w_0()
+                            .gap(px(8.))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .text_size(px(14.))
+                                    .font_medium()
+                                    .child(row.title.clone()),
+                            )
+                            .children(badge),
+                    )
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .min_w_0()
+                            .gap(px(5.))
+                            .text_size(SMALL)
+                            .text_color(muted)
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .child(row.folder_short.clone()),
+                            )
+                            .child(div().flex_none().child("·"))
+                            .child(div().flex_none().child(row.when.clone())),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(px(14.))
+                    .text_color(muted)
+                    .child(RESUME_ARROW),
             )
     }
 }
 
 impl Render for EmptyTabState {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
-            .gap_6()
-            .child(self.header(cx))
-            .child(self.render_choosers(cx))
+            .id("empty-tab")
+            .test_support()
+            .size_full()
+            .overflow_hidden()
+            .items_center()
+            .pt(PAGE_TOP)
+            .pb(PAGE_BOTTOM)
+            .px(PAGE_X)
+            .child(
+                v_flex()
+                    .id("empty-tab-block")
+                    .test_support()
+                    .w_full()
+                    .max_w(px(design::MEASURE))
+                    .flex_1()
+                    .min_h_0()
+                    .child(self.header(cx))
+                    .child(self.launch_layout(window, cx))
+                    .child(self.history_section(cx)),
+            )
     }
 }
 
-/// How much of the theme's surface shows under a hovered or focused drop target: a wash,
-/// not a fill — the page stays one page, and the outline does the pointing.
-const HOVER_WASH: f32 = 0.35;
+/// Where one card's own slots are in the state: the two model fields (`0`, `1`), the two
+/// sliders (`3`, `4`, after the count box's `2`).
+fn slot(role: Card) -> usize {
+    match role {
+        Card::Coordinator => 0,
+        Card::Lanes => 1,
+    }
+}
+
+/// The registrations one card's menu offers.
+fn model_items(launcher: &Launcher, role: Card) -> Vec<ModelItem> {
+    launcher
+        .models()
+        .iter()
+        .map(|model| ModelItem::from((model, role)))
+        .collect()
+}
+
+/// Where a card's chosen registration sits in its menu, for a select that takes an index.
+fn selected_row(launcher: &Launcher, role: Card, items: &[ModelItem]) -> Option<IndexPath> {
+    let key = launcher.chosen_key(role)?;
+    items
+        .iter()
+        .position(|item| item.key.as_ref() == key)
+        .map(|row| IndexPath::default().row(row))
+}
+
+/// A card's model field, built from the launcher's options.
+fn model_state(
+    launcher: &Launcher,
+    role: Card,
+    window: &mut Window,
+    cx: &mut App,
+) -> Entity<SelectState<Vec<ModelItem>>> {
+    let items = model_items(launcher, role);
+    let selected = selected_row(launcher, role, &items);
+    cx.new(|cx| SelectState::new(items, selected, window, cx))
+}
+
+/// What the caption says when the catalog could not be fetched at all (§5.6): one sentence
+/// about what the page still does, because the server's own words — `http 500: The value
+/// "Bearer …"` — are evidence, not a message. They go in the line's tooltip and in
+/// `app.log`; the fields keep whatever they had, so a swarm can still be started.
+const CATALOG_FAILED: &str = "Couldn't load the model list — evo's own defaults will apply.";
+/// … and when the catalog could not be fetched but the last one is still in the fields.
+const CATALOG_STALE: &str = "Couldn't refresh the model list — using the last one it loaded.";
 
 /// The one line a check that could not run becomes (§9): evo's own answer shape, naming the
 /// binary it tried and where a path is fixed. A click on it opens Settings, which is where
@@ -955,160 +1486,33 @@ fn check_failed(error: &CliError) -> Problem {
     }
 }
 
-/// A chooser's select, built from the launcher's options.
-fn chooser_state(
-    launcher: &Launcher,
-    which: Choice,
-    window: &mut Window,
-    cx: &mut App,
-) -> Entity<SelectState<Vec<ChooserItem>>> {
-    let items: Vec<ChooserItem> = launcher
-        .chooser(which)
-        .options
-        .iter()
-        .map(ChooserItem::from)
-        .collect();
-    // Default is the first option, so a fresh tab starts on it (§7.2).
-    cx.new(|cx| SelectState::new(items, Some(IndexPath::default()), window, cx))
+/// A check report as the JSON body `session::Launcher::set_check` reads: the same document
+/// `evo-swarm check --json` prints, rebuilt from the report a run produced.
+fn check_body(report: &CheckReport) -> Value {
+    fn one(check: &Option<store::catalog::ModelCheck>) -> Value {
+        serde_json::json!({
+            "id": check.as_ref().and_then(|check| check.id.clone()),
+            "provider": check.as_ref().and_then(|check| check.provider.clone()),
+            "ok": check.as_ref().map(|check| check.ok),
+            "reason": check.as_ref().and_then(|check| check.reason.clone()),
+        })
+    }
+    serde_json::json!({
+        "ok": report.ok,
+        "model": one(&report.model),
+        "lane_model": one(&report.lane_model),
+        "problems": report
+            .problems
+            .iter()
+            .map(|problem| serde_json::json!({"code": problem.code, "message": problem.message}))
+            .collect::<Vec<_>>(),
+    })
 }
 
 impl TabContent {
-    /// The empty tab (§7.2): the launcher block, then the resumable swarms.
-    pub(crate) fn render_empty(&self, cx: &mut Context<Self>) -> AnyElement {
-        v_flex()
-            .id("empty-tab")
-            .test_support()
-            .size_full()
-            .px_6()
-            .items_center()
-            // A tenth of the window keeps the block off the title bar, and the block then
-            // fills what is left so the history list scrolls inside it.
-            .child(div().h(relative(BLOCK_TOP)).flex_none())
-            .child(
-                v_flex()
-                    .id("empty-tab-block")
-                    .test_support()
-                    .w_full()
-                    .max_w(BLOCK_WIDTH)
-                    .flex_1()
-                    .min_h_0()
-                    .gap_6()
-                    .child(self.choosers.state.clone())
-                    .child(self.render_history(cx)),
-            )
-            .into_any_element()
-    }
-
-    /// The history list's own keys: the List draws and handles its items, but it does not
-    /// take part in tab traversal, so the frame around it holds the focus (§7.2's keyboard
-    /// order) and the arrows and Enter are handled here — the same two things a click does.
-    fn history_key(
-        &mut self,
-        event: &gpui_kit::KeyDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let rows = self.history.read(cx).delegate().rows().len();
-        let current = self.history.read(cx).selected_index();
-        match event.keystroke.key.as_str() {
-            // Home and End are the ends of the list, the same way an arrow is one step of it.
-            "home" | "end" | "down" | "up" => {
-                if rows == 0 {
-                    return;
-                }
-                let key = event.keystroke.key.as_str();
-                let row = match (key, current) {
-                    ("home", _) => 0,
-                    ("end", _) => rows - 1,
-                    (_, Some(ix)) => {
-                        let step: isize = if key == "down" { 1 } else { -1 };
-                        ix.row.saturating_add_signed(step).min(rows - 1)
-                    }
-                    // Nothing selected yet: an arrow starts at the top, or the bottom when
-                    // it points up.
-                    (_, None) if key == "up" => rows - 1,
-                    (_, None) => 0,
-                };
-                self.history.update(cx, |state, cx| {
-                    state.set_selected_index(Some(IndexPath::default().row(row)), window, cx)
-                });
-            }
-            "enter" => {
-                let Some(row) = current.and_then(|ix| {
-                    self.history
-                        .read(cx)
-                        .delegate()
-                        .row(ix.row)
-                        .map(|row| (row.session_path.clone(), row.folder.clone()))
-                }) else {
-                    return;
-                };
-                cx.emit(TabContentEvent::Resume {
-                    session_path: row.0,
-                    folder: row.1,
-                });
-            }
-            _ => {}
-        }
-    }
-
-    /// The resumable swarms, newest first (§2), with the two states that have no rows.
-    fn render_history(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let state = self.history.read(cx).delegate();
-        let rows = state.rows().len();
-        let count = match (rows, state.loading()) {
-            (0, true) => SharedString::default(),
-            (0, false) => SharedString::default(),
-            (1, _) => SharedString::from("1 resumable"),
-            (n, _) => SharedString::from(format!("{n} resumable")),
-        };
-        v_flex()
-            .w_full()
-            .flex_1()
-            .min_h_0()
-            .gap_2()
-            .child(
-                h_flex()
-                    .w_full()
-                    .items_center()
-                    .gap_2()
-                    .child(div().text_sm().font_semibold().child("History"))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(count),
-                    ),
-            )
-            .child(
-                div()
-                    .id(HISTORY_ID)
-                    .test_support()
-                    // The list's own focus handle, tracked here as well: the List draws and
-                    // handles keys, but it does not register itself as a tab stop, so
-                    // tabbing would never reach it (§7.2's keyboard order).
-                    .track_focus(&self.choosers.state.read(cx).history_focus)
-                    .tab_stop(true)
-                    // The frame is what has the focus, so the frame is what carries the
-                    // section's name: the List inside names its own items but not itself.
-                    .role(Role::Group)
-                    .aria_label(HISTORY_LABEL)
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_hidden()
-                    // The frame is the tab stop, so the frame is what shows the keyboard
-                    // focus: the same hairline ring the folder card carries. Only the
-                    // keyboard draws it — a pointer that lands on a row is not the list
-                    // saying it is ready for the arrows.
-                    .border_1()
-                    .border_color(cx.theme().transparent)
-                    .focus_visible({
-                        let ring = cx.theme().ring;
-                        move |style| style.border_color(ring)
-                    })
-                    .on_key_down(cx.listener(Self::history_key))
-                    .child(List::new(&self.history)),
-            )
+    /// The empty tab (§7.2): the configuration block, then the resumable swarms.
+    pub(crate) fn render_empty(&self, _cx: &mut Context<Self>) -> AnyElement {
+        self.choosers.state.clone().into_any_element()
     }
 
     /// The model catalog (§5.6): the body the disk cache holds, or the one the running
@@ -1126,7 +1530,8 @@ impl TabContent {
         cx.notify();
     }
 
-    /// The catalog could not be learned: say so where the loading hint would be.
+    /// The catalog could not be learned: say so under the cards, where the check's own
+    /// lines are.
     pub fn set_catalog_error(&mut self, error: Option<String>, cx: &mut Context<Self>) {
         let state = self.choosers.state.clone();
         state.update(cx, |state, cx| state.set_catalog_error(error, cx));
@@ -1146,7 +1551,7 @@ impl TabContent {
     ) {
         let state = self.choosers.state.clone();
         let home = home.map(str::to_string);
-        state.update(cx, |state, cx| {
+        let rows = state.update(cx, |state, cx| {
             state
                 .launcher
                 .set_history(entries, now, offset_seconds, home.as_deref());
@@ -1154,26 +1559,32 @@ impl TabContent {
                 state.home = home;
             }
             cx.notify();
+            rows_from_session(state.launcher.history())
         });
-        let rows = rows_from_session(state.read(cx).launcher.history());
         self.history
-            .update(cx, |state, cx| state.delegate_mut().set_rows(rows, cx));
+            .update(cx, |list, cx| list.delegate_mut().set_rows(rows, cx));
         cx.notify();
     }
 
     /// The session index is still being fetched (§2): the list says so instead of claiming
     /// there is nothing.
     pub fn set_history_loading(&mut self, loading: bool, cx: &mut Context<Self>) {
-        self.history.update(cx, |state, cx| {
-            state.delegate_mut().set_loading(loading, cx)
+        let state = self.choosers.state.clone();
+        state.update(cx, |state, cx| {
+            state.history_loading = loading;
+            cx.notify();
         });
         cx.notify();
     }
 
     /// The session index could not be read: the list says why.
     pub fn set_history_error(&mut self, error: Option<String>, cx: &mut Context<Self>) {
-        self.history
-            .update(cx, |state, cx| state.delegate_mut().set_error(error, cx));
+        let error = error.filter(|error| !error.trim().is_empty());
+        let state = self.choosers.state.clone();
+        state.update(cx, |state, cx| {
+            state.history_error = error;
+            cx.notify();
+        });
         cx.notify();
     }
 
@@ -1184,15 +1595,15 @@ impl TabContent {
         cx.notify();
     }
 
-    /// What the choosers add up to (§7.2, §1): the coordinator's `--model`, the lanes'
-    /// `--lane-model` and `--lane-thinking`, and `--workers`.
+    /// What the controls add up to (§7.2, §1): the coordinator's `--model` and
+    /// `--thinking`, `--workers`, and the lanes' `--lane-model` and `--lane-thinking`.
     pub fn launch_plan(&self, cx: &App) -> LaunchPlan {
         self.choosers.plan(cx)
     }
 
-    /// A folder is chosen: hand the window the launch it asked for — the models and the
-    /// worker count are fixed when the swarm starts (§7.2). The window starts the swarm;
-    /// this only reports the intent.
+    /// A folder is chosen: hand the window the launch it asked for — the models, the
+    /// efforts and the worker count are fixed when the swarm starts (§7.2). The window
+    /// starts the swarm; this only reports the intent.
     pub(crate) fn emit_launch(
         &mut self,
         folder: PathBuf,
@@ -1202,15 +1613,28 @@ impl TabContent {
         cx.emit(TabContentEvent::Launch { folder, plan });
     }
 
-    /// [`TabContent::emit_launch`] with the plan read from the choosers, for a caller that
+    /// [`TabContent::emit_launch`] with the plan read from the controls, for a caller that
     /// is not inside this tab's own update.
     pub(crate) fn request_launch(&mut self, folder: PathBuf, cx: &mut Context<Self>) {
         let plan = self.launch_plan(cx);
         self.emit_launch(folder, plan, cx);
     }
 
-    /// A folder pick a test injects, in place of the platform dialog. `None` is a cancelled
-    /// dialog: the tab stays empty. Test-only, hence the allow.
+    /// A history row is clicked: resume that session in the folder it ran in (§2).
+    pub(crate) fn request_resume(
+        &mut self,
+        session_path: PathBuf,
+        folder: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        cx.emit(TabContentEvent::Resume {
+            session_path,
+            folder,
+        });
+    }
+
+    /// A folder pick a test injects, in place of the platform dialog. `None` is a
+    /// cancelled dialog: the tab stays empty. Test-only, hence the allow.
     #[allow(dead_code)]
     pub(crate) fn set_folder_picker(&mut self, folder: Option<PathBuf>, cx: &mut Context<Self>) {
         let state = self.choosers.state.clone();
@@ -1220,36 +1644,27 @@ impl TabContent {
     }
 }
 
-/// The empty tab's history list (§2): the rows, and the states before there are any.
+/// The empty tab's history rows (§2): what `TabContent::history_rows` reads, and what a
+/// row's click resumes.
+///
+/// The rows are drawn by the empty tab itself, from the session model's own rows; this
+/// holds the two paths a *resume* needs, and the states before there are any rows.
 pub(crate) struct HistoryList {
     rows: Vec<HistoryRow>,
-    /// The session index is still being fetched.
-    loading: bool,
-    /// The index could not be fetched.
-    error: Option<String>,
-    selected: Option<IndexPath>,
 }
 
 impl HistoryList {
     pub(crate) fn new(rows: Vec<HistoryRow>) -> Self {
-        HistoryList {
-            rows,
-            loading: false,
-            error: None,
-            selected: None,
-        }
+        HistoryList { rows }
     }
 
     pub(crate) fn rows(&self) -> &[HistoryRow] {
         &self.rows
     }
 
+    /// One row, by its place in the list: what a caller resumes.
     pub(crate) fn row(&self, row: usize) -> Option<&HistoryRow> {
         self.rows.get(row)
-    }
-
-    pub(crate) fn loading(&self) -> bool {
-        self.loading
     }
 
     fn set_rows(&mut self, rows: Vec<HistoryRow>, cx: &mut Context<ListState<Self>>) {
@@ -1257,24 +1672,7 @@ impl HistoryList {
             return;
         }
         self.rows = rows;
-        // The rows are a different set now, so a remembered row index means nothing.
-        self.selected = None;
         cx.notify();
-    }
-
-    fn set_loading(&mut self, loading: bool, cx: &mut Context<ListState<Self>>) {
-        if self.loading != loading {
-            self.loading = loading;
-            cx.notify();
-        }
-    }
-
-    fn set_error(&mut self, error: Option<String>, cx: &mut Context<ListState<Self>>) {
-        let error = error.filter(|error| !error.trim().is_empty());
-        if self.error != error {
-            self.error = error;
-            cx.notify();
-        }
     }
 }
 
@@ -1285,180 +1683,24 @@ impl ListDelegate for HistoryList {
         self.rows.len()
     }
 
+    /// The rows are the empty tab's own to draw (it wants the design's row, not the
+    /// kit's), so this delegate only ever holds them: nothing asks it to render an item.
     fn render_item(
         &mut self,
-        ix: IndexPath,
+        _ix: IndexPath,
         _window: &mut Window,
-        cx: &mut Context<ListState<Self>>,
+        _cx: &mut Context<ListState<Self>>,
     ) -> Option<Self::Item> {
-        let row = self.rows.get(ix.row)?;
-        let selected = Some(ix) == self.selected;
-        let theme = cx.theme();
-        let muted = theme.muted_foreground;
-        // The path and the facts are the row's substance — which folder, how many lanes, how
-        // long ago, which model — so they take the theme's secondary text tone. The muted grey
-        // is lighter than that: on the light theme's white page it reads as fine print.
-        let facts = theme.tab_foreground;
-        // The pill is filled with the theme's secondary tone, so it takes that tone's own
-        // foreground: the muted grey is the page's secondary text, and at 11 px on a filled
-        // chip it reads as a smudge.
-        let badge_face = theme.secondary;
-        let badge_text = theme.secondary_foreground;
-        let radius = theme.radius;
-        let tooltip = row.tooltip.clone();
-        // The session the app had open when it last quit wears a pill, so it reads as a
-        // fact about this row rather than as part of its name.
-        let badge = row.open_at_quit.then(|| {
-            div()
-                .id(ElementId::NamedInteger(
-                    OPEN_AT_QUIT_ID.into(),
-                    ix.row as u64,
-                ))
-                .test_support()
-                .flex_none()
-                .px_1p5()
-                .py_0p5()
-                .rounded(radius)
-                .bg(badge_face)
-                .text_color(badge_text)
-                // A badge, not a word: a notch under the meta's own size, the way the agent
-                // list's row badges are set.
-                .text_size(px(11.))
-                .child(OPEN_AT_QUIT_TEXT)
-                .into_any_element()
-        });
-        Some(
-            ListItem::new(ElementId::NamedInteger(
-                HISTORY_ROW_ID.into(),
-                ix.row as u64,
-            ))
-            // An 8 px pill, like the rest of the app's rows, with a document's own height:
-            // 8 px above and below the two lines (the list item's own padding is narrower).
-            .rounded(px(8.))
-            .py_2()
-            .child(
-                h_flex()
-                    .w_full()
-                    .min_w_0()
-                    .gap_3()
-                    .items_center()
-                    // A small folder glyph leads the row in the muted colour, so the list
-                    // reads as a list of folders rather than of bare names.
-                    .child(
-                        Icon::new(IconName::Folder)
-                            .with_size(ROW_ICON_SIZE)
-                            .flex_none()
-                            .text_color(muted),
-                    )
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .gap_0p5()
-                            .child(
-                                h_flex()
-                                    .w_full()
-                                    .min_w_0()
-                                    .gap_2()
-                                    .items_center()
-                                    .child(
-                                        div()
-                                            .flex_shrink(1.)
-                                            .min_w_0()
-                                            .truncate()
-                                            .text_size(ROW_TITLE_SIZE)
-                                            .font_medium()
-                                            .child(row.title.clone()),
-                                    )
-                                    .when_some(badge, |line, badge| line.child(badge)),
-                            )
-                            .child(
-                                // The path and the facts share the second line. The path
-                                // gives way first: it ellipsizes and the `·` separator sits
-                                // right after it, with the same space on both sides as the
-                                // ones inside the meta. The lane count and the time never
-                                // give way — only the model at the very end may ellipsize.
-                                h_flex()
-                                    .w_full()
-                                    .min_w_0()
-                                    .gap_1()
-                                    .items_center()
-                                    .child(
-                                        div()
-                                            .flex_shrink(1.)
-                                            .min_w_0()
-                                            .truncate()
-                                            .text_xs()
-                                            .text_color(facts)
-                                            .child(row.subtitle.clone()),
-                                    )
-                                    .child(div().flex_none().text_xs().text_color(facts).child("·"))
-                                    .child(
-                                        div()
-                                            .flex_none()
-                                            .max_w(px(420.))
-                                            .truncate()
-                                            .text_xs()
-                                            .text_color(facts)
-                                            .child(row.meta.clone()),
-                                    ),
-                            ),
-                    ),
-            )
-            .selected(selected)
-            // The pill is a fact about the row, not decoration: a screen reader hears it too,
-            // in the one place the row says it.
-            .accessibility_label(match row.open_at_quit {
-                true => format!(
-                    "{} {} {} {}",
-                    row.title, row.subtitle, OPEN_AT_QUIT_TEXT, row.meta
-                ),
-                false => format!("{} {} {}", row.title, row.subtitle, row.meta),
-            })
-            .tooltip(move |window, cx| {
-                Tooltip::new(tooltip.clone())
-                    .max_w(px(460.))
-                    .build(window, cx)
-            }),
-        )
+        None
     }
 
+    /// The same: there is no list selection here — a row is a button of its own.
     fn set_selected_index(
         &mut self,
-        ix: Option<IndexPath>,
+        _ix: Option<IndexPath>,
         _window: &mut Window,
-        cx: &mut Context<ListState<Self>>,
+        _cx: &mut Context<ListState<Self>>,
     ) {
-        self.selected = ix;
-        cx.notify();
-    }
-
-    /// Nothing to list: say which nothing it is — the index is still being fetched, the
-    /// failed, or there is genuinely nothing to resume.
-    fn render_empty(
-        &mut self,
-        _window: &mut Window,
-        cx: &mut Context<ListState<Self>>,
-    ) -> impl IntoElement {
-        let muted = cx.theme().muted_foreground;
-        let (line, color) = match (&self.error, self.loading) {
-            (Some(error), _) => (error.clone(), cx.theme().danger),
-            (None, true) => ("Scanning sessions…".to_string(), muted),
-            (None, false) => ("No resumable swarms yet".to_string(), muted),
-        };
-        h_flex()
-            .id(HISTORY_HINT_ID)
-            .test_support()
-            .w_full()
-            .py_4()
-            .gap_2()
-            .items_center()
-            .text_sm()
-            .text_color(color)
-            .when(self.error.is_none() && self.loading, |row| {
-                row.child(Spinner::new().small())
-            })
-            .child(line)
     }
 }
 
@@ -1471,13 +1713,14 @@ mod tests {
     };
     use std::cell::RefCell;
     use std::rc::Rc;
-    use store::Root;
+    use std::sync::Arc;
+    use store::catalog::ModelCheck;
 
-    /// A window wide enough for the 880 px block, and tall enough for the whole screen.
+    /// A window wide enough for the 800 px block, and tall enough for the whole page.
     const WINDOW: (f32, f32) = (1200., 800.);
 
-    /// A `/catalog` body as `evo-swarm catalog --json` prints it (§5.6): two models a lane
-    /// may run, and one whose `lanes.models` entry says it may not.
+    /// A `/catalog` body as `evo-swarm catalog --json` prints it (§5.6): the default
+    /// registration, one every lane may run, one no lane may run, and the ladder.
     fn catalog_body() -> Value {
         serde_json::json!({
             "models": [
@@ -1486,19 +1729,39 @@ mod tests {
                  "reasoning": false, "images": false, "ready": true, "reason": null},
                 {"id": "claude-opus-4.5", "provider": "anthropic", "name": "Claude Opus 4.5",
                  "api": "anthropic-messages", "context_window": 1000000,
-                 "reasoning": true, "images": true, "ready": true, "reason": null}
+                 "reasoning": true, "images": true, "ready": true, "reason": null},
+                {"id": "claude-sonnet-5", "provider": "proxy", "name": "Claude Sonnet 5",
+                 "api": "anthropic-oauth-messages", "context_window": 1000000,
+                 "reasoning": true, "images": true, "ready": false, "reason": "no credential"}
             ],
-            "providers": [{"name": "aiden", "api": "ark-chat", "has_key": true, "key_env": null}],
-            "default_model": {"id": "ark-deepseek-v4.1-flash", "provider": "aiden"},
-            "thinking_levels": ["off", "low", "medium", "high"],
-            "languages": [{"code": "en", "name": "English"}],
+            "default_model": {"id": "claude-opus-4.5", "provider": "anthropic"},
+            "thinking_levels": ["off", "low", "medium", "high", "xhigh", "max"],
             "lanes": {"models": [
                 {"id": "ark-deepseek-v4.1-flash", "provider": "aiden", "ok": false,
                  "reason": "ark-chat is not an api a lane has"},
-                {"id": "claude-opus-4.5", "provider": "anthropic", "ok": true, "reason": null}
+                {"id": "claude-opus-4.5", "provider": "anthropic", "ok": true, "reason": null},
+                {"id": "claude-sonnet-5", "provider": "proxy", "ok": false,
+                 "reason": "api anthropic-oauth-messages is not in a lane"}
             ]},
             "warnings": []
         })
+    }
+
+    fn check(model: (&str, &str), lane: (&str, &str), problems: Vec<Problem>) -> CheckReport {
+        let one = |(id, provider): (&str, &str)| {
+            Some(ModelCheck {
+                id: Some(id.to_string()),
+                provider: Some(provider.to_string()),
+                ok: true,
+                reason: None,
+            })
+        };
+        CheckReport {
+            ok: problems.is_empty(),
+            model: one(model),
+            lane_model: one(lane),
+            problems,
+        }
     }
 
     struct Fixture {
@@ -1517,6 +1780,39 @@ mod tests {
             cx.update_window(self.window, |_, window, cx| f(window, cx))
                 .expect("tab window")
         }
+
+        /// The empty tab's own state, for the assertions that are about the model rather
+        /// than about what was drawn.
+        fn state(&self, cx: &mut TestAppContext) -> Entity<EmptyTabState> {
+            cx.update(|cx| self.tab.read(cx).choosers.state.clone())
+        }
+
+        fn set_catalog(&self, cx: &mut TestAppContext, catalog: &Value) {
+            let state = self.state(cx);
+            self.act(cx, |window, cx| {
+                state.update(cx, |state, cx| state.set_catalog(catalog, window, cx))
+            });
+        }
+
+        fn set_check(&self, cx: &mut TestAppContext, report: CheckReport) {
+            let state = self.state(cx);
+            self.act(cx, |_, cx| {
+                state.update(cx, |state, cx| state.set_check_report(report, cx))
+            });
+        }
+
+        fn history(&self, cx: &mut TestAppContext, entries: &[HistoryEntry], home: &str) {
+            let tab = self.tab.clone();
+            self.act(cx, |_, cx| {
+                tab.update(cx, |tab, cx| {
+                    tab.set_history_entries(entries, 1_700_000_000, 0, Some(home), cx)
+                })
+            });
+        }
+
+        fn render(&self, cx: &mut TestAppContext) {
+            self.act(cx, |window, cx| window.render_frame(cx));
+        }
     }
 
     fn open(cx: &mut TestAppContext) -> Fixture {
@@ -1533,7 +1829,12 @@ mod tests {
                 cx.new(|cx| {
                     TabContent::new(
                         crate::tab::TabId::new(1),
-                        std::sync::Arc::new(crate::LaunchEnv::default()),
+                        // The check starts no process here: this tab's checks are answered
+                        // by `set_check`, and the resolution never reaches a binary.
+                        Arc::new(crate::LaunchEnv {
+                            swarm_bin: PathBuf::from("/nonexistent/evo-swarm"),
+                            ..crate::LaunchEnv::default()
+                        }),
                         window,
                         cx,
                     )
@@ -1558,1193 +1859,439 @@ mod tests {
         }
     }
 
-    /// The window's own view (§7.1), with one empty tab started from `env`. The
-    /// handle is kept: it is what the test's window lives on.
-    fn open_window_with_env(
-        cx: &mut TestAppContext,
-        env: crate::LaunchEnv,
-    ) -> (AnyWindowHandle, Entity<crate::chrome::WorkspaceView>) {
-        cx.update(gpui_kit::init);
-        cx.update(|cx| {
-            let options = WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(Bounds {
-                    origin: point(px(0.), px(0.)),
-                    size: size(px(WINDOW.0), px(WINDOW.1)),
-                })),
-                ..Default::default()
-            };
-            gpui_kit::open_window(options, cx, |window, cx| {
-                cx.new(|cx| {
-                    crate::chrome::WorkspaceView::with_config(std::sync::Arc::new(env), window, cx)
-                })
-            })
-            .expect("workspace window")
-        })
-    }
-
-    /// A `model-cache.json` on disk, as the app's own `catalog --json` fetch leaves it,
-    /// loaded the way the app loads it. The temp directory removes itself.
-    struct CacheDir(std::path::PathBuf);
-
-    impl CacheDir {
-        fn new(catalog: &Value) -> CacheDir {
-            let dir = std::env::temp_dir().join(format!(
-                "evo-desktop-empty-tab-{}-{:?}",
-                std::process::id(),
-                std::thread::current().id()
-            ));
-            std::fs::create_dir_all(&dir).expect("temp dir");
-            let cache = serde_json::json!({
-                "version": 2,
-                "fetched_at": "2026-09-30T09:25:44Z",
-                "program": "evo-swarm",
-                "catalog": catalog,
-            });
-            std::fs::write(dir.join("model-cache.json"), cache.to_string()).expect("write cache");
-            CacheDir(dir)
-        }
-
-        /// The body the app hands the tab: what `ModelCache::load` read back.
-        fn catalog(&self) -> Value {
-            store::ModelCache::load(&Root::at(self.0.clone()))
-                .raw()
-                .clone()
-        }
-    }
-
-    impl Drop for CacheDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
-    fn history_entry(session: &str, folder: &str, minutes_ago: i64) -> HistoryEntry {
+    fn entry(session: &str, folder: &str, title: &str, open: bool) -> HistoryEntry {
         HistoryEntry {
             session_path: session.to_string(),
             folder: folder.to_string(),
-            title: String::new(),
-            when: Some(1_700_000_000 - minutes_ago * 60),
+            title: title.to_string(),
+            when: Some(1_700_000_000),
             lanes: Some(4),
-            coordinator_model: Some("ark-deepseek-v4.1-flash".to_string()),
+            coordinator_model: Some("claude-opus-4.5@anthropic".to_string()),
             lanes_model: None,
             source: session::HistorySource::Index,
-            open_at_quit: false,
+            open_at_quit: open,
         }
     }
 
-    /// The keys one chooser offers, with whether each is available.
-    fn options(cx: &App, tab: &Entity<TabContent>, which: Choice) -> Vec<(String, bool)> {
-        tab.read(cx)
-            .choosers
-            .state
-            .read(cx)
-            .launcher
-            .chooser(which)
-            .options
-            .iter()
-            .map(|option| (option.key.clone(), option.available))
-            .collect()
-    }
-
-    /// The problem lines the last check left, as the tab shows them.
-    fn problem_lines(cx: &App, tab: &Entity<TabContent>) -> Vec<String> {
-        tab.read(cx)
-            .choosers
-            .state
-            .read(cx)
-            .problems
-            .iter()
-            .map(|problem| problem.line())
-            .collect()
-    }
-
-    fn caption_text(cx: &App, tab: &Entity<TabContent>) -> String {
-        tab.read(cx)
-            .choosers
-            .state
-            .read(cx)
-            .caption()
-            .map(|caption| caption.text.to_string())
-            .unwrap_or_default()
-    }
-
-    /// What the caption's hover carries, when the line is a summary of something longer.
-    fn caption_detail(cx: &App, tab: &Entity<TabContent>) -> Option<String> {
-        tab.read(cx)
-            .choosers
-            .state
-            .read(cx)
-            .caption()
-            .and_then(|caption| caption.detail)
-            .map(|detail| detail.to_string())
-    }
-
-    /// Whether the caption wears the quiet warning tone rather than the page's muted grey.
-    fn caption_is_warning(cx: &App, tab: &Entity<TabContent>) -> bool {
-        tab.read(cx)
-            .choosers
-            .state
-            .read(cx)
-            .caption()
-            .is_some_and(|caption| caption.tone == CaptionTone::Warning)
-    }
-
+    /// The page is the design's own markup: the head, the two cards with the folder card
+    /// beside them, and the history under them.
     #[gpui_kit::test]
-    fn a_fresh_tab_is_default_everywhere_and_says_it_is_loading(cx: &mut TestAppContext) {
+    fn the_page_is_the_designs_own_layout(cx: &mut TestAppContext) {
         let f = open(cx);
-        f.act(cx, |window, cx| {
-            window.render_frame(cx);
-
-            // Every chooser starts on Default, which passes nothing to the swarm (§7.2).
-            assert_eq!(f.tab.read(cx).coordinator_model(cx).as_ref(), "Default");
-            assert_eq!(f.tab.read(cx).lanes_model(cx).as_ref(), "Default");
-            assert_eq!(f.tab.read(cx).workers(cx).as_ref(), "Default");
-            assert_eq!(f.tab.read(cx).launch_plan(cx), LaunchPlan::default());
-
-            // Before the catalog is known, the choosers hold Default alone and the caption
-            // says why.
-            assert_eq!(caption_text(cx, &f.tab), "Loading models…");
-            assert!(window.find(CAPTION_ID).visible());
-
-            // No index has arrived yet, so the history says so rather than showing
-            // placeholder rows.
-            assert!(f.tab.read(cx).history_rows(cx).is_empty());
+        f.render(cx);
+        f.act(cx, |window, _| {
+            for id in [
+                "empty-tab",
+                "empty-tab-block",
+                "empty-head",
+                "launch-layout",
+                "role-stack",
+                COORDINATOR_CARD_ID,
+                WORKERS_CARD_ID,
+                COORDINATOR_MODEL_ID,
+                WORKERS_MODEL_ID,
+                COORDINATOR_EFFORT_ID,
+                WORKERS_EFFORT_ID,
+                COUNT_ID,
+                COUNT_MINUS_ID,
+                COUNT_PLUS_ID,
+                FOLDER_ID,
+                "history",
+                "history-head",
+            ] {
+                assert!(window.find(id).visible(), "{id} is on the page");
+            }
+            // Nothing has been read yet, so the history says so rather than showing an
+            // empty box.
             assert!(window.find(HISTORY_HINT_ID).visible());
+            assert!(window.try_find(HISTORY_LIST_ID).is_none());
         });
     }
 
+    /// §7.2: the controls open on what evo resolved, and nothing is labelled "Default".
     #[gpui_kit::test]
-    fn the_cached_catalog_fills_the_choosers_and_the_lanes_availability(cx: &mut TestAppContext) {
-        let cache = CacheDir::new(&catalog_body());
+    fn the_controls_open_on_the_catalogs_own_resolution(cx: &mut TestAppContext) {
         let f = open(cx);
+        f.set_catalog(cx, &catalog_body());
+        f.render(cx);
+
+        let tab = f.tab.clone();
+        let state = f.state(cx);
         f.act(cx, |window, cx| {
-            f.tab
-                .update(cx, |tab, cx| tab.set_catalog(&cache.catalog(), window, cx));
-            window.render_frame(cx);
-
-            // The catalog arrived: the loading hint is gone, and both models are offered to
-            // the coordinator — a coordinator runs with the user's own userspace, so the
-            // catalog's own `ready` is the only answer it needs.
-            // Nothing to say, so there is no line under the chooser at all: the row the
-            // caption used to reserve was a blank gap the height of a chooser row.
-            assert_eq!(caption_text(cx, &f.tab), "");
-            assert!(window.try_find(CAPTION_ID).is_none());
-            let coordinator = options(cx, &f.tab, Choice::Coordinator);
-            assert_eq!(coordinator.len(), 3, "Default plus two models");
-            assert!(
-                coordinator
-                    .iter()
-                    .any(|(key, ok)| key == "claude-opus-4.5@anthropic" && *ok),
-                "{coordinator:?}"
-            );
-            assert!(
-                coordinator
-                    .iter()
-                    .any(|(key, ok)| key == "ark-deepseek-v4.1-flash@aiden" && *ok),
-                "{coordinator:?}"
-            );
-
-            // The lanes chooser offers the same registrations and greys out exactly the one
-            // `lanes.models` says a lane cannot run (§5.6) — evo's own words are the reason.
-            let lanes = options(cx, &f.tab, Choice::Lanes);
-            let offered: Vec<&(String, bool)> =
-                lanes.iter().filter(|(key, _)| key != DEFAULT_KEY).collect();
-            assert_eq!(offered.len(), 2, "{lanes:?}");
-            assert!(
-                offered
-                    .iter()
-                    .any(|(key, ok)| key == "claude-opus-4.5@anthropic" && *ok),
-                "{lanes:?}"
-            );
-            assert!(
-                offered
-                    .iter()
-                    .any(|(key, ok)| key == "ark-deepseek-v4.1-flash@aiden" && !*ok),
-                "{lanes:?}"
-            );
-
-            // ... and an unavailable option is one the menu cannot commit.
-            let blocked = f
-                .tab
-                .read(cx)
-                .choosers
-                .state
-                .read(cx)
-                .launcher
-                .chooser(Choice::Lanes)
-                .options
-                .iter()
-                .find(|option| !option.available)
-                .expect("an unavailable lanes model");
-            let item = ChooserItem::from(blocked);
-            assert!(item.disabled(), "{}", item.label);
-            assert!(
-                item.detail.contains("not an api a lane has"),
-                "{}",
-                item.detail
-            );
-
-            // The thinking row is the catalog's own levels, Default first (§1's
-            // `--lane-thinking`).
-            let thinking: Vec<String> = options(cx, &f.tab, Choice::LaneThinking)
-                .iter()
-                .map(|(key, _)| key.clone())
-                .collect();
+            let state = state.read(cx);
+            // The catalog's own default, for both cards — a lane can register it.
             assert_eq!(
-                thinking,
-                vec!["default", "off", "low", "medium", "high"],
-                "the catalog's levels, Default first"
+                state.launcher.chosen_key(Card::Coordinator),
+                Some("claude-opus-4.5@anthropic")
             );
-        });
-    }
-
-    /// The catalog is the only answer now: the body a running server answers `GET /catalog`
-    /// with is read exactly like the cached one, and a body that changes its mind about a
-    /// lane changes the chooser with it.
-    #[gpui_kit::test]
-    fn a_live_catalog_refresh_answers_the_same_way(cx: &mut TestAppContext) {
-        let cache = CacheDir::new(&catalog_body());
-        let f = open(cx);
-        f.act(cx, |window, cx| {
-            f.tab
-                .update(cx, |tab, cx| tab.set_catalog(&cache.catalog(), window, cx));
-            assert!(
-                !options(cx, &f.tab, Choice::Lanes)
-                    .iter()
-                    .find(|(key, _)| key == "ark-deepseek-v4.1-flash@aiden")
-                    .expect("the aiden model")
-                    .1,
-                "a lane cannot run it, and the catalog said so"
+            assert_eq!(
+                state.launcher.chosen_key(Card::Lanes),
+                Some("claude-opus-4.5@anthropic")
             );
-
-            // The server now says a lane can: the same registration turns available, with no
-            // API set to compare and nothing remembered between the two bodies.
-            let mut live = catalog_body();
-            live["lanes"]["models"][0]["ok"] = Value::Bool(true);
-            live["lanes"]["models"][0]["reason"] = Value::Null;
-            f.tab
-                .update(cx, |tab, cx| tab.set_catalog(&live, window, cx));
-            assert!(
-                options(cx, &f.tab, Choice::Lanes)
-                    .iter()
-                    .find(|(key, _)| key == "ark-deepseek-v4.1-flash@aiden")
-                    .expect("the aiden model")
-                    .1,
-                "the catalog's newest answer is the one that counts"
-            );
-        });
-    }
-
-    #[gpui_kit::test]
-    fn choosing_a_lanes_model_says_every_lane_runs_it_and_lands_in_the_plan(
-        cx: &mut TestAppContext,
-    ) {
-        let cache = CacheDir::new(&catalog_body());
-        let f = open(cx);
-        f.act(cx, |window, cx| {
-            f.tab
-                .update(cx, |tab, cx| tab.set_catalog(&cache.catalog(), window, cx));
+            // The ladder's own middle rung, and evo's own count.
+            assert_eq!(state.launcher.level(Card::Coordinator), Some("medium"));
+            assert_eq!(state.launcher.level(Card::Lanes), Some("medium"));
+            assert_eq!(state.count.read(cx).value().as_ref(), "6");
             window.render_frame(cx);
 
-            // The chooser commits the way the menu does: the select emits its Confirm.
-            let key = SharedString::from("claude-opus-4.5@anthropic");
-            f.tab.update(cx, |tab, cx| {
-                let lanes = tab.choosers.state.read(cx).lanes.clone();
-                lanes.update(cx, |lanes, cx| {
-                    let index = lanes.selected_index(cx);
-                    let _ = index;
-                    cx.emit(SelectEvent::Confirm(Some(key.clone())));
+            // What the tab strip and the tab's own title read from it.
+            assert_eq!(
+                tab.read(cx).coordinator_model(cx).as_ref(),
+                "claude-opus-4.5@anthropic"
+            );
+            assert_eq!(tab.read(cx).workers(cx).as_ref(), "6");
+        });
+    }
+
+    /// A model a lane cannot register is offered, greyed out, with evo's own reason —
+    /// which is also what the field would say if it were the chosen one.
+    #[gpui_kit::test]
+    fn a_lane_that_cannot_run_a_model_says_why(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.set_catalog(cx, &catalog_body());
+        let state = f.state(cx);
+        f.act(cx, |_, cx| {
+            let state = state.read(cx);
+            let lanes = model_items(&state.launcher, Card::Lanes);
+            let blocked = lanes
+                .iter()
+                .find(|item| item.key.as_ref() == "claude-sonnet-5@proxy")
+                .expect("the catalog lists it");
+            assert!(!blocked.available);
+            assert_eq!(
+                blocked.detail.as_ref(),
+                "api anthropic-oauth-messages is not in a lane"
+            );
+            // The coordinator card may run it as far as readiness goes… no: evo cannot
+            // reach it either, and its own reason says that.
+            let coordinators = model_items(&state.launcher, Card::Coordinator);
+            let unready = coordinators
+                .iter()
+                .find(|item| item.key.as_ref() == "claude-sonnet-5@proxy")
+                .expect("the catalog lists it");
+            assert!(!unready.available);
+            assert_eq!(unready.detail.as_ref(), "no credential");
+        });
+    }
+
+    /// What `check --json` resolved is what the launch would run, so the fields show it —
+    /// over the catalog's own default.
+    #[gpui_kit::test]
+    fn the_check_that_resolved_the_launch_is_what_the_fields_show(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.set_catalog(cx, &catalog_body());
+        f.set_check(
+            cx,
+            check(
+                ("ark-deepseek-v4.1-flash", "aiden"),
+                ("claude-opus-4.5", "anthropic"),
+                Vec::new(),
+            ),
+        );
+        let tab = f.tab.clone();
+        f.act(cx, |_, cx| {
+            assert_eq!(
+                tab.read(cx).coordinator_model(cx).as_ref(),
+                "ark-deepseek-v4.1-flash@aiden"
+            );
+            assert_eq!(
+                tab.read(cx).lanes_model(cx).as_ref(),
+                "claude-opus-4.5@anthropic"
+            );
+        });
+    }
+
+    /// §14.2's own rule, as the design writes it: a number that cannot be a count is the
+    /// nearest count it can be — `Math.max(1, Math.min(64, n || 1))`.
+    #[gpui_kit::test]
+    fn a_count_typed_out_of_range_is_put_back_in_range(cx: &mut TestAppContext) {
+        let f = open(cx);
+        let state = f.state(cx);
+        let cases = [
+            ("99", "64"),
+            ("0", "1"),
+            ("", "1"),
+            ("four", "1"),
+            ("7", "7"),
+            ("1", "1"),
+        ];
+        for (typed, expected) in cases {
+            f.act(cx, |window, cx| {
+                state.update(cx, |state, cx| {
+                    state.count.update(cx, |count, cx| {
+                        count.set_value(typed.to_string(), window, cx)
+                    });
+                    state.on_type(&InputEvent::Change, window, cx);
+                    assert_eq!(
+                        state.launcher.workers().to_string(),
+                        expected,
+                        "typing {typed:?}"
+                    );
+                    // The field is put back to what the model took: a box showing `99`
+                    // would be lying about the launch.
+                    assert_eq!(
+                        state.count.read(cx).value().as_ref(),
+                        expected,
+                        "typing {typed:?}"
+                    );
                 });
             });
-            window.render_frame(cx);
-        });
+        }
+    }
 
-        // The choice reaches the launcher when the update that emitted it returns, so the
-        // caption is read in its own update.
+    /// The two steppers walk one count at a time and stop at the ends.
+    #[gpui_kit::test]
+    fn the_count_steppers_walk_and_stop_at_the_ends(cx: &mut TestAppContext) {
+        let f = open(cx);
+        let state = f.state(cx);
         f.act(cx, |window, cx| {
-            window.render_frame(cx);
-            // §1: the choice is a launch flag, not a file this app writes — the caption says
-            // what every lane will run.
-            let caption = caption_text(cx, &f.tab);
-            assert_eq!(
-                caption,
-                "Every lane runs claude-opus-4.5@anthropic (--lane-model)"
-            );
-
-            // ... and it is what the launch plan carries.
-            let plan = f.tab.read(cx).launch_plan(cx);
-            assert_eq!(
-                plan.lanes_model,
-                Some(("claude-opus-4.5".to_string(), "anthropic".to_string()))
-            );
-            assert_eq!(plan.model, None);
-            assert_eq!(plan.workers, None);
+            state.update(cx, |state, cx| {
+                state.step_count(true, window, cx);
+                assert_eq!(state.launcher.workers(), 7);
+                assert_eq!(state.count.read(cx).value().as_ref(), "7");
+                state.step_count(false, window, cx);
+                assert_eq!(state.launcher.workers(), 6);
+                // The ends hold.
+                state.launcher.set_workers(session::WORKERS_MAX);
+                state.step_count(true, window, cx);
+                assert_eq!(state.launcher.workers(), session::WORKERS_MAX);
+                state.launcher.set_workers(session::WORKERS_MIN);
+                state.step_count(false, window, cx);
+                assert_eq!(state.launcher.workers(), session::WORKERS_MIN);
+            });
         });
     }
 
+    /// §9: the check's own lines sit under the cards, and a click on one puts the keyboard
+    /// where the fix is.
     #[gpui_kit::test]
-    fn a_chosen_folder_launches_with_the_plan(cx: &mut TestAppContext) {
-        let cache = CacheDir::new(&catalog_body());
+    fn the_checks_lines_sit_under_the_cards_and_open_their_control(cx: &mut TestAppContext) {
         let f = open(cx);
+        let state = f.state(cx);
+        f.set_catalog(cx, &catalog_body());
+        f.set_check(
+            cx,
+            check(
+                ("claude-sonnet-5", "proxy"),
+                ("claude-sonnet-5", "proxy"),
+                vec![
+                    Problem {
+                        code: "model_not_ready".to_string(),
+                        message: "claude-sonnet-5 has no credential\npick another model"
+                            .to_string(),
+                    },
+                    Problem {
+                        code: "lane_model_not_ready".to_string(),
+                        message: "a lane cannot register claude-sonnet-5".to_string(),
+                    },
+                ],
+            ),
+        );
+        f.render(cx);
         f.act(cx, |window, cx| {
-            f.tab
-                .update(cx, |tab, cx| tab.set_catalog(&cache.catalog(), window, cx));
-            f.tab.update(cx, |tab, cx| {
-                tab.choosers.state.update(cx, |state, cx| {
-                    state.launcher.select(Choice::Workers, "6");
-                    cx.notify();
-                });
-            });
-            f.tab.update(cx, |tab, cx| {
-                tab.set_folder_picker(Some(PathBuf::from("/Users/you/coding/evo-gui")), cx)
-            });
-            window.render_frame(cx);
-            window.click("select-folder", cx);
+            assert!(window.find(PROBLEMS_ID).visible());
+            // One line per problem, folded onto one line each.
+            assert!(window
+                .find(ElementId::NamedInteger(PROBLEM_ID.into(), 0))
+                .visible());
+            assert!(window
+                .find(ElementId::NamedInteger(PROBLEM_ID.into(), 1))
+                .visible());
+            let line = window.find(ElementId::NamedInteger(PROBLEM_ID.into(), 0));
+            assert_eq!(
+                line.label(),
+                Some("claude-sonnet-5 has no credential pick another model")
+            );
+
+            // A click on the first line opens the coordinator's model field.
+            window.click(ElementId::NamedInteger(PROBLEM_ID.into(), 0), cx);
+            let expected = state.read(cx).coordinator.read(cx).focus_handle(cx);
+            assert_eq!(window.focused(cx).as_ref(), Some(&expected));
+        });
+    }
+
+    /// A catalog that could not be read is one more calm line under the cards — never a
+    /// sentence hanging off a field.
+    #[gpui_kit::test]
+    fn a_catalog_that_could_not_be_read_says_so_under_the_cards(cx: &mut TestAppContext) {
+        let f = open(cx);
+        let state = f.state(cx);
+        f.act(cx, |_, cx| {
+            state.update(cx, |state, cx| {
+                state.set_catalog_error(Some("http 500: no".to_string()), cx)
+            })
+        });
+        f.render(cx);
+        f.act(cx, |window, _| {
+            assert!(window.find("catalog-problem").visible());
+            assert!(window.find(PROBLEMS_ID).visible());
+        });
+    }
+
+    /// §2: a row resumes its session in the folder it ran in — and only a row the app had
+    /// open wears the badge.
+    #[gpui_kit::test]
+    fn a_history_row_resumes_its_session_in_its_folder(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.history(
+            cx,
+            &[
+                entry("/j/1.sexp", "/Users/you/coding/foo", "make the tab", true),
+                entry("/j/2.sexp", "/Users/you/coding/bar", "wire it up", false),
+            ],
+            "/Users/you",
+        );
+        f.render(cx);
+        assert!(f.events().is_empty());
+
+        f.act(cx, |window, cx| {
+            assert!(window.find(HISTORY_LIST_ID).visible());
+            assert!(window.find(HISTORY_COUNT_ID).visible());
+            assert!(window
+                .find(ElementId::NamedInteger(OPEN_AT_QUIT_ID.into(), 0))
+                .visible());
+            assert!(window
+                .find(ElementId::NamedInteger(HISTORY_ROW_ID.into(), 1))
+                .visible());
+            // The second row is not the app's own, so it wears no badge.
+            assert!(window
+                .try_find(ElementId::NamedInteger(OPEN_AT_QUIT_ID.into(), 1))
+                .is_none());
+            window.click(ElementId::NamedInteger(HISTORY_ROW_ID.into(), 1), cx);
         });
 
         assert_eq!(
             f.events(),
+            vec![TabContentEvent::Resume {
+                session_path: PathBuf::from("/j/2.sexp"),
+                folder: PathBuf::from("/Users/you/coding/bar"),
+            }]
+        );
+    }
+
+    /// Before the index arrives the history says what it is doing, and a failure says why.
+    #[gpui_kit::test]
+    fn the_history_says_what_it_is_doing_before_it_has_rows(cx: &mut TestAppContext) {
+        let f = open(cx);
+        let tab = f.tab.clone();
+        f.act(cx, |_, cx| {
+            tab.update(cx, |tab, cx| tab.set_history_loading(true, cx))
+        });
+        f.render(cx);
+        f.act(cx, |window, _| {
+            assert!(window.find(HISTORY_HINT_ID).visible());
+        });
+        f.act(cx, |_, cx| {
+            tab.update(cx, |tab, cx| {
+                tab.set_history_error(Some("no index".to_string()), cx)
+            })
+        });
+        f.render(cx);
+        f.act(cx, |window, _| {
+            assert!(window.find(HISTORY_HINT_ID).visible());
+        });
+    }
+
+    /// §7.2: the folder card launches in the folder it picked, with the flags the controls
+    /// show — the two models, the two rungs and the count.
+    #[gpui_kit::test]
+    fn a_chosen_folder_launches_with_the_resolved_plan(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.set_catalog(cx, &catalog_body());
+        let folder = PathBuf::from("/Users/you/coding/foo");
+        let tab = f.tab.clone();
+        f.act(cx, |_, cx| {
+            tab.update(cx, |tab, cx| {
+                tab.set_folder_picker(Some(folder.clone()), cx)
+            })
+        });
+        f.render(cx);
+        f.act(cx, |window, cx| window.click(FOLDER_ID, cx));
+
+        assert_eq!(
+            f.events(),
             vec![TabContentEvent::Launch {
-                folder: PathBuf::from("/Users/you/coding/evo-gui"),
+                folder,
                 plan: LaunchPlan {
-                    model: None,
-                    lanes_model: None,
-                    lane_thinking: None,
+                    model: Some(("claude-opus-4.5".to_string(), "anthropic".to_string())),
+                    thinking: Some("medium".to_string()),
                     workers: Some(6),
+                    lanes_model: Some(("claude-opus-4.5".to_string(), "anthropic".to_string())),
+                    lane_thinking: Some("medium".to_string()),
                 },
             }]
         );
     }
 
+    /// The design's own geometry: the folder card is exactly as tall as the two cards
+    /// beside it, and both cards put their fields in the same two columns.
     #[gpui_kit::test]
-    fn a_cancelled_folder_pick_leaves_the_tab_where_it_was(cx: &mut TestAppContext) {
+    fn the_folder_card_matches_the_cards_beside_it(cx: &mut TestAppContext) {
         let f = open(cx);
-        f.act(cx, |window, cx| {
-            f.tab.update(cx, |tab, cx| tab.set_folder_picker(None, cx));
-            window.render_frame(cx);
-            window.click("select-folder", cx);
-        });
-
-        assert!(f.events().is_empty());
-        f.act(cx, |_, cx| {
-            assert_eq!(f.tab.read(cx).state(), &crate::tab::TabState::Empty)
-        });
-    }
-
-    #[gpui_kit::test]
-    fn a_history_row_resumes_its_session_in_its_folder(cx: &mut TestAppContext) {
-        let f = open(cx);
-        f.act(cx, |window, cx| {
-            let entries = vec![
-                history_entry(
-                    "/Users/you/.evo/sessions/a/1.sexp",
-                    "/Users/you/coding/foo",
-                    5,
-                ),
-                history_entry(
-                    "/Users/you/.evo/sessions/b/2.sexp",
-                    "/Users/you/coding/bar",
-                    90,
-                ),
-            ];
-            f.tab.update(cx, |tab, cx| {
-                tab.set_history_entries(&entries, 1_700_000_000, 0, Some("/Users/you"), cx)
-            });
-            window.render_frame(cx);
-
-            // The rows carry the folder's name, the `~` path and the meta line (§2).
-            assert_eq!(f.tab.read(cx).history_rows(cx).len(), 2);
-            assert_eq!(f.tab.read(cx).history_rows(cx)[0].title, "foo");
-            assert_eq!(f.tab.read(cx).history_rows(cx)[0].subtitle, "~/coding/foo");
-
-            window.click(ElementId::NamedInteger(HISTORY_ROW_ID.into(), 0), cx);
-        });
-
-        assert_eq!(
-            f.events(),
-            vec![TabContentEvent::Resume {
-                session_path: PathBuf::from("/Users/you/.evo/sessions/a/1.sexp"),
-                folder: PathBuf::from("/Users/you/coding/foo"),
-            }]
-        );
-    }
-
-    #[gpui_kit::test]
-    fn only_a_row_the_app_had_open_wears_the_badge(cx: &mut TestAppContext) {
-        let f = open(cx);
-        f.act(cx, |window, cx| {
-            // The app's own recents know the tab was open when it last quit; the index cannot.
-            let mut opened = history_entry(
-                "/Users/you/.evo/sessions/a/1.sexp",
-                "/Users/you/coding/foo",
-                5,
-            );
-            opened.open_at_quit = true;
-            opened.source = session::HistorySource::Recent;
-            let indexed = history_entry(
-                "/Users/you/.evo/sessions/b/2.sexp",
-                "/Users/you/coding/bar",
-                90,
-            );
-            f.tab.update(cx, |tab, cx| {
-                tab.set_history_entries(
-                    &[opened, indexed],
-                    1_700_000_000,
-                    0,
-                    Some("/Users/you"),
-                    cx,
-                )
-            });
-            window.render_frame(cx);
-
-            assert!(window
-                .find(ElementId::NamedInteger(OPEN_AT_QUIT_ID.into(), 0))
-                .visible());
-            // The row it sits on is still a row: the badge did not replace its own id.
-            assert!(window
-                .find(ElementId::NamedInteger(HISTORY_ROW_ID.into(), 0))
-                .visible());
-            assert!(
-                window
-                    .try_find(ElementId::NamedInteger(OPEN_AT_QUIT_ID.into(), 1))
-                    .is_none(),
-                "a session the index alone found cannot say it was open at quit"
-            );
-            // A badge is decoration on the row, not a thing of its own: the pill takes no
-            // click, so the click lands on the row under it and opens the session.
-            window.click(ElementId::NamedInteger(OPEN_AT_QUIT_ID.into(), 0), cx);
-        });
-
-        assert_eq!(
-            f.events(),
-            vec![TabContentEvent::Resume {
-                session_path: PathBuf::from("/Users/you/.evo/sessions/a/1.sexp"),
-                folder: PathBuf::from("/Users/you/coding/foo"),
-            }]
-        );
-    }
-
-    /// A chooser's select, by which one it is: the tests reach them through the tab's own
-    /// state, the way the render does.
-    fn chooser(f: &Fixture, cx: &App, which: Choice) -> Entity<SelectState<Vec<ChooserItem>>> {
-        let state = f.tab.read(cx).choosers.state.clone();
-        let state = state.read(cx);
-        match which {
-            Choice::Coordinator => state.coordinator.clone(),
-            Choice::Lanes => state.lanes.clone(),
-            Choice::LaneThinking => state.lane_thinking.clone(),
-            Choice::Workers => state.workers.clone(),
-        }
-    }
-
-    #[gpui_kit::test]
-    fn a_chooser_opens_from_space_walks_with_the_arrows_and_closes_on_escape(
-        cx: &mut TestAppContext,
-    ) {
-        let cache = CacheDir::new(&catalog_body());
-        let f = open(cx);
-        // Every step is its own act: opening and closing go through the select's own
-        // actions, which GPUI dispatches on the way out of the update they were queued in.
-        let trigger = f.act(cx, |window, cx| {
-            f.tab
-                .update(cx, |tab, cx| tab.set_catalog(&cache.catalog(), window, cx));
-            let chooser = chooser(&f, cx, Choice::Coordinator);
-            let trigger = chooser.read(cx).focus_handle(cx);
-            window.focus(&trigger, cx);
-            window.render_frame(cx);
-            trigger
-        });
-        assert_eq!(
-            f.act(cx, |window, cx| window.focused(cx)),
-            Some(trigger.clone())
-        );
-
-        f.act(cx, |window, cx| {
-            window.press("space", cx);
-            window.render_frame(cx);
-        });
-        // Space opens the menu the way Enter and the arrows do: the options take the focus,
-        // and the trigger gives it up.
-        assert_ne!(
-            f.act(cx, |window, cx| window.focused(cx)),
-            Some(trigger.clone()),
-            "space must open the chooser: the options have the focus"
-        );
-
-        // Escape closes it and hands the trigger back — and the tab is still the tab: no tab
-        // went away, no tab was opened, and nothing was committed.
-        f.act(cx, |window, cx| {
-            window.press("escape", cx);
-            window.render_frame(cx);
-        });
-        assert_eq!(
-            f.act(cx, |window, cx| window.focused(cx)),
-            Some(trigger.clone()),
-            "escape gives the chooser back its trigger"
-        );
-        assert!(f.act(cx, |window, _| window.find("empty-tab").visible()));
-        assert!(f.events().is_empty(), "a closed chooser launches nothing");
-        cx.update(|cx| {
-            assert_eq!(f.tab.read(cx).coordinator_model(cx).as_ref(), "Default");
-        });
-
-        // Opened again with Space, the arrows walk the menu and Enter commits what they land
-        // on: one step down is the first real model, not Default.
-        f.act(cx, |window, cx| {
-            window.press("space", cx);
-            window.render_frame(cx);
-        });
-        f.act(cx, |window, cx| {
-            window.press("down", cx);
-            window.render_frame(cx);
-        });
-        f.act(cx, |window, cx| {
-            window.press("enter", cx);
-            window.render_frame(cx);
-        });
-
-        let (committed, expected) = cx.update(|cx| {
-            let state = f.tab.read(cx).choosers.state.read(cx);
-            let expected = state.launcher.chooser(Choice::Coordinator).options[1]
-                .label
-                .clone();
-            let committed = f.tab.read(cx).coordinator_model(cx).to_string();
-            (committed, expected)
-        });
-        assert_eq!(
-            committed, expected,
-            "enter committed the option the arrows walked to"
-        );
-    }
-
-    #[gpui_kit::test]
-    fn enter_and_the_arrows_open_a_chooser_the_way_the_kit_binds_them(cx: &mut TestAppContext) {
-        // Space is the one key the tab has to supply: the select's own key context already
-        // binds Enter and the arrows to opening, and Escape to closing. This pins that, so a
-        // kit upgrade that dropped one of them would fail here rather than in a capture.
-        let f = open(cx);
-        for key in ["enter", "down", "up"] {
-            let trigger = f.act(cx, |window, cx| {
-                let chooser = chooser(&f, cx, Choice::Coordinator);
-                let trigger = chooser.read(cx).focus_handle(cx);
-                window.focus(&trigger, cx);
-                window.render_frame(cx);
-                trigger
-            });
-            f.act(cx, |window, cx| {
-                window.press(key, cx);
-                window.render_frame(cx);
-            });
-            assert_ne!(
-                f.act(cx, |window, cx| window.focused(cx)),
-                Some(trigger.clone()),
-                "{key} opens the chooser"
-            );
-            f.act(cx, |window, cx| {
-                window.press("escape", cx);
-                window.render_frame(cx);
-            });
+        f.set_catalog(cx, &catalog_body());
+        f.render(cx);
+        f.act(cx, |window, _| {
+            let stack = window.find("role-stack").bounds();
+            let folder = window.find(FOLDER_ID).bounds();
+            assert_eq!(folder.size.height, stack.size.height);
             assert_eq!(
-                f.act(cx, |window, cx| window.focused(cx)),
-                Some(trigger),
-                "escape closes what {key} opened, without leaving the tab"
+                folder.origin.x,
+                stack.origin.x + stack.size.width + LAYOUT_GAP
             );
-            assert!(f.act(cx, |window, _| window.find("empty-tab").visible()));
-        }
-    }
+            assert_eq!(folder.size.width, FOLDER_COLUMN);
 
-    /// Selecting an empty tab puts the keyboard where the tab begins: the
-    /// coordinator chooser, the first of its three rows (§7.1).
-    #[gpui_kit::test]
-    fn focus_primary_lands_the_keyboard_on_the_first_chooser(cx: &mut TestAppContext) {
-        let f = open(cx);
-        // Rendered first, the way a tab the window is showing is.
-        f.act(cx, |window, cx| window.render_frame(cx));
-
-        let (took, focused, trigger) = f.act(cx, |window, cx| {
-            let took = f
-                .tab
-                .update(cx, |tab, cx| tab.choosers.focus_primary(window, cx));
-            let trigger = chooser(&f, cx, Choice::Coordinator);
-            let trigger = trigger.read(cx).focus_handle(cx);
-            (took, window.focused(cx), trigger)
-        });
-        assert!(took, "the empty tab takes the keyboard");
-        assert_eq!(
-            focused,
-            Some(trigger.clone()),
-            "…and the coordinator chooser is what has it"
-        );
-
-        // The focus is this frame's, not a handle remembered from another: the key
-        // the tab supplies for its choosers opens the menu from where the keyboard
-        // now is.
-        f.act(cx, |window, cx| {
-            window.press("space", cx);
-            window.render_frame(cx);
-        });
-        assert_ne!(
-            f.act(cx, |window, cx| window.focused(cx)),
-            Some(trigger),
-            "space opened the chooser the keyboard landed on"
-        );
-    }
-
-    /// The call is idempotent, and a window that takes no focus at all is left
-    /// alone rather than half-focused.
-    #[gpui_kit::test]
-    fn focus_primary_answers_false_when_the_window_refuses_the_keyboard(cx: &mut TestAppContext) {
-        let f = open(cx);
-        let (first, landed, again, still) = f.act(cx, |window, cx| {
-            let first = f
-                .tab
-                .update(cx, |tab, cx| tab.choosers.focus_primary(window, cx));
-            let landed = window.focused(cx);
-            let again = f
-                .tab
-                .update(cx, |tab, cx| tab.choosers.focus_primary(window, cx));
-            (first, landed, again, window.focused(cx))
-        });
-        assert!(first && again, "both calls take the focus");
-        assert_eq!(landed, still, "and the second lands on the same control");
-
-        let refused = f.act(cx, |window, cx| {
-            window.disable_focus(cx);
-            let took = f
-                .tab
-                .update(cx, |tab, cx| tab.choosers.focus_primary(window, cx));
-            (took, window.focused(cx))
-        });
-        assert!(!refused.0, "a window taking no focus answers false");
-        assert_eq!(refused.1, None, "and nothing holds the keyboard");
-    }
-
-    /// The row the history list has highlighted, for the keyboard tests below.
-    fn selected_history_row(cx: &App, tab: &Entity<TabContent>) -> Option<usize> {
-        tab.read(cx)
-            .history
-            .read(cx)
-            .selected_index()
-            .map(|ix| ix.row)
-    }
-
-    #[gpui_kit::test]
-    fn the_history_list_walks_with_the_arrows_and_the_ends(cx: &mut TestAppContext) {
-        let f = open(cx);
-        f.act(cx, |window, cx| {
-            let entries = ["a", "b", "c"]
-                .iter()
-                .enumerate()
-                .map(|(i, name)| {
-                    history_entry(
-                        &format!("/Users/you/.evo/sessions/{name}/1.sexp"),
-                        &format!("/Users/you/coding/{name}"),
-                        (i as i64 + 1) * 30,
-                    )
-                })
-                .collect::<Vec<_>>();
-            f.tab.update(cx, |tab, cx| {
-                tab.set_history_entries(&entries, 1_700_000_000, 0, Some("/Users/you"), cx)
-            });
-            let list = f.tab.read(cx).choosers.state.read(cx).history_focus.clone();
-            window.focus(&list, cx);
-            window.render_frame(cx);
-
-            // Nothing selected yet, so Down starts at the top and Up starts at the bottom.
-            assert_eq!(selected_history_row(cx, &f.tab), None);
-            window.press("up", cx);
-            assert_eq!(selected_history_row(cx, &f.tab), Some(2));
-            window.press("home", cx);
-            assert_eq!(selected_history_row(cx, &f.tab), Some(0));
-            window.press("down", cx);
-            assert_eq!(selected_history_row(cx, &f.tab), Some(1));
-            window.press("end", cx);
-            assert_eq!(selected_history_row(cx, &f.tab), Some(2));
-            // The ends hold: another Down does not walk past the last row.
-            window.press("down", cx);
-            assert_eq!(selected_history_row(cx, &f.tab), Some(2));
-        });
-    }
-
-    #[gpui_kit::test]
-    fn the_badge_is_part_of_what_the_row_says(cx: &mut TestAppContext) {
-        let f = open(cx);
-        f.act(cx, |window, cx| {
-            let mut opened = history_entry(
-                "/Users/you/.evo/sessions/a/1.sexp",
-                "/Users/you/coding/foo",
-                5,
-            );
-            opened.open_at_quit = true;
-            let indexed = history_entry(
-                "/Users/you/.evo/sessions/b/2.sexp",
-                "/Users/you/coding/bar",
-                90,
-            );
-            f.tab.update(cx, |tab, cx| {
-                tab.set_history_entries(
-                    &[opened, indexed],
-                    1_700_000_000,
-                    0,
-                    Some("/Users/you"),
-                    cx,
-                )
-            });
-            window.render_frame(cx);
-
-            let said = |ix: u64| {
-                window
-                    .find(ElementId::NamedInteger(HISTORY_ROW_ID.into(), ix))
-                    .label()
-                    .unwrap_or_default()
-                    .to_string()
-            };
-            let opened_said = said(0);
-            let indexed_said = said(1);
-            // The pill is the only place the row says this, so the name has to carry it.
-            assert!(
-                opened_said.contains(OPEN_AT_QUIT_TEXT),
-                "the row's name must say what the pill says: {opened_said}"
-            );
-            assert!(
-                !indexed_said.contains(OPEN_AT_QUIT_TEXT),
-                "a row the index alone found must not claim it: {indexed_said}"
-            );
-            // ... and the row still names itself: title, path and facts.
-            assert!(opened_said.contains("foo"), "{opened_said}");
-            assert!(opened_said.contains("~/coding/foo"), "{opened_said}");
-        });
-    }
-
-    #[gpui_kit::test]
-    fn the_history_list_says_which_nothing_it_is(cx: &mut TestAppContext) {
-        let f = open(cx);
-        f.act(cx, |window, cx| {
-            window.render_frame(cx);
-            // Nothing yet.
-            assert!(window.find(HISTORY_HINT_ID).visible());
-
-            // The index is still coming: it says so, with a spinner.
-            f.tab
-                .update(cx, |tab, cx| tab.set_history_loading(true, cx));
-            window.render_frame(cx);
-            assert!(window.find(HISTORY_HINT_ID).visible());
-
-            // The index could not be fetched: it says why.
-            f.tab
-                .update(cx, |tab, cx| tab.set_history_loading(false, cx));
-            f.tab.update(cx, |tab, cx| {
-                tab.set_history_error(Some("~/.evo/sessions is not readable".to_string()), cx)
-            });
-            window.render_frame(cx);
-            assert!(window.find(HISTORY_HINT_ID).visible());
-
-            // And a real row replaces the hint.
-            let entries = vec![history_entry(
-                "/Users/you/.evo/sessions/a/1.sexp",
-                "/Users/you/coding/foo",
-                5,
-            )];
-            f.tab.update(cx, |tab, cx| {
-                tab.set_history_entries(&entries, 1_700_000_000, 0, Some("/Users/you"), cx)
-            });
-            f.tab.update(cx, |tab, cx| tab.set_history_error(None, cx));
-            window.render_frame(cx);
-            assert!(window.try_find(HISTORY_HINT_ID).is_none());
-            assert!(window
-                .find(ElementId::NamedInteger(HISTORY_ROW_ID.into(), 0))
-                .visible());
-        });
-    }
-
-    /// A focus handle's identity, for a test that has to compare them: `FocusHandle` is
-    /// `PartialEq` but has no printable name.
-    fn focus_name(handle: &FocusHandle) -> String {
-        format!("{handle:?}")
-    }
-
-    /// The tab's own focus handles, in the order they should be reached: the four
-    /// choosers, the folder card, then the history list.
-    fn focus_order(cx: &App, tab: &Entity<TabContent>) -> Vec<FocusHandle> {
-        let state = tab.read(cx).choosers.state.read(cx);
-        vec![
-            state.coordinator.read(cx).focus_handle(cx),
-            state.lanes.read(cx).focus_handle(cx),
-            state.lane_thinking.read(cx).focus_handle(cx),
-            state.workers.read(cx).focus_handle(cx),
-            state.folder_focus.clone(),
-            // The frame around the list, not the list's own handle: the List does not take
-            // part in tab traversal, so the frame holds the focus and forwards the keys.
-            state.history_focus.clone(),
-        ]
-    }
-
-    #[gpui_kit::test]
-    fn tab_reaches_the_choosers_then_the_folder_card_then_the_history(cx: &mut TestAppContext) {
-        let f = open(cx);
-        f.act(cx, |window, cx| {
-            let entries = vec![history_entry(
-                "/Users/you/.evo/sessions/a/1.sexp",
-                "/Users/you/coding/foo",
-                5,
-            )];
-            f.tab.update(cx, |tab, cx| {
-                tab.set_history_entries(&entries, 1_700_000_000, 0, Some("/Users/you"), cx)
-            });
-            window.render_frame(cx);
-
-            // Walk the window's tab stops, and note where each of the tab's own controls is
-            // reached. `focus_next` is what the platform's Tab key does (gpui keeps Tab out
-            // of the action path); other things are focusable too — the tab strip — so only
-            // the order matters.
-            let expected = focus_order(cx, &f.tab);
-            let mut seen: Vec<String> = Vec::new();
-            for _ in 0..30 {
-                window.focus_next(cx);
-                if let Some(focused) = window.focused(cx) {
-                    let name = focus_name(&focused);
-                    if !seen.contains(&name) {
-                        seen.push(name);
-                    }
-                }
-            }
-            let reached: Vec<usize> = expected
-                .iter()
-                .map(|handle| {
-                    let name = focus_name(handle);
-                    seen.iter()
-                        .position(|seen| *seen == name)
-                        .unwrap_or_else(|| panic!("never focused: {name} of {seen:?}"))
-                })
-                .collect();
-            assert!(
-                reached.windows(2).all(|pair| pair[0] < pair[1]),
-                "focus order is {reached:?}, expected the choosers, the card and then the list: {seen:?}"
-            );
-        });
-    }
-
-    #[gpui_kit::test]
-    fn enter_on_the_folder_card_launches(cx: &mut TestAppContext) {
-        let f = open(cx);
-        f.act(cx, |window, cx| {
-            f.tab.update(cx, |tab, cx| {
-                tab.set_folder_picker(Some(PathBuf::from("/Users/you/coding/foo")), cx)
-            });
-            let card = f.tab.read(cx).choosers.state.read(cx).folder_focus.clone();
-            window.focus(&card, cx);
-            window.render_frame(cx);
-            window.press("enter", cx);
-        });
-
-        assert_eq!(
-            f.events(),
-            vec![TabContentEvent::Launch {
-                folder: PathBuf::from("/Users/you/coding/foo"),
-                plan: LaunchPlan::default(),
-            }]
-        );
-    }
-
-    #[gpui_kit::test]
-    fn enter_on_the_history_list_resumes_the_selected_row(cx: &mut TestAppContext) {
-        let f = open(cx);
-        f.act(cx, |window, cx| {
-            let entries = vec![
-                history_entry(
-                    "/Users/you/.evo/sessions/a/1.sexp",
-                    "/Users/you/coding/foo",
-                    5,
-                ),
-                history_entry(
-                    "/Users/you/.evo/sessions/b/2.sexp",
-                    "/Users/you/coding/bar",
-                    90,
-                ),
-            ];
-            f.tab.update(cx, |tab, cx| {
-                tab.set_history_entries(&entries, 1_700_000_000, 0, Some("/Users/you"), cx)
-            });
-            let list = f.tab.read(cx).choosers.state.read(cx).history_focus.clone();
-            window.focus(&list, cx);
-            window.render_frame(cx);
-
-            // Down selects a row, Enter opens it — the keyboard route to the same event a
-            // click emits, on the frame Tab actually lands on.
-            window.press("down", cx);
-            window.press("enter", cx);
-        });
-
-        assert_eq!(
-            f.events(),
-            vec![TabContentEvent::Resume {
-                session_path: PathBuf::from("/Users/you/.evo/sessions/a/1.sexp"),
-                folder: PathBuf::from("/Users/you/coding/foo"),
-            }]
-        );
-    }
-
-    /// §9: what `evo-swarm check --json` found wrong is said under the choosers, one calm
-    /// line each, and a click on a line opens the chooser it is about. Nothing is said when
-    /// the launch is fine.
-    #[gpui_kit::test]
-    fn the_checks_problems_are_lines_that_open_their_chooser(cx: &mut TestAppContext) {
-        let cache = CacheDir::new(&catalog_body());
-        let f = open(cx);
-        f.act(cx, |window, cx| {
-            f.tab
-                .update(cx, |tab, cx| tab.set_catalog(&cache.catalog(), window, cx));
-            window.render_frame(cx);
-            // A launch on Default has nothing wrong with it.
-            assert!(problem_lines(cx, &f.tab).is_empty());
-            assert!(window.try_find(PROBLEMS_ID).is_none());
-
-            // The check's answer, as evo's own `check --json` gives it: two problems, one
-            // about the coordinator's model and one about the lanes'.
-            f.tab.update(cx, |tab, cx| {
-                tab.choosers.state.update(cx, |state, cx| {
-                    state.set_problems(
-                        vec![
-                            Problem {
-                                code: "model_not_ready".to_string(),
-                                message: "claude-opus-4.5 has no credential".to_string(),
-                            },
-                            Problem {
-                                code: "lane_model_not_ready".to_string(),
-                                message: "a lane cannot register\nthe aiden model".to_string(),
-                            },
-                        ],
-                        cx,
-                    )
-                })
-            });
-            window.render_frame(cx);
+            // The model field takes what is left, the effort field its own 180 — the same
+            // column in both cards.
+            let coordinator = window
+                .find(ElementId::Name(
+                    format!("{COORDINATOR_MODEL_ID}-box").into(),
+                ))
+                .bounds();
+            let workers = window
+                .find(ElementId::Name(format!("{WORKERS_MODEL_ID}-box").into()))
+                .bounds();
+            let effort = window.find(COORDINATOR_EFFORT_ID).bounds();
+            let effort_below = window.find(WORKERS_EFFORT_ID).bounds();
+            assert_eq!(coordinator.origin.x, workers.origin.x);
+            assert_eq!(coordinator.size.width, workers.size.width);
+            assert_eq!(effort.origin.x, effort_below.origin.x);
+            assert_eq!(effort.size.width, effort_below.size.width);
+            assert_eq!(effort.size.width, FIELD_COLUMN);
+            assert_eq!(coordinator.size.height, SELECT_H);
             assert_eq!(
-                problem_lines(cx, &f.tab),
-                vec![
-                    "claude-opus-4.5 has no credential".to_string(),
-                    "a lane cannot register the aiden model".to_string(),
-                ],
-                "one line each, the message's own newline folded away"
-            );
-            assert!(window.find(PROBLEMS_ID).visible());
-
-            // The keyboard starts on the folder card: not on any chooser.
-            window.focus(
-                &f.tab.read(cx).choosers.state.read(cx).folder_focus.clone(),
-                cx,
-            );
-            window.click(ElementId::NamedInteger(PROBLEM_ID.into(), 1), cx);
-        });
-
-        // The click is the lanes' line, so the lanes chooser is what has the keyboard —
-        // not the coordinator's, which is the row above it.
-        let lanes = f.act(cx, |window, cx| window.focused(cx));
-        assert_eq!(
-            lanes,
-            f.act(cx, |_, cx| Some(
-                chooser(&f, cx, Choice::Lanes).read(cx).focus_handle(cx)
-            )),
-            "the lanes line opens the lanes chooser"
-        );
-
-        f.act(cx, |window, cx| {
-            // A clean check takes the lines away again.
-            f.tab.update(cx, |tab, cx| {
-                tab.choosers
-                    .state
-                    .update(cx, |state, cx| state.set_problems(Vec::new(), cx))
-            });
-            window.render_frame(cx);
-            assert!(window.try_find(PROBLEMS_ID).is_none());
-        });
-    }
-
-    /// §9, §13: the check runs the binary the **app** would spawn — the one Settings
-    /// names — and follows it while the tab is still empty. A path that cannot run is
-    /// the line that says so, naming that path.
-    #[gpui_kit::test]
-    fn the_check_runs_the_binary_the_app_names(cx: &mut TestAppContext) {
-        let (_window, view) = open_window_with_env(
-            cx,
-            crate::LaunchEnv {
-                swarm_bin: PathBuf::from("/nonexistent/from-settings"),
-                ..crate::LaunchEnv::default()
-            },
-        );
-        // The tab opens on the app's path, and a check is a process: its answer
-        // lands on the executor, not in the update that asked.
-        cx.run_until_parked();
-        let tab = cx.update(|cx| view.read(cx).selected_tab().clone());
-        cx.update(|cx| {
-            let lines = problem_lines(cx, &tab);
-            assert_eq!(lines.len(), 1, "{lines:?}");
-            assert!(
-                lines[0].contains("/nonexistent/from-settings"),
-                "the check ran, and named, the app's own binary: {lines:?}"
-            );
-        });
-
-        // Settings points somewhere else: a tab that has started nothing is still the
-        // empty tab, so its check follows the window's new binary (§13).
-        cx.update(|cx| {
-            view.update(cx, |view, cx| {
-                view.set_launch_env(
-                    std::sync::Arc::new(crate::LaunchEnv {
-                        swarm_bin: PathBuf::from("/also/nonexistent"),
-                        ..crate::LaunchEnv::default()
-                    }),
-                    cx,
-                )
-            });
-        });
-        cx.run_until_parked();
-        cx.update(|cx| {
-            let lines = problem_lines(cx, &tab);
-            assert_eq!(lines.len(), 1, "{lines:?}");
-            assert!(
-                lines[0].contains("/also/nonexistent"),
-                "the empty tab followed Settings: {lines:?}"
+                effort.origin.x,
+                coordinator.origin.x + coordinator.size.width + FIELD_GAP
             );
         });
     }
 
+    /// The keyboard starts on the coordinator's model field — the first control on the
+    /// page (§7.1's polish).
     #[gpui_kit::test]
-    fn a_catalog_failure_reads_as_one_sentence_and_keeps_the_servers_words_for_the_hover(
-        cx: &mut TestAppContext,
-    ) {
-        // The error a failing catalog fetch leaves behind: the command's own words, a
-        // bearer token and all. Under a chooser it reads as a broken screen.
-        let raw = r#"http 500: The value "Bearer sk-live-9f3c…" is not a model"#;
+    fn focus_primary_lands_on_the_coordinator_field(cx: &mut TestAppContext) {
         let f = open(cx);
+        f.render(cx);
+        let state = f.state(cx);
+        let tab = f.tab.clone();
         f.act(cx, |window, cx| {
-            f.tab.update(cx, |tab, cx| {
-                tab.set_catalog_error(Some(raw.to_string()), cx)
-            });
+            let expected = state.read(cx).coordinator.read(cx).focus_handle(cx);
+            let took = tab.update(cx, |tab, cx| tab.focus_primary(window, cx));
+            assert!(took, "the field takes the keyboard");
+            assert_eq!(window.focused(cx).as_ref(), Some(&expected));
+            // The ring is the box around the field: the element carrying the control's
+            // own handle, painted from the handle's focus — which is what the design's
+            // `:focus-within` is.
+            // The ring itself is paint, and a headless window paints no focus: what the
+            // test can pin is that the box the design rings is the one carrying the
+            // control's own handle, and that the keyboard is on it.
             window.render_frame(cx);
-
-            let line = caption_text(cx, &f.tab);
-            assert_eq!(
-                line, "Couldn't load the model list — Default models will be used.",
-                "one sentence about what the tab does now"
-            );
-            assert!(
-                !line.contains("Bearer") && !line.contains("500"),
-                "not the server's error dump: {line}"
-            );
-            assert!(
-                caption_is_warning(cx, &f.tab),
-                "and it wears the warning tone, not the danger one"
-            );
-            assert_eq!(
-                caption_detail(cx, &f.tab).as_deref(),
-                Some(raw),
-                "the server's own words are what the hover carries"
-            );
-            // The tab still works: every chooser is usable on Default, and the folder card
-            // is what starts the swarm.
-            assert_eq!(f.tab.read(cx).coordinator_model(cx).as_ref(), "Default");
-            assert_eq!(f.tab.read(cx).lanes_model(cx).as_ref(), "Default");
-            assert_eq!(f.tab.read(cx).workers(cx).as_ref(), "Default");
-            assert!(window.find(FOLDER_ID).visible());
-        });
-    }
-
-    /// A fetch can fail while the last catalog is still in the choosers: then the line must
-    /// not claim the list is gone when it is on the screen.
-    #[gpui_kit::test]
-    fn a_failed_refresh_says_the_last_catalog_is_still_in_use(cx: &mut TestAppContext) {
-        let cache = CacheDir::new(&catalog_body());
-        let f = open(cx);
-        f.act(cx, |window, cx| {
-            f.tab.update(cx, |tab, cx| {
-                tab.set_catalog(&cache.catalog(), window, cx);
-                tab.set_catalog_error(Some("evo-swarm catalog --json exited 1".to_string()), cx);
-            });
-            window.render_frame(cx);
-            assert_eq!(
-                caption_text(cx, &f.tab),
-                "Couldn't refresh the model list — using the last one it loaded."
-            );
-            assert!(
-                options(cx, &f.tab, Choice::Lanes).len() > 1,
-                "the models the cache brought are still in the chooser"
-            );
-        });
-    }
-
-    /// §9.7: a binary `check --json` cannot run at all is one more problem line — the same
-    /// shape as evo's own, naming the path it tried — and a click on it opens Settings,
-    /// which is where a path is fixed.
-    #[gpui_kit::test]
-    fn a_check_that_cannot_run_is_a_line_that_opens_settings(cx: &mut TestAppContext) {
-        // What the app's own handler would do with the action; the app is not in this test,
-        // so the test is the one that answers it.
-        let asked = Rc::new(RefCell::new(0usize));
-        let answered = asked.clone();
-        cx.update(|cx| {
-            cx.on_action(move |_: &OpenSettings, _cx: &mut App| {
-                *answered.borrow_mut() += 1;
-            });
-        });
-        let cache = CacheDir::new(&catalog_body());
-        let f = open(cx);
-        f.act(cx, |window, cx| {
-            f.tab
-                .update(cx, |tab, cx| tab.set_catalog(&cache.catalog(), window, cx));
-            // A path with nothing at it: the check cannot run, which is a problem with the
-            // machine rather than with the launch.
-            f.tab.update(cx, |tab, cx| {
-                tab.set_swarm_bin(PathBuf::from("/nonexistent/evo-swarm"), cx)
-            });
-            window.render_frame(cx);
-        });
-        // The check is a process on the app's executor: its answer lands here.
-        cx.run_until_parked();
-
-        f.act(cx, |window, cx| {
-            window.render_frame(cx);
-            let lines = problem_lines(cx, &f.tab);
-            assert_eq!(lines.len(), 1, "{lines:?}");
-            assert!(
-                lines[0].contains("/nonexistent/evo-swarm"),
-                "the line names the path that failed: {lines:?}"
-            );
-            assert!(
-                lines[0].contains("Settings"),
-                "and says where a path is fixed: {lines:?}"
-            );
-            assert!(window.find(PROBLEMS_ID).visible());
-
-            // Clicking it opens Settings — the workspace dispatches the action and the app
-            // answers it, which is the seam between the two crates.
-            window.click(ElementId::NamedInteger(PROBLEM_ID.into(), 0), cx);
-        });
-        // A window's own action dispatch is deferred to the end of the effect cycle
-        // (`Window::dispatch_action`), so what the click asked for lands here.
-        cx.run_until_parked();
-        assert_eq!(*asked.borrow(), 1, "the click asked for Settings");
-        assert!(
-            !f.events()
-                .iter()
-                .any(|event| matches!(event, TabContentEvent::Launch { .. })),
-            "the line is not the folder card: nothing was launched"
-        );
-
-        // A binary that runs is no line at all.
-        f.act(cx, |window, cx| {
-            f.tab
-                .update(cx, |tab, cx| tab.set_swarm_bin(store::cli::swarm_bin(), cx));
-            window.render_frame(cx);
-        });
-        cx.run_until_parked();
-        f.act(cx, |window, cx| {
-            window.render_frame(cx);
-            let lines = problem_lines(cx, &f.tab);
-            assert!(
-                !lines.iter().any(|line| line.contains("/nonexistent")),
-                "{lines:?}"
-            );
+            let box_ = window.find(ElementId::Name(
+                format!("{COORDINATOR_MODEL_ID}-box").into(),
+            ));
+            assert!(box_.visible());
+            let other = window.find(ElementId::Name(format!("{WORKERS_MODEL_ID}-box").into()));
+            assert!(other.visible());
+            assert_eq!(box_.bounds().origin.x, other.bounds().origin.x);
         });
     }
 }
