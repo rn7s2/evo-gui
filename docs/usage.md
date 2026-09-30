@@ -282,10 +282,12 @@ row is in the transcript, cancellable, until then. The draft is cleared only whe
 the server accepted the send, and **Esc never touches it**.
 
 The single button's face is what it does: **Send** while nothing is going on
-(enabled once there is text), **■ Stop swarm** while the swarm is busy or held
-while its lanes work (`run.interrupt`, scope `swarm` — it stops everyone, and the
-coordinator is told). There is never a Send and a Stop side by side. A lane can
-be stopped from its own row in the left column.
+(enabled once there is text), **■ Stop swarm** while anything is — the coordinator
+running its own turn, held while its lanes work, or a lane still working
+(`run.interrupt`, scope `swarm`: it stops everyone, and the coordinator is told).
+There is never a Send and a Stop side by side; `Esc` is the same interrupt with the
+keyboard, and **Enter** still sends while the swarm is busy (that is what the queue
+is for). A lane can be stopped from its own row in the left column.
 
 The status line sits at the foot of the centre column: the `segments` the server
 publishes for the agent being shown, in its order, so the same session reads the
