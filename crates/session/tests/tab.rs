@@ -300,6 +300,39 @@ fn older_items_page_into_the_topic_the_ui_asked_for() {
     assert!(!tab.topic("session").unwrap().has_older());
 }
 
+/// A coordinator whose own topic has not caught up still reads as waiting when the
+/// swarm says it is held for its lanes (§4.2): the row says what the swarm says, and
+/// never "idle" while lanes are out.
+#[test]
+fn a_coordinator_the_swarm_holds_is_waiting_on_its_lanes() {
+    let mut session_body = topic_body(&fixture("snapshot-session.json"), "session");
+    session_body["state"]["status"] = json!("idle");
+    let mut tab = TabModel::new();
+    tab.on_snapshot("session", &session_body);
+    tab.on_snapshot(
+        "swarm",
+        &topic_body(&fixture("snapshot-swarm.json"), "swarm"),
+    );
+    assert!(
+        tab.lane_list().swarm.as_ref().unwrap().waiting_on_lanes,
+        "the swarm says it holds the coordinator"
+    );
+    assert_eq!(tab.activity(), Status::Waiting);
+    assert_eq!(tab.activity().label(), "waiting on lanes");
+
+    // The swarm's flag goes when the lanes come back, and the coordinator's own
+    // status is what is left.
+    let mut swarm_body = topic_body(&fixture("snapshot-swarm.json"), "swarm");
+    swarm_body["state"]["status"]["waiting_on_lanes"] = json!(false);
+    let mut tab = TabModel::new();
+    tab.on_snapshot("session", &session_body);
+    tab.on_snapshot("swarm", &swarm_body);
+    assert_eq!(tab.activity(), Status::Idle);
+    assert_eq!(tab.activity().label(), "idle");
+}
+
+/// A stream's own status is per topic: one topic reconnecting says nothing about
+/// another, and no topic says anything until something does.
 #[test]
 fn a_stream_badge_is_per_topic() {
     let mut tab = open_tab();
