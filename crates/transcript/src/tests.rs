@@ -797,3 +797,30 @@ fn switching_agent_follows_the_tail_again(cx: &mut TestAppContext) {
     );
     assert!(cx.read(|cx| !view.read(cx).is_away_from_latest(cx)));
 }
+
+/// The list opens at its latest item: with more rows than the pane can show, the
+/// last one is on screen — which is the whole point of the pinning, and the one
+/// thing a scroll position can be held to from a test.
+#[gpui_kit::test]
+fn a_long_transcript_opens_at_its_latest_row(cx: &mut TestAppContext) {
+    let items: Vec<Item> = (0..40)
+        .map(|i| user(&format!("u_{i:02}"), "a turn of its own"))
+        .collect();
+    let (view, cx) = open!(cx, items);
+    // The first frame lays the list out; the second applies the scroll the first
+    // frame asked for (the rule runs in prepaint, so it is one frame behind).
+    for _ in 0..4 {
+        cx.update(|window, cx| window.render_frame(cx));
+    }
+
+    let transcript = cx.update(|window, _| window.find("transcript").bounds());
+    let last = cx.update(|window, _| window.find(row_id("transcript-row", "u_39")).bounds());
+    assert!(
+        last.bottom() <= transcript.bottom() + px(1.),
+        "the latest row is inside the pane: {last:?} vs {transcript:?}"
+    );
+    assert!(
+        last.bottom() > transcript.bottom() - px(60.),
+        "and at the bottom of it, not floating above: {last:?} vs {transcript:?}"
+    );
+}

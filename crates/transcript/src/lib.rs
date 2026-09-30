@@ -55,7 +55,6 @@ use gpui_kit::{
     StatefulInteractiveElement as _, Styled as _, Task, TestSupportExt as _, WeakEntity, Window,
 };
 use session::{AgentKey, Item, ItemId, ItemKind, Todo};
-use std::cell::Cell;
 use std::time::Duration;
 
 use crate::pin::{Action, Pin};
@@ -186,11 +185,6 @@ pub struct TranscriptView {
     /// moves.
     scroll: ScrollHandle,
     pin: Pin,
-    /// The list's bounds as last painted, and the pane's: the two the distance
-    /// from the bottom is measured between, in window coordinates — which is the
-    /// design's `scrollHeight`, `scrollTop` and `clientHeight`.
-    content: Rc<Cell<Bounds<Pixels>>>,
-    viewport: Rc<Cell<Bounds<Pixels>>>,
     /// The step-by-step return to the latest, while one is running.
     jump: Option<Task<()>>,
     todos: Vec<Todo>,
@@ -225,8 +219,6 @@ impl TranscriptView {
             }),
             scroll: ScrollHandle::new(),
             pin: Pin::new(),
-            content: Rc::new(Cell::new(Bounds::default())),
-            viewport: Rc::new(Cell::new(Bounds::default())),
             jump: None,
             todos: Vec::new(),
             has_older: false,
@@ -745,19 +737,6 @@ impl Render for TranscriptView {
             rows
         };
 
-        // The list itself: the reading measure, one row after another. It is the
-        // element whose bounds are the scroll's *content* — the reader's distance
-        // from the bottom is measured against them.
-        let content = self.content.clone();
-        let on_content = {
-            let weak = cx.weak_entity();
-            move |bounds: Vec<Bounds<Pixels>>, _window: &mut Window, cx: &mut App| {
-                if let Some(bounds) = bounds.first().copied() {
-                    content.set(bounds);
-                }
-                let _ = weak.update(cx, |view, cx| view.on_painted(cx));
-            }
-        };
         let mut measure = div()
             .id("transcript-measure")
             .flex()
@@ -776,7 +755,6 @@ impl Render for TranscriptView {
             }
         }
         let content = div()
-            .on_children_prepainted(on_content)
             .w_full()
             .flex()
             .justify_center()
@@ -784,15 +762,12 @@ impl Render for TranscriptView {
             .pb(px(INSET))
             .child(measure);
 
-        // The pane: what the reader scrolls. Its own bounds are the *viewport*, and
-        // they are what the content is measured against.
-        let viewport = self.viewport.clone();
-        let on_viewport = {
+        // Every frame the list is painted is a chance for the design's rule to run
+        // — the same chance a scroll event gives it in a browser, and the one that
+        // catches a pane that changed height under a reader who is following.
+        let on_painted = {
             let weak = cx.weak_entity();
-            move |bounds: Vec<Bounds<Pixels>>, _window: &mut Window, cx: &mut App| {
-                if let Some(bounds) = bounds.first().copied() {
-                    viewport.set(bounds);
-                }
+            move |_bounds: Vec<Bounds<Pixels>>, _window: &mut Window, cx: &mut App| {
                 let _ = weak.update(cx, |view, cx| view.on_painted(cx));
             }
         };
@@ -828,7 +803,7 @@ impl Render for TranscriptView {
         );
 
         let scroll = div()
-            .on_children_prepainted(on_viewport)
+            .on_children_prepainted(on_painted)
             .id("transcript-scroll")
             .test_support()
             .size_full()
@@ -957,16 +932,15 @@ impl Drop for TranscriptView {
     }
 }
 
-/// The reader's distance from the bottom, in the list as last painted, and what
-/// the design's rule makes of it.
+/// What the design's rule makes of the reader's distance from the bottom.
+///
+/// The distance is the scroll's own: gpui keeps the offset from the top as a
+/// negative number and the greatest offset as a positive one, so their sum is
+/// `scrollHeight - scrollTop - clientHeight` exactly — 0 at the bottom, growing as
+/// the reader goes up, and 0 for a list shorter than its pane.
 impl TranscriptView {
     fn on_painted(&mut self, cx: &mut Context<Self>) {
-        let content = self.content.get();
-        let viewport = self.viewport.get();
-        if viewport.size.height == px(0.) || content.size.height == px(0.) {
-            return;
-        }
-        let gap = f32::from(content.bottom() - viewport.bottom());
+        let gap = f32::from(self.scroll.max_offset().y + self.scroll.offset().y);
         let away = self.pin.is_away();
         match self.pin.on_scroll(gap) {
             // The layout moved under a reader who is following: pull the list back
