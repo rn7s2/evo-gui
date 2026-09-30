@@ -89,7 +89,7 @@ pub enum StreamMsg {
     /// until [`EventStream::resume_from`]. Re-snapshot everything first.
     Reset { reason: StreamResetReason },
     /// The connection dropped; the next attempt is in `retry_in`.
-    Reconnecting { attempt: u32, retry_in: Duration },
+    Reconnecting { retry_in: Duration },
     /// The stream has stopped and nothing more will arrive.
     Stopped,
 }
@@ -276,7 +276,8 @@ fn run(
                 }
                 let retry_in = config.backoff.wait(attempt);
                 attempt = attempt.saturating_add(1);
-                let _ = messages.send_blocking(StreamMsg::Reconnecting { attempt, retry_in });
+                let _ = &attempt;
+                let _ = messages.send_blocking(StreamMsg::Reconnecting { retry_in });
                 if !sleep_until(retry_in, &stopped) {
                     break;
                 }

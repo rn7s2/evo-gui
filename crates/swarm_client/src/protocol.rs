@@ -165,11 +165,6 @@ impl StreamFrame {
         StreamFrame { cursor, op, data }
     }
 
-    /// The op's `data` as an object, if it is one.
-    pub fn fields(&self) -> Option<&Map<String, Value>> {
-        self.data.as_object()
-    }
-
     /// One field of the frame's data.
     pub fn get(&self, key: &str) -> Option<&Value> {
         self.data.get(key)
@@ -755,7 +750,6 @@ mod tests {
         assert_eq!(frame.cursor, None);
         assert_eq!(frame.data, Value::Null);
         assert_eq!(frame.op, "op");
-        assert!(frame.fields().is_none());
         assert_eq!(frame.topic(), None);
         // Neither reset is claimed by a frame with no reason.
         let frame = StreamFrame::parse(Some("op"), None, r#"{"op":"stream.reset"}"#);

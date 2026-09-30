@@ -35,7 +35,9 @@ use swarm_client::{
     ShutdownOutcome, Snapshot, StdinClose, StreamConfig, StreamFrame, StreamMsg,
 };
 
-use crate::types::{tab_topics, Update};
+use crate::types::Update;
+
+use crate::types::tab_topics;
 
 /// What the engine thread reads: a command from the UI, or something the stream
 /// saw. One channel for both, so the loop never blocks on two things at once.
@@ -44,9 +46,70 @@ enum Inbound {
     Request(Box<OpRequest>),
     /// Re-read every topic.
     Snapshot,
+    /// A read the UI asked for (§5.4): older items, one whole item, image bytes.
+    Fetch(Fetch),
     /// Stop the server the ladder's way and end the engine.
     Shutdown,
     Stream(StreamMsg),
+}
+
+/// One read the UI asked for. GETs, so they are neither ops nor snapshots.
+#[derive(Clone, Debug)]
+enum Fetch {
+    /// `GET /items?topic=&before=&limit=` — older items, paged in at the front.
+    Page {
+        topic: String,
+        before: Option<String>,
+        limit: u32,
+    },
+    /// `GET /items/<id>?topic=` — one item, whole.
+    Item { topic: String, id: String },
+    /// `GET /media/<id>/<n>?topic=` — image bytes.
+    Media { topic: String, id: String, n: u32 },
+}
+
+impl Fetch {
+    /// The fetch, named for a person — and for a failure the UI has to place.
+    fn what(&self) -> String {
+        match self {
+            Fetch::Page {
+                topic,
+                before: Some(before),
+                ..
+            } => format!("items before {before} in {topic}"),
+            Fetch::Page { topic, .. } => format!("items in {topic}"),
+            Fetch::Item { topic, id } => format!("item {id} in {topic}"),
+            Fetch::Media { topic, id, n } => format!("media {n} of {id} in {topic}"),
+        }
+    }
+
+    /// Do it. The update carries the server's own body, unread.
+    fn run(self, client: &Client) -> Result<Update, swarm_client::Error> {
+        match self {
+            Fetch::Page {
+                topic,
+                before,
+                limit,
+            } => {
+                let body = client.items(&topic, before.as_deref(), limit)?;
+                Ok(Update::ItemsBefore { topic, body })
+            }
+            Fetch::Item { topic, id } => {
+                let body = client.item(&topic, &id)?;
+                Ok(Update::Item { topic, body })
+            }
+            Fetch::Media { topic, id, n } => {
+                let (bytes, content_type) = client.media(&topic, &id, n)?;
+                Ok(Update::Media {
+                    topic,
+                    id,
+                    n,
+                    content_type,
+                    bytes,
+                })
+            }
+        }
+    }
 }
 
 /// A tab: one server, one stream, one thread.
@@ -114,6 +177,41 @@ impl EngineHandle {
     /// not keep up with.
     pub fn refetch(&self) -> bool {
         self.inbox.send_blocking(Inbound::Snapshot).is_ok()
+    }
+
+    /// `GET /items?topic=&before=&limit=`: a page of items older than `before`
+    /// (`None` pages from the newest). The answer arrives as
+    /// [`Update::ItemsBefore`], or [`Update::FetchFailed`].
+    pub fn page(&self, topic: &str, before: Option<&str>, limit: u32) -> bool {
+        self.send(Inbound::Fetch(Fetch::Page {
+            topic: topic.to_owned(),
+            before: before.map(str::to_owned),
+            limit,
+        }))
+    }
+
+    /// `GET /items/<id>`: one item whole — a tool row's full output, the whole
+    /// thinking. The answer arrives as [`Update::Item`].
+    pub fn item(&self, topic: &str, id: &str) -> bool {
+        self.send(Inbound::Fetch(Fetch::Item {
+            topic: topic.to_owned(),
+            id: id.to_owned(),
+        }))
+    }
+
+    /// `GET /media/<id>/<n>`: image bytes and their content type. The answer
+    /// arrives as [`Update::Media`].
+    pub fn media(&self, topic: &str, id: &str, n: u32) -> bool {
+        self.send(Inbound::Fetch(Fetch::Media {
+            topic: topic.to_owned(),
+            id: id.to_owned(),
+            n,
+        }))
+    }
+
+    /// Hand the engine one inbound message.
+    fn send(&self, message: Inbound) -> bool {
+        self.inbox.send_blocking(message).is_ok()
     }
 
     /// Stop the server and end the engine. Returns at once: the child is told by
@@ -284,12 +382,13 @@ fn engine_loop(
                 engine.snapshot(client, None);
             }
             Inbound::Request(request) => post(engine, client, *request),
+            Inbound::Fetch(fetch) => fetch_off_loop(engine, client, fetch),
             Inbound::Stream(StreamMsg::Connected { .. }) => {
                 engine.send(Update::Stream {
                     status: crate::types::StreamStatus::Connected,
                 });
             }
-            Inbound::Stream(StreamMsg::Reconnecting { retry_in, .. }) => {
+            Inbound::Stream(StreamMsg::Reconnecting { retry_in }) => {
                 // A stream that cannot come back is a server that is not there.
                 if !server.is_running() {
                     engine.send(Update::ServerGone);
@@ -332,6 +431,27 @@ fn engine_loop(
             }
         }
     }
+}
+
+/// One read, on a thread of its own: a page of items, an item, or an image can be
+/// large, and none of them may hold up the stream. A failure is an update, not a
+/// panic and not a retry.
+fn fetch_off_loop(engine: &Engine, client: &Client, fetch: Fetch) {
+    let client = client.clone();
+    let updates = engine.updates.clone();
+    let what = fetch.what();
+    let _ = thread::Builder::new()
+        .name("evo-tab-fetch".into())
+        .spawn(move || {
+            let message = match fetch.run(&client) {
+                Ok(update) => update,
+                Err(error) => Update::FetchFailed {
+                    what,
+                    reason: error.to_string(),
+                },
+            };
+            let _ = updates.send_blocking(message);
+        });
 }
 
 /// POST one op, on a thread of its own: a slow or refused op must not hold up the
