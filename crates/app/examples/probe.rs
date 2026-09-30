@@ -17,7 +17,7 @@
 //! shot NAME [light|dark|both]    picture of the window (default both)
 //! crop NAME X Y W H [scale]      picture of a region, scaled up (default 2)
 //! theme light|dark               switch the theme
-//! click ID | dclick ID | hover ID
+//! click ID | dclick ID | hover ID   (never `click select-folder`: a real dialog)
 //! at X Y                          move the pointer to window coordinates
 //! down X Y | up X Y               press / release the left button there
 //! press KEY | input TEXT          keyboard
@@ -193,6 +193,17 @@ fn run(world: &str, out: &Path, script: &str) -> Result<(), Error> {
                 set_theme(&mut cx, window, mode)?;
             }
             "click" | "dclick" | "hover" => {
+                // The folder card opens the platform's own Open panel, which nothing
+                // in a headless run can answer: the run would stall until it is
+                // killed. `hover` is fine; a launch is the `launch` step.
+                if cmd != "hover" && rest == "select-folder" {
+                    return Err(format!(
+                        "line {}: clicking select-folder opens the real Open panel; \
+                         use `hover select-folder`, or `launch` to start a tab",
+                        n + 1
+                    )
+                    .into());
+                }
                 let id = element_id(rest);
                 cx.update_window(window, |_, window, cx| {
                     let found = window.find(id.clone());
