@@ -1,21 +1,33 @@
-//! proofs — milestone proof tests against a real evo-swarm, with no UI.
+//! proofs — the real-binary end-to-end proofs (CONTRACT.md).
 //!
-//! Each milestone is one test binary under `tests/`, driving the same three crates
-//! the tab page drives — `tab_engine` for the I/O, `session` for the view models,
-//! `store` for what the app keeps on disk — against a real `evo-swarm serve` in a
-//! hermetic temp `HOME` whose model is scripted (`swarm_client::harness`, feature
-//! `test-harness`). Nothing is faked but the model.
+//! Each `tests/` file proves one thing about a **real** `evo-swarm serve` (or,
+//! for the catalog, about the real offline CLIs), with no UI in the way: a temp
+//! `HOME` whose evo home registers the scripted stub model, the binaries the
+//! environment names, and this harness driving them over the real protocol.
 //!
-//! Run them with `CARGO_TARGET_DIR=target/proofs cargo test -p proofs` (the
-//! isolation the proofs want: a swarm is a supervisor plus a process per lane, and
-//! these binaries start real ones). What each milestone proves, and the result of
-//! the last run, is in `docs/proofs.md`.
+//! ```sh
+//! EVO_SWARM_BIN=…/build/evo-swarm EVO_AGENT_BIN=…/build/evo-agent \
+//!   CARGO_TARGET_DIR=target/proofs cargo test -p proofs -- --nocapture
+//! ```
 //!
-//! What the UI adds on top of this is drawing: the folding of a `tab_engine`
-//! [`Update`] into a `session::TabModel` is the same turn by turn (it is the
-//! `absorb` of `crates/workspace/src/tab.rs`'s `Live`), so a proof that asserts on
-//! the model asserts on what the tab page renders.
-//!
-//! [`Update`]: tab_engine::Update
+//! What each proof asserts is the contract, not an implementation: the ready
+//! file, the snapshot, the ops of §5.3, the items of §4.1. Nothing here reads a
+//! journal, a port file or a pid list to find out what happened — and nothing
+//! here polls a health endpoint to find out that a server is up, because the
+//! ready file already said so.
 
-pub use session::TabModel;
+pub mod fixture;
+pub mod watch;
+
+pub use fixture::{Bins, Fixture, NOTE, WAIT};
+pub use watch::{deadline_after, wait_for, Mirror, Watcher};
+
+/// One swarm at a time. A test binary runs its own tests in parallel threads and
+/// these proofs start real processes with real lanes; the crate's tests are one
+/// per binary, but a binary that grows a second proof must still take this.
+pub fn one_swarm() -> std::sync::MutexGuard<'static, ()> {
+    static SWARM: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    SWARM
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
