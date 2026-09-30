@@ -551,11 +551,24 @@ impl TabContent {
             .is_some_and(|live| live.stream.is_reconnecting())
     }
 
-    /// Whether the coordinator has a run in flight — the tab strip's activity dot
-    /// (§7.1). A compaction counts: the swarm is busy either way, and the readout
-    /// says which.
+    /// Whether the coordinator has a run in flight. A compaction counts: the swarm
+    /// is busy either way, and the readout says which.
+    ///
+    /// This is the coordinator alone; the tab strip asks
+    /// [`is_working`](Self::is_working), which is this plus the lanes.
     pub fn is_running(&self) -> bool {
         self.model().is_some_and(|model| model.activity().is_busy())
+    }
+
+    /// Whether this tab's swarm is working at all — a lane at work, or the
+    /// coordinator's own run — which is what the strip's dot breathes to (§7.1).
+    ///
+    /// [`is_running`](Self::is_running) is the coordinator alone: a coordinator
+    /// between turns with a lane still at work is a working swarm, and the strip
+    /// is where a person looks to see whether anything is happening in a tab.
+    /// ([`swarm_is_busy`] is the same rule the composer's Stop answers.)
+    pub fn is_working(&self) -> bool {
+        self.model().is_some_and(swarm_is_busy)
     }
 
     /// The label on the tab: the folder's name, or "New tab" while empty.

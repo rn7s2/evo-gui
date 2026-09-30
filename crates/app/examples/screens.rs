@@ -135,7 +135,7 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     match state {
         TabState::Running { .. } => {
             println!("[capture] the tab came up: {}", fixture.folder.display());
-            live_states(&mut cx, window, dir, &tab)?;
+            live_states(&mut cx, window, dir, &view, &tab)?;
             // The same window, one tab older: its history now has the session
             // that tab just ran.
             let tabs = view.clone();
@@ -200,6 +200,7 @@ fn live_states(
     cx: &mut HeadlessAppContext,
     window: AnyWindowHandle,
     dir: &Path,
+    view: &Entity<WorkspaceView>,
     tab: &Entity<TabContent>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // --- the pool, and one lane given work --------------------------------------
@@ -212,6 +213,55 @@ fn live_states(
         lane_busy(cx, tab, 1).then_some(())
     });
     shot(cx, window, dir, "02-lanes-working")?;
+
+    // --- the strip itself ------------------------------------------------------
+    //
+    // Four tabs, one of them working, one of them under the pointer: the design's
+    // own subject (`TabStrip.tsx`), and the only state that shows the outward
+    // corners at the ends of a tab, the dividers between tabs and what a hover
+    // does to them. The working tab is the one this capture is on.
+    let extra = {
+        let view = view.clone();
+        cx.update_window(window, |_, window, cx| {
+            view.update(cx, |view, cx| {
+                (0..3)
+                    .map(|_| view.add_tab(window, cx).read(cx).id())
+                    .collect::<Vec<_>>()
+            })
+        })?
+    };
+    let under_the_pointer = extra[0];
+    // The tab that is working is the one these states are about, so it stays the
+    // one being shown: the hovered tab is the second, and the strip is now the
+    // design's own picture — an active tab with its corners, a hovered one beside
+    // it, and the dividers the two of them hide.
+    cx.update_window(window, |_, window, cx| {
+        let view = view.clone();
+        view.update(cx, |view, cx| view.select_tab(0, window, cx));
+    })?;
+    cx.update_window(window, |_, window, cx| {
+        let at = window
+            .find(ElementId::NamedInteger(
+                "tab-label".into(),
+                under_the_pointer.get(),
+            ))
+            .bounds()
+            .center();
+        window.simulate_mouse_move(at, cx);
+    })?;
+    pump(cx, Duration::from_millis(400));
+    shot(cx, window, dir, "10-tabs")?;
+    // Back to the tab the rest of these states are about.
+    cx.update_window(window, |_, window, cx| {
+        let view = view.clone();
+        view.update(cx, |view, cx| {
+            view.select_tab(0, window, cx);
+            for id in extra {
+                view.close_tab(id, window, cx);
+            }
+        });
+    })?;
+    pump(cx, Duration::from_millis(400));
 
     // --- the lane's own transcript ---------------------------------------------
     click(cx, window, agent_row(AgentKey::Lane(1)))?;
@@ -331,7 +381,14 @@ fn open(
                 ..workspace::window_options(cx)
             },
             cx,
-            |window, cx| cx.new(|cx| WorkspaceView::with_config(config, window, cx)),
+            |window, cx| {
+                // The app's own light or dark, and the design's palettes under it:
+                // a capture is the window the app opens, down to the theme. The
+                // subscription is not kept — nothing here changes the system's
+                // appearance while the pictures are being taken.
+                let _appearance = evo_desktop::follow_appearance(cx, window);
+                cx.new(|cx| WorkspaceView::with_config(config, window, cx))
+            },
         )?;
         cx.update_global::<Shell, _>(|shell, _| shell.view = Some(view.downgrade()));
         Ok::<_, Box<dyn std::error::Error>>((window, view))

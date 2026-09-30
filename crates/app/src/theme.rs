@@ -169,6 +169,10 @@ fn colors(p: &Palette) -> serde_json::Value {
     let items: Vec<(&str, String)> = vec![
         ("background", hex(p.bg)),
         ("foreground", fg.clone()),
+        // A panel that sits on the page, and the page itself: the design has one
+        // deepest surface (`--bg`), and cards take `muted`/`secondary`.
+        ("surface", hex(p.bg)),
+        ("surface_foreground", fg.clone()),
         ("muted.background", muted.clone()),
         ("muted.foreground", hex(p.muted_fg)),
         ("border", border.clone()),
