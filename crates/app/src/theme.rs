@@ -190,6 +190,12 @@ fn colors(p: &Palette) -> serde_json::Value {
         ("danger.foreground", primary_fg.clone()),
         ("success.background", hex(p.success)),
         ("success.foreground", primary_fg.clone()),
+        // The kit's `input` is a *border* (`input.border`): there is no
+        // `input.background` in its schema, and `Theme::input_background()` is
+        // the page's own background in the light mode — see
+        // `the_kits_input_surface_is_not_the_designs_input`. A crate that draws
+        // the design's `--input` (the lightest surface, which a card's body is)
+        // reads it from `store::design::palette()`.
         ("input.border", border.clone()),
         ("ring", primary.clone()),
         ("caret", fg.clone()),
@@ -311,6 +317,48 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The kit has no input *surface* to map: `Theme::input_background()` is the
+    /// page's background in the light mode and its own `input` mixed towards
+    /// transparent in the dark one, whatever a theme file says. So the design's
+    /// `--input` — the lightest surface, which `doc28` gives a card's body and a
+    /// composer's field — is not reachable through this mapping, and a crate that
+    /// wants it reads `store::design::palette().input`.
+    ///
+    /// This is here so a gpui-component that grows the token fails loudly rather
+    /// than leaving a colour silently unmapped.
+    #[gpui_kit::test]
+    fn the_kits_input_surface_is_not_the_designs_input(cx: &mut gpui_kit::TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            install(cx);
+            ComponentTheme::change(ThemeMode::Light, None, cx);
+        });
+        cx.update(|cx| {
+            let theme = cx.global::<ComponentTheme>();
+            assert_eq!(
+                theme.light_theme.name.as_ref(),
+                LIGHT_THEME,
+                "the design's palette is the one installed"
+            );
+            assert_ne!(
+                theme.input_background(),
+                hsla_test(design::LIGHT.input),
+                "the kit's input surface is not the design's `--input`"
+            );
+            assert_eq!(
+                theme.input_background(),
+                theme.background,
+                "in the light mode it is the page's own background"
+            );
+        });
+    }
+
+    /// A design colour as the renderer's, for the tests here.
+    fn hsla_test(c: store::design::Rgb) -> gpui_kit::Hsla {
+        let colour: gpui_kit::Hsla = gpui_kit::rgba(c.to_u32()).into();
+        colour
     }
 
     /// The two palettes are genuinely two: the design's light ramp and the dark
