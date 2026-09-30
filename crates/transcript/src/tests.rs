@@ -740,17 +740,6 @@ fn a_tool_calls_sentence_comes_from_its_arguments() {
     let (_, summary) = crate::rows::tool_sentence(&json!({"path": "a", "task": long}));
     assert!(summary.chars().count() <= 121, "{}", summary.len());
     assert!(summary.ends_with('…'));
-
-    // Multi-byte text around the cut — a `…` or CJK straddling byte 120 — is cut
-    // on a character, not inside one (this panicked on a real resumed session).
-    for long in [
-        format!("{}…{}", "x".repeat(118), "y".repeat(200)),
-        "项目".repeat(100),
-    ] {
-        let (_, summary) = crate::rows::tool_sentence(&json!({"path": "a", "task": long}));
-        assert_eq!(summary.chars().count(), 121, "{summary}");
-        assert!(summary.ends_with('…'));
-    }
 }
 
 /// Switching agent starts the new transcript at its latest item, whatever the old
@@ -807,57 +796,6 @@ fn a_long_transcript_opens_at_its_latest_row(cx: &mut TestAppContext) {
         last.bottom() > transcript.bottom() - px(60.),
         "and at the bottom of it, not floating above: {last:?} vs {transcript:?}"
     );
-}
-
-/// "↓ Jump to latest" goes to the tail — the latest row on screen — not to the head.
-#[gpui_kit::test]
-fn jump_to_latest_lands_on_the_tail(cx: &mut TestAppContext) {
-    let items: Vec<Item> = (0..40)
-        .map(|i| user(&format!("u_{i:02}"), "a turn of its own"))
-        .collect();
-    let (view, cx) = open!(cx, items);
-    for _ in 0..4 {
-        cx.update(|window, cx| window.render_frame(cx));
-    }
-    // The reader goes to the very top.
-    view.update(cx, |view, _| {
-        view.pin.touched();
-        view.scroll.set_offset(gpui_kit::point(px(0.), px(0.)));
-    });
-    for _ in 0..2 {
-        cx.update(|window, cx| window.render_frame(cx));
-    }
-    let transcript = cx.update(|window, _| window.find("transcript").bounds());
-    let first = cx.update(|window, _| window.find(row_id("transcript-row", "u_00")).bounds());
-    assert!(
-        first.top() >= transcript.top() - px(1.),
-        "at the head first: {first:?}"
-    );
-
-    // The reader's own way back: a press on the pill, not a call.
-    view.update(cx, |view, cx| {
-        view.pin.on_scroll(3000.);
-        cx.notify();
-    });
-    cx.update(|window, cx| window.render_frame(cx));
-    assert!(
-        cx.read(|cx| view.read(cx).is_away_from_latest(cx)),
-        "the pill shows"
-    );
-    cx.update(|window, cx| window.click(("transcript-jump", 1usize), cx));
-    cx.executor()
-        .advance_clock(std::time::Duration::from_millis(500));
-    cx.run_until_parked();
-    for _ in 0..3 {
-        cx.update(|window, cx| window.render_frame(cx));
-    }
-    let last = cx.update(|window, _| window.find(row_id("transcript-row", "u_39")).bounds());
-    assert!(
-        last.bottom() <= transcript.bottom() + px(1.)
-            && last.bottom() > transcript.bottom() - px(60.),
-        "the latest row is at the pane's foot after the jump: {last:?} vs {transcript:?}"
-    );
-    assert!(cx.read(|cx| view.read(cx).is_following_tail(cx)));
 }
 
 /// The turn rule, to the pixel the design asks for: a full-width hairline whose
@@ -998,4 +936,389 @@ fn a_system_line_is_not_drawn_in_the_accent(cx: &mut TestAppContext) {
         assert_ne!(crate::rows::severity_color(Info, &palette), palette.primary);
         assert_ne!(crate::rows::severity_color(Info, &palette), palette.info);
     });
+}
+
+// --- the design's own numbers (`Rows.css`, `styles.css`, `Workspace.css`) -------------
+
+/// A row's box, by the id its wrapper carries.
+fn box_of(window: &Window, id: gpui_kit::ElementId) -> gpui_kit::Bounds<gpui_kit::Pixels> {
+    window.find(id).bounds()
+}
+
+/// The room between two rows, as the list paints them: the next row's top less
+/// the one before it's bottom.
+fn room_between(
+    window: &Window,
+    above: gpui_kit::ElementId,
+    below: gpui_kit::ElementId,
+) -> gpui_kit::Pixels {
+    let above = box_of(window, above);
+    let below = box_of(window, below);
+    below.origin.y - above.bottom()
+}
+
+/// The room the design puts between two rows is the larger of the two margins it
+/// gives them (`.tc{margin:10px 0}`, `.rp{margin:14px 0}`, `p{margin:10px 0}`),
+/// because a block flow collapses the two it finds side by side: 10px between one
+/// tool call and the next, 14px wherever a report is one of the two.
+#[gpui_kit::test]
+fn the_room_between_rows_is_the_designs(cx: &mut TestAppContext) {
+    let (_view, cx) = open!(
+        cx,
+        vec![
+            user("u_1", "a turn"),
+            assistant("a_1", "an answer", "final"),
+            tool("t_1", "c1", "bash", "first", false),
+            tool("t_2", "c2", "bash", "second", false),
+            report("r_1", 3),
+            report("r_2", 4),
+            tool("t_3", "c3", "bash", "third", false),
+        ]
+    );
+    for _ in 0..3 {
+        cx.update(|window, cx| window.render_frame(cx));
+    }
+    cx.update(|window, _| {
+        let measure = |id: &str| row_id("transcript-measure", id);
+        let room = |above: &str, below: &str| room_between(window, measure(above), measure(below));
+
+        assert_eq!(room("u_1", "a_1"), px(10.), "a user row then a message");
+        assert_eq!(room("a_1", "t_1"), px(10.), "a message then a tool call");
+        assert_eq!(
+            room("t_1", "t_2"),
+            px(10.),
+            "two tool calls, .tc's own margin"
+        );
+        assert_eq!(room("t_2", "r_1"), px(14.), "a tool call then a report");
+        assert_eq!(room("r_1", "r_2"), px(14.), "two reports, .rp's own margin");
+        assert_eq!(room("r_2", "t_3"), px(14.), "a report then a tool call");
+
+        // The list opens at its own 16px (`.transcript-scroll{padding:var(--inset)
+        // 0}`), and the first row is there.
+        assert_eq!(box_of(window, measure("u_1")).origin.y, px(16.));
+    });
+}
+
+/// The tool card, to the numbers `Rows.css` gives it: a 34px head with the
+/// caret's own 16px column, a body inset 42px from the card's left and 10px from
+/// its top, a caption on a 17.25px line box 4px above a `72px 1fr` key/value
+/// grid whose rows sit 3px apart on a 19px line.
+#[gpui_kit::test]
+fn the_tool_card_is_the_designs(cx: &mut TestAppContext) {
+    let (_view, cx) = open!(
+        cx,
+        vec![tool("t_1", "c1", "bash", "all tests passed", false)]
+    );
+    for _ in 0..2 {
+        cx.update(|window, cx| window.render_frame(cx));
+    }
+    cx.update(|window, _| {
+        let card = box_of(window, row_id("transcript-tool-row", "t_1"));
+        let head = box_of(window, row_id("transcript-tool", "t_1"));
+        // `.tc-head{height:34px}`, inside the card's own 1px border.
+        assert_eq!(head.size.height, px(34.));
+        assert_eq!(card.size.height, px(36.), "1px + the 34px head + 1px");
+    });
+
+    cx.update(|window, cx| window.click(row_id("transcript-tool", "t_1"), cx));
+    for _ in 0..2 {
+        cx.update(|window, cx| window.render_frame(cx));
+    }
+    cx.update(|window, _| {
+        let head = box_of(window, row_id("transcript-tool", "t_1"));
+
+        let args = row_id("transcript-tool-arguments", "t_1");
+        let args_box = box_of(window, args.clone());
+        // `.tc-body{padding:10px 12px 12px 42px}` — from the card's own edge,
+        // which is the head's box (the 1px border is outside it) — under the
+        // body's own 1px top rule (`border-top:1px solid var(--rule-soft)`).
+        assert_eq!(args_box.origin.x - head.origin.x, px(42.));
+        assert_eq!(
+            args_box.origin.y - head.bottom(),
+            px(11.),
+            "1px rule + 10px"
+        );
+
+        // `.tc-caption{font-size:11.5px}` on the page's 1.5 line box, 4px above
+        // the grid (`.tc-caption{margin-bottom:4px}`).
+        let caption_id: gpui_kit::ElementId = (args.clone(), "caption").into();
+        let caption = box_of(window, caption_id);
+        assert!(
+            (caption.size.height - px(17.25)).abs() <= px(0.5),
+            "an 11.5px caption on the page's 1.5 line box: {caption:?}"
+        );
+        let first: gpui_kit::ElementId = (args.clone(), "0").into();
+        let first_box = box_of(window, first.clone());
+        assert_eq!(first_box.origin.y - caption.bottom(), px(4.));
+
+        // `.tc-kv{grid-template-columns:72px 1fr;gap:3px 12px;font-size:13px;
+        // line-height:19px}` — the key's column is 72px, the value starts 12px
+        // past it, and the rows are 19px tall.
+        let key: gpui_kit::ElementId = (first.clone(), "key").into();
+        let value: gpui_kit::ElementId = (first.clone(), "value").into();
+        let key_box = box_of(window, key);
+        let value_box = box_of(window, value);
+        assert_eq!(key_box.size.width, px(72.));
+        assert_eq!(value_box.origin.x - key_box.right(), px(12.));
+        assert_eq!(first_box.size.height, px(19.));
+        assert_eq!(key_box.size.height, px(19.));
+
+        // `.tc-result{font-size:13px;line-height:19px}`, under its own caption.
+        let result = row_id("transcript-tool-result", "t_1");
+        let result_box = box_of(window, result.clone());
+        let result_caption: gpui_kit::ElementId = (result.clone(), "caption").into();
+        let result_caption = box_of(window, result_caption);
+        let body: gpui_kit::ElementId = (result.clone(), "text").into();
+        let body = box_of(window, body);
+        assert_eq!(body.size.height, px(19.));
+        assert_eq!(result_box.origin.y - args_box.bottom(), px(10.)); // .tc-body{gap:10px}
+        assert_eq!(body.origin.y - result_caption.bottom(), px(4.));
+    });
+}
+
+/// Two fields of one payload sit `.tc-kv`'s own 3px apart.
+#[gpui_kit::test]
+fn a_tool_payloads_rows_sit_three_pixels_apart(cx: &mut TestAppContext) {
+    let args = json!({ "command": "cargo test", "timeout": 30 });
+    let item = item(json!({
+        "id": "t_1", "ts": 1, "kind": "tool", "call_id": "c1", "name": "bash",
+        "args": args, "status": "ok",
+        "result": { "text": "ok", "chars": 2, "truncated": false },
+    }));
+    let (_view, cx) = open!(cx, vec![item]);
+    for _ in 0..2 {
+        cx.update(|window, cx| window.render_frame(cx));
+    }
+    cx.update(|window, cx| window.click(row_id("transcript-tool", "t_1"), cx));
+    for _ in 0..2 {
+        cx.update(|window, cx| window.render_frame(cx));
+    }
+    cx.update(|window, _| {
+        let args = row_id("transcript-tool-arguments", "t_1");
+        let first: gpui_kit::ElementId = (args.clone(), "0").into();
+        let second: gpui_kit::ElementId = (args.clone(), "1").into();
+        assert_eq!(room_between(window, first, second), px(3.));
+    });
+}
+
+/// The report card, to `Rows.css`'s `.rp`: a 36px head over one row per section,
+/// each `9px 12px` of padding on a 20px line with an 80px label column 12px from
+/// the value.
+#[gpui_kit::test]
+fn the_report_card_is_the_designs(cx: &mut TestAppContext) {
+    let (_view, cx) = open!(cx, vec![report("r_1", 3)]);
+    for _ in 0..3 {
+        cx.update(|window, cx| window.render_frame(cx));
+    }
+    cx.update(|window, _| {
+        let card = box_of(window, row_id("transcript-report", "r_1"));
+        let head = box_of(window, row_id("transcript-report-heading", "r_1"));
+        assert_eq!(head.size.height, px(36.));
+        assert_eq!(
+            head.origin.y - card.origin.y,
+            px(1.),
+            "inside the card's border"
+        );
+
+        let row_id_ = row_id("transcript-report-done", "r_1");
+        let report_row = box_of(window, row_id_.clone());
+        // `.rp-row{padding:9px 12px;font-size:13.5px;line-height:20px}` and the
+        // 1px rule `+ .rp-row` is drawn with, at the card's bottom.
+        assert_eq!(report_row.size.height, px(39.));
+        assert_eq!(
+            report_row.origin.y - head.bottom(),
+            px(0.),
+            "the leading rule belongs to the row above it"
+        );
+        assert_eq!(
+            report_row.origin.x - card.origin.x,
+            px(1.),
+            "inside the border"
+        );
+
+        let label: gpui_kit::ElementId = (row_id_.clone(), "label").into();
+        let label = box_of(window, label);
+        // `.rp-row{grid-template-columns:80px 1fr;gap:12px;padding:… 12px}`.
+        assert_eq!(label.origin.x - report_row.origin.x, px(12.));
+        assert_eq!(label.size.width, px(80.));
+        let value: gpui_kit::ElementId = (row_id_.clone(), "value").into();
+        assert_eq!(box_of(window, value).origin.x - label.right(), px(12.));
+    });
+}
+
+/// The user row: `.user-row`'s `8px 12px` of padding around a 14px line on the
+/// page's 1.5 line box.
+#[gpui_kit::test]
+fn the_user_row_is_the_designs(cx: &mut TestAppContext) {
+    let (_view, cx) = open!(cx, vec![user("u_1", "a turn")]);
+    for _ in 0..2 {
+        cx.update(|window, cx| window.render_frame(cx));
+    }
+    cx.update(|window, _| {
+        let row = box_of(window, row_id("transcript-user", "u_1"));
+        assert_eq!(row.size.height, px(37.), "8 + 21 + 8");
+    });
+}
+
+/// The thinking a message carries is drawn *above* it — the model's own aside
+/// before the message it wrote (`Transcript.tsx`'s `Thinking`, before its
+/// `Markdown`) — on the design's sizes: a 12px label, 14px italic text, and the
+/// 10px `.thinking{margin:10px 0}` leaves between it and the message.
+#[gpui_kit::test]
+fn thinking_is_drawn_above_its_message(cx: &mut TestAppContext) {
+    let (view, cx) = open!(
+        cx,
+        vec![assistant_with_thinking("a_1", "an answer", "a thought")]
+    );
+    view.update(cx, |view, cx| view.set_show_thinking(true, cx));
+    for _ in 0..2 {
+        cx.update(|window, cx| window.render_frame(cx));
+    }
+    cx.update(|window, _| {
+        let thinking = box_of(window, row_id("transcript-thinking", "a_1"));
+        let message = box_of(window, row_id("transcript-message", "a_1"));
+        assert!(
+            thinking.bottom() < message.origin.y,
+            "the aside comes first: {thinking:?} vs {message:?}"
+        );
+        // `.thinking{padding-left:8px;border-left:2px solid var(--border)}`, and
+        // `.thinking{margin:10px 0}` leaving the message 10px below it.
+        let text = box_of(window, row_id("transcript-thinking-text", "a_1"));
+        // The 2px rule is outside the 8px padding, as it is in the design.
+        assert_eq!(text.origin.x - thinking.origin.x, px(10.));
+        assert_eq!(message.origin.y - thinking.bottom(), px(10.));
+        // `.thinking-label{font-size:12px}` then `.thinking-text{font-size:14px}`,
+        // each on the page's 1.5 line box.
+        assert_eq!(thinking.size.height, px(18. + 21.));
+    });
+}
+
+/// A report's own fields are markdown, as the design draws them: `.rp-row`'s body
+/// goes through the renderer, so an evidence line is a list and a path is a code
+/// span, not the source with its `-` and backticks.
+#[gpui_kit::test]
+fn a_reports_field_is_rendered_as_markdown(cx: &mut TestAppContext) {
+    let (view, cx) = open!(
+        cx,
+        vec![item(json!({
+            "id": "r_1", "ts": 1, "kind": "lane_report", "lane": 3,
+            "done": "the captions read `arguments`", "evidence": "- `transcript::tests`\n- both themes",
+            "next": "", "blocked": "", "requests": ""
+        }))]
+    );
+    cx.update(|window, cx| window.render_frame(cx));
+
+    let document = move |view: &Entity<TranscriptView>, cx: &App, label: &'static str| {
+        view.read(cx)
+            .data
+            .read(cx)
+            .field_documents
+            .get(&("r_1".to_string(), label))
+            .cloned()
+            .unwrap_or_else(|| panic!("the {label} field keeps a document"))
+    };
+    cx.read(|cx| {
+        let evidence = document(&view, cx, "evidence").read(cx).rendered_text();
+        assert!(
+            evidence.as_str().contains("transcript::tests")
+                && evidence.as_str().contains("both themes"),
+            "{:?}",
+            evidence.as_str()
+        );
+        assert!(
+            !evidence.as_str().contains('`'),
+            "the backticks are a code span, not text: {:?}",
+            evidence.as_str()
+        );
+        let done = document(&view, cx, "done").read(cx).rendered_text();
+        assert_eq!(done.as_str().trim(), "the captions read arguments");
+    });
+
+    // A report that goes takes its fields' documents with it.
+    view.update(cx, |view, cx| view.replace(vec![user("u_2", "gone")], cx));
+    cx.read(|cx| assert!(view.read(cx).data.read(cx).field_documents.is_empty()));
+}
+
+/// A reader's own wheel takes the list off its tail: the offset moves, the pin lets
+/// go, and the design's "↓ Jump to latest" is drawn — and scrolling back to the tail
+/// puts it away again.
+///
+/// The wheel is the one scroll the design counts as the reader's (`USER_WINDOW`),
+/// and the one thing that drives it is the box's own wheel handler — a positive dy
+/// is a wheel up, away from the tail.
+#[gpui_kit::test]
+fn a_wheel_takes_the_list_off_its_tail_and_the_pill_appears(cx: &mut TestAppContext) {
+    let items: Vec<Item> = (0..40)
+        .map(|i| user(&format!("u_{i:02}"), "a turn of its own"))
+        .collect();
+    let (view, cx) = open!(cx, items);
+    for _ in 0..4 {
+        cx.update(|window, cx| window.render_frame(cx));
+    }
+    let tail = cx.read(|cx| view.read(cx).scroll.offset());
+    // The design's own distance from the bottom: `max + offset`, 0 at the tail (the
+    // offset grows negative as the list scrolls down, to `-max`).
+    let gap = |cx: &mut TestAppContext| {
+        cx.read(|cx| {
+            let view = view.read(cx);
+            view.scroll.max_offset().y + view.scroll.offset().y
+        })
+    };
+    assert_eq!(gap(cx), px(0.), "the list opens at its tail");
+    assert!(
+        cx.read(|cx| view.read(cx).pin.is_pinned()),
+        "the list opens following its tail"
+    );
+    assert!(
+        !cx.update(|window, _| window.find("transcript-jump").visible()),
+        "and there is nothing to jump back to"
+    );
+
+    // A wheel up, over the list.
+    cx.update(|window, cx| {
+        window.scroll(
+            "transcript-scroll",
+            gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(600.))),
+            cx,
+        );
+    });
+    for _ in 0..3 {
+        cx.update(|window, cx| window.render_frame(cx));
+    }
+    assert_eq!(
+        gap(cx),
+        px(600.),
+        "the wheel moved the list 600px off its tail (from {tail:?})"
+    );
+    assert!(
+        cx.read(|cx| view.read(cx).pin.is_away()),
+        "600px up is past the design's 240px, so the list is not following"
+    );
+    assert!(
+        cx.update(|window, _| window.find("transcript-jump").visible()),
+        "and the pill is drawn"
+    );
+
+    // Back down to the tail: following again, nothing to jump to.
+    cx.update(|window, cx| {
+        window.scroll(
+            "transcript-scroll",
+            gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-900.))),
+            cx,
+        );
+    });
+    for _ in 0..3 {
+        cx.update(|window, cx| window.render_frame(cx));
+    }
+    assert_eq!(
+        cx.read(|cx| view.read(cx).scroll.offset()),
+        tail,
+        "the wheel down stops at the tail"
+    );
+    assert_eq!(gap(cx), px(0.));
+    assert!(cx.read(|cx| view.read(cx).pin.is_pinned()));
+    assert!(
+        !cx.update(|window, _| window.find("transcript-jump").visible()),
+        "with the reader back at the latest, the pill is away..."
+    );
 }

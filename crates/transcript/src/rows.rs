@@ -79,8 +79,8 @@ pub(crate) const MAX_ARRAY: usize = 20;
 pub(crate) const COLUMN_GAP: Pixels = px(12.);
 /// The size a key is drawn at, in the UI font: a key is a label, not payload.
 const KEY_SIZE: Pixels = px(12.);
-/// The size a panel's caption is drawn at.
-const CAPTION_SIZE: Pixels = px(11.);
+/// The size a panel's caption is drawn at: `Rows.css`'s `.tc-caption`, 11.5px.
+const CAPTION_SIZE: Pixels = px(11.5);
 /// The size a tool row's name is drawn at, and the size of the status word
 /// beside it.
 const NAME_SIZE: Pixels = px(13.);
@@ -265,24 +265,43 @@ impl Group {
             | ItemKind::Unknown { .. } => Self::Quiet,
         }
     }
+
+    /// The air the design puts above and below this kind of row, as a block
+    /// margin: `.tc{margin:10px 0}`, `.rp{margin:14px 0}`, `p{margin:10px 0}`,
+    /// `.thinking{margin:10px 0}`. A user row has none of its own — the turn
+    /// rule above it carries that space.
+    ///
+    /// The quiet lines and the context rows have no counterpart in the design
+    /// (the app draws a lane event, a goal transition, a notice and an injected
+    /// context note itself), so they keep the app's own quieter rhythm.
+    fn margin(self) -> Pixels {
+        match self {
+            Self::User => px(0.),
+            Self::Assistant | Self::Tool => px(10.),
+            Self::Report => px(14.),
+            Self::Quiet | Self::Context => BLOCK_GAP,
+            Self::Divider => BLOCK_GAP,
+        }
+    }
 }
 
 /// Space above `row`, given the row before it.
+///
+/// The design's rows carry their own vertical margins and a block flow collapses
+/// the two it finds side by side, so the space between one row and the next is
+/// the larger of the two margins — 10px between two tool calls, 14px wherever a
+/// report is involved. A run of quiet lines is the app's own and stays tight,
+/// and a turn opens with its own separator, which carries the space itself.
 fn gap_before(previous: Option<&Item>, row: &Item) -> Pixels {
     let Some(previous) = previous else {
         return px(0.);
     };
     let (previous, current) = (Group::of(&previous.kind), Group::of(&row.kind));
     match current {
-        // A turn opens with its own separator, which carries the space.
         Group::User => px(0.),
         Group::Divider => BLOCK_GAP,
-        _ if previous == current => match current {
-            Group::Tool | Group::Quiet | Group::Context => TIGHT_GAP,
-            Group::Assistant | Group::Report | Group::User => GROUP_GAP,
-            Group::Divider => BLOCK_GAP,
-        },
-        _ => BLOCK_GAP,
+        Group::Quiet | Group::Context if previous == current => TIGHT_GAP,
+        _ => previous.margin().max(current.margin()),
     }
 }
 
@@ -319,6 +338,18 @@ pub(crate) fn render_row(
             data.sync_document(index, cx);
         }
     }
+    // A report's own fields are markdown too: each document is brought up to date
+    // here, at the frame that shows the row.
+    if let ItemKind::LaneReport(report) = &data.items[index].kind {
+        let fields: Vec<&'static str> = report_fields(report)
+            .into_iter()
+            .filter(|(_, text)| !text.is_empty())
+            .map(|(label, _)| label)
+            .collect();
+        for label in fields {
+            data.sync_field_document(index, label, cx);
+        }
+    }
 
     let item = &data.items[index];
     let palette = Palette::from_app(cx);
@@ -347,7 +378,7 @@ pub(crate) fn render_row(
         ),
         ItemKind::Assistant(assistant) => assistant_row(item, assistant, data, cx, &palette),
         ItemKind::Tool(tool) => tool_row(item, tool, data, view, &palette),
-        ItemKind::LaneReport(report) => report_row(item.id.clone(), report, &palette),
+        ItemKind::LaneReport(report) => report_row(item.id.clone(), report, data, cx, &palette),
         ItemKind::LaneEvent(event) => lane_event_row(item.id.clone(), event, &palette),
         ItemKind::Goal(goal) => goal_row(
             item.id.clone(),
@@ -547,6 +578,8 @@ fn user_row(
         .flex_col()
         .gap_1()
         .text_size(px(14.))
+        // `.user-row{font-size:14px}` under the page's `line-height: 1.5`.
+        .line_height(px(21.))
         .text_color(text_color)
         .child(SelectableText::new(
             row_id("transcript-user-text", &id),
@@ -1034,8 +1067,14 @@ fn quiet_block(name: &'static str, id: ItemId, text: &str, palette: &Palette) ->
         .into_any_element()
 }
 
-/// An assistant message: the retained markdown document, its optional thinking text, and
-/// the error that ended it, if any.
+/// An assistant message: the retained markdown document, its optional thinking
+/// text, and the error that ended it, if any.
+///
+/// The thinking comes *first*: it is what the model said to itself before it
+/// wrote the message or reached for a tool, and the design draws it above the
+/// message it belongs to (`Transcript.tsx`'s `Thinking`, before its `Markdown`).
+/// The air between the two is the design's own — `.thinking{margin:10px 0}` and
+/// `p{margin:10px 0}` collapse to 10px.
 fn assistant_row(
     item: &Item,
     assistant: &AssistantItem,
@@ -1052,7 +1091,44 @@ fn assistant_row(
         .min_w_0()
         .flex()
         .flex_col()
-        .gap_2();
+        .gap(BLOCK_GAP);
+
+    if data.show_thinking && !assistant.thinking.is_empty() {
+        row = row.child(
+            div()
+                .id(row_id("transcript-thinking", &id))
+                .flex()
+                .flex_col()
+                .pl_2()
+                .border_l_2()
+                .border_color(palette.border)
+                .text_color(palette.muted_foreground)
+                .child(
+                    // `.thinking-label`: 12px, on the muted ink, with the design's
+                    // 1.5 line box under it.
+                    div()
+                        .text_size(px(12.))
+                        .line_height(px(18.))
+                        .child("thinking"),
+                )
+                .child(
+                    // `.thinking-text`: 14px, italic, the muted ink.
+                    div()
+                        .id(row_id("transcript-thinking-text", &id))
+                        .test_support()
+                        .w_full()
+                        .min_w_0()
+                        .text_size(px(14.))
+                        .line_height(px(21.))
+                        .italic()
+                        .child(SelectableText::new(
+                            row_id("transcript-thinking-run", &id),
+                            assistant.thinking.clone(),
+                        )),
+                )
+                .test_support(),
+        );
+    }
 
     if assistant.is_streaming() && assistant.text.trim().is_empty() {
         row = row.child(waiting_dots(&id, palette));
@@ -1064,23 +1140,33 @@ fn assistant_row(
                 let code_palette = palette.clone();
                 let message_id = id.clone();
                 row.child(
-                    TextView::new(document)
-                        .style(text_style(cx))
-                        .motion(stream_motion())
-                        .on_link_click(link::on_click())
-                        .markdown_extensions(markdown::extensions())
-                        .code_block_actions(move |code_block, _, _| {
-                            let block = code_block.span.map(|span| span.start).unwrap_or(0);
-                            copy_button(
-                                (ElementId::from("transcript-copy-block"), message_id.clone()),
-                                CopyTarget::Block(copy_offset(&message_id), block),
-                                code_block.code(),
-                                &feedback,
-                                true,
-                                &code_palette,
-                            )
-                            .test_support()
-                        }),
+                    div()
+                        .id(row_id("transcript-message", &id))
+                        .test_support()
+                        .w_full()
+                        .min_w_0()
+                        .child(
+                            TextView::new(document)
+                                .style(text_style(cx))
+                                .motion(stream_motion())
+                                .on_link_click(link::on_click())
+                                .markdown_extensions(markdown::extensions())
+                                .code_block_actions(move |code_block, _, _| {
+                                    let block = code_block.span.map(|span| span.start).unwrap_or(0);
+                                    copy_button(
+                                        (
+                                            ElementId::from("transcript-copy-block"),
+                                            message_id.clone(),
+                                        ),
+                                        CopyTarget::Block(copy_offset(&message_id), block),
+                                        code_block.code(),
+                                        &feedback,
+                                        true,
+                                        &code_palette,
+                                    )
+                                    .test_support()
+                                }),
+                        ),
                 )
                 .child(
                     copy_button(
@@ -1103,36 +1189,6 @@ fn assistant_row(
                     .child(assistant.text.clone()),
             ),
         };
-    }
-
-    if data.show_thinking && !assistant.thinking.is_empty() {
-        row = row.child(
-            div()
-                .id(row_id("transcript-thinking", &id))
-                .flex()
-                .flex_col()
-                .gap_1()
-                .pl_2()
-                .border_l_2()
-                .border_color(palette.border)
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(palette.muted_foreground)
-                        .child("thinking"),
-                )
-                .child(
-                    div()
-                        .text_sm()
-                        .italic()
-                        .text_color(palette.muted_foreground)
-                        .child(SelectableText::new(
-                            row_id("transcript-thinking-text", &id),
-                            assistant.thinking.clone(),
-                        )),
-                )
-                .test_support(),
-        );
     }
 
     if let Some(error) = assistant.error.as_deref().filter(|error| !error.is_empty()) {
@@ -1228,7 +1284,7 @@ fn tool_row(
         .pl_2()
         .pr(px(10.))
         .text_size(px(13.))
-        .cursor_pointer()
+        .cursor_default()
         .hover({
             let sidebar = palette.sidebar;
             move |style| style.bg(mix(palette.foreground, 4., sidebar))
@@ -1704,26 +1760,52 @@ fn quiet_source_line(
     .into_any_element()
 }
 
+/// A lane report's own fields, in the order the card draws them: the label
+/// `Rows.css`'s `.rp-label` shows and the text under it.
+pub(crate) fn report_fields(report: &LaneReport) -> [(&'static str, &str); 6] {
+    [
+        ("done", report.done.as_str()),
+        ("evidence", report.evidence.as_str()),
+        ("next", report.next.as_str()),
+        ("blocked", report.blocked.as_str()),
+        ("requests", report.requests.as_str()),
+        ("goal", report.goal.as_deref().unwrap_or_default()),
+    ]
+}
+
+/// What a report's field is drawn in: the design's `.rp-row` is one voice, and the
+/// two fields that need an eye — a block, an ask — take the two colours that mean
+/// something.
+fn report_field_ink(label: &str, palette: &Palette) -> Hsla {
+    match label {
+        "blocked" => palette.destructive,
+        "requests" => palette.primary,
+        "evidence" | "goal" => palette.muted_foreground,
+        _ => palette.foreground,
+    }
+}
+
+/// The markdown style of a report's row: the message style with the design's own
+/// `.rp-row p{margin:0}` — a paragraph inside a row adds no air of its own.
+fn report_text_style(cx: &App) -> gpui_kit::component::text::TextViewStyle {
+    let mut style = text_style(cx);
+    style.paragraph_gap = gpui_kit::rems(0.);
+    style
+}
+
 /// One lane's report: what it did, in the fields the item carries — never re-parsed out of
 /// the prose the swarm used to send.
-fn report_row(id: ItemId, report: &LaneReport, palette: &Palette) -> AnyElement {
-    let fields = [
-        ("done", report.done.as_str(), palette.foreground),
-        (
-            "evidence",
-            report.evidence.as_str(),
-            palette.muted_foreground,
-        ),
-        ("next", report.next.as_str(), palette.foreground),
-        ("blocked", report.blocked.as_str(), palette.destructive),
-        ("requests", report.requests.as_str(), palette.primary),
-        (
-            "goal",
-            report.goal.as_deref().unwrap_or_default(),
-            palette.muted_foreground,
-        ),
-    ];
-
+///
+/// A field's body is markdown, as the design draws it (`Rows.css`'s `.rp-row`, whose
+/// rules are `p{margin:0}`, `ul{margin:0;padding-left:18px}`, `code{font-size:12px}`):
+/// an evidence line is a list, a path is a code span.
+fn report_row(
+    id: ItemId,
+    report: &LaneReport,
+    data: &TranscriptData,
+    cx: &App,
+    palette: &Palette,
+) -> AnyElement {
     // `Rows.css`'s `.rp`: a labelled card — a head with who sent it and what state
     // it is in, then one row per section, so the answer is scannable rather than a
     // wall.
@@ -1765,13 +1847,25 @@ fn report_row(id: ItemId, report: &LaneReport, palette: &Palette) -> AnyElement 
                 .test_support(),
         );
 
-    for (label, value, color) in fields {
+    for (label, value) in report_fields(report) {
         if value.is_empty() {
             continue;
         }
-        let value_id = row_id(format!("transcript-report-{label}"), &id);
+        let line_id = row_id(format!("transcript-report-{label}"), &id);
+        // `.rp-row`'s body is markdown — `Rows.css` gives it `p{margin:0}`,
+        // `ul{margin:0;padding-left:18px}`, `code{font-size:12px}`. The document is
+        // brought up to date by `render_row`, before the row is drawn.
+        let body = match data.field_documents.get(&(id.clone(), label)) {
+            Some(document) => TextView::new(document)
+                .style(report_text_style(cx))
+                .selectable(true)
+                .into_any_element(),
+            None => div().child(value.to_string()).into_any_element(),
+        };
         row = row.child(
             div()
+                .id(line_id.clone())
+                .test_support()
                 .flex()
                 .items_start()
                 .gap_3()
@@ -1783,6 +1877,8 @@ fn report_row(id: ItemId, report: &LaneReport, palette: &Palette) -> AnyElement 
                 .line_height(px(20.))
                 .child(
                     div()
+                        .id((line_id.clone(), "label"))
+                        .test_support()
                         .w(REPORT_LABEL_WIDTH)
                         .flex_shrink_0()
                         .text_size(px(12.))
@@ -1792,10 +1888,12 @@ fn report_row(id: ItemId, report: &LaneReport, palette: &Palette) -> AnyElement 
                 )
                 .child(
                     div()
+                        .id((line_id, "value"))
+                        .test_support()
                         .min_w_0()
                         .flex_1()
-                        .text_color(color)
-                        .child(SelectableText::new(value_id, value.to_string())),
+                        .text_color(report_field_ink(label, palette))
+                        .child(body),
                 ),
         );
     }
@@ -2126,10 +2224,17 @@ pub(crate) fn looks_like_code(text: &str) -> bool {
 /// muted — quiet enough not to read as a line of the transcript. (GPUI has no
 /// letter spacing, so a caption is set small rather than tracked; it is not
 /// upper-cased, which shouts.)
+///
+/// `Rows.css`'s `.tc-caption`: 11.5px on a 1.5 line box, the muted ink, and 4px
+/// below it.
 fn caption(id: &ElementId, label: &str, palette: &Palette) -> AnyElement {
     div()
         .id((id.clone(), "caption"))
+        .mb(px(4.))
         .text_size(CAPTION_SIZE)
+        // `.tc-caption` inherits the page's `line-height: 1.5`: 17.25px under an
+        // 11.5px caption.
+        .line_height(px(17.25))
         .text_color(palette.muted_foreground)
         .aria_label(label.to_string())
         .child(label.to_string())
@@ -2155,20 +2260,32 @@ fn fields_block(
     let fields = cap_fields(fields, &mut cap);
     // `Rows.css`'s `.tc-body`: a caption, then the payload as a grid of
     // `72px 1fr` k/v pairs. The card around it is the tool's own.
+    //
+    // The grid's own gaps: `.tc-kv{gap:3px 12px}` is 3px between one field and
+    // the next and 12px between a key and its value (the latter is the row's own
+    // [`COLUMN_GAP`]), and the caption's `.tc-caption{margin-bottom:4px}` is the
+    // 4px between it and the first field.
     let mut block = div()
         .id(id.clone())
         .flex()
         .flex_col()
-        .gap_1()
         .w_full()
         .min_w_0()
         .text_size(palette.payload_size)
-        .line_height(palette.payload_size * PAYLOAD_LINE_HEIGHT)
+        .line_height(palette.payload_line)
         .child(caption(&id, label, palette));
 
+    let mut rows = div()
+        .id((id.clone(), "fields"))
+        .flex()
+        .flex_col()
+        .gap(px(3.))
+        .w_full()
+        .min_w_0();
     for (index, field) in fields.iter().enumerate() {
-        block = block.child(field_row(&id, index, field, palette));
+        rows = rows.child(field_row(&id, index, field, palette));
     }
+    block = block.child(rows);
     if cap.hidden() > 0 {
         block = block.child(cap_note((id.clone(), "note"), cap.hidden(), palette));
     }
@@ -2326,7 +2443,6 @@ fn text_block(
         .id(id.clone())
         .flex()
         .flex_col()
-        .gap_1()
         .w_full()
         .min_w_0()
         .child(caption(&id, label, palette))
@@ -2338,10 +2454,11 @@ fn text_block(
                 .id((id.clone(), "text"))
                 .w_full()
                 .min_w_0()
-                // `.tc-result`: the UI font at 13/19. The design sets mono only
-                // for a call's arguments' keys and the tool's own name.
-                .text_size(px(13.))
-                .line_height(px(19.))
+                // `.tc-result`: the UI font at 13/19, the design's own payload
+                // size. The design sets mono only for a call's arguments' keys
+                // and the tool's own name.
+                .text_size(palette.payload_size)
+                .line_height(palette.payload_line)
                 .text_color(palette.foreground)
                 .child(SelectableText::new((id.clone(), "body"), body))
                 .test_support(),

@@ -44,20 +44,24 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::base::TextViewState;
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{v_flex, ActiveTheme as _, Icon, IconName};
 use gpui_kit::{
     div, linear_color_stop, linear_gradient, point, px, Animation, AnimationExt as _, AnyElement,
-    App, AppContext as _, Bounds, Context, Entity, FocusHandle, Hsla, InteractiveElement as _,
-    IntoElement, MouseButton, ParentElement as _, Pixels, Render, ScrollHandle,
-    StatefulInteractiveElement as _, Styled as _, Task, TestSupportExt as _, WeakEntity, Window,
+    App, AppContext as _, Bounds, BoxShadow, Context, Entity, FocusHandle, Hsla,
+    InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, Pixels, Render,
+    ScrollHandle, StatefulInteractiveElement as _, Styled as _, Task, TestSupportExt as _,
+    WeakEntity, Window,
 };
 use session::{AgentKey, Item, ItemId, ItemKind};
 use std::time::Duration;
+use widgets::effort::cubic_bezier;
+use widgets::paint;
 
 use crate::pin::{Action, Pin};
 use crate::rows::CopyFeedback;
 use crate::style::Palette;
-use store::design::{INSET, MEASURE};
+use store::design::{palette as design_palette, INSET, MEASURE};
 
 /// How many assistant items keep their parsed document.
 const KEPT_DOCUMENTS: usize = 128;
@@ -92,6 +96,9 @@ pub(crate) struct TranscriptData {
     pub(crate) items: Vec<Item>,
     /// Retained markdown documents of assistant items, keyed by item id.
     pub(crate) documents: HashMap<ItemId, Entity<TextViewState>>,
+    /// Retained markdown documents of a lane report's own fields, keyed by the
+    /// item and the field's label: `.rp-row`'s body is markdown in the design.
+    pub(crate) field_documents: HashMap<(ItemId, &'static str), Entity<TextViewState>>,
     rendered: HashMap<ItemId, u64>,
     frame: u64,
     /// Items the reader has opened.
@@ -168,10 +175,41 @@ impl TranscriptData {
         let items = &self.items;
         self.documents
             .retain(|id, _| items.iter().any(|item| item.id == *id));
+        self.field_documents
+            .retain(|(id, _), _| items.iter().any(|item| item.id == *id));
         self.rendered
             .retain(|id, _| items.iter().any(|item| item.id == *id));
         self.full_results
             .retain(|id, _| items.iter().any(|item| item.id == *id));
+    }
+
+    /// Bring one of a report's fields up to date, creating its document the first
+    /// time the row is on screen: the design draws `.rp-row`'s body as markdown
+    /// (an evidence line is a list, a path is a code span), not as plain text.
+    pub(crate) fn sync_field_document(
+        &mut self,
+        index: usize,
+        label: &'static str,
+        cx: &mut Context<Self>,
+    ) {
+        let item = &self.items[index];
+        let ItemKind::LaneReport(report) = &item.kind else {
+            return;
+        };
+        let Some((_, text)) = rows::report_fields(report)
+            .into_iter()
+            .find(|(name, _)| *name == label)
+        else {
+            return;
+        };
+        let key = (item.id.clone(), label);
+        match self.field_documents.get(&key).cloned() {
+            Some(document) => document.update(cx, |state, cx| state.set_text(text, cx)),
+            None => {
+                let document = cx.new(|cx| TextViewState::markdown(text, cx));
+                self.field_documents.insert(key, document);
+            }
+        }
     }
 }
 
@@ -200,6 +238,7 @@ impl TranscriptView {
                 focus: cx.focus_handle(),
                 items: Vec::new(),
                 documents: HashMap::new(),
+                field_documents: HashMap::new(),
                 rendered: HashMap::new(),
                 frame: 0,
                 expanded: HashSet::new(),
@@ -431,6 +470,7 @@ impl TranscriptView {
             let index = data.index_of(id)?;
             data.items.remove(index);
             data.documents.remove(id);
+            data.field_documents.retain(|(held, _), _| held != id);
             data.rendered.remove(id);
             data.expanded.remove(id);
             data.full_results.remove(id);
@@ -448,6 +488,7 @@ impl TranscriptView {
         self.data.update(cx, |data, _| {
             data.items.clear();
             data.documents.clear();
+            data.field_documents.clear();
             data.rendered.clear();
             data.expanded.clear();
             data.full_results.clear();
@@ -473,22 +514,15 @@ impl TranscriptView {
         self.pin.jumped();
         cx.notify();
         let scroll = self.scroll.clone();
-        // gpui's offset grows *negative* as the list scrolls down (`set_offset`: "as
-        // you scroll further down the offset becomes more negative"), so the tail is
-        // at `-max_offset`. Aiming at `+max_offset` clamped to 0 — the head.
         let from = f32::from(scroll.offset().y);
-        let to = -f32::from(scroll.max_offset().y);
-        self.jump = Some(cx.spawn(async move |view, cx| {
+        let to = f32::from(scroll.max_offset().y);
+        self.jump = Some(cx.spawn(async move |_view, cx| {
             for step in 1..=JUMP_STEPS {
                 cx.background_executor().timer(JUMP_STEP).await;
                 let t = step as f32 / JUMP_STEPS as f32;
                 let y = from + (to - from) * ease_out(t);
                 scroll.set_offset(point(scroll.offset().x, px(y)));
-                let _ = view.update(cx, |_, cx| cx.notify());
             }
-            // Land exactly on the tail, even if it grew while we travelled.
-            scroll.scroll_to_bottom();
-            let _ = view.update(cx, |_, cx| cx.notify());
         }));
     }
 
@@ -763,14 +797,6 @@ impl Render for TranscriptView {
                 measure = measure.child(header);
             }
         }
-        let content = div()
-            .w_full()
-            .flex()
-            .justify_center()
-            .pt(px(INSET))
-            .pb(px(INSET))
-            .child(measure);
-
         // Every frame the list is painted is a chance for the design's rule to run
         // — the same chance a scroll event gives it in a browser, and the one that
         // catches a pane that changed height under a reader who is following.
@@ -780,6 +806,14 @@ impl Render for TranscriptView {
                 let _ = weak.update(cx, |view, cx| view.on_painted(cx));
             }
         };
+
+        let content = div()
+            .w_full()
+            .flex()
+            .justify_center()
+            .pt(px(INSET))
+            .pb(px(INSET))
+            .child(measure);
 
         // The reader's own scroll: a wheel, a touch, a key or a pointer press opens
         // the design's 500ms window in which a scroll is theirs.
@@ -845,6 +879,11 @@ impl Render for TranscriptView {
                 linear_color_stop(background, 1.),
             ));
 
+        // The scrollbar's overlay goes on the *host* — the box that does not
+        // scroll — rather than on the scroller: the kit draws the bar as a child
+        // of the element that carries it, so on the scroller it would be translated
+        // with the rows. It is driven by the scroller's own handle either way, and
+        // the app's scrollbar mode (`app::theme`) shows it only while scrolling.
         div()
             .id("transcript")
             .test_support()
@@ -854,6 +893,7 @@ impl Render for TranscriptView {
             .child(scroll)
             .child(fade)
             .children(self.jump_pill(cx))
+            .vertical_scrollbar(&self.scroll)
             .into_any_element()
     }
 }
@@ -864,6 +904,10 @@ const FADE_HEIGHT: f32 = 20.;
 /// How long "↓ Jump to latest" takes to come and go, and how far it lifts.
 const JUMP_FADE: Duration = Duration::from_millis(160);
 const JUMP_LIFT: f32 = 6.;
+
+/// The ink the pill's shadow is cast in: `.ws-main .jump`'s
+/// `rgba(60,40,10,.12)`, the warm ink the design's other shadows use.
+const JUMP_SHADOW_INK: paint::Rgb = paint::Rgb::new(0x3C, 0x28, 0x0A);
 
 /// How long "↓ Jump to latest" takes to come and go, and how far it lifts.
 impl TranscriptView {
@@ -876,7 +920,6 @@ impl TranscriptView {
     fn jump_pill(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let away = self.pin.is_away();
         let palette = Palette::from_app(cx);
-        let theme = cx.theme().clone();
         let jump = cx.listener(
             |view: &mut Self,
              _: &gpui_kit::MouseDownEvent,
@@ -887,7 +930,7 @@ impl TranscriptView {
         );
 
         let pill = div()
-            .id(("transcript-jump", away as usize))
+            .id("transcript-jump")
             .h(px(28.))
             .flex()
             .items_center()
@@ -896,17 +939,32 @@ impl TranscriptView {
             .rounded_full()
             .border_1()
             .border_color(palette.border)
-            .bg(theme.input)
+            // `.ws-main .jump`: `background:var(--input)`, the design's lightest
+            // surface — not the kit theme's own input token, which is the
+            // widget border in this app's theme.
+            .bg(palette.input)
             .text_size(px(12.))
             .text_color(palette.foreground)
-            .shadow_sm()
-            .cursor_pointer()
+            // `.ws-main .jump`: `box-shadow: 0 2px 8px rgba(60,40,10,.12)`.
+            .shadow(vec![BoxShadow::new(
+                px(0.),
+                px(2.),
+                paint::wash(JUMP_SHADOW_INK, 12.),
+            )
+            .blur_radius(px(8.))])
+            .cursor_default()
+            .hover(|style| {
+                style.bg(paint::color(
+                    design_palette(cx.theme().mode.is_dark()).sidebar,
+                ))
+            })
             .on_mouse_down(MouseButton::Left, jump)
             .child("↓ Jump to latest")
             .test_support()
             .with_animation(
                 ("transcript-jump-motion", away as usize),
-                Animation::new(JUMP_FADE),
+                // `transition: opacity .16s ease, transform .16s ease`.
+                Animation::new(JUMP_FADE).with_easing(cubic_bezier(0.25, 0.1, 0.25, 1.)),
                 move |el, delta| {
                     // Away: in, lifted to its place. Back: out, and 6px down.
                     let (from, to) = if away { (0., 1.) } else { (1., 0.) };

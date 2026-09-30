@@ -48,12 +48,11 @@ pub(crate) struct Palette {
     pub(crate) mono: SharedString,
     /// The theme's body size: what a row measures itself against.
     pub(crate) font_size: Pixels,
-    /// The size a tool's payload — its arguments, its result — is drawn at.
-    ///
-    /// Half a point under the theme's mono size: a mono face reads larger than
-    /// sans at the same size, and a call's payload is read at a glance, not
-    /// like the prose of the message it belongs to.
+    /// The size a tool's payload — its arguments, its result — is drawn at, and
+    /// their line height: `Rows.css` sets both, `.tc-kv` and `.tc-result` alike
+    /// (`font-size:13px; line-height:19px`).
     pub(crate) payload_size: Pixels,
+    pub(crate) payload_line: Pixels,
     pub(crate) radius: Pixels,
 }
 
@@ -116,7 +115,10 @@ impl Palette {
             info: theme.info,
             mono: theme.mono_font_family.clone(),
             font_size: theme.font_size,
-            payload_size: theme.mono_font_size - px(0.5),
+            // `Rows.css`: `.tc-kv{font-size:13px;line-height:19px}`, which is the
+            // design's mono size (`--mono`, 13) and the line box it sets under it.
+            payload_size: px(design::FONT_MONO),
+            payload_line: px(19.),
             radius: theme.radius,
         }
     }
@@ -155,8 +157,12 @@ pub(crate) fn text_style(cx: &App) -> TextViewStyle {
         .text_size(px(12.5))
         .font_weight(FontWeight::MEDIUM);
 
-    // A cell: `7px 12px` of air, a rule under it and a softer one to its right —
-    // the frame's own edges come from the table.
+    // A cell: `7px 12px` of air and the softer rule to its right — the frame and
+    // the rule *under* each row come from the table and from the row itself,
+    // which the kit draws with the table's own `border_color` (`--rule`), so a
+    // cell must not paint a second one over it: `Rows.css` has
+    // `th,td{border-bottom:1px solid var(--rule);border-right:1px solid
+    // var(--rule-soft)}`, and the row's own border is the first of those.
     //
     // The padding is what gpui-base measures a column's floor with (16px plus the
     // border), so a wider padding than its assumption lets a column shrink under
@@ -166,7 +172,6 @@ pub(crate) fn text_style(cx: &App) -> TextViewStyle {
         .px(px(12.))
         .py(px(7.))
         .text_size(px(13.5))
-        .border_b_1()
         .border_r_1()
         .border_color(rule_soft)
         .font_weight(FontWeight::NORMAL);
