@@ -73,9 +73,9 @@ pub(crate) const NEST_INDENT: Pixels = px(12.);
 pub(crate) const MAX_DEPTH: usize = 4;
 /// Longest array drawn item by item.
 pub(crate) const MAX_ARRAY: usize = 20;
-/// The gap between a key and its value — and so the indent of a block whose
-/// content has no keys of its own.
-pub(crate) const COLUMN_GAP: Pixels = px(8.);
+/// The gap between a key and its value — `Rows.css`'s `.tc-kv{gap:3px 12px}` —
+/// and so the indent of a block whose content has no keys of its own.
+pub(crate) const COLUMN_GAP: Pixels = px(12.);
 /// The size a key is drawn at, in the UI font: a key is a label, not payload.
 const KEY_SIZE: Pixels = px(12.);
 /// The size a panel's caption is drawn at.
@@ -1685,7 +1685,7 @@ fn quiet_source_line(
                 div()
                     .flex_none()
                     .text_color(source_ink)
-                    .child(source.to_string()),
+                    .child(format!("{source} ·")),
             )
             .child(div().min_w_0().truncate().child(text.to_string()));
     } else {
@@ -2243,6 +2243,9 @@ fn key_cell(id: &ElementId, key: &str, palette: &Palette) -> AnyElement {
         .w(KEY_WIDTH)
         .flex_shrink_0()
         .truncate()
+        // `.tc-kv dt`: a key is payload syntax, so it is set in the mono face at
+        // 12px — the values beside it stay in the UI font.
+        .font_family(palette.mono.clone())
         .text_size(KEY_SIZE)
         .text_color(palette.muted_foreground)
         .child(SelectableText::new((id.clone(), "key"), key.to_string()))
