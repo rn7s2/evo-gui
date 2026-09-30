@@ -31,8 +31,8 @@ call one tool, `SLOW …` makes it answer in sixty deltas over six seconds.
 | | |
 |---|---|
 | `01-empty-*` | The window as the app opens it: the New Swarm page (`design/doc28/NewSwarm.tsx`) — the Coordinator card (model and effort), the Workers card (count, model, effort) and the folder card beside them, with the history under them, empty and saying so. Every control opens on what evo resolved, so the two model fields read `stub · stub-a` (the one registration the stub home has) and the effort sliders sit on the catalog's middle rung. |
-| `02-lanes-working-*` | Six lanes, one of them given work: the left column reads `6 lanes · 1 busy`, `main` is waiting on its lanes, lane 1 is working with its step clock running and its own **Stop**, and the coordinator's turn — the `delegate` call and the tool's answer — is in the transcript. The button reads **■ Stop swarm**. |
-| `03-lane-transcript-*` | Lane 1 selected: the centre column is *that lane's* transcript — the `todo` call it was told to make, its result, and the lane's own checklist at the foot. Input still goes to the coordinator. |
+| `02-lanes-working-*` | Six lanes, one of them given work: the agent column's band reads `Lanes` with `0 of 6 busy`, `main` is waiting on its lanes, lane 1 is working — its own row carries the task it was given and its step clock — and the coordinator's turn, the `delegate` call and the tool's answer, is in the transcript. The button reads **■ Stop swarm**. |
+| `03-lane-transcript-*` | Lane 1 selected: the conversation column is *that lane's* transcript — the `todo` call it was told to make, its result, and the lane's own todos in the composer's todo strip at the foot of the column. Input still goes to the coordinator. |
 | `04-tool-*` | A tool row, opened: `bash`'s arguments and its result as rows, with the exit status. The row is opened by clicking its own header, and a truncated result is fetched whole with `GET /items/<id>`. |
 | `05-queued-*` | A prompt typed while the coordinator works: the card says `queued · sent at the next step` and carries a **Cancel**, the answer above it is still being written, and the button is still **Stop swarm** — the face follows the swarm being busy, not the composer's draft. |
 | `06-report-*` | What a lane's report looks like when it arrives: the `Lane 1 report` card with the fields the lane sent (`done`, `evidence`, `next`), which is the item a client renders instead of reading `[lane 1 report]` out of a sentence. Above it, the notice the swarm published for the same report — today labelled `command`, because the swarm's own notice goes out through the serve's command channel (`source: "command"`), which is what a client is told. |
@@ -48,6 +48,11 @@ call one tool, `SLOW …` makes it answer in sixty deltas over six seconds.
   lane could register; the stub home registers exactly one model, which every lane
   can run, so there is nothing to grey. A home with a second, lane-incapable model
   is what that picture needs.
+- **The composer's fold-outs**: the todo list opened, and the model and goal
+  drawers folded out inside the box. These pictures never open them, so they are
+  taken from the composer alone — `cargo run -p composer --example composer_states
+  -- --capture /tmp/composer-states`, which slides the todo strip, both drawers, the
+  busy face and a lane's own read-only drawer off the same clicks a person makes.
 - **A compaction divider**, which needs a session long enough for evo to compact.
 - **A dropped connection** and the reconnecting badge: the app reconnects with a
   backoff, and the picture needs a server to die under a live tab.
