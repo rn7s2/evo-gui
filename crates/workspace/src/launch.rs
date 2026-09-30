@@ -13,9 +13,9 @@ use std::time::Duration;
 
 use async_channel::Receiver;
 use session::LaunchPlan;
-use store::catalog::CheckReport;
+use store::catalog::{CheckReport, ModelRef};
 use store::cli::{self, CliError};
-use store::launch::{LaunchSpec, ModelRef, Program};
+use store::launch::{LaunchSpec, Program};
 use store::paths::Root;
 use tab_engine::{shutdown_all, EngineHandle, ShutdownReport, Update};
 
