@@ -23,6 +23,7 @@
 //! [`ThemeMode::Dark`]; `System` is this app's own third answer, worked out from
 //! the window's appearance.
 
+use gpui_kit::component::scroll::ScrollbarMode;
 use gpui_kit::component::{Theme as ComponentTheme, ThemeMode, ThemeRegistry};
 use gpui_kit::{App, Subscription, Window, WindowAppearance};
 
@@ -56,6 +57,38 @@ const THEME_SET: &str = "Evo";
 /// renders `#495158`. `#38BDF8` is the strongest *blue* the cap allows.
 const SELECTION_LIGHT: &str = "#0069CC40";
 const SELECTION_DARK: &str = "#38BDF84C";
+
+/// What a theme file washes over the palette rather than taking from it: a selection, and
+/// the scrollbar's thumb — the palette's own `fg` at an alpha, which is what the kit's own
+/// themes do (`foreground.alpha(0.35)`), so a thumb settles on whatever surface it covers
+/// instead of being a colour of its own.
+///
+/// The weights are per mode because the two `fg`s are not mirror images: `#202020` over
+/// the light page is a softer wash than `#FAFAFA` over the dark one at the same alpha.
+/// These land within a hundredth of a contrast point of each other — 2.08 and 2.10 on the
+/// page, 3.09 and 3.40 under the pointer — which is the mac-like "there is more below"
+/// weight: readable over a row of text, never a bar you have to read past.
+#[derive(Clone, Copy)]
+struct Washes {
+    /// The colour selected text is drawn with, as written in the theme file.
+    selection: &'static str,
+    /// The scrollbar thumb, as the alpha over the palette's `fg`.
+    thumb: u8,
+    /// And under the pointer, where the kit also widens it to 8px.
+    thumb_hover: u8,
+}
+
+const LIGHT_WASHES: Washes = Washes {
+    selection: SELECTION_LIGHT,
+    thumb: 0x59,
+    thumb_hover: 0x80,
+};
+
+const DARK_WASHES: Washes = Washes {
+    selection: SELECTION_DARK,
+    thumb: 0x40,
+    thumb_hover: 0x61,
+};
 
 /// What to show, given `app.json`'s choice and what the system says.
 ///
@@ -92,11 +125,25 @@ pub fn follow_appearance(cx: &mut App, window: &mut Window) -> Subscription {
 /// Registering them and pointing [`ComponentTheme`]'s light and dark at them is
 /// what makes every later `Theme::change` put *these* colours on the window: the
 /// kit loads the mode's registered theme, and the registered one is the design's.
+///
+/// The app's scrollbar *behaviour* is set here too, and it is the app's own answer rather
+/// than the platform's: [`ScrollbarMode::Scrolling`] — a thin overlay thumb appears when an
+/// area is scrolled (a wheel, a drag, a keyboard scroll) and fades two seconds after the
+/// last one, with no track behind it and nothing on a hover that scrolled nothing. The
+/// kit's default is whatever the system prefers, which is `Scrolling` on a platform that
+/// auto-hides its scrollbars and `Hover` on one that does not: the same app would answer
+/// differently per machine, and the design asks for one behaviour everywhere.
 pub fn install(cx: &mut App) {
-    if cx
-        .try_global::<ComponentTheme>()
-        .is_some_and(|theme| theme.light_theme.name.as_ref() == LIGHT_THEME)
-    {
+    let Some(installed) = cx.try_global::<ComponentTheme>() else {
+        // Nothing to install into: `gpui_kit::init` has not run.
+        return;
+    };
+    let already = installed.light_theme.name.as_ref() == LIGHT_THEME;
+    let mode = installed.scrollbar_mode;
+    if mode != ScrollbarMode::Scrolling {
+        ComponentTheme::set_scrollbar_mode(ScrollbarMode::Scrolling, cx);
+    }
+    if already {
         return;
     }
     let body = theme_set();
@@ -150,13 +197,13 @@ fn apply(cx: &mut App, window: &mut Window) {
 /// place a size is written down.
 fn theme_set() -> String {
     let themes = [
-        theme(LIGHT_THEME, "light", &design::LIGHT, SELECTION_LIGHT),
-        theme(DARK_THEME, "dark", &design::DARK, SELECTION_DARK),
+        theme(LIGHT_THEME, "light", &design::LIGHT, LIGHT_WASHES),
+        theme(DARK_THEME, "dark", &design::DARK, DARK_WASHES),
     ];
     serde_json::json!({ "name": THEME_SET, "themes": themes }).to_string()
 }
 
-fn theme(name: &str, mode: &str, palette: &Palette, selection: &str) -> serde_json::Value {
+fn theme(name: &str, mode: &str, palette: &Palette, washes: Washes) -> serde_json::Value {
     serde_json::json!({
         "name": name,
         "is_default": false,
@@ -167,7 +214,7 @@ fn theme(name: &str, mode: &str, palette: &Palette, selection: &str) -> serde_js
         "radius": design::RADIUS as u32,
         "radius.lg": design::RADIUS_LG as u32,
         "shadow": true,
-        "colors": colors(palette, selection),
+        "colors": colors(palette, washes),
     })
 }
 
@@ -179,7 +226,7 @@ fn theme(name: &str, mode: &str, palette: &Palette, selection: &str) -> serde_js
 ///
 /// Built as a list rather than one `json!`: the macro's nesting is the compiler's
 /// recursion limit, and the design has more tokens than the limit has levels.
-fn colors(p: &Palette, selection: &str) -> serde_json::Value {
+fn colors(p: &Palette, washes: Washes) -> serde_json::Value {
     // A row's hover and selection, as the design's lane rows do it: the foreground
     // a few percent into the surface the row sits on.
     let row_hover = hex(p.fg.mix(p.sidebar, 0.05));
@@ -227,7 +274,7 @@ fn colors(p: &Palette, selection: &str) -> serde_json::Value {
         // covers — see [`SELECTION_LIGHT`]. `muted` (what this used to be) is the
         // card's own surface in the light theme, so selected text was invisible on
         // it.
-        ("selection.background", selection.to_string()),
+        ("selection.background", washes.selection.to_string()),
         ("title_bar.background", hex(p.title_bar)),
         ("title_bar.border", border.clone()),
         ("tab.background", hex(p.tab_strip)),
@@ -245,11 +292,14 @@ fn colors(p: &Palette, selection: &str) -> serde_json::Value {
         ("list.active.background", row_active),
         ("list.even.background", sidebar.clone()),
         ("list.head.background", sidebar.clone()),
-        ("scrollbar.background", muted.clone()),
-        ("scrollbar.thumb.background", border.clone()),
+        // An overlay scrollbar, mac-like: no track at all (the list under it shows
+        // through), and a thumb the palette's own `fg` at the weight in `Washes` — the
+        // kit draws it 6px wide, 4px in from the edge, and 8px while the pointer is on it.
+        ("scrollbar.background", hex_alpha(p.bg, 0x00)),
+        ("scrollbar.thumb.background", hex_alpha(p.fg, washes.thumb)),
         (
             "scrollbar.thumb.hover.background",
-            hex(p.fg.mix(p.border, 0.25)),
+            hex_alpha(p.fg, washes.thumb_hover),
         ),
         ("switch.background", muted.clone()),
         ("switch.thumb.background", hex(p.input)),
@@ -277,6 +327,13 @@ fn colors(p: &Palette, selection: &str) -> serde_json::Value {
 /// `#RRGGBB`, the form the kit's colour parser takes.
 fn hex(c: Rgb) -> String {
     format!("#{:02X}{:02X}{:02X}", c.r, c.g, c.b)
+}
+
+/// The same, plus an alpha — `#RRGGBBAA`, which the kit's parser also takes and keeps.
+/// What a wash needs: a selection and a scrollbar thumb are drawn over a surface rather
+/// than replacing it.
+fn hex_alpha(c: Rgb, alpha: u8) -> String {
+    format!("{}{:02X}", hex(c), alpha)
 }
 
 #[cfg(test)]
@@ -505,6 +562,81 @@ mod tests {
             assert_eq!(
                 cx.theme().selection,
                 try_parse_color(SELECTION_DARK).expect("the dark wash")
+            );
+        });
+    }
+
+    /// The scrollbar is an overlay, as mac-like as this kit gets: no track (the list shows
+    /// through where the bar sits) and a thumb you can see over a row of text in either
+    /// mode, never a bar to read past. The firmer weight is what the pointer on the thumb
+    /// buys, and the kit widens the thumb to 8px there too.
+    #[test]
+    fn the_scrollbar_is_an_overlay_with_no_track() {
+        let set: serde_json::Value = serde_json::from_str(&theme_set()).expect("JSON");
+        let themes = set["themes"].as_array().expect("themes");
+        let colors = |mode: &str| -> serde_json::Map<String, serde_json::Value> {
+            themes
+                .iter()
+                .find(|theme| theme["mode"] == mode)
+                .and_then(|theme| theme["colors"].as_object().cloned())
+                .unwrap_or_default()
+        };
+        for (mode, palette) in [("light", &design::LIGHT), ("dark", &design::DARK)] {
+            let colors = colors(mode);
+            let colour = |key: &str| {
+                try_parse_color(colors[key].as_str().expect(key)).expect("a colour the kit reads")
+            };
+            let raw = |key: &str| colors[key].as_str().expect(key);
+            assert_eq!(colour("scrollbar.background").a, 0.0, "{mode}: no track");
+            let (thumb, hover) = (
+                colour("scrollbar.thumb.background"),
+                colour("scrollbar.thumb.hover.background"),
+            );
+            assert!(
+                thumb.a > 0.0 && thumb.a < 1.0,
+                "{mode}: a wash over the list, not a panel: {thumb:?}"
+            );
+            assert!(hover.a > thumb.a, "{mode}: pointing at it makes it firmer");
+            let opposite = (palette.bg.r, palette.bg.g, palette.bg.b);
+            let step = |wash: &str| contrast(blend(wash, palette.bg), opposite);
+            let (rest, pointed) = (
+                step(raw("scrollbar.thumb.background")),
+                step(raw("scrollbar.thumb.hover.background")),
+            );
+            assert!(
+                (1.9..2.4).contains(&rest),
+                "{mode}: {rest:.2} over the page — visible, not loud"
+            );
+            assert!(
+                (2.8..3.8).contains(&pointed),
+                "{mode}: {pointed:.2} under the pointer"
+            );
+        }
+    }
+
+    /// The scrollbar *behaviour* is the app's own answer rather than the platform's: the kit
+    /// defaults to the system's preference, which is `Scrolling` on a platform that auto-hides
+    /// its scrollbars and `Hover` on one that does not — the same app would show a bar on a
+    /// mere hover on one machine and nothing until a scroll on another. The design asks for
+    /// one behaviour everywhere: a wheel (or a drag, or a keyboard scroll) brings the thumb
+    /// out, and it fades two seconds after the last one; a hover that scrolled nothing shows
+    /// nothing, which is what the probe pictures show.
+    #[gpui_kit::test]
+    fn the_scrollbars_come_out_for_a_scroll_not_for_a_hover(cx: &mut gpui_kit::TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            install(cx);
+            assert_eq!(
+                cx.global::<ComponentTheme>().scrollbar_mode,
+                ScrollbarMode::Scrolling,
+                "the app's answer, whatever the platform prefers"
+            );
+            // And installing again — every window open and appearance change does — is a
+            // no-op, not a second write that refreshes every window.
+            install(cx);
+            assert_eq!(
+                cx.global::<ComponentTheme>().scrollbar_mode,
+                ScrollbarMode::Scrolling
             );
         });
     }
