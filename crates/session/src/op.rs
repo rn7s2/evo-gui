@@ -10,6 +10,11 @@ use serde_json::{json, Value};
 use crate::{AppendField, Item, ItemId};
 
 /// One frame of the op stream.
+///
+/// `ItemAdd` carries a whole item, which is much larger than the other frames. Boxing it
+/// would save the few bytes a frame's enum spends on the largest variant; the enum is
+/// built and dropped per frame, so it is not worth the indirection in every match.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum Op {
     /// The stream's first frame: where it starts, and which process it belongs to.
