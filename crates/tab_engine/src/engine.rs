@@ -289,7 +289,7 @@ fn engine_loop(
                     status: crate::types::StreamStatus::Connected,
                 });
             }
-            Inbound::Stream(StreamMsg::Reconnecting { retry_in, .. }) => {
+            Inbound::Stream(StreamMsg::Reconnecting { retry_in }) => {
                 // A stream that cannot come back is a server that is not there.
                 if !server.is_running() {
                     engine.send(Update::ServerGone);
