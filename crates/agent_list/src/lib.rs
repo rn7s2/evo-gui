@@ -9,12 +9,13 @@
 //!
 //! ```text
 //! AgentList::new(cx)                                  the entity
-//! set_lanes(&LaneList, cx)                            GET /lanes + lane-state events
-//! set_coordinator(activity, reconnecting, cx)         /state.status + the stream badge
-//! set_coordinator_clock(Option<String>, cx)           TabModel::coordinator_step_started()
+//! set_lanes(&LaneList, cx)                            topic `swarm`, from TabModel
+//! set_coordinator(status, reconnecting, cx)           topic `session` + the stream badge
+//! set_coordinator_clock(Option<String>, cx)           the coordinator's absolute step start
 //! set_selected(AgentKey, cx)                          TabModel::selected
-//! set_down_reason(lane, Option<String>, cx)           §9.7: why a lane is down
+//! set_down_reason(lane, Option<String>, cx)           TabModel::lane_down_reason
 //! → AgentListEvent::Select(AgentKey)                  the owner calls TabModel::select
+//! → AgentListEvent::StopLane(u32)                     the owner sends run.interrupt{scope:lane}
 //! ```
 
 use std::collections::BTreeMap;
@@ -27,7 +28,7 @@ use gpui_kit::{
     InteractiveElement as _, IntoElement, KeyDownEvent, ParentElement as _, Pixels, Render, Role,
     SharedString, StatefulInteractiveElement as _, Styled as _, TestSupportExt as _, Window,
 };
-use session::{Activity, AgentKey, LaneList, LaneRow, LaneStatus};
+use session::{AgentKey, LaneList, LaneRow, LaneStatus, Status};
 
 /// The column's width in the tab page (§7.3). The owner sizes the column; this is the
 /// number the design was drawn against, and what the demo uses.
@@ -73,12 +74,15 @@ pub enum AgentListEvent {
     /// Show this agent's transcript in the center column: the owner calls
     /// `TabModel::select` and feeds the result back with [`AgentList::set_selected`].
     Select(AgentKey),
+    /// Stop one lane (`run.interrupt` with scope `lane`): the one human action on a lane
+    /// besides typing to the coordinator (CONTRACT §7.4).
+    StopLane(u32),
 }
 
 /// The tab page's agent list.
 pub struct AgentList {
     lanes: LaneList,
-    activity: Activity,
+    activity: Status,
     /// The coordinator's step clock, already formatted by the owner
     /// (`session::StepClock::clock_label`). Shown in the trailing cell while the
     /// coordinator runs or compacts, where an idle row shows its activity word.
@@ -107,7 +111,7 @@ impl AgentList {
     pub fn new(cx: &mut Context<Self>) -> Self {
         Self {
             lanes: LaneList::new(),
-            activity: Activity::Idle,
+            activity: Status::Idle,
             coordinator_clock: None,
             coordinator_reconnecting: false,
             selected: AgentKey::Coordinator,
@@ -142,10 +146,10 @@ impl AgentList {
         }
     }
 
-    /// The coordinator's own row: its activity, and whether its stream is reconnecting.
+    /// The coordinator's own row: its status, and whether its stream is reconnecting.
     pub fn set_coordinator(
         &mut self,
-        activity: Activity,
+        activity: Status,
         reconnecting: bool,
         cx: &mut Context<Self>,
     ) {
@@ -217,12 +221,7 @@ impl AgentList {
     /// The arrows move through this, so the order on screen is the order they walk.
     fn keys(&self) -> Vec<AgentKey> {
         std::iter::once(AgentKey::Coordinator)
-            .chain(
-                self.lanes
-                    .lanes
-                    .iter()
-                    .map(|row| AgentKey::Lane(row.n as u32)),
-            )
+            .chain(self.lanes.lanes.iter().map(|row| AgentKey::Lane(row.n)))
             .collect()
     }
 
@@ -289,7 +288,7 @@ impl AgentList {
         // The step clock takes the trailing cell a lane's own clock sits in, but only while
         // the coordinator is actually doing something: an idle `main` says "idle", not the
         // seconds since a run that already ended.
-        let busy = matches!(self.activity, Activity::Running | Activity::Compacting);
+        let busy = matches!(self.activity, Status::Running | Status::Compacting);
         let clock = busy.then(|| self.coordinator_clock.clone()).flatten();
         let badge = self
             .coordinator_reconnecting
@@ -316,31 +315,29 @@ impl AgentList {
             label_color: theme.foreground,
             trailing: Some(clock.unwrap_or_else(|| word.to_string()).into()),
             badge,
+            stop: None,
             tooltip: tooltip.into(),
             aria: format!("{} main, {word}{aria_step}", status.glyph()).into(),
         }
     }
 
     fn lane_view(&self, row: &LaneRow, theme: &Theme) -> RowView {
-        let key = AgentKey::Lane(row.n as u32);
+        let key = AgentKey::Lane(row.n);
         let reason = (row.status == LaneStatus::Down)
-            .then(|| self.down_reasons.get(&(row.n as u32)))
+            .then(|| self.down_reasons.get(&row.n))
             .flatten();
-        // A down lane says why instead of what it was doing; a lane that has never been
-        // given anything says where it is in the swarm's own vocabulary.
-        let (label, label_color) = match (reason, row.task_label()) {
-            (Some(reason), _) => (reason.clone(), theme.danger),
-            (None, Some(task)) => (task, theme.foreground),
-            (None, None) => (row.state.clone(), theme.muted_foreground),
+        // A down lane says why instead of what it was doing; a busy one says what it is
+        // doing right now, from its own mirror; anything else says where it is in the
+        // swarm's own vocabulary.
+        let (label, label_color) = match reason {
+            Some(reason) => (reason.clone(), theme.danger),
+            None if row.is_busy() => (row.label(), theme.foreground),
+            None => (row.label(), theme.muted_foreground),
         };
         // The clock is what tells a slow step from a wedged lane, so it is only worth a
         // cell while the lane is actually working — and it is read at the owner's
         // `now` (`set_now`), which is what keeps it moving between `/lanes` reads.
-        let trailing = if row.is_busy() {
-            row.step_clock_at(self.now_millis)
-        } else {
-            None
-        };
+        let trailing = row.step_clock(self.now_millis);
         let aria = format!(
             "{} lane {} {}, {}{}",
             row.glyph(),
@@ -361,9 +358,35 @@ impl AgentList {
             label_color,
             trailing: trailing.map(SharedString::from),
             badge: None,
+            stop: row.is_busy().then_some(key),
             tooltip: lane_tooltip(row, reason, self.now_millis).into(),
             aria: aria.into(),
         }
+    }
+
+    /// The Stop button of one lane's row: `run.interrupt` with scope `lane`, sent by the
+    /// owner when it hears [`AgentListEvent::StopLane`].
+    fn stop_button(&self, lane: u32, theme: &Theme, cx: &Context<Self>) -> impl IntoElement {
+        div()
+            .id(("agent-stop", lane as u64))
+            .test_support()
+            .flex_none()
+            .px_1()
+            .rounded(theme.radius)
+            .border_1()
+            .border_color(theme.border)
+            .text_size(SMALL_TEXT_SIZE)
+            .text_color(theme.muted_foreground)
+            .cursor_pointer()
+            .hover(|style| style.text_color(theme.danger))
+            .aria_label(format!("Stop lane {lane}"))
+            .on_click(cx.listener(move |_, _, _, cx| {
+                // A click on the button is not a click on the row: the row must not also
+                // select the lane the reader is stopping.
+                cx.stop_propagation();
+                cx.emit(AgentListEvent::StopLane(lane));
+            }))
+            .child("Stop")
     }
 
     /// Draw one row. The whole row is the click target, so a click anywhere selects.
@@ -377,6 +400,7 @@ impl AgentList {
         let glyph = view.glyph.to_string();
         let trailing = view.trailing;
         let badge = view.badge;
+        let stop = view.stop;
 
         h_flex()
             .id(row_id(key))
@@ -448,6 +472,12 @@ impl AgentList {
                         .text_size(SMALL_TEXT_SIZE)
                         .child(badge),
                 )
+            })
+            // The one thing a person may do to a lane (CONTRACT §7.4): stop it. It
+            // appears while the row can be stopped, not on every row.
+            .when_some(stop, |row, stop| {
+                let lane = stop.lane().unwrap_or_default();
+                row.child(self.stop_button(lane, theme, cx))
             })
             .on_click(cx.listener(move |this, _, window, cx| {
                 // A click is also how the list takes the keyboard: the arrows walk the rows
@@ -553,23 +583,20 @@ fn row_index(key: AgentKey) -> u64 {
     }
 }
 
-/// The coordinator's activity in the lane vocabulary, so one glyph and one color table
-/// covers both kinds of row.
-pub fn activity_status(activity: Activity) -> LaneStatus {
+/// The coordinator's status in the lane vocabulary, so one glyph and one color table
+/// covers both kinds of row. `waiting` — settled but held while the lanes work — is the
+/// idle glyph: the coordinator itself is not doing anything.
+pub fn activity_status(activity: Status) -> LaneStatus {
     match activity {
-        Activity::Idle => LaneStatus::Idle,
-        Activity::Running => LaneStatus::Working,
-        Activity::Compacting => LaneStatus::Compacting,
+        Status::Idle | Status::Waiting => LaneStatus::Idle,
+        Status::Running => LaneStatus::Working,
+        Status::Compacting => LaneStatus::Compacting,
     }
 }
 
-/// The activity as the coordinator's row spells it.
-pub fn activity_word(activity: Activity) -> &'static str {
-    match activity {
-        Activity::Idle => "idle",
-        Activity::Running => "running",
-        Activity::Compacting => "compacting",
-    }
+/// The status as the coordinator's row spells it.
+pub fn activity_word(activity: Status) -> &'static str {
+    activity.label()
 }
 
 /// The status glyph's color (§7.3): work is the live accent, compaction a warning, idle and
@@ -583,6 +610,7 @@ pub fn status_color(status: LaneStatus, theme: &Theme) -> Hsla {
         LaneStatus::Compacting => theme.warning,
         LaneStatus::Idle => theme.muted_foreground,
         LaneStatus::Starting => theme.muted_foreground,
+        LaneStatus::Stopped => theme.muted_foreground,
         LaneStatus::Down => theme.danger,
     }
 }
@@ -607,6 +635,8 @@ struct RowView {
     trailing: Option<SharedString>,
     /// `reconnecting`, shown where the activity would go while the stream is down.
     badge: Option<SharedString>,
+    /// The Stop button's lane, while the row can be stopped.
+    stop: Option<AgentKey>,
     tooltip: SharedString,
     aria: SharedString,
 }
@@ -617,43 +647,10 @@ struct RowView {
 /// One field group per line, each folded at [`TOOLTIP_LINE`]: a tooltip that grew to the
 /// width of a long task would be wider than the window it is drawn in.
 fn lane_tooltip(row: &LaneRow, reason: Option<&String>, now_millis: u64) -> String {
-    let mut head = format!("lane {} · {}", row.n, row.state);
-    if let Some(clock) = row.step_clock_at(now_millis) {
-        head.push_str(&format!(" · step {clock}"));
-    }
-    let mut lines = vec![head];
-    if let Some(task) = &row.task {
-        lines.push(format!("task: {task}"));
-    }
-    let mut facts: Vec<String> = Vec::new();
-    if let Some(worktree) = &row.worktree {
-        let branch = match &row.branch {
-            Some(branch) => format!(" ({branch})"),
-            None => String::new(),
-        };
-        facts.push(format!("worktree {worktree}{branch}"));
-    }
-    if row.restarts > 0 {
-        // The swarm's `lane-status-line` stays quiet about zero restarts; so does this.
-        facts.push(format!(
-            "{} {}",
-            row.restarts,
-            if row.restarts == 1 {
-                "restart"
-            } else {
-                "restarts"
-            }
-        ));
-    }
-    if let Some(pid) = row.pid {
-        facts.push(format!("pid {pid}"));
-    }
-    if let Some(goal) = &row.goal_status {
-        facts.push(format!("goal {goal}"));
-    }
-    if !facts.is_empty() {
-        lines.push(facts.join(" · "));
-    }
+    // The row's own line is the swarm's: state, step, task, worktree, reports, restarts,
+    // pid, goal, context. The one thing it cannot carry is why a down lane is down, and
+    // that is the line this adds.
+    let mut lines = vec![row.tooltip(now_millis)];
     if let Some(reason) = reason {
         lines.push(reason.clone());
     }
@@ -712,8 +709,11 @@ mod tests {
         height: px(400.),
     };
 
-    /// A lane as `/lanes` reports one, with only the fields a test cares about set.
-    fn lane(n: u64, status: LaneStatus, task: Option<&str>) -> LaneRow {
+    /// The moment the tests count a lane's clock to.
+    const NOW: u64 = 1_759_200_000_000;
+
+    /// A lane as the swarm topic reports one, with only the fields a test cares about set.
+    fn lane(n: u32, status: LaneStatus, task: Option<&str>) -> LaneRow {
         LaneRow {
             n,
             status,
@@ -722,22 +722,27 @@ mod tests {
                 LaneStatus::Compacting => "compacting",
                 LaneStatus::Idle => "idle",
                 LaneStatus::Starting => "starting",
+                LaneStatus::Stopped => "stopped",
                 LaneStatus::Down => "down",
             }
             .to_string(),
             task: task.map(str::to_string),
-            task_age: None,
-            // A working lane has a step clock; anything else has already stopped.
-            step_age: matches!(status, LaneStatus::Working | LaneStatus::Compacting)
-                .then(|| 41 * n),
-            // No moment to stamp it with: the clock is the age `/lanes` reported.
-            step_age_at_millis: None,
-            pid: Some(4000 + n),
+            task_started_at: None,
+            // A working lane counts from an absolute start: 41 n seconds before NOW.
+            step_started_at: status
+                .is_busy()
+                .then(|| NOW.saturating_sub(u64::from(n) * 41 * 1000)),
+            restarts: 0,
+            pid: Some(4000 + u64::from(n)),
             worktree: None,
             branch: None,
-            restarts: 0,
-            reports: 0,
+            model: None,
             goal_status: None,
+            context_tokens: None,
+            context_window: None,
+            reports: 0,
+            last_item: None,
+            activity: None,
         }
     }
 
@@ -747,11 +752,11 @@ mod tests {
         LaneList {
             swarm: Some(SwarmInfo {
                 id: "sw-test".to_string(),
-                dir: "/tmp/sw-test".to_string(),
-                cwd: "/tmp".to_string(),
                 workers,
                 busy,
-                stopping: false,
+                waiting_on_lanes: busy > 0,
+                lane_model: None,
+                lane_thinking: None,
             }),
             lanes: rows,
         }
@@ -890,6 +895,33 @@ mod tests {
         });
     }
 
+    /// CONTRACT §7.4: the one human action on a lane is stopping it. The button appears
+    /// only while a lane has something to stop, and a click on it is not a click on the
+    /// row — the reader is stopping the lane, not selecting it.
+    #[gpui_kit::test]
+    fn a_busy_lane_offers_stop_and_the_click_names_the_lane(cx: &mut TestAppContext) {
+        let f = open(
+            cx,
+            lanes(vec![
+                lane(1, LaneStatus::Working, Some("porting")),
+                lane(2, LaneStatus::Idle, None),
+            ]),
+        );
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window.try_find(("agent-stop", 1u64)).is_some(),
+                "a working lane can be stopped"
+            );
+            assert!(
+                window.try_find(("agent-stop", 2u64)).is_none(),
+                "an idle lane has nothing to stop"
+            );
+            window.click(("agent-stop", 1u64), cx);
+        });
+        assert_eq!(f.events(), vec![AgentListEvent::StopLane(1)]);
+    }
+
     /// The word the aria label carries for each status, which is the swarm's own state
     /// vocabulary.
     fn status_from_state_word(status: LaneStatus) -> &'static str {
@@ -898,6 +930,7 @@ mod tests {
             LaneStatus::Compacting => "compacting",
             LaneStatus::Idle => "idle",
             LaneStatus::Starting => "starting",
+            LaneStatus::Stopped => "stopped",
             LaneStatus::Down => "down",
         }
     }
@@ -1166,16 +1199,15 @@ mod tests {
         });
     }
 
-    /// §7.3: a lane's step clock is an age as of wherever it was read, so the row
-    /// counts on from that moment. The owner stamps the time (`set_now`); the list
-    /// reads no clock of its own, and an owner that never stamps one gets exactly
-    /// the ages the swarm reported.
+    /// §7.3: a lane's step clock counts from the absolute start the swarm published, and
+    /// the owner stamps the moment it counts to (`set_now`). The list reads no clock of
+    /// its own, and an owner that never stamps one shows what the swarm last said.
     #[gpui_kit::test]
-    fn a_lane_clock_counts_on_from_the_moment_its_age_was_read(cx: &mut TestAppContext) {
+    fn a_lane_clock_counts_on_from_the_start_the_swarm_published(cx: &mut TestAppContext) {
         let mut row = lane(1, LaneStatus::Working, Some("build the readout segments"));
-        row.step_age = Some(30);
-        row.step_age_at_millis = Some(1_000_000);
+        row.step_started_at = Some(NOW - 30_000);
         let f = open(cx, lanes(vec![row]));
+        f.list.update(cx, |list, cx| list.set_now(NOW, cx));
         let clock = |window: &mut Window| {
             window
                 .find(row_id(AgentKey::Lane(1)))
@@ -1192,7 +1224,7 @@ mod tests {
             );
 
             // Three seconds of frames later — the same rows, nothing re-read.
-            f.list.update(cx, |list, cx| list.set_now(1_003_000, cx));
+            f.list.update(cx, |list, cx| list.set_now(NOW + 3_000, cx));
             window.render_frame(cx);
             assert!(
                 clock(window).ends_with("step 33s"),
@@ -1279,7 +1311,7 @@ mod tests {
             );
 
             f.list.update(cx, |list, cx| {
-                list.set_coordinator(Activity::Running, true, cx)
+                list.set_coordinator(Status::Running, true, cx)
             });
             window.render_frame(cx);
             let main = window
@@ -1313,7 +1345,7 @@ mod tests {
         f.act(cx, |window, cx| {
             // Idle: the word, even with a clock in hand.
             f.list.update(cx, |list, cx| {
-                list.set_coordinator(Activity::Idle, false, cx);
+                list.set_coordinator(Status::Idle, false, cx);
                 list.set_coordinator_clock(Some("41s".to_string()), cx);
             });
             assert_eq!(coordinator_trailing(&f, cx).as_deref(), Some("idle"));
@@ -1321,7 +1353,7 @@ mod tests {
             // Running with a clock: the clock, in the cell the lanes use, and the row's aria
             // says the step as a lane row's does.
             f.list.update(cx, |list, cx| {
-                list.set_coordinator(Activity::Running, false, cx);
+                list.set_coordinator(Status::Running, false, cx);
             });
             assert_eq!(coordinator_trailing(&f, cx).as_deref(), Some("41s"));
             window.render_frame(cx);
@@ -1335,7 +1367,7 @@ mod tests {
 
             // A compaction is work too.
             f.list.update(cx, |list, cx| {
-                list.set_coordinator(Activity::Compacting, false, cx);
+                list.set_coordinator(Status::Compacting, false, cx);
                 list.set_coordinator_clock(Some("3m".to_string()), cx);
             });
             assert_eq!(coordinator_trailing(&f, cx).as_deref(), Some("3m"));
@@ -1352,7 +1384,7 @@ mod tests {
 
             // A step that just began is a real clock, not an empty cell.
             f.list.update(cx, |list, cx| {
-                list.set_coordinator(Activity::Running, false, cx);
+                list.set_coordinator(Status::Running, false, cx);
                 list.set_coordinator_clock(Some("0s".to_string()), cx);
             });
             assert_eq!(coordinator_trailing(&f, cx).as_deref(), Some("0s"));
@@ -1409,13 +1441,10 @@ mod tests {
 
     #[test]
     fn the_coordinator_activity_maps_onto_the_row_states() {
-        assert_eq!(activity_status(Activity::Idle), LaneStatus::Idle);
-        assert_eq!(activity_status(Activity::Running), LaneStatus::Working);
-        assert_eq!(
-            activity_status(Activity::Compacting),
-            LaneStatus::Compacting
-        );
-        assert_eq!(activity_word(Activity::Running), "running");
+        assert_eq!(activity_status(Status::Idle), LaneStatus::Idle);
+        assert_eq!(activity_status(Status::Running), LaneStatus::Working);
+        assert_eq!(activity_status(Status::Compacting), LaneStatus::Compacting);
+        assert_eq!(activity_word(Status::Running), "running");
     }
 
     #[test]
@@ -1442,10 +1471,10 @@ mod tests {
         row.branch = Some("evo/lane-2".to_string());
         row.restarts = 2;
         row.goal_status = Some("active".to_string());
-        let tooltip = lane_tooltip(&row, None, 0);
+        let tooltip = lane_tooltip(&row, None, NOW);
         // Folded for the tooltip's width, so the checks ignore where the line breaks land.
         let flat = tooltip.replace('\n', " ");
-        assert!(flat.starts_with("lane 2 · working · step 1m"), "{tooltip}");
+        assert!(flat.starts_with("lane 2  working · step 1m"), "{tooltip}");
         assert!(
             flat.contains("task: build the readout segments"),
             "{tooltip}"

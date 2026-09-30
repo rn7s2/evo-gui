@@ -14,6 +14,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -26,8 +27,11 @@ use gpui_kit::{
 
 use async_channel::Receiver;
 use composer::{Composer, ComposerEvent};
-use session::{Activity, AgentKey, Changes, LaunchPlan, RowChanges, TabModel};
-use tab_engine::{Agent, EngineHandle, ReqId, Update};
+use session::{
+    AgentKey, Changes, ItemChange, LaunchPlan, Op, OpRequest, Queue, Status, StreamStatus, TabModel,
+};
+use swarm_client::{ErrorCode, OpError, OpReply};
+use tab_engine::{EngineHandle, Update};
 use transcript::TranscriptView;
 
 use agent_list::{AgentList, AgentListEvent};
@@ -35,11 +39,7 @@ use agent_list::{AgentList, AgentListEvent};
 use crate::chrome::LauncherData;
 use crate::empty_tab::{Choosers, HistoryList};
 use crate::history::{folder_name, HistoryRow};
-use crate::launch::{Launch, SwarmConfig};
-
-/// Called with a live tab's `/registry`, so the app can refresh its model cache
-/// from a real server (§9.4).
-pub type RegistryHook = std::rc::Rc<dyn Fn(&serde_json::Value, &mut App)>;
+use crate::launch::{Launch, LaunchEnv};
 
 /// How often the step clock re-renders while a turn runs. It is a UI ticker and
 /// nothing else: no request, no state (§7.3).
@@ -48,6 +48,9 @@ const STEP_TICK: Duration = Duration::from_secs(1);
 /// How long a notice above the composer stays: long enough to read a refusal,
 /// short enough that it is gone before it becomes furniture (§4).
 const NOTICE_LIFETIME: Duration = Duration::from_secs(4);
+
+/// How many items one page of scrollback asks for (`GET /items?before=&limit=`, §5.4).
+const PAGE_ITEMS: u32 = 100;
 
 /// A transient line above the composer (§4, §9.2).
 ///
@@ -87,42 +90,37 @@ impl NoticeTone {
     }
 }
 
-/// What a rejected POST reads as (§4).
+/// What a refused op reads as (§4).
 ///
-/// The decision is the server's, not ours: `not_now` is tab_engine's reading of
-/// `409`, and everything else — `422`, `503`, a broken connection — is a failure
-/// carrying the reply's own `error`.
-pub(crate) fn notice_tone(error: &tab_engine::PostError) -> NoticeTone {
-    if error.not_now {
-        NoticeTone::Dim
-    } else {
-        NoticeTone::Error
+/// The decision is the server's, not ours: `busy` and `not_quiescent` are the
+/// server saying it cannot take this now — dim, not a mistake — and every other
+/// code is a failure carrying the reply's own words.
+pub(crate) fn notice_tone(error: &OpError) -> NoticeTone {
+    match error.code {
+        ErrorCode::Busy | ErrorCode::NotQuiescent => NoticeTone::Dim,
+        _ => NoticeTone::Error,
     }
 }
 
-/// What a failed POST says above the composer, and the raw error to keep for the
+/// What a refused op says above the composer, and the raw text to keep for the
 /// hover (§4).
 ///
-/// A reply is the server's own words, always: `409`, `422`, `400` are the swarm
-/// talking about the request, and re-stating them is the one thing §8 forbids.
-/// The two cases with nothing to re-state are:
-///
-/// - **no reply at all** — the connection, the deadline, the half-read answer.
-///   `io: Connection refused (os error 61)` is the socket talking, not the swarm,
-///   and what happened is that the swarm is not there (yet).
-/// - **`503`** — the server answered, and its answer is that it is going away.
-///
-/// Both get a sentence; the raw text is returned as the detail so it can ride in
-/// the notice's tooltip instead of being dropped.
-fn notice_words(error: &tab_engine::PostError) -> (String, Option<String>) {
-    let plain = match error.status {
-        None => "Can't reach the swarm — it may be restarting.",
-        Some(503) => "The swarm is shutting down.",
-        Some(_) => return (error.message.clone(), None),
+/// A refusal is the server's own words, always: the reply's `message` is the
+/// swarm talking about the request, and re-stating it is the one thing §8 forbids.
+/// The server's messages never quote a user or config value (CONTRACT §5.5), so
+/// there is nothing to scrub here either.
+fn notice_words(error: &OpError) -> (String, Option<String>) {
+    let text = if error.message.trim().is_empty() {
+        format!("The swarm refused that ({:?}).", error.code)
+    } else {
+        error.message.clone()
     };
-    let raw = error.message.trim();
-    let detail = (!raw.is_empty() && raw != plain).then(|| raw.to_owned());
-    (plain.to_owned(), detail)
+    let detail = error
+        .detail
+        .as_object()
+        .filter(|detail| !detail.is_empty())
+        .map(|detail| serde_json::Value::Object(detail.clone()).to_string());
+    (text, detail)
 }
 
 /// Identity of a tab inside the window.
@@ -234,8 +232,9 @@ pub struct TabContent {
     /// docs/review-1.md F5).
     pub(crate) transcripts: BTreeMap<AgentKey, Entity<TranscriptView>>,
     pub(crate) composer: Entity<Composer>,
-    /// What every tab of this window starts its swarms with.
-    config: Arc<SwarmConfig>,
+    /// What every tab of this window starts its swarms with: the two binaries, the
+    /// app's data root and the environment a hermetic run needs (§1).
+    config: Arc<LaunchEnv>,
     /// The side columns' widths (§7.3), as the window has them: the same in
     /// every tab, so the page of a tab opened now looks like the one next to it.
     pub(crate) panes: store::app_state::Panes,
@@ -250,8 +249,6 @@ pub struct TabContent {
     last_launch: Option<Launch>,
     /// Why the tab's swarm is gone, when it went away on its own.
     gone: Option<SharedString>,
-    /// Called with this tab's `/registry` (§9.4).
-    registry_hook: Option<RegistryHook>,
     /// What the server last refused, until it ages out (§4, §9.2).
     notice: Option<Notice>,
     /// The task that takes the notice away again.
@@ -265,10 +262,34 @@ pub struct TabContent {
     _subscriptions: Vec<Subscription>,
 }
 
+/// What one agent's transcript view has to be told, gathered from one batch of
+/// changes before any view is touched.
+#[derive(Default)]
+struct ViewPlan {
+    /// The whole item list, with the topic's own `has_more`.
+    reset: Option<(Vec<session::Item>, bool)>,
+    /// Older items, paged in at the front.
+    prepend: Option<Vec<session::Item>>,
+    upsert: Vec<session::Item>,
+    remove: Vec<session::ItemId>,
+    /// The topic's state moved (the checklist, the segments).
+    state: bool,
+}
+
+impl ViewPlan {
+    fn is_empty(&self) -> bool {
+        self.reset.is_none()
+            && self.prepend.is_none()
+            && self.upsert.is_empty()
+            && self.remove.is_empty()
+            && !self.state
+    }
+}
+
 /// Everything the agent list draws, read off the model in one go (§7.3).
 struct AgentsSnapshot {
     lanes: session::LaneList,
-    activity: Activity,
+    activity: Status,
     reconnecting: bool,
     selected: AgentKey,
     /// The coordinator's own step clock, already formatted.
@@ -280,36 +301,38 @@ struct AgentsSnapshot {
     down_reasons: Vec<(u32, Option<String>)>,
 }
 
-/// The `POST` a tab is waiting for (§9.2), so its reply is read for what it is:
-/// only a *prompt*'s `ok` clears the draft — an interrupt is answered `ok` too,
-/// and the text the user was typing is none of its business (§7.3).
+/// The op a tab is waiting for a reply to, so its answer is read for what it is:
+/// only a *send*'s `ok` clears the draft — a stop is answered `ok` too, and the
+/// text the person was typing is none of its business (§7.3).
+///
+/// One op is outstanding at a time: the composer disables its own button while it
+/// waits, and the ops the list sends do not touch its alphabet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct InFlight {
-    req: ReqId,
-    /// True when this request was the interrupt — the button's Stop, or `Esc`.
-    interrupt: bool,
-    /// The queued row a send is showing the reader's words as, until evo takes
-    /// them (§9.1). The reply's error path is what takes the row back.
-    pending: Option<session::RowId>,
+enum Pending {
+    /// `input.send` — the reply is the one that clears the draft.
+    Send,
+    /// A `run.interrupt`, from the button, from a lane's Stop, or from `Esc`.
+    Interrupt,
 }
 
 /// One tab's live swarm: the engine, the model its updates land in, and the pump
 /// that carries them across.
 struct Live {
-    engine: EngineHandle,
+    /// Shared, because a transcript row's own ask (page older items, fetch one item
+    /// whole, take a queued input back) is a `'static` handler that has to hold on to
+    /// it. The handle is single-threaded, like the UI that calls it.
+    engine: Rc<EngineHandle>,
     model: TabModel,
     /// The task that applies the engine's updates on the UI thread. Held only so
     /// it lives exactly as long as the tab does: dropping the tab — or handing
     /// the engine over to be stopped — cancels the pump.
     _pump: Task<()>,
-    /// `tabs/<id>/` — where the swarm keeps its `token` and its `swarm.log` (§6).
+    /// `tabs/<id>/` — where the swarm keeps its log and its ready file (§6).
     tab_dir: PathBuf,
-    /// The next `POST`'s id, and the one a reply is still expected for.
-    next_req: ReqId,
-    in_flight: Option<InFlight>,
-    /// The last `/state` revision applied: an answer from an older fetch is
-    /// dropped instead of overwriting newer state (§9.1).
-    state_revision: u64,
+    /// The op a reply is still expected for, and what it was (§5.5).
+    pending: Option<Pending>,
+    /// The one stream's state, for the `reconnecting` badge (§5.3, §9.7).
+    stream: StreamStatus,
     /// True once this tab's session has been recorded as a recent (§9.5).
     recorded: bool,
     /// True while that recording is out on its thread, so the `/state` resyncs
@@ -324,19 +347,12 @@ struct Live {
     ticker: Option<Task<()>>,
 }
 
-impl Live {
-    fn next_req(&mut self) -> ReqId {
-        self.next_req += 1;
-        self.next_req
-    }
-}
-
 impl TabContent {
     /// A fresh tab: nothing chosen yet (§7.2). The choosers need the window they
     /// will be rendered in.
     pub fn new(
         id: TabId,
-        config: Arc<SwarmConfig>,
+        config: Arc<LaunchEnv>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -378,11 +394,14 @@ impl TabContent {
         // The agent list selects nothing on its own: it asks, and the tab decides
         // — the same path a click on the old placeholder took (§7.3).
         let agents = cx.new(AgentList::new);
-        let agents_subscription =
-            cx.subscribe(&agents, |this, _list, event: &AgentListEvent, cx| {
-                let AgentListEvent::Select(agent) = event;
-                this.select_agent(*agent, cx);
-            });
+        let agents_subscription = cx.subscribe(
+            &agents,
+            |this, _list, event: &AgentListEvent, cx| match event {
+                AgentListEvent::Select(agent) => this.select_agent(*agent, cx),
+                // The one human action on a lane: stop it (§7.4).
+                AgentListEvent::StopLane(lane) => this.on_stop_lane(*lane),
+            },
+        );
 
         TabContent {
             id,
@@ -397,7 +416,6 @@ impl TabContent {
             live: None,
             last_launch: None,
             gone: None,
-            registry_hook: None,
             notice: None,
             notice_task: None,
             session: None,
@@ -524,16 +542,16 @@ impl TabContent {
     /// Whether the selected agent's stream is retrying, which the tab page shows
     /// as a badge and the tab's tooltip as "reconnecting" (§9.7).
     pub fn is_reconnecting(&self) -> bool {
-        self.model()
-            .is_some_and(|model| model.is_reconnecting(model.selected()))
+        self.live
+            .as_ref()
+            .is_some_and(|live| live.stream.is_reconnecting())
     }
 
     /// Whether the coordinator has a run in flight — the tab strip's activity dot
     /// (§7.1). A compaction counts: the swarm is busy either way, and the readout
     /// says which.
     pub fn is_running(&self) -> bool {
-        self.model()
-            .is_some_and(|model| model.activity() != Activity::Idle)
+        self.model().is_some_and(|model| model.activity().is_busy())
     }
 
     /// The label on the tab: the folder's name, or "New tab" while empty.
@@ -576,30 +594,22 @@ impl TabContent {
     }
 
     /// The app's catalog and session list, forwarded to the empty tab that shows
-    /// them (§9.4, §9.5).
+    /// them (§5.6, §2).
+    ///
+    /// Everything here is data the app read once, for every tab: one catalog body
+    /// (`evo-swarm catalog --json`), one session index, one clock. Nothing is fetched
+    /// per tab.
     pub fn set_launcher_data(
         &mut self,
         data: &LauncherData,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(raw) = &data.registry {
-            // The engine hands `/registry` over as it arrived; the choosers want
-            // it parsed, so a reply that no longer parses is simply skipped.
-            if let Ok(typed) = serde_json::from_value::<swarm_client::Registry>(raw.clone()) {
-                let registry = swarm_client::Payload {
-                    typed,
-                    raw: raw.clone(),
-                };
-                self.set_registry(&registry, window, cx);
-            }
-        }
-        if let Some(cache) = &data.model_cache {
-            self.set_model_cache(cache, window, cx);
+        if let Some(catalog) = &data.catalog {
+            self.set_catalog(catalog, window, cx);
         }
         self.set_catalog_error(data.catalog_error.clone(), cx);
-        self.set_swarm_problem(data.swarm_problem.clone(), cx);
-        self.set_scanning(data.scanning, cx);
+        self.set_history_loading(data.history_loading, cx);
         if !data.history.is_empty() {
             self.set_history_entries(
                 &data.history,
@@ -611,11 +621,6 @@ impl TabContent {
         }
         self.set_history_error(data.history_error.clone(), cx);
         self.set_home(data.home.clone(), cx);
-    }
-
-    /// Install the hook a live tab's `/registry` is reported to (§9.4).
-    pub fn set_registry_hook(&mut self, hook: Option<RegistryHook>) {
-        self.registry_hook = hook;
     }
 
     /// The rows the history region currently lists.
@@ -707,7 +712,10 @@ impl TabContent {
             self.set_state(TabState::Stopping { folder }, cx);
             cx.notify();
         }
-        Some(live.engine)
+        // The handle is shared with whatever row asked for a read; when a view still
+        // holds one, dropping the last reference is what closes the child's stdin —
+        // the server's own signal to stop — so the tab has nothing more to hand over.
+        Rc::try_unwrap(live.engine).ok()
     }
 
     /// Take a started swarm: keep its engine, start the pump, and show the boot
@@ -723,22 +731,71 @@ impl TabContent {
         // The coordinator is what a fresh tab page shows (§7.3).
         let coordinator = cx.new(TranscriptView::new);
         coordinator.update(cx, |view, cx| view.set_agent(AgentKey::Coordinator, cx));
-        self.transcripts.insert(AgentKey::Coordinator, coordinator);
+        self.transcripts
+            .insert(AgentKey::Coordinator, coordinator.clone());
         self.live = Some(Live {
-            engine: started.engine,
+            engine: Rc::new(started.engine),
             model: TabModel::new(),
             _pump: pump,
             tab_dir: started.tab_dir,
-            next_req: 0,
-            in_flight: None,
-            state_revision: 0,
+            pending: None,
+            stream: StreamStatus::Connected,
             recorded: false,
             recording: false,
             pid: None,
             store_id: started.store_id,
             ticker: None,
         });
+        // The coordinator's rows can page back, fetch one item whole and take a queued
+        // input back from the moment the tab has a server to ask (§5.4, §5.5).
+        self.wire_view(&AgentKey::Coordinator, cx);
+        let _ = window;
         cx.notify();
+    }
+
+    /// Give one agent's transcript the three asks a row can make: older items
+    /// (`GET /items?before=`), one item whole (`GET /items/<id>`), and taking a queued
+    /// input back (`input.cancel`).
+    ///
+    /// Each is a read or an op on that agent's own topic, sent by the engine. A view
+    /// whose callbacks are never installed simply offers nothing to click: the history
+    /// header is drawn only when the owner said there is more, and a tool row's "load
+    /// the whole output" only when there is a way to fetch it.
+    fn wire_view(&self, agent: &AgentKey, cx: &mut Context<Self>) {
+        let Some(live) = self.live.as_ref() else {
+            return;
+        };
+        let Some(view) = self.transcripts.get(agent).cloned() else {
+            return;
+        };
+        let topic = agent.topic();
+        let engine = live.engine.clone();
+        let page_topic = topic.clone();
+        let item_topic = topic.clone();
+        let cancel_topic = topic;
+        view.update(cx, |view, cx| {
+            view.on_load_older(
+                move |oldest, _window, _cx| {
+                    engine.page(&page_topic, Some(oldest), PAGE_ITEMS);
+                },
+                cx,
+            );
+            let engine = live.engine.clone();
+            view.on_fetch_item(
+                move |id, _window, _cx| {
+                    engine.item(&item_topic, id);
+                },
+                cx,
+            );
+            let engine = live.engine.clone();
+            view.on_cancel_input(
+                move |id, _window, _cx| {
+                    engine.request(session::OpRequest::input_cancel(id));
+                },
+                cx,
+            );
+            let _ = &cancel_topic;
+        });
     }
 
     /// The task that carries the engine's updates onto the UI thread (§9.1).
@@ -776,22 +833,25 @@ impl TabContent {
         let was_running = self.is_running();
         match update {
             Update::Booting => {}
-            Update::Ready { pid, .. } => {
+            Update::Ready { pid, session, .. } => {
                 if let Some(live) = self.live.as_mut() {
                     live.pid = Some(pid);
                 }
+                // The session the swarm is writing to is what history resumes (§2).
+                self.session = Some(PathBuf::from(&session.path));
+                self.record_recent(cx);
                 if let Some(folder) = self.folder().map(Path::to_path_buf) {
                     self.set_state(TabState::Running { folder }, cx);
                     cx.notify();
                 }
             }
-            Update::BootFailed { message, log_tail } => {
+            Update::BootFailed { reason, log_tail } => {
                 if let Some(folder) = self.folder().map(Path::to_path_buf) {
                     let tab_dir = self.live.as_ref().map(|live| live.tab_dir.clone());
                     self.set_state(
                         TabState::Failed {
                             folder,
-                            message: Some(message),
+                            message: Some(reason),
                             log_tail,
                             was_up: false,
                             tab_dir,
@@ -801,49 +861,79 @@ impl TabContent {
                     cx.notify();
                 }
             }
-            Update::Registry { raw } => {
-                if let Some(hook) = self.registry_hook.clone() {
-                    hook(&raw, cx);
-                }
-                let changes = self.live.as_mut().map(|live| live.model.on_registry(&raw));
+            // One topic of a snapshot, and one stream frame: both go straight into
+            // the model, which is the only thing that reads them (§5.2, §5.3).
+            Update::Snapshot { topic, body } => {
+                let changes = self
+                    .live
+                    .as_mut()
+                    .map(|live| live.model.on_snapshot(&topic, &body));
                 if let Some(changes) = changes {
                     self.push(changes, cx);
                 }
+                self.session_from_state(cx);
             }
-            Update::State { revision, raw } => {
-                let changes = match self.live.as_mut() {
-                    Some(live) if revision > live.state_revision => {
-                        live.state_revision = revision;
-                        Some(live.model.on_state(&raw))
+            Update::Op { topic, op } => {
+                let changes = self.live.as_mut().map(|live| live.model.on_op(&topic, &op));
+                if let Some(changes) = changes {
+                    self.push(changes, cx);
+                }
+                if let Op::TopicReset { reason } = &op {
+                    if reason == "lane_restarted" {
+                        if let Some(lane) = topic.strip_prefix("lane:").and_then(|n| n.parse().ok())
+                        {
+                            let changes = self
+                                .live
+                                .as_mut()
+                                .map(|live| live.model.on_lane_restarted(lane));
+                            if let Some(changes) = changes {
+                                self.push(changes, cx);
+                            }
+                        }
                     }
-                    _ => None,
-                };
+                }
+            }
+            Update::Stream { status } => {
+                if let Some(live) = self.live.as_mut() {
+                    live.stream = status;
+                }
+                self.sync_agents(cx);
+            }
+            // Older items, paged in at the front: the scrollback walking back
+            // through compactions (§5.4).
+            Update::ItemsBefore { topic, body } => {
+                let changes = self
+                    .live
+                    .as_mut()
+                    .map(|live| live.model.on_items_before(&topic, &body));
                 if let Some(changes) = changes {
                     self.push(changes, cx);
                 }
-                // The session the swarm is writing to is what history resumes
-                // (§9.5); it is known once /state has answered.
-                if let Some(session) = raw.get("session").and_then(serde_json::Value::as_str) {
-                    self.session = Some(PathBuf::from(session));
-                    self.record_recent(cx);
-                }
             }
-            Update::PostResult { req_id, result } => self.finish_post(req_id, result, window, cx),
+            // One item, whole: a tool row's untruncated output (§5.4). The view
+            // holding that row takes it.
+            Update::Item { topic, body } => self.on_full_item(&topic, &body, cx),
+            // Image bytes. The transcript draws an image reference as its own line
+            // today and fetches nothing, so the bytes are dropped rather than
+            // half-rendered.
+            Update::Media { .. } => {}
+            // A read that failed. The view stays as it was, and one quiet line says
+            // what could not be fetched: nothing is retried (§5.4).
+            Update::FetchFailed { what, reason } => {
+                self.show_notice(
+                    format!("Could not read {what}."),
+                    Some(reason),
+                    NoticeTone::Dim,
+                    cx,
+                );
+            }
+            Update::OpReply(reply) => self.on_op_reply(*reply, window, cx),
             Update::ServerGone => self.server_gone(window, cx),
             Update::Exited { outcome } => {
                 // The engine stopped. A tab being closed never sees this; one that
                 // is still on screen says so and keeps what it has.
                 self.gone = Some(format!("swarm stopped ({outcome:?})").into());
                 cx.notify();
-            }
-            update => {
-                let changes = match self.live.as_mut() {
-                    Some(live) => absorb(&mut live.model, update),
-                    None => None,
-                };
-                if let Some(changes) = changes {
-                    self.push(changes, cx);
-                }
             }
         }
         // The run ended with this update. The tab does not know whether anyone was
@@ -854,76 +944,143 @@ impl TabContent {
         }
     }
 
-    /// Hand the model's [`Changes`] to the views that show them (§9.1).
-    fn push(&mut self, changes: Changes, cx: &mut Context<Self>) {
-        let Some(live) = self.live.as_mut() else {
+    /// The session the swarm is writing to, once a snapshot has named it (§2).
+    fn session_from_state(&mut self, cx: &mut Context<Self>) {
+        let Some(live) = self.live.as_ref() else {
             return;
         };
-        let selected = live.model.selected();
-        // The view's own counter is the model's per-agent revision: this view
-        // shows one agent, so it never has to compare two agents' numbering.
-        let revision = live
+        let path = live
             .model
-            .agent_model(selected)
-            .map(|model| model.revision())
-            .unwrap_or_default();
+            .state(session::AgentKey::Coordinator)
+            .and_then(|state| state.session.as_ref())
+            .map(|session| PathBuf::from(&session.path));
+        if let Some(path) = path.filter(|path| Some(path) != self.session.as_ref()) {
+            self.session = Some(path);
+            self.record_recent(cx);
+        }
+    }
 
-        let rebuilt = match changes.rows_for(selected) {
-            Some(RowChanges::Rebuilt) => Some(live.model.selected_rows().to_vec()),
-            _ => None,
-        };
-        // A changed id the model no longer holds is a removed row (an assistant
-        // message that ended empty); the view has to drop it, not skip it.
-        let mut changed: Vec<session::Row> = Vec::new();
-        let mut removed: Vec<session::RowId> = Vec::new();
-        if let Some(RowChanges::Changed(ids)) = changes.rows_for(selected) {
-            for id in ids {
-                match live.model.agent_model(selected).and_then(|m| m.row(*id)) {
-                    Some(row) => changed.push(row.clone()),
-                    None => removed.push(*id),
+    /// Hand the model's [`Changes`] to the views that show them (§9.1).
+    ///
+    /// The changes are keyed by topic, which is what the views are keyed by: one
+    /// transcript per agent, one status line for the selected one, and one lane list
+    /// for the whole swarm.
+    fn push(&mut self, changes: Changes, cx: &mut Context<Self>) {
+        if self.live.is_none() {
+            return;
+        }
+        // Read everything the views need first, and let the model's borrow end: the
+        // views are updated through `cx`, which needs `&mut self`.
+        let mut plans: Vec<(AgentKey, ViewPlan)> = Vec::new();
+        {
+            let live = self.live.as_ref().expect("checked above");
+            for (topic, topic_changes) in &changes.topics {
+                let Some(agent) = AgentKey::from_topic(topic) else {
+                    continue;
+                };
+                let mut plan = ViewPlan::default();
+                if topic_changes.reset {
+                    plan.reset = Some((
+                        live.model.items(agent).to_vec(),
+                        live.model.agent_topic(agent).is_some_and(|t| t.has_older()),
+                    ));
+                }
+                if topic_changes.prepended > 0 {
+                    plan.prepend =
+                        Some(live.model.items(agent)[..topic_changes.prepended].to_vec());
+                }
+                for change in topic_changes.items() {
+                    match change {
+                        ItemChange::Upsert { id, .. } => {
+                            if let Some(item) =
+                                live.model.items(agent).iter().find(|item| &item.id == id)
+                            {
+                                plan.upsert.push(item.clone());
+                            }
+                        }
+                        ItemChange::Remove { id } => plan.remove.push(id.clone()),
+                    }
+                }
+                if topic_changes.state {
+                    plan.state = true;
+                }
+                if !plan.is_empty() {
+                    plans.push((agent, plan));
                 }
             }
+            // A topic the model holds but the tab has never shown still has a view
+            // once anything happens to it, so nothing is dropped on the floor.
+            for (agent, _) in &plans {
+                self.transcripts
+                    .entry(*agent)
+                    .or_insert_with(|| cx.new(TranscriptView::new))
+                    .clone()
+                    .update(cx, |view, cx| view.set_agent(*agent, cx));
+            }
         }
-        let todos = changes
-            .todos
-            .contains(&selected)
-            .then(|| live.model.selected_todos().to_vec());
-        let activity = changes.activity.then(|| live.model.activity());
+        // A view that has just been made knows whose transcript it is, and what its
+        // rows may ask for.
+        let fresh: Vec<AgentKey> = plans.iter().map(|(agent, _)| *agent).collect();
+        {
+            for agent in fresh {
+                self.wire_view(&agent, cx);
+            }
+        }
 
-        let Some(view) = self.transcripts.get(&selected).cloned() else {
-            return;
-        };
-        if let Some(rows) = rebuilt {
-            view.update(cx, |view, cx| view.replace(revision, rows, cx));
-        }
-        if !removed.is_empty() {
+        for (agent, plan) in plans {
+            let Some(view) = self.transcripts.get(&agent).cloned() else {
+                continue;
+            };
             view.update(cx, |view, cx| {
-                for id in removed {
-                    view.remove(revision, id, cx);
+                if let Some((items, has_older)) = plan.reset {
+                    view.replace(items, cx);
+                    view.set_history(has_older, view.is_loading_older(), cx);
+                }
+                if let Some(older) = plan.prepend {
+                    view.prepend(older, cx);
+                }
+                for id in plan.remove {
+                    view.remove(&id, cx);
+                }
+                for item in plan.upsert {
+                    view.upsert(item, cx);
                 }
             });
         }
-        if !changed.is_empty() {
-            view.update(cx, |view, cx| {
-                for row in changed {
-                    view.upsert(revision, row, cx);
-                }
-            });
+
+        let selected = self.live.as_ref().expect("checked above").model.selected();
+        let selected_changed = changes
+            .for_topic(&selected.topic())
+            .is_some_and(|topic| topic.state)
+            || changes.selection;
+        if selected_changed {
+            let todos = self
+                .live
+                .as_ref()
+                .expect("checked above")
+                .model
+                .selected_todos()
+                .to_vec();
+            if let Some(view) = self.transcripts.get(&selected).cloned() {
+                view.update(cx, |view, cx| view.set_todos(todos, cx));
+            }
         }
-        if let Some(todos) = todos {
-            view.update(cx, |view, cx| view.set_todos(todos, cx));
-        }
-        if let Some(activity) = activity {
-            self.composer
-                .update(cx, |composer, cx| composer.set_activity(activity, cx));
-        }
+        let live = self.live.as_ref().expect("checked above");
+        let (left, right) = session::ordered_segments(live.model.selected_segments());
+        let left: Vec<session::Segment> = left.into_iter().cloned().collect();
+        let right: Vec<session::Segment> = right.into_iter().cloned().collect();
+        let swarm_busy = live.model.is_swarm_busy();
+        self.composer.update(cx, |composer, cx| {
+            composer.set_segments(&left, &right, cx);
+            composer.set_swarm_busy(swarm_busy, cx);
+        });
         // The left column takes the same facts, on the same batch (§7.3).
         self.sync_agents(cx);
         cx.notify();
     }
 
-    /// Feed the agent list from the model: the rows, the coordinator's activity and
-    /// step clock, the selection, and why each down lane is down (§7.3, §9.7).
+    /// Feed the agent list from the model: the rows, the coordinator's status and step
+    /// clock, the selection, and why each down lane is down (§7.3, §9.7).
     fn sync_agents(&mut self, cx: &mut Context<Self>) {
         let Some(snapshot) = self.agents_snapshot() else {
             return;
@@ -943,37 +1100,37 @@ impl TabContent {
     /// The agent list's inputs, read off the model in one go: the list and the
     /// model are different entities, so the model's borrow ends here.
     fn agents_snapshot(&self) -> Option<AgentsSnapshot> {
-        let model = self.model()?;
+        let live = self.live.as_ref()?;
+        let model = &live.model;
         let selected = model.selected();
         // One reading of the clock for both of them: the coordinator's and the
         // lanes' are the same moment (§7.3).
         let now = now_millis();
         Some(AgentsSnapshot {
-            lanes: model.lanes().clone(),
+            lanes: model.lane_list().clone(),
             activity: model.activity(),
-            reconnecting: model.is_reconnecting(selected),
+            reconnecting: live.stream.is_reconnecting(),
             selected,
             clock: model
-                .coordinator_step_started()
-                .and_then(|clock| clock.clock_label(now)),
+                .selected_state()
+                .and_then(|state| state.step_clock(now)),
             now_millis: now,
             down_reasons: model
-                .lanes()
-                .lanes
+                .lane_rows()
                 .iter()
-                .map(|lane| (lane.n as u32, model.lane_down_reason(lane.n as u32)))
+                .map(|lane| (lane.n, model.lane_down_reason(lane.n)))
                 .collect(),
         })
     }
 
-    /// Whether anything on the page is counting seconds (§7.3): the coordinator's
-    /// own step, or a lane that is working or compacting.
+    /// Whether anything on the page is counting seconds (§7.3): the coordinator's own
+    /// step, or a lane that is working or compacting.
     fn stepping(&self) -> bool {
         self.model().is_some_and(clocks_running)
     }
 
-    /// Start the once-a-second re-render while anything has a clock to move, and
-    /// stop it when nothing has (§7.3).
+    /// Start the once-a-second re-render while anything has a clock to move, and stop it
+    /// when nothing has (§7.3).
     fn ensure_step_ticker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // A ticker that has ended is not a ticker: the next step starts a new one.
         let ticker_live = self
@@ -991,7 +1148,8 @@ impl TabContent {
                 let stepped = this.update_in(cx, |tab, _window, cx| {
                     let stepping = tab.stepping();
                     if stepping {
-                        // The clocks are the only thing that changed (§7.3).
+                        // The clocks are the only thing that changed, and they count
+                        // from the absolute starts the server published (§7.3).
                         tab.sync_agents(cx);
                         cx.notify();
                     }
@@ -1009,13 +1167,15 @@ impl TabContent {
         }
     }
 
-    /// How long the coordinator's current step has been running, in seconds
-    /// (§7.3, §5's `turn-start` clock).
+    /// How long the selected agent's current step has been running, in seconds (§7.3).
     pub fn step_seconds(&self) -> Option<u64> {
         let started = self
             .model()?
-            .coordinator_step_started()?
-            .started_at_millis?;
+            .selected_state()?
+            .task
+            .as_ref()
+            .map(|task| task.step_started_at.max(task.started_at))
+            .filter(|started| *started > 0)?;
         Some(now_millis().saturating_sub(started) / 1000)
     }
 
@@ -1031,13 +1191,13 @@ impl TabContent {
             let Some(live) = self.live.as_mut() else {
                 return;
             };
-            let changes = live.model.select(agent);
-            // Only the lane being shown is watched (§9.3).
-            live.engine.watch_lane(agent.lane());
-            changes
+            // One stream carries every topic (§5.3), so selecting an agent is the
+            // view's business alone: nothing new is subscribed to.
+            live.model.select(agent)
         };
         // An agent's view exists from the moment it is first shown, and lives as
         // long as the tab: switching back keeps its scroll and its documents.
+        let created = !self.transcripts.contains_key(&agent);
         let view = self
             .transcripts
             .entry(agent)
@@ -1045,72 +1205,92 @@ impl TabContent {
             .clone();
         // The view says whose transcript it is, which is what an empty one shows.
         view.update(cx, |view, cx| view.set_agent(agent, cx));
+        if created {
+            self.wire_view(&agent, cx);
+        }
         self.push(changes, cx);
         self.sync_agents(cx);
     }
 
-    /// What the composer asked for: a turn, or an interrupt (§7.3, §9.2).
+    /// What the composer asked for: a turn, a stop of the whole swarm, or a stop of the
+    /// coordinator's own run (§7.3, §5.5).
     ///
-    /// A send is also a row: the reader's words go on screen at once, as a queued
-    /// turn (§9.1) — while a run is in flight the server only queues the prompt,
-    /// and evo says nothing back until it drains the queue at the running turn's
-    /// next boundary. The engine refusing the command (its thread already gone)
-    /// takes the row back with it, and a `POST` that fails later does the same in
-    /// [`TabContent::finish_post`].
+    /// Each is one [`OpRequest`] handed to the engine, which POSTs it; the reply comes
+    /// back as [`Update::OpReply`]. The reader's words appear when the server adds the
+    /// item — an `item.add` on topic `session` — so nothing is drawn here that the
+    /// server has not taken.
     fn on_composer_event(
         &mut self,
         event: ComposerEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Which of the two this is, so the reply is read for what it is: an
-        // interrupt's `ok` is not a send's and must leave the draft alone.
-        let interrupt = event == ComposerEvent::Interrupt;
-        let mut changes = Changes::default();
         let sent = match self.live.as_mut() {
             Some(live) => {
-                let req = live.next_req();
-                let (sent, pending) = match event {
+                let request: OpRequest = match event {
                     ComposerEvent::Send(text) => {
-                        let queued = live.model.begin_send(&text);
-                        if live.engine.prompt(req, text) {
-                            match queued {
-                                Some((id, queued)) => {
-                                    changes = queued;
-                                    (true, Some(id))
-                                }
-                                None => (true, None),
-                            }
+                        // A run in flight takes the words at its next boundary; an idle
+                        // coordinator runs them now (§5.5).
+                        let queue = if live.model.activity() == Status::Idle {
+                            Queue::Now
                         } else {
-                            // Nothing left to send to: no row either.
-                            if let Some((id, _)) = queued {
-                                changes = live.model.cancel_send(id);
-                            }
-                            (false, None)
-                        }
+                            Queue::AfterRun
+                        };
+                        live.pending = Some(Pending::Send);
+                        live.model.send_input(&text, queue)
                     }
-                    ComposerEvent::Interrupt => (live.engine.interrupt(req), None),
+                    ComposerEvent::StopSwarm => {
+                        live.pending = Some(Pending::Interrupt);
+                        live.model.interrupt_swarm()
+                    }
+                    ComposerEvent::Interrupt => {
+                        live.pending = Some(Pending::Interrupt);
+                        live.model.interrupt_session()
+                    }
                 };
-                if sent {
-                    live.in_flight = Some(InFlight {
-                        req,
-                        interrupt,
-                        pending,
-                    });
-                }
-                sent
+                live.engine.request(request)
             }
             // No swarm: there is nothing to send to, and the button must not stay
             // disabled waiting for a reply that cannot come.
             None => false,
         };
-        if !changes.is_empty() {
-            self.push(changes, cx);
-        }
         if !sent {
+            if let Some(live) = self.live.as_mut() {
+                live.pending = None;
+            }
             self.composer.update(cx, |composer, cx| {
                 composer.request_finished(false, window, cx)
             });
+        }
+    }
+
+    /// A lane's Stop, from the agent list: `run.interrupt` with scope `lane`, which is
+    /// the one human action a lane answers to (CONTRACT §7.4).
+    fn on_stop_lane(&mut self, lane: u32) {
+        if let Some(live) = self.live.as_mut() {
+            let request = live.model.interrupt_lane(lane);
+            live.engine.request(request);
+        }
+    }
+
+    /// The whole of one item, as `GET /items/<id>` answered: the row that asked for it
+    /// takes the untruncated text (§5.4).
+    fn on_full_item(&mut self, topic: &str, body: &serde_json::Value, cx: &mut Context<Self>) {
+        let Some(agent) = AgentKey::from_topic(topic) else {
+            return;
+        };
+        let Some(item) = body.get("item").and_then(session::Item::from_json) else {
+            return;
+        };
+        let session::ItemKind::Tool(tool) = &item.kind else {
+            return;
+        };
+        let Some(result) = tool.result.as_ref() else {
+            return;
+        };
+        if let Some(view) = self.transcripts.get(&agent).cloned() {
+            let (id, text) = (item.id.clone(), result.text.clone());
+            view.update(cx, |view, cx| view.set_full_result(&id, text, cx));
         }
     }
 
@@ -1167,42 +1347,28 @@ impl TabContent {
             .and_then(|notice| notice.detail.as_deref())
     }
 
-    /// A `POST` came back: the button takes its outcome, and a refusal is shown
-    /// from the reply's own words — never re-validated here (§8).
+    /// An op's reply arrived: the composer takes its outcome, and a refusal is shown
+    /// from the reply's own words — never re-validated here (§5.5, §8).
     ///
-    /// The outcome is the composer's only while its request is the one still in
-    /// flight, and only a *prompt* may clear the draft: an interrupt is answered
-    /// `ok` too, and `Stop`/`Esc` leaves the half-written text where it was
-    /// (§7.3).
-    fn finish_post(
-        &mut self,
-        req_id: ReqId,
-        result: Result<swarm_client::Envelope, tab_engine::PostError>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let asked = self.live.as_mut().and_then(|live| {
-            (live.in_flight.map(|asked| asked.req) == Some(req_id))
-                .then(|| live.in_flight.take())
-                .flatten()
-        });
+    /// Only a *send* may clear the draft: a stop is answered `ok` too, and it leaves the
+    /// half-written text where it was (§7.3).
+    fn on_op_reply(&mut self, reply: OpReply, window: &mut Window, cx: &mut Context<Self>) {
+        let asked = self.live.as_mut().and_then(|live| live.pending.take());
         if let Some(asked) = asked {
-            self.composer.update(cx, |composer, cx| {
-                composer.request_finished(result.is_ok() && !asked.interrupt, window, cx)
-            });
-        }
-        if let Err(error) = result {
-            // A send the server never took: the queued row goes with it. The
-            // composer keeps the draft (§7.3), so the words are still the
-            // reader's, and nothing evo holds will ever match them.
-            if let Some(id) = asked.and_then(|asked| asked.pending) {
-                let changes = self.live.as_mut().map(|live| live.model.cancel_send(id));
-                if let Some(changes) = changes.filter(|changes| !changes.is_empty()) {
-                    self.push(changes, cx);
-                }
+            if asked == Pending::Send {
+                self.composer.update(cx, |composer, cx| {
+                    composer.request_finished(reply.ok, window, cx)
+                });
+            } else {
+                // A stop's reply only re-arms the button; the draft is untouched.
+                self.composer.update(cx, |composer, cx| {
+                    composer.request_finished(false, window, cx)
+                });
             }
-            let tone = notice_tone(&error);
-            let (text, detail) = notice_words(&error);
+        }
+        if let Some(error) = reply.error() {
+            let tone = notice_tone(error);
+            let (text, detail) = notice_words(error);
             self.show_notice(text, detail, tone, cx);
         }
     }
@@ -1276,13 +1442,7 @@ impl TabContent {
             .and_then(|launch| launch.plan())
             .and_then(|plan| plan.workers)
             .map(u32::from)
-            .or_else(|| {
-                live.model
-                    .lanes()
-                    .swarm
-                    .as_ref()
-                    .map(|swarm| swarm.workers as u32)
-            })
+            .or_else(|| live.model.swarm().map(|swarm| swarm.workers as u32))
             .unwrap_or_default();
 
         let mut recent = store::app_state::Recent::new(session.clone(), folder, lanes);
@@ -1342,71 +1502,15 @@ impl TabContent {
     }
 }
 
-/// Whether this model has a clock to move (§7.3).
+/// Whether this tab has a clock to move (§7.3).
 ///
-/// Both clocks on the page are *ages* — the coordinator's step and a lane's — that
-/// a read or an event only stamped, so between updates they are counted on by the
-/// frame the tab draws. This is the one question that decides whether a frame a
-/// second is worth paying for: a busy lane's clock is as much a reason as the
-/// coordinator's own step, and a page where neither is running has nothing to
-/// redraw.
+/// Both clocks on the page count from an absolute start the server published — the
+/// coordinator's `task.step_started_at` and a lane's — so between updates they are
+/// counted on by the frame the tab draws. This is the one question that decides whether
+/// a frame a second is worth paying for: a busy lane's clock is as much a reason as the
+/// coordinator's own step, and a page where neither is running has nothing to redraw.
 fn clocks_running(model: &TabModel) -> bool {
-    model.coordinator_step_started().is_some() || model.lanes().busy() > 0
-}
-
-/// Fold one engine update into the model, answering the [`Changes`] the UI has
-/// to apply — or `None` when the update was not the model's.
-///
-/// A function of the model rather than of the tab that holds it: what an engine
-/// update means is the model's business, and the tab only has to hand it over.
-fn absorb(model: &mut TabModel, update: Update) -> Option<Changes> {
-    let changes = match update {
-        Update::Transcript {
-            agent,
-            revision,
-            raw,
-        } => model.on_transcript(agent_key(agent), revision, &raw),
-        Update::Lanes { raw } => {
-            // `GET /lanes` reports a step *age*, so a read is also the moment that
-            // age was seen: the row counts on from here (§7.3).
-            model.on_lanes_at(&raw, Some(now_millis()))
-        }
-        Update::Event {
-            agent,
-            id,
-            kind,
-            data,
-        } => {
-            let id = id.unwrap_or_default().max(0) as u64;
-            // The event is stamped with when the UI saw it, which is what the
-            // step clock counts from (§7.3).
-            model.on_event_at(agent_key(agent), id, &kind, &data, now_millis())
-        }
-        Update::Stream { agent, status } => {
-            model.on_stream(agent_key(agent), stream_status(status))
-        }
-        Update::CacheSeed { entry } => model.on_cache_seed(entry.as_ref()),
-        _ => return None,
-    };
-    Some(changes)
-}
-
-/// The engine names an agent; the model names the same one its own way.
-fn agent_key(agent: Agent) -> AgentKey {
-    match agent {
-        Agent::Coordinator => AgentKey::Coordinator,
-        Agent::Lane(n) => AgentKey::Lane(n),
-    }
-}
-
-/// The engine's stream status, as the model spells it for the badge (§9.7).
-fn stream_status(status: tab_engine::StreamStatus) -> session::StreamStatus {
-    match status {
-        tab_engine::StreamStatus::Connected => session::StreamStatus::Connected,
-        tab_engine::StreamStatus::Reconnecting { retry_in } => {
-            session::StreamStatus::Reconnecting { retry_in }
-        }
-    }
+    model.activity().is_busy() || model.lane_rows().iter().any(|lane| lane.is_busy())
 }
 
 impl EventEmitter<TabContentEvent> for TabContent {}
@@ -1437,9 +1541,9 @@ mod tests {
         point, px, size, AnyWindowHandle, Bounds, Entity, TestAppContext, WindowBounds,
         WindowOptions,
     };
+    use swarm_client::ErrorCode;
 
-    /// A tab showing a page of a swarm that is not there: what the composer's own
-    /// refusals need, and nothing more.
+    /// A tab showing a page of a swarm: what a refusal's line needs, and nothing more.
     fn running_tab(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<TabContent>) {
         cx.update(gpui_kit::init);
         cx.update(|cx| {
@@ -1452,7 +1556,7 @@ mod tests {
             };
             gpui_kit::open_window(options, cx, |window, cx| {
                 let tab = cx.new(|cx| {
-                    TabContent::new(TabId::new(1), Arc::new(SwarmConfig::default()), window, cx)
+                    TabContent::new(TabId::new(1), Arc::new(LaunchEnv::default()), window, cx)
                 });
                 tab.update(cx, |tab, _cx| {
                     tab.state = TabState::Running {
@@ -1465,461 +1569,170 @@ mod tests {
         })
     }
 
-    /// A POST came back refused.
-    fn refused(
-        cx: &mut TestAppContext,
-        window: AnyWindowHandle,
-        tab: &Entity<TabContent>,
-        status: u16,
-        message: &str,
-    ) {
-        let error = tab_engine::PostError {
-            status: Some(status),
-            not_now: status == 409,
+    fn error(code: ErrorCode, message: &str) -> OpError {
+        OpError {
+            code,
             message: message.to_string(),
-        };
-        cx.update_window(window, |_, window, cx| {
-            tab.update(cx, |tab, cx| tab.finish_post(1, Err(error), window, cx));
-        })
-        .expect("the refused post");
+            detail: serde_json::Value::Null,
+        }
     }
 
-    /// A POST that never reached a server: the transport's own words are not what
-    /// a person needs, so the line says what happened and the raw error waits on
-    /// hover (§4).
-    fn transport_failed(
-        cx: &mut TestAppContext,
-        window: AnyWindowHandle,
-        tab: &Entity<TabContent>,
-        raw: &str,
-    ) {
-        let error = tab_engine::PostError {
-            status: None,
-            not_now: false,
-            message: raw.to_string(),
-        };
-        cx.update_window(window, |_, window, cx| {
-            tab.update(cx, |tab, cx| tab.finish_post(1, Err(error), window, cx));
-        })
-        .expect("the failed post");
+    /// What a refusal reads as, and in whose words (§4, §5.5).
+    #[test]
+    fn only_a_refusal_the_swarm_calls_busy_is_dim() {
+        assert_eq!(
+            notice_tone(&error(ErrorCode::Busy, "a run is in flight")),
+            NoticeTone::Dim
+        );
+        assert_eq!(
+            notice_tone(&error(ErrorCode::NotQuiescent, "a run is in flight")),
+            NoticeTone::Dim
+        );
+        assert_eq!(
+            notice_tone(&error(
+                ErrorCode::AlreadySent,
+                "that input was already taken"
+            )),
+            NoticeTone::Error
+        );
+        assert_eq!(
+            notice_tone(&error(ErrorCode::Unknown, "who knows")),
+            NoticeTone::Error
+        );
     }
 
-    /// §4, §9.2: a refusal is a dim line above the composer, a failure is an
-    /// error-coloured one, both in the server's own words, and neither is a modal:
-    /// the page keeps its place and the line leaves on its own.
+    /// A refusal is the server's own words, always (§8): nothing is re-stated, and
+    /// the structured detail is kept for the hover rather than dropped.
+    #[test]
+    fn a_refusal_is_shown_as_the_server_wrote_it() {
+        let (text, detail) = notice_words(&error(ErrorCode::Busy, "a run is in flight"));
+        assert_eq!(text, "a run is in flight");
+        assert_eq!(detail, None);
+
+        let mut with_detail = error(ErrorCode::InvalidArgs, "the objective is empty");
+        with_detail.detail = serde_json::json!({ "field": "objective" });
+        let (text, detail) = notice_words(&with_detail);
+        assert_eq!(text, "the objective is empty");
+        assert_eq!(detail.as_deref(), Some(r#"{"field":"objective"}"#));
+
+        // A server that says nothing still gets a line rather than an empty row.
+        let (text, _) = notice_words(&error(ErrorCode::OpFailed, ""));
+        assert!(text.contains("OpFailed"), "{text}");
+    }
+
+    /// §4: a refused op is a line above the composer, in the reply's own words, and
+    /// never a modal — the page keeps its place and the line leaves on its own.
     #[gpui_kit::test]
-    fn a_refused_post_is_a_line_above_the_composer(cx: &mut TestAppContext) {
+    fn a_refused_op_is_a_line_above_the_composer(cx: &mut TestAppContext) {
         let (window, tab) = running_tab(cx);
+        cx.update_window(window, |_, window, cx| {
+            tab.update(cx, |tab, cx| {
+                tab.on_op_reply(
+                    OpReply {
+                        rid: "r1".to_string(),
+                        ok: false,
+                        seq: 4,
+                        result: serde_json::Value::Null,
+                        error: Some(error(ErrorCode::Busy, "a run is in flight")),
+                    },
+                    window,
+                    cx,
+                );
+            });
+        })
+        .expect("the refused op");
 
-        // `409 not now`: the server cannot take this right now (§4).
-        refused(cx, window, &tab, 409, "no goal to pause");
         cx.update_window(window, |_, window, cx| {
             window.render_frame(cx);
-            assert!(
-                window.find("tab-page").visible(),
-                "a refusal is not a modal: the page stays"
-            );
-            assert_eq!(
-                window.find("composer-notice-dim").label(),
-                Some("no goal to pause"),
-                "the notice carries the server's own words"
-            );
+            let line = window.find("composer-notice-dim");
+            assert_eq!(line.label(), Some("a run is in flight"));
             assert!(
                 window.try_find("composer-notice-error").is_none(),
-                "and is not dressed as a failure"
+                "a busy refusal is not an error"
             );
         })
-        .expect("the dim notice frame");
+        .expect("the dim line");
 
-        // `422`: the command ran and failed. Same place, the reply's `error` (§4).
-        refused(cx, window, &tab, 422, "unreadable code");
+        // A failure is the error tone, and the page is still there.
         cx.update_window(window, |_, window, cx| {
-            window.render_frame(cx);
-            assert!(
-                window.find("composer-notice-error").visible(),
-                "a failure is shown as one"
-            );
-            assert!(
-                window.try_find("composer-notice-dim").is_none(),
-                "and replaces the refusal it followed"
-            );
+            tab.update(cx, |tab, cx| {
+                tab.on_op_reply(
+                    OpReply {
+                        rid: "r2".to_string(),
+                        ok: false,
+                        seq: 5,
+                        result: serde_json::Value::Null,
+                        error: Some(error(ErrorCode::InvalidArgs, "the objective is empty")),
+                    },
+                    window,
+                    cx,
+                );
+            });
         })
-        .expect("the error notice frame");
-
-        // A POST the server never answered (§9.7): the socket's `io:` line is not
-        // what a person reads, so the line says what it means and the raw error
-        // is what hovers over it.
-        transport_failed(cx, window, &tab, "io: Connection refused (os error 61)");
+        .expect("the refused op");
         cx.update_window(window, |_, window, cx| {
             window.render_frame(cx);
             assert_eq!(
                 window.find("composer-notice-error").label(),
-                Some("Can't reach the swarm — it may be restarting."),
-                "an unanswered POST says what happened, not what the socket said"
+                Some("the objective is empty")
             );
         })
-        .expect("the transport notice frame");
-        assert_eq!(
-            cx.update(|cx| tab.read(cx).notice_detail().map(str::to_owned)),
-            Some("io: Connection refused (os error 61)".to_string()),
-            "and the raw error is not thrown away: it is the notice's tooltip"
-        );
-
-        // It goes away by itself, on the app clock (§4).
-        let mut gone = false;
-        for _ in 0..5 {
-            // The clock moves outside an app update: a task that wakes up while
-            // the app is already borrowed cannot update its own entity.
-            cx.executor()
-                .advance_clock(NOTICE_LIFETIME + Duration::from_secs(1));
-            cx.run_until_parked();
-            gone = cx
-                .update_window(window, |_, window, cx| {
-                    window.render_frame(cx);
-                    assert!(window.find("tab-page").visible());
-                    window.try_find("composer-notice-error").is_none()
-                })
-                .expect("the frame after the notice");
-            if gone {
-                break;
-            }
-        }
-        assert!(gone, "the notice ages out on its own");
+        .expect("the error line");
     }
 
-    /// §7.3: the header's thinking control appears only when the shown agent has
-    /// thinking text, and it drives that transcript's own state.
+    /// §5.4: a read that failed is one quiet line, saying what could not be fetched
+    /// and in the socket's or the server's own words. Nothing is retried.
     #[gpui_kit::test]
-    fn the_thinking_toggle_follows_the_shown_transcript(cx: &mut TestAppContext) {
+    fn a_read_that_failed_is_said_quietly(cx: &mut TestAppContext) {
         let (window, tab) = running_tab(cx);
-
-        // Nothing to reveal: a control that reveals nothing is noise.
         cx.update_window(window, |_, window, cx| {
-            window.render_frame(cx);
-            assert!(window.try_find("transcript-thinking").is_none());
-        })
-        .expect("the header without thinking");
-
-        // The coordinator's view, as a tab with a swarm has one.
-        let view = cx.update(|cx| {
-            let view = cx.new(TranscriptView::new);
-            view.update(cx, |view, cx| view.set_agent(AgentKey::Coordinator, cx));
-            tab.update(cx, |tab, _cx| {
-                tab.transcripts.insert(AgentKey::Coordinator, view.clone());
-            });
-            view
-        });
-
-        // An assistant row that carries thinking: the control appears.
-        cx.update(|cx| {
-            view.update(cx, |view, cx| {
-                view.replace(
-                    1,
-                    vec![session::Row {
-                        id: 1,
-                        version: 1,
-                        kind: session::RowKind::Assistant {
-                            markdown: "an answer".into(),
-                            thinking: "because".into(),
-                            streaming: false,
-                            error: None,
-                        },
-                    }],
+            tab.update(cx, |tab, cx| {
+                tab.apply(
+                    Update::FetchFailed {
+                        what: "item e_3 in session".to_string(),
+                        reason: "404 not_found".to_string(),
+                    },
+                    window,
                     cx,
                 );
             });
-        });
+        })
+        .expect("the failed read");
         cx.update_window(window, |_, window, cx| {
             window.render_frame(cx);
             assert_eq!(
-                window.find("transcript-thinking").label(),
-                Some("Show thinking"),
-                "thinking is hidden until it is asked for"
-            );
-            window.click("transcript-thinking", cx);
-            window.render_frame(cx);
-            assert_eq!(
-                window.find("transcript-thinking").label(),
-                Some("Hide thinking"),
-                "and the button says what it will do next"
+                window.find("composer-notice-dim").label(),
+                Some("Could not read item e_3 in session.")
             );
         })
-        .expect("the header with thinking");
-
-        cx.update(|cx| {
-            assert!(
-                view.read(cx).is_showing_thinking(cx),
-                "the click reached the transcript's own state"
-            );
-        });
+        .expect("the quiet line");
     }
 
-    /// §7.3: the one segment of the status line that is not in `/state` is the
-    /// cache figure. It arrives twice over — first as the journal's newest
-    /// `cache-stats` entry, which a tab seeds the readout with, and from then on
-    /// out of every `message-end`'s usage — and this drives the tab's own
-    /// mapping of those updates into the model, which is what the composer's
-    /// row is set from.
-    ///
-    /// The stub model the swarm tests run against reports no cache activity at
-    /// all (its usage carries no cache fields), so the segment cannot come from
-    /// a live run: the same `Update`s the engine sends, the same model, the same
-    /// line.
+    /// A clock is what makes a frame a second worth paying for, and it is the
+    /// *absolute* starts the server publishes that decide it (§7.3).
     #[test]
-    fn the_cache_segment_rides_the_tab_readout_wiring() {
+    fn a_tab_with_nothing_running_has_no_clock_to_move() {
         let mut model = TabModel::new();
-        // `/state`, as a live tab seeds the readout (§9.1).
-        model.on_state(&serde_json::json!({
-            "status": "idle",
-            "model": "ark-deepseek-v4.1-flash",
-            "thinking": "max",
-            "context_tokens": 48_000,
-            "context_window": 936_000,
-        }));
-        assert!(
-            model.readout_text().contains("ctx 48k/936k"),
-            "the readout is seeded from /state: {}",
-            model.readout_text()
+        assert!(!clocks_running(&model));
+
+        model.on_snapshot(
+            "session",
+            &serde_json::json!({ "state": { "status": "running" }, "items": [] }),
         );
-        assert!(
-            !model.readout_text().contains("cached"),
-            "no provider has reported cache activity yet: {}",
-            model.readout_text()
+        assert!(clocks_running(&model), "the coordinator's own step counts");
+
+        model.on_snapshot(
+            "session",
+            &serde_json::json!({ "state": { "status": "waiting" }, "items": [] }),
         );
+        assert!(!clocks_running(&model));
 
-        // The journal's newest `cache-stats` totals: an already-cached session,
-        // folded in whole.
-        let seed = serde_json::json!({"input": 2_000, "cache_read": 97_000, "cache_write": 1_000});
-        let changes = absorb(&mut model, Update::CacheSeed { entry: Some(seed) })
-            .expect("a cache seed is the model's");
-        assert!(changes.readout, "the seed changes the line");
-        assert!(
-            model.readout_text().contains("97% cached"),
-            "{}",
-            model.readout_text()
+        model.on_snapshot(
+            "swarm",
+            &serde_json::json!({ "state": { "id": "sw", "workers": 1, "status": { "busy": 1 }, "lanes": [
+                { "n": 1, "state": "working", "reports": 0 }
+            ] } }),
         );
-
-        // And it stays live: a `message-end`'s usage moves the same figure, so
-        // the line follows the run rather than the next resync (§7.3).
-        let changes = absorb(
-            &mut model,
-            Update::Event {
-                agent: Agent::Coordinator,
-                id: Some(41),
-                kind: "message-end".into(),
-                data: serde_json::json!({
-                    "stop-reason": "end_turn",
-                    "usage": {
-                        "input": 1_000,
-                        "output": 500,
-                        "cache_read": 99_000,
-                        "cache_write": 0,
-                    },
-                }),
-            },
-        )
-        .expect("a message-end is the model's");
-        assert!(changes.readout, "the folded usage changes the line too");
-        assert!(
-            model.readout_text().contains("98% cached"),
-            "{}",
-            model.readout_text()
-        );
-        assert!(
-            model.readout_text().contains("ctx 100k/936k"),
-            "and re-anchors the context figure from the same usage: {}",
-            model.readout_text()
-        );
-    }
-
-    /// §7.3: a step clock is an *age*, so the moment it was read is part of what
-    /// a `/lanes` read says. The engine hands the body over; the tab is what knows
-    /// the time, and stamps the rows with it before the model counts on.
-    #[test]
-    fn a_lanes_read_stamps_the_ages_it_reports() {
-        let mut model = TabModel::new();
-        let before = now_millis();
-        absorb(
-            &mut model,
-            Update::Lanes {
-                raw: serde_json::json!({
-                    "swarm": {"id": "s", "workers": 2, "busy": 1},
-                    "lanes": [{
-                        "n": 1,
-                        "state": "working",
-                        "task": "build the readout segments",
-                        "step_age": 45,
-                        "pid": 42,
-                    }],
-                }),
-            },
-        )
-        .expect("/lanes is the model's");
-        let seen = now_millis();
-
-        let row = model
-            .lane_rows()
-            .iter()
-            .find(|row| row.n == 1)
-            .expect("lane 1 is in the list");
-        assert_eq!(row.step_clock().as_deref(), Some("45s"));
-        let stamped = row
-            .step_age_at_millis
-            .expect("the read is also the moment its age was seen");
-        assert!(
-            before <= stamped && stamped <= seen,
-            "stamped with the moment of the read: {stamped} is not in {before}..={seen}"
-        );
-        // Which is the whole point: the clock counts on from there, so a second of
-        // frames moves it without another read (§7.3).
-        assert_eq!(row.step_clock_at(stamped).as_deref(), Some("45s"));
-        assert_eq!(row.step_clock_at(stamped + 1_000).as_deref(), Some("46s"));
-    }
-
-    /// §7.3: the frame a second is worth paying for while a clock is moving, and a
-    /// lane's step is a clock as much as the coordinator's own step is. A page whose
-    /// only work is a lane's would otherwise freeze its clock the moment the
-    /// coordinator's turn ended.
-    #[test]
-    fn a_busy_lane_keeps_the_seconds_coming() {
-        let mut model = TabModel::new();
-        assert!(
-            !clocks_running(&model),
-            "an idle session has no clock to redraw"
-        );
-
-        // A lane-state event that starts a step: the lane works, the coordinator
-        // does not — nothing has run and `create_goal` has not asked for anything.
-        absorb(
-            &mut model,
-            Update::Event {
-                agent: Agent::Coordinator,
-                id: Some(1),
-                kind: "lane-state".into(),
-                data: serde_json::json!({
-                    "lane": 1,
-                    "state": "working",
-                    "task": "build the readout segments",
-                }),
-            },
-        )
-        .expect("a lane-state event is the model's");
-        assert!(
-            model.coordinator_step_started().is_none(),
-            "the coordinator has no step of its own here"
-        );
-        assert!(
-            clocks_running(&model),
-            "the lane's clock is what keeps the frames coming"
-        );
-
-        // The lane stops, and with it the reason to redraw: the ticker ends itself.
-        absorb(
-            &mut model,
-            Update::Event {
-                agent: Agent::Coordinator,
-                id: Some(2),
-                kind: "lane-state".into(),
-                data: serde_json::json!({"lane": 1, "state": "idle", "task": null}),
-            },
-        )
-        .expect("a lane-state event is the model's");
-        assert!(
-            !clocks_running(&model),
-            "an idle lane is not a reason to draw a frame a second"
-        );
-    }
-
-    /// §4: a POST the server never answered has no reply to quote, so the line
-    /// says what happened in plain words — and keeps the raw error for the hover,
-    /// where `io: Connection refused (os error 61)` is the evidence.
-    #[test]
-    fn a_post_with_no_reply_is_said_in_plain_words() {
-        for raw in [
-            "io: Connection refused (os error 61)",
-            "connection closed",
-            "timeout: POST /prompt after 30s",
-            "protocol: expected an HTTP status line",
-        ] {
-            let error = tab_engine::PostError {
-                status: None,
-                not_now: false,
-                message: raw.to_owned(),
-            };
-            let (text, detail) = notice_words(&error);
-            assert_eq!(text, "Can't reach the swarm — it may be restarting.");
-            assert_eq!(detail.as_deref(), Some(raw), "the raw text is kept");
-        }
-
-        // Nothing was said, so there is nothing to hover.
-        let silent = tab_engine::PostError {
-            status: None,
-            not_now: false,
-            message: "  ".into(),
-        };
-        assert_eq!(notice_words(&silent).1, None);
-    }
-
-    /// §4: `503` is a reply — the server saying it is going away — and the line
-    /// says so instead of quoting the shutdown text.
-    #[test]
-    fn a_shutting_down_server_says_so() {
-        let error = tab_engine::PostError {
-            status: Some(503),
-            not_now: false,
-            message: "the server is shutting down".into(),
-        };
-        let (text, detail) = notice_words(&error);
-        assert_eq!(text, "The swarm is shutting down.");
-        assert_eq!(detail.as_deref(), Some("the server is shutting down"));
-
-        // Already the same words: nothing to add on hover.
-        let same = tab_engine::PostError {
-            status: Some(503),
-            not_now: false,
-            message: "The swarm is shutting down.".into(),
-        };
-        assert_eq!(notice_words(&same).1, None);
-    }
-
-    /// A reply is the server's own words, verbatim and with nothing hidden behind
-    /// a hover: `409`, `422`, `400` are the swarm talking about the request (§8).
-    #[test]
-    fn a_reply_is_shown_as_the_server_wrote_it() {
-        for status in [409u16, 422, 400, 404, 500] {
-            let error = tab_engine::PostError {
-                status: Some(status),
-                not_now: status == 409,
-                message: "unreadable code".into(),
-            };
-            let (text, detail) = notice_words(&error);
-            assert_eq!(text, "unreadable code", "{status}");
-            assert_eq!(detail, None, "{status}");
-        }
-    }
-
-    /// The notice decision is the server's, not ours (§8): `not_now` — tab_engine's
-    /// reading of `409` — is the only status that is not a failure.
-    #[test]
-    fn only_a_not_now_refusal_is_dim() {
-        let not_now = tab_engine::PostError {
-            status: Some(409),
-            not_now: true,
-            message: "no run to steer".into(),
-        };
-        assert_eq!(notice_tone(&not_now), NoticeTone::Dim);
-
-        for status in [Some(422), Some(503), Some(400), Some(500), None] {
-            let error = tab_engine::PostError {
-                status,
-                not_now: false,
-                message: "…".into(),
-            };
-            assert_eq!(
-                notice_tone(&error),
-                NoticeTone::Error,
-                "{status:?} is a failure"
-            );
-        }
+        assert!(clocks_running(&model), "a busy lane's clock counts too");
     }
 }

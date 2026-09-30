@@ -1,0 +1,37 @@
+{
+  "sessions": [
+    {
+      "id": "ed99c60d1dee3c3f",
+      "path": "/Users/x/.evo/sessions/-Users-x-coding-evo/20260929T090956Z_ed99c60d1dee3c3f.sexp",
+      "cwd": "/Users/x/coding/evo",
+      "program": "evo-swarm",
+      "swarm_id": "20260929T090956-ed99",
+      "title": "make the empty tab read the session index",
+      "created_at": 1790672996000,
+      "updated_at": 1790674196000,
+      "entries": 412
+    },
+    {
+      "id": "aaaa1111bbbb2222",
+      "path": "/Users/x/.evo/sessions/-Users-x-coding-foo/20260928T224500Z_aaaa1111bbbb2222.sexp",
+      "cwd": "/Users/x/coding/foo",
+      "program": "evo-swarm",
+      "swarm_id": null,
+      "title": "wire the lanes chooser to the catalog",
+      "created_at": 1790635500000,
+      "updated_at": 1790635800000,
+      "entries": 37
+    },
+    {
+      "id": "cccc3333dddd4444",
+      "path": "/Users/x/.evo/sessions/-Users-x-coding-bar/20260927T101500Z_cccc3333dddd4444.sexp",
+      "cwd": "/Users/x/coding/bar",
+      "program": "evo-agent",
+      "swarm_id": null,
+      "title": "",
+      "created_at": 1790504100000,
+      "updated_at": 1790504160000,
+      "entries": 3
+    }
+  ]
+}

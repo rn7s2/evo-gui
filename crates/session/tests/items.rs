@@ -239,7 +239,7 @@ fn an_id_already_held_is_patched_not_duplicated() {
     let mut topic = session_topic();
     let before = topic.items().len();
     let changes = topic.apply_op(&Op::ItemAdd {
-        item: topic.item("e_1").unwrap().clone(),
+        item: Box::new(topic.item("e_1").unwrap().clone()),
         after: None,
     });
     assert_eq!(topic.items().len(), before, "ids are stable: no second row");

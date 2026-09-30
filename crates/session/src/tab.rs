@@ -279,6 +279,30 @@ impl TabModel {
         &self.session.state().queue
     }
 
+    /// Why lane N is down, for the `✗` row's tooltip: the newest lane event about that
+    /// lane that the swarm called an error — `crashed`, `down`, `failed_to_start`.
+    ///
+    /// **Only a lane the list shows as down has a reason.** A lane that is back up has
+    /// none: whatever was said while it was being brought back is not current, and a
+    /// tooltip over a working lane claiming it is down would be a lie.
+    pub fn lane_down_reason(&self, n: u32) -> Option<String> {
+        if self.lane_list.lane(n).map(|lane| lane.status) != Some(crate::LaneStatus::Down) {
+            return None;
+        }
+        self.session
+            .items()
+            .iter()
+            .rev()
+            .find_map(|item| match &item.kind {
+                crate::ItemKind::LaneEvent(event)
+                    if event.lane == n && event.severity == crate::NoticeSeverity::Error =>
+                {
+                    Some(item.summary())
+                }
+                _ => None,
+            })
+    }
+
     pub fn stream_status(&self, topic: &str) -> StreamStatus {
         self.streams.get(topic).copied().unwrap_or_default()
     }

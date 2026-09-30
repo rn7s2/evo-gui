@@ -14,7 +14,7 @@ use gpui_kit::{
     WindowHandle, WindowOptions,
 };
 use session::LaunchPlan;
-use workspace::{Launch, SwarmConfig, TabState, WorkspaceView};
+use workspace::{Launch, LaunchEnv, TabState, WorkspaceView};
 
 /// Opens the app's window with one empty tab, at a deterministic size.
 fn open_workspace(cx: &mut TestAppContext) -> (WindowHandle<Root>, Entity<WorkspaceView>) {
@@ -581,10 +581,10 @@ fn the_window_is_named_after_the_folder_of_the_tab_being_shown(cx: &mut TestAppC
 
     let (handle, view) = open_window_with(cx, move |window, cx| {
         WorkspaceView::with_config(
-            Arc::new(SwarmConfig {
+            Arc::new(LaunchEnv {
                 swarm_bin: PathBuf::from("/nonexistent/evo-swarm"),
                 root: store::paths::Root::at(home),
-                ..SwarmConfig::default()
+                ..LaunchEnv::default()
             }),
             window,
             cx,
@@ -649,12 +649,12 @@ fn the_add_button_never_sits_on_a_tab(cx: &mut TestAppContext) {
 
     let (handle, view) = open_window_with(cx, move |window, cx| {
         WorkspaceView::with_config(
-            Arc::new(SwarmConfig {
+            Arc::new(LaunchEnv {
                 // A tab reaches its folder without a process behind it: the strip is
                 // what this test is about, and a swarm would only add noise.
                 swarm_bin: PathBuf::from("/nonexistent/evo-swarm"),
                 root: store::paths::Root::at(root),
-                ..SwarmConfig::default()
+                ..LaunchEnv::default()
             }),
             window,
             cx,
