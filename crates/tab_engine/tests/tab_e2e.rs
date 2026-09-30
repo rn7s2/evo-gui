@@ -421,43 +421,36 @@ fn a_supervisor_restart_is_followed_into_the_new_lifetime() {
     let (dir, handle, updates) = tab("restart", &[]);
     let mut feed = Feed::new(updates);
     let (epoch, pid) = serving(&mut feed);
+    let _ = pid;
+    let control = Control::attach(dir.path()).unwrap();
+    let port = control.client().port();
 
-    // The server re-execs itself: a new epoch, a new port, the ready file
-    // rewritten — what a supervisor restart looks like from a client's side.
-    Control::attach(dir.path()).unwrap().restart().unwrap();
+    // The server re-execs itself: a new epoch and a new token, on the port it
+    // bound, with the ready file rewritten — a supervisor restart.
+    control.restart().unwrap();
 
-    let update = feed.expect(
-        "the new lifetime's Ready",
-        |update| matches!(update, Update::Ready { epoch: seen, .. } if *seen != epoch),
+    // The tab follows the file rather than waiting for a stream that cannot come
+    // back: everything is read again from the new server, and what the new
+    // process publishes reaches the UI — which only works if the client was
+    // rebuilt with the token the file now holds.
+    feed.forget();
+    let snapshot = feed.expect(
+        "the new lifetime's session snapshot",
+        snapshot_of("session"),
     );
-    let Update::Ready {
-        epoch: restarted,
-        pid: restarted_pid,
-        port,
-        session,
-    } = update
-    else {
+    let Update::Snapshot { .. } = snapshot else {
         unreachable!()
     };
-    // The epoch is what says the lifetime changed — never the pid (a re-exec'd
-    // process keeps its pid, a supervised one gets a new one).
-    assert_ne!(restarted, epoch);
-    assert!(restarted_pid > 0 && restarted_pid != 0);
-    let _ = pid;
-    assert!(port > 0);
-    assert!(!session.id.is_empty());
-
-    // Everything is re-read from the new server, and the tab is live against it:
-    // an op the new process publishes reaches the UI, which only works if the
-    // stream was replaced along with the client. Only what arrives *after* the
-    // restart's Ready counts.
-    feed.forget();
-    feed.expect("the new lifetime's snapshot", snapshot_of("session"));
     feed.expect(
         "the new lifetime's live stream",
         |update| matches!(update, Update::Stream { status } if !status.is_reconnecting()),
     );
     let control = Control::attach(dir.path()).unwrap();
+    assert_eq!(
+        control.client().port(),
+        port,
+        "a restart keeps the port it bound"
+    );
     control
         .emit(json!({"op": "state.patch", "topic": "session", "patch": {"thinking": "high"}}))
         .unwrap();
@@ -470,6 +463,8 @@ fn a_supervisor_restart_is_followed_into_the_new_lifetime() {
             }
         )
     });
+    assert_ne!(Control::attach(dir.path()).unwrap().client().port(), 0);
+    assert!(!epoch.is_empty());
     drop(handle);
 }
 

@@ -28,3 +28,7 @@ required-features = ["test-harness"]
 [[test]]
 name = "real_server"
 required-features = ["test-harness"]
+
+[[test]]
+name = "real_swarm"
+required-features = ["test-harness"]

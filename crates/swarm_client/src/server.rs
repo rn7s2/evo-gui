@@ -420,11 +420,14 @@ impl Server {
     }
 
     /// Re-read the ready file, and follow the server if it says it is a different
-    /// process lifetime: the port can change with a supervisor restart, and the
-    /// epoch is what says so. `Some(ready)` when the file moved on.
+    /// process lifetime. `Some(ready)` when the file moved on.
     ///
-    /// The client it returns talks to the server the file now names; the caller's
-    /// old connections are dead and must be replaced.
+    /// The client this leaves behind talks to the server the file now names; the
+    /// caller's old connections are dead and must be replaced. It is needed
+    /// because a lifetime is more than the epoch: the token is minted per process
+    /// (verified against the real server), so a client that kept the one it first
+    /// read gets 401 for ever after a restart — and this build also moved the port
+    /// before the supervisor pinned it.
     pub fn follow_ready(&mut self) -> Option<ReadyFile> {
         let ready = read_ready(&self.proc.ready_file)?;
         if ready.epoch == self.ready.epoch {

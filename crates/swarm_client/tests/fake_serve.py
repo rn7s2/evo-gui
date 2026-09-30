@@ -433,7 +433,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def _reexec(self):
         time.sleep(0.2)
-        os.execv(sys.executable, [sys.executable] + sys.argv)
+        # The port it bound is the port it keeps (CONTRACT §1 exact restarts).
+        argv = list(sys.argv)
+        if "--port" in argv:
+            argv[argv.index("--port") + 1] = str(self.server.server_address[1])
+        os.execv(sys.executable, [sys.executable] + argv)
 
     def control_forget(self, _query, _body):
         with self.server.state.lock:
@@ -486,7 +490,9 @@ def watch_stdin(server, ready_file):
 
 
 STATE = State()
-TOKEN = "0" * 64
+# The bearer token is minted per process, as the real server's is: a restart
+# rewrites the ready file with a new one, which is why a client must re-read it.
+TOKEN = uuid.uuid4().hex + uuid.uuid4().hex
 
 
 def main(argv):

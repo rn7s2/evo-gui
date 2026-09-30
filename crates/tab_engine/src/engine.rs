@@ -336,10 +336,12 @@ fn run(
 /// The tab's connection to one process lifetime: the client, the stream it reads,
 /// and the thread that forwards what the stream sees.
 ///
-/// A supervisor restart is a *new* lifetime — a new epoch, and in this build also
-/// a new port — so the connection is rebuilt rather than hoped for: the ready
-/// file is re-read, a client is made for the server it now names, and a fresh
-/// snapshot + stream replace the dead ones.
+/// A supervisor restart is a *new* lifetime: this build keeps the port but mints
+/// a new token, and the ready file is where both are written. So the connection is
+/// rebuilt rather than hoped for — the file is re-read, a client is made for the
+/// server it now names, and a fresh snapshot + stream replace the dead ones. The
+/// UI needs no extra notice: the snapshots carry the session and the epoch the
+/// stream is in, which is everything a tab draws.
 struct Live {
     client: Client,
     stream: EventStream,
@@ -449,16 +451,12 @@ fn engine_loop(
                 });
             }
             Inbound::Stream(StreamMsg::Reconnecting { retry_in }) => {
-                // A supervisor restart is a new process lifetime, and a new
-                // lifetime can mean a new port: the ready file is the only place
-                // that says so, so it is read before believing the stream died.
-                if let Some(ready) = server.follow_ready() {
-                    engine.send(Update::Ready {
-                        epoch: ready.epoch.clone(),
-                        pid: ready.pid,
-                        port: ready.port,
-                        session: ready.session.clone(),
-                    });
+                // A supervisor restart is a new process lifetime, and a lifetime
+                // is more than a port: this build mints a new token with it, and
+                // the ready file is the only place that says so. The file is read
+                // before the stream is believed dead, and a lifetime that moved
+                // is followed rather than waited for.
+                if server.follow_ready().is_some() {
                     if let Some(snapshot) = live.follow(server, &engine.topics, commands) {
                         engine.topics_of(&snapshot);
                     }

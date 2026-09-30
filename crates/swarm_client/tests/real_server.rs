@@ -223,6 +223,30 @@ fn a_supervisor_restart_is_a_new_epoch_the_ready_file_names() {
     let Some((_dir, mut server)) = server("real-restart") else {
         return;
     };
+    // §1 restarts the child from the exact session it was serving, so there must
+    // be one: a session that has never been written is not resumed (reported).
+    let client = server.client().clone();
+    let reply = client
+        .op(
+            "input.send",
+            json!({"text": "a turn before the restart", "queue": "now"}),
+        )
+        .expect("a reply");
+    assert!(reply.ok, "{reply:?}");
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let status = client
+            .snapshot(&["session".to_owned()], Some(1))
+            .unwrap()
+            .topic("session")
+            .unwrap()["state"]["status"]
+            .clone();
+        if status == json!("idle") {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "the turn never ended");
+        std::thread::sleep(Duration::from_millis(200));
+    }
     let epoch = server.epoch().to_owned();
     let port = server.port();
     let before = server.ready().clone();
@@ -244,6 +268,15 @@ fn a_supervisor_restart_is_a_new_epoch_the_ready_file_names() {
     };
     assert_ne!(restarted.epoch, epoch, "a restart is a new epoch");
     assert!(restarted.pid > 0);
+    assert_eq!(
+        restarted.port, port,
+        "§1: a restart keeps the port it bound"
+    );
+    assert_eq!(restarted.restarts, 1, "§1: and counts itself");
+    assert_eq!(
+        restarted.session.path, before.session.path,
+        "§1: --resume <the exact session it was serving>"
+    );
     // And the client built from the new file reads the new server, whatever port
     // it chose.
     let client = server.client().clone();
