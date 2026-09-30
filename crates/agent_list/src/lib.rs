@@ -24,6 +24,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{h_flex, tooltip::Tooltip, v_flex, ActiveTheme as _, StyledExt as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -32,7 +33,7 @@ use gpui_kit::{
     SharedString, StatefulInteractiveElement as _, Styled as _, TestSupportExt as _, Window,
 };
 use session::{AgentKey, LaneList, LaneRow, LaneStatus, Status};
-use store::design::{self, Palette, HEADER_HEIGHT, INSET, RADIUS};
+use store::design::{self, Palette, Rgb, HEADER_HEIGHT, INSET, RADIUS};
 use widgets::{paint, BreathingDot};
 
 /// The column's width in the tab page (§7.3). The owner sizes the column; this is the
@@ -45,8 +46,10 @@ const LANE_ROW: f32 = 32.;
 const LANE_GAP: f32 = 9.;
 const LANE_PAD: f32 = 10.;
 const LANE_FONT: Pixels = px(13.);
-/// The list's own inset and the gap between rows (`.ws-lane-list{padding:6px}`).
+/// The list's own inset and the gap between rows (`.ws-lane-list{padding:6px}`, and the
+/// design's own `gap:2px` override in `styles.css`).
 const LIST_PAD: f32 = 6.;
+const LIST_GAP: f32 = 2.;
 /// The band's two sizes: `.ws-head-title{font-size:13px}` and
 /// `.ws-head-meta{font-size:12px}`.
 const TITLE_SIZE: Pixels = px(13.);
@@ -56,6 +59,10 @@ const STATE_SIZE: Pixels = px(12.);
 /// The Stop control and the `reconnecting` badge, which the design has no size for:
 /// the chrome's own small print.
 const STOP_SIZE: Pixels = px(11.);
+/// The Stop control's own width, pinned to the four pixels of padding a side its label
+/// takes — `px(4.) * 2` around an 11px `Stop` — so a row that can be stopped can keep
+/// exactly that much room for it (see [`AgentList::row`]).
+const STOP_WIDTH: f32 = 35.;
 
 /// The row's fill on hover and while selected: the ink a few percent into the sidebar
 /// (`--row-surface: color-mix(in srgb, var(--fg) 5%|9%, var(--sidebar))`). The theme
@@ -72,8 +79,19 @@ const WORKSPACE_IDLE: f32 = 0.8;
 /// failure reason inside the window.
 const TOOLTIP_LINE: usize = 56;
 
-/// The rows scroller, so a swarm with more lanes than fit can be scrolled.
+/// The rows scroller, so a swarm with more lanes than fit can be scrolled. It is the
+/// wrapper the kit's scrollbar builds around the rows; the rows themselves sit inside it,
+/// under the name this one gives them with `"content"` after it (`rows_content_id`).
 const ROWS_ID: &str = "agent-list-rows";
+
+/// The id of the rows inside that scroller: what the kit's scroll area hands the element
+/// it was given (`gpui_component::scroll::Scrollable`'s named `content` child). The list's
+/// own name, its role and its rows are all on it, because it is the element the list
+/// builds — the scroller around it is the kit's.
+#[cfg(test)]
+fn rows_content_id() -> ElementId {
+    (ElementId::from(ROWS_ID), "content").into()
+}
 
 /// The `6 lanes · 2 busy` summary above the rows.
 const SUMMARY_ID: &str = "agent-list-summary";
@@ -408,9 +426,14 @@ impl AgentList {
     /// The design has no room for it on the row, so it is the row's own control while
     /// the pointer is on that row: a lane that is working is the one a reader wants to
     /// stop, and it is the only thing this column can ask the swarm to do.
+    ///
+    /// `under` is the fill the row has under the pointer, which is the fill the button
+    /// is drawn on: it is pinned over the state cell rather than beside it, and an
+    /// opaque box in any other colour would show as a patch on the row.
     fn stop_button(
         &self,
         lane: u32,
+        under: Rgb,
         palette: &'static Palette,
         cx: &Context<Self>,
     ) -> impl IntoElement {
@@ -419,9 +442,13 @@ impl AgentList {
             .test_support()
             .flex_none()
             .invisible()
-            .px(px(4.))
+            .w(px(STOP_WIDTH))
             .py(px(1.))
+            .flex()
+            .items_center()
+            .justify_center()
             .rounded(px(RADIUS))
+            .bg(paint::color(under))
             .border_1()
             .border_color(paint::color(palette.border))
             .text_size(STOP_SIZE)
@@ -457,11 +484,15 @@ impl AgentList {
         let state = view.state;
         let badge = view.badge;
         let stop = view.stop;
+        let stoppable = stop.is_some();
         // The row's own fill, and the one the dot breathes against: on hover and while
         // selected the dot has a new surface, as the design's `--row-surface` does.
         let hover = paint::mix(palette.fg, HOVER_MIX, palette.sidebar);
         let active = paint::mix(palette.fg, SELECTED_MIX, palette.sidebar);
         let surface = if selected { active } else { palette.sidebar };
+        // What the pointer leaves under a row it is on, which is what a control pinned
+        // over that row is drawn on.
+        let under_pointer = if selected { active } else { hover };
         let name = view.name;
 
         h_flex()
@@ -497,12 +528,16 @@ impl AgentList {
                     .child(name),
             )
             .child(
-                // The flexible cell: the task, or nothing to say.
+                // The flexible cell: the task, or nothing to say. A row that can be
+                // stopped keeps the Stop's room at its trailing edge — this is the cell
+                // the design's `flex:1` gives way — so the control lands beside the text
+                // rather than over the ellipsis that ends it.
                 div()
                     .id(task_id)
                     .test_support()
                     .flex_1()
                     .min_w_0()
+                    .when(stoppable, |task| task.pr(px(STOP_WIDTH)))
                     .truncate()
                     .text_color(view.task_color)
                     .children(task),
@@ -536,9 +571,25 @@ impl AgentList {
             })
             // The one thing a person may do to a lane (CONTRACT §7.4): stop it, while
             // the pointer is on the row that can be stopped.
+            //
+            // It is pinned over the row's trailing edge rather than laid out in it. The
+            // design puts every row's state in one place — the far end, so the eye can
+            // read down the column — and a control that took room of its own there would
+            // hold a working lane's clock away from that edge on every frame, whether the
+            // pointer was on the row or not. Painted on the row's own fill, over the cell
+            // it replaces, it moves nothing.
             .when_some(stop, |row, stop| {
                 let lane = stop.lane().unwrap_or_default();
-                row.child(self.stop_button(lane, palette, cx))
+                row.child(
+                    div()
+                        .absolute()
+                        .top(px(0.))
+                        .bottom(px(0.))
+                        .right(px(LANE_PAD))
+                        .flex()
+                        .items_center()
+                        .child(self.stop_button(lane, under_pointer, palette, cx)),
+                )
             })
             .on_click(cx.listener(move |this, _, window, cx| {
                 // A click is also how the list takes the keyboard: the arrows walk the
@@ -580,11 +631,17 @@ impl Render for AgentList {
             .w_full()
             .flex_1()
             .min_h_0()
-            .gap(px(2.))
+            .gap(px(LIST_GAP))
             .p(px(LIST_PAD))
-            .overflow_y_scroll()
             .role(Role::ListBox)
-            .aria_label(LIST_LABEL);
+            .aria_label(LIST_LABEL)
+            // A swarm with more lanes than the column has room for scrolls, and the kit's
+            // own thumb says so — on the colours the app's theme gives it
+            // (`crates/app/src/theme.rs`). The wrapper this builds around the rows keeps
+            // the list's own id, and hands the rows the id this names with `"content"`
+            // after it (`rows_content_id`).
+            .overflow_y_scrollbar()
+            .id(ROWS_ID);
         rows = rows.child(self.row(coordinator, palette, cx));
         for lane in lanes {
             rows = rows.child(self.row(lane, palette, cx));
@@ -598,20 +655,37 @@ impl Render for AgentList {
             .bg(paint::color(palette.sidebar))
             // The column is the tab stop (§7.3): the frame around it is focused rather
             // than any row, so the arrows can walk the rows without a row of its own
-            // having to be a control. The border is always laid out and only coloured in
-            // when focused, so taking focus does not move the rows by a pixel.
+            // having to be a control.
             .track_focus(&self.focus_handle)
             .tab_stop(true)
             .on_key_down(cx.listener(Self::key_down))
-            // The column is a tab stop, so it says when the keyboard has it — and only
-            // then: a click that selects a lane is not a reason to outline the whole
-            // column, which is what `:focus-visible` means and what the design draws.
-            .border_1()
-            .border_color(gpui_kit::Hsla::default())
-            .focus_visible(move |style| style.border_color(paint::color(palette.primary)))
             .text_color(paint::color(palette.fg))
             .child(self.header(palette))
             .child(rows)
+            // The column is a tab stop, so it says when the keyboard has it — and only
+            // then: a click that selects a lane is not a reason to outline the whole
+            // column, which is what `:focus-visible` means and what the design draws.
+            //
+            // The ring is a child laid over the column's own box, not a border on it.
+            // A border is laid out inside the box, so the whole column — its band, its
+            // rows, the rule under the band — would sit a pixel in from every edge, and
+            // the band over the lanes would meet the conversation's band a pixel lower
+            // than the design draws the one straight rule across both columns.
+            .child(
+                div()
+                    .id("agent-column-ring")
+                    .absolute()
+                    .top(px(0.))
+                    .left(px(0.))
+                    .right(px(0.))
+                    .bottom(px(0.))
+                    // Paint only: the column itself is what the keyboard focuses, and
+                    // this says so without taking a tab stop of its own.
+                    .track_focus(&self.focus_handle)
+                    .border_1()
+                    .border_color(gpui_kit::Hsla::default())
+                    .focus_visible(move |style| style.border_color(paint::color(palette.primary))),
+            )
     }
 }
 
@@ -748,8 +822,9 @@ mod tests {
     use super::*;
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{
-        point, AnyWindowHandle, App, AppContext as _, Bounds, Entity, Size, Subscription,
-        TestAppContext, Window, WindowBounds, WindowOptions,
+        point, AnyWindowHandle, App, AppContext as _, Bounds, Entity, InputEvent as _, Pixels,
+        ScrollDelta, ScrollWheelEvent, Size, Subscription, TestAppContext, Window, WindowBounds,
+        WindowOptions,
     };
     use session::SwarmInfo;
     use std::cell::RefCell;
@@ -995,6 +1070,174 @@ mod tests {
         );
     }
 
+    /// §7.3's rows, with the design's own numbers: the list insets them by 6px, a row is
+    /// 32px with 2px between them, and the column's content reaches its edges — the
+    /// focus ring is painted over the column, not laid out inside it, or the band over
+    /// the lanes would meet the conversation's band a pixel low and the rows would start
+    /// a pixel in.
+    #[gpui_kit::test]
+    fn the_column_holds_its_rows_to_the_designs_own_numbers(cx: &mut TestAppContext) {
+        let f = open(
+            cx,
+            lanes(vec![
+                lane(1, LaneStatus::Working, Some("one")),
+                lane(2, LaneStatus::Idle, None),
+            ]),
+        );
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            let main = window.find(row_id(AgentKey::Coordinator)).bounds();
+            let one = window.find(row_id(AgentKey::Lane(1))).bounds();
+            let two = window.find(row_id(AgentKey::Lane(2))).bounds();
+
+            // The list's 6px inset, and a row's 32px on a 34px pitch (§7.3's rows are
+            // 32px with the design's 2px gap between them).
+            assert_eq!(
+                main.origin.x,
+                px(LIST_PAD),
+                "the rows are inset by the list"
+            );
+            assert_eq!(
+                main.size.width,
+                COLUMN_WIDTH - px(2. * LIST_PAD),
+                "a row fills the list, inset on both sides"
+            );
+            assert_eq!(main.size.height, px(LANE_ROW));
+            assert_eq!(
+                main.origin.y,
+                px(HEADER_HEIGHT + LIST_PAD),
+                "the first row sits under the column's band"
+            );
+            assert_eq!(one.origin.y, main.origin.y + px(LANE_ROW + LIST_GAP));
+            assert_eq!(two.origin.y, one.origin.y + px(LANE_ROW + LIST_GAP));
+        });
+    }
+
+    /// §7.3: the state cell is the row's far end, where the eye compares rows. The Stop a
+    /// working lane's row offers is pinned over that cell rather than laid out beside it,
+    /// so a lane that can be stopped holds its clock in the same place as a lane that
+    /// cannot — whether the pointer is on the row or not.
+    #[gpui_kit::test]
+    fn the_stop_covers_the_state_cell_without_moving_it(cx: &mut TestAppContext) {
+        let f = open(
+            cx,
+            lanes(vec![
+                lane(1, LaneStatus::Working, Some("one")),
+                lane(2, LaneStatus::Working, Some("two")),
+            ]),
+        );
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            let row = window.find(row_id(AgentKey::Lane(1))).bounds();
+            let state = window.find(state_id(AgentKey::Lane(1))).bounds();
+            assert_eq!(
+                state.right(),
+                row.right() - px(LANE_PAD),
+                "the clock is at the row's far end"
+            );
+
+            // An idle lane's state is in the same place — one column, one edge.
+            let idle = window.find(state_id(AgentKey::Lane(2))).bounds();
+            assert_eq!(idle.right(), state.right());
+
+            // The Stop is over the cell, on the row's own fill, and its own right edge is
+            // the row's padding inset too.
+            let stop = window.find(stop_id(1)).bounds();
+            assert_eq!(stop.right(), row.right() - px(LANE_PAD));
+            assert_eq!(stop.size.width, px(STOP_WIDTH));
+            assert!(
+                stop.left() <= state.right() && stop.right() >= state.left(),
+                "the Stop replaces the clock: {stop:?} over {state:?}"
+            );
+            // The task cell kept the room for the control (`flex:1` with the Stop's
+            // width as trailing padding), so the text it elides ends clear of the Stop's
+            // box — the cell's own box is the slack and does not move, which is why the
+            // ink is what that claim is checked against (the `agent_list_states`
+            // capture, and the probe's crop of a working lane's row).
+            assert!(
+                (stop.center().y - row.center().y).abs() <= px(1.),
+                "the Stop is centred on the row: {stop:?} in {row:?}"
+            );
+
+            // The pointer on the row brings it out, and moves nothing.
+            window.simulate_mouse_move(row.center(), cx);
+            window.render_frame(cx);
+            assert!(window.find(stop_id(1)).visible());
+            assert_eq!(
+                window.find(state_id(AgentKey::Lane(1))).bounds(),
+                state,
+                "hovering the row moves neither the state nor the Stop"
+            );
+            assert_eq!(window.find(stop_id(1)).bounds(), stop);
+        });
+    }
+
+    /// §7.3's keyboard: the column is the tab stop and wears the focus ring while the
+    /// keyboard is on it. The ring is painted over the column — the ring is the column's
+    /// outermost pixel, and taking focus does not move a row or the band by one.
+    #[gpui_kit::test]
+    fn the_focus_ring_does_not_move_what_the_column_holds(cx: &mut TestAppContext) {
+        let f = open(cx, lanes(vec![lane(1, LaneStatus::Idle, None)]));
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            let before = window.find(row_id(AgentKey::Coordinator)).bounds();
+            assert_eq!(before.origin.x, px(LIST_PAD));
+
+            // A click takes the column, and the keyboard it then answers is what the
+            // ring is for: `:focus-visible`, not every focus there is.
+            window.click(row_id(AgentKey::Coordinator), cx);
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("agent-column-list").focused(),
+                Some(true),
+                "a click takes the column"
+            );
+            window.press("down", cx);
+            window.render_frame(cx);
+            assert_eq!(
+                window.find(row_id(AgentKey::Coordinator)).bounds(),
+                before,
+                "the keyboard's ring moves nothing"
+            );
+        });
+    }
+
+    /// §7.3: a swarm with more lanes than the column has room for scrolls. The list is
+    /// the kit's scroll area, so the wheel over it moves the rows — and it is that same
+    /// area the thumb rides on (`agent_list_states --capture` takes the picture of it).
+    #[gpui_kit::test]
+    fn a_list_longer_than_the_column_scrolls(cx: &mut TestAppContext) {
+        let rows: Vec<LaneRow> = (1..=30).map(|n| lane(n, LaneStatus::Idle, None)).collect();
+        let f = open(cx, lanes(rows));
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            let content = window.find(rows_content_id()).bounds();
+            assert!(
+                content.size.height > COLUMN.height,
+                "thirty rows are taller than the column: {content:?}"
+            );
+            let first = window.find(row_id(AgentKey::Lane(1))).bounds();
+
+            // Somewhere the pointer can be: the content is taller than the window, so
+            // its own centre is off it.
+            window.dispatch_event(
+                ScrollWheelEvent {
+                    position: point(COLUMN_WIDTH / 2., px(200.)),
+                    delta: ScrollDelta::Pixels(point(px(0.), px(-90.))),
+                    ..Default::default()
+                }
+                .to_platform_input(),
+                cx,
+            );
+            window.render_frame(cx);
+            let scrolled = window.find(row_id(AgentKey::Lane(1))).bounds();
+            assert!(
+                first.origin.y - scrolled.origin.y >= px(80.),
+                "the wheel moved the rows up: {first:?} then {scrolled:?}"
+            );
+        });
+    }
+
     #[gpui_kit::test]
     fn the_list_names_itself_and_says_where_each_row_sits(cx: &mut TestAppContext) {
         let f = open(
@@ -1008,7 +1251,11 @@ mod tests {
             window.render_frame(cx);
             // The rows name themselves; the list box around them says what it is, so a screen
             // reader can announce "Agents, list box" before reading the rows out.
-            let list = window.find(ROWS_ID).label().unwrap_or_default().to_string();
+            let list = window
+                .find(rows_content_id())
+                .label()
+                .unwrap_or_default()
+                .to_string();
             assert_eq!(list, LIST_LABEL);
             let row = window
                 .find(row_id(AgentKey::Lane(2)))
