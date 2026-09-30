@@ -21,9 +21,9 @@ use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{h_flex, Icon, IconName};
 use gpui_kit::TestSupportExt as _;
 use gpui_kit::{
-    div, px, Animation, AnimationExt as _, AnyElement, App, ClipboardItem, Context, Div, ElementId,
-    FontWeight, Hsla, InteractiveElement as _, IntoElement, ParentElement, Pixels, SharedString,
-    Stateful, StatefulInteractiveElement as _, Styled as _, WeakEntity,
+    div, point, px, Animation, AnimationExt as _, AnyElement, App, ClipboardItem, Context, Div,
+    ElementId, FontWeight, Hsla, InteractiveElement as _, IntoElement, ParentElement, Pixels,
+    Point, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, WeakEntity,
 };
 use serde_json::Value;
 use session::{
@@ -36,6 +36,7 @@ use crate::ImageState;
 
 use crate::style::{mix, text_style, Palette, BLOCK_GAP, GROUP_GAP, MEASURE, TIGHT_GAP, TURN_GAP};
 use crate::{link, markdown, TranscriptData, TranscriptView};
+use widgets::glyph;
 
 /// Fade window for text appended by a streaming delta (§2.8).
 const STREAM_FADE: Duration = Duration::from_millis(350);
@@ -61,7 +62,6 @@ pub(crate) const TOOL_ROW_HEIGHT: Pixels = px(24.);
 const DISCLOSURE_WIDTH: Pixels = px(14.);
 /// The disclosure chevron: a glyph with about ten pixels of ink, centred in its
 /// own column. The glyph box is larger than the ink a chevron actually draws.
-const CARET_SIZE: Pixels = px(14.);
 /// Width of the key column of an expanded argument list: enough for a nested
 /// key like `diff.removed` without eliding it.
 pub(crate) const KEY_WIDTH: Pixels = px(112.);
@@ -1370,13 +1370,20 @@ fn status_pill(status: &str, _status_color: Hsla, palette: &Palette) -> AnyEleme
         .into_any_element()
 }
 
-/// The disclosure of a tool row.
+/// The disclosure of a tool row: the design's chevron, turning a quarter in
+/// 120ms as the card opens (`transition: transform .12s ease`).
+///
+/// gpui has no `transform` on an element — no rotation, no scale — so the chevron
+/// is *painted* rather than transformed: its three points are turned about the
+/// caret's own centre on every frame of the animation, and stroked. `ease` is
+/// `cubic-bezier(.25,.1,.25,1)`, the curve the design names.
 fn caret(expanded: bool, palette: &Palette) -> AnyElement {
-    let chevron = if expanded {
-        IconName::ChevronDown
-    } else {
-        IconName::ChevronRight
-    };
+    let colour = palette.muted_foreground;
+    // The two ends are the two states, so a fresh animation on a toggle runs from
+    // the angle the caret is at to the angle it is going to — and the ids make the
+    // toggle a fresh animation.
+    let (from, to) = if expanded { (0., 1.) } else { (1., 0.) };
+    let easing = widgets::effort::cubic_bezier(0.25, 0.1, 0.25, 1.0);
 
     div()
         .w(DISCLOSURE_WIDTH)
@@ -1385,12 +1392,53 @@ fn caret(expanded: bool, palette: &Palette) -> AnyElement {
         .items_center()
         .justify_center()
         .child(
-            Icon::new(chevron)
-                .size(CARET_SIZE)
-                .text_color(palette.muted_foreground),
+            div()
+                .id(ElementId::from((
+                    "transcript-tool-caret",
+                    expanded as usize,
+                )))
+                .flex_none()
+                .size(px(CARET_GLYPH))
+                .with_animation(
+                    ElementId::from(("transcript-tool-caret-motion", expanded as usize)),
+                    Animation::new(CARET_TURN).with_easing(easing),
+                    move |el, delta| {
+                        let angle = (from + (to - from) * delta) * std::f32::consts::FRAC_PI_2;
+                        el.child(glyph::stroked(
+                            CARET_GLYPH,
+                            CARET_STROKE,
+                            &chevron_lines(angle),
+                            colour,
+                        ))
+                    },
+                ),
         )
         .into_any_element()
 }
+
+/// The chevron `m9 6 6 6-6 6` of the design's 24-unit box, at `size`, turned by
+/// `angle` about its own centre — two strokes through its three points.
+fn chevron_lines(angle: f32) -> Vec<(Point<Pixels>, Point<Pixels>)> {
+    let size = CARET_GLYPH;
+    let (sin, cos) = angle.sin_cos();
+    let turn = |x: f32, y: f32| {
+        let (x, y) = (x * size, y * size);
+        let (dx, dy) = (x - size / 2., y - size / 2.);
+        point(
+            px(size / 2. + dx * cos - dy * sin),
+            px(size / 2. + dx * sin + dy * cos),
+        )
+    };
+    // 9,6 → 15,12 → 9,18 of 24.
+    let (a, b, c) = (turn(0.375, 0.25), turn(0.625, 0.5), turn(0.375, 0.75));
+    vec![(a, b), (b, c)]
+}
+
+/// The caret's own numbers: the design's 12px glyph with a 2.2px stroke drawn at
+/// half scale, turning in 120ms.
+const CARET_GLYPH: f32 = 12.;
+const CARET_STROKE: f32 = 1.1;
+const CARET_TURN: Duration = Duration::from_millis(120);
 
 /// The arguments of an open tool row: the call's own object as a key/value list, or the
 /// text exactly as it came when it is not one.
