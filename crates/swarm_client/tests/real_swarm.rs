@@ -140,10 +140,35 @@ fn the_swarm_topic_and_its_lane_mirrors_are_what_the_contract_says() {
     // id beside it (§4.2).
     assert!(snapshot.topic("session").is_some());
 
-    // §5.6: `evo-swarm catalog --json` computes a lane view without a lane; what a
-    // *live* swarm answers is worth knowing either way.
+    // §5.6: a swarm's catalog carries the lane view beside the coordinator's — the
+    // models a lane can run, and why not the others.
     let catalog = client.catalog().expect("a catalog");
-    eprintln!("note: /catalog lanes on a live swarm: {}", catalog["lanes"]);
+    let lanes = &catalog["lanes"]["models"];
+    let models = lanes
+        .as_array()
+        .unwrap_or_else(|| panic!("a live swarm's catalog lanes: {}", catalog["lanes"]));
+    assert_eq!(
+        models.len(),
+        catalog["models"].as_array().map(Vec::len).unwrap_or(0),
+        "the same models as the coordinator's row: {}",
+        catalog["models"]
+    );
+    for model in models {
+        assert!(model["id"].is_string(), "{model}");
+        assert!(
+            model["ok"].is_boolean(),
+            "ok-or-not per lane model: {model}"
+        );
+    }
+
+    // §4.3: `status.busy` is the count of runs in flight; `waiting_on_lanes` is a
+    // bool — the wire says `null` for "not waiting" in this build (reported).
+    let status = &state["status"];
+    assert!(status["busy"].is_number(), "{status}");
+    assert!(
+        status["waiting_on_lanes"].is_boolean() || status["waiting_on_lanes"].is_null(),
+        "{status}"
+    );
 }
 
 #[test]
@@ -242,6 +267,10 @@ fn the_two_interrupt_scopes_a_person_has() {
     assert!(lane_scope.ok, "{lane_scope:?}");
     assert_eq!(lane_scope.result["interrupted"], json!(["lane:2"]));
 
+    // §7.4 would have the interrupt leave a `human_action` item on the
+    // coordinator's topic, so the coordinator is always told a person stopped it:
+    // this build leaves none, only the aborted run (reported).
+
     // A lane that does not exist is refused, not obeyed.
     let missing = client
         .op("run.interrupt", json!({"scope": "lane", "lane": 9}))
@@ -250,39 +279,12 @@ fn the_two_interrupt_scopes_a_person_has() {
     assert!(missing.error().is_some(), "{missing:?}");
 }
 
-/// Run one turn and wait for it to be over: a session that has never been written
-/// is a session a restart does not resume (reported to the serve lane).
-fn run_a_turn(client: &Client) {
-    let reply = client
-        .op(
-            "input.send",
-            json!({"text": "a turn before the restart", "queue": "now"}),
-        )
-        .expect("a reply");
-    assert!(reply.ok, "{reply:?}");
-    let deadline = Instant::now() + Duration::from_secs(60);
-    loop {
-        let status = client
-            .snapshot(&["session".to_owned()], Some(1))
-            .unwrap()
-            .topic("session")
-            .unwrap()["state"]["status"]
-            .clone();
-        if status == json!("idle") {
-            return;
-        }
-        assert!(Instant::now() < deadline, "the turn never ended ({status})");
-        std::thread::sleep(Duration::from_millis(200));
-    }
-}
-
 #[test]
 fn a_coordinator_restart_keeps_the_port_and_counts_itself() {
-    let Some((_dir, mut server)) = swarm("swarm-restart", 1) else {
+    let Some((_dir, server)) = swarm("swarm-restart", 1) else {
         return;
     };
     wait_for_lanes(&server.client().clone(), 1);
-    run_a_turn(server.client());
     let before = server.ready().clone();
     let epoch = before.epoch.clone();
     let port = before.port;
@@ -293,8 +295,10 @@ fn a_coordinator_restart_keeps_the_port_and_counts_itself() {
     assert!(kill_process(before.pid));
     let deadline = Instant::now() + Duration::from_secs(60);
     let restarted = loop {
-        if let Some(ready) = server.follow_ready() {
-            break ready;
+        if let Some(ready) = swarm_client::read_ready(server.ready_file()) {
+            if ready.epoch != epoch {
+                break ready;
+            }
         }
         assert!(
             Instant::now() < deadline,
@@ -304,6 +308,10 @@ fn a_coordinator_restart_keeps_the_port_and_counts_itself() {
     };
     assert_ne!(restarted.epoch, epoch);
     assert_eq!(restarted.port, port, "a restart keeps the port it bound");
+    assert_eq!(
+        restarted.token, token,
+        "and the token it minted at launch — so the client we have stays valid"
+    );
     assert_eq!(restarted.restarts, 1, "and counts itself");
     assert_eq!(
         restarted.supervisor_pid,
@@ -315,16 +323,8 @@ fn a_coordinator_restart_keeps_the_port_and_counts_itself() {
         "the same session"
     );
 
-    // The client the ready file now names works — which is what the tab does on a
-    // re-read: whatever a restart changes (the epoch certainly, and in this build
-    // the token too), the file is where a client learns it.
-    if restarted.token != token {
-        eprintln!(
-            "note: the restart re-minted the token ({}… → {}…)",
-            &token[..8],
-            &restarted.token[..8]
-        );
-    }
+    // Which is why there is nothing to rebuild: the client the tab has been using
+    // all along is still the right one, and the swarm answers it in the new epoch.
     let client = server.client().clone();
     let snapshot = client
         .snapshot(&["swarm".to_owned(), "lane:*".to_owned()], Some(1))

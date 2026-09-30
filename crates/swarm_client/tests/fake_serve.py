@@ -437,7 +437,8 @@ class Handler(BaseHTTPRequestHandler):
         argv = list(sys.argv)
         if "--port" in argv:
             argv[argv.index("--port") + 1] = str(self.server.server_address[1])
-        os.execv(sys.executable, [sys.executable] + argv)
+        env = dict(os.environ, EVO_FAKE_TOKEN=TOKEN)
+        os.execve(sys.executable, [sys.executable] + argv, env)
 
     def control_forget(self, _query, _body):
         with self.server.state.lock:
@@ -490,9 +491,10 @@ def watch_stdin(server, ready_file):
 
 
 STATE = State()
-# The bearer token is minted per process, as the real server's is: a restart
-# rewrites the ready file with a new one, which is why a client must re-read it.
-TOKEN = uuid.uuid4().hex + uuid.uuid4().hex
+# The bearer token is minted once per launch and kept across a restart, as the
+# real supervisor keeps it (§1) — a client built from the first ready file stays
+# the right client, and a new lifetime is a `stream.reset` on the same connection.
+TOKEN = os.environ.get("EVO_FAKE_TOKEN") or uuid.uuid4().hex + uuid.uuid4().hex
 
 
 def main(argv):
