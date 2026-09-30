@@ -2,7 +2,8 @@
 //!
 //! `Composer.css`'s `.chip`: 26px tall, a 999px pill, one step of the ink into the
 //! input surface, 12px text with tabular figures so a readout does not jitter as
-//! it counts. A chip that opens something (`chip-button`) darkens on hover and
+//! it counts (`font-variant-numeric: tabular-nums` is `tnum` among gpui's font
+//! features). A chip that opens something (`chip-button`) darkens on hover and
 //! stays darker while its drawer is open; a chip that states something is not a
 //! button at all.
 
@@ -109,6 +110,9 @@ impl Chip {
             .rounded(px(RADIUS))
             .bg(crate::paint::color(base))
             .text_size(px(FONT))
+            // `font-variant-numeric: tabular-nums`: a count that ticks over does
+            // not shift the chip around it.
+            .font_features(tabular())
             .text_color(crate::paint::color(palette.fg))
             .child(self.label);
         if interactive {
@@ -131,6 +135,11 @@ impl Chip {
     }
 }
 
+/// The design's tabular figures, as gpui's font features name them.
+fn tabular() -> gpui_kit::FontFeatures {
+    gpui_kit::FontFeatures(std::sync::Arc::new(vec![("tnum".to_string(), 1)]))
+}
+
 /// The chip's fill at each state, for a caller drawing its own.
 pub fn fill(palette: &Palette, hovered: bool, open: bool) -> Hsla {
     let pct = if open {
@@ -148,6 +157,13 @@ mod tests {
     use super::*;
     use gpui_kit::Rgba;
     use store::design::{DARK, LIGHT};
+
+    /// `.chip{font-variant-numeric: tabular-nums}`: the figures a count ticks over
+    /// in do not change width.
+    #[test]
+    fn a_chip_counts_in_tabular_figures() {
+        assert_eq!(tabular().tag_value_list(), [("tnum".to_string(), 1)]);
+    }
 
     /// The three states are three different fills, each a step further in — and
     /// the chips of both themes are one rule.

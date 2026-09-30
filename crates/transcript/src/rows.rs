@@ -58,8 +58,9 @@ const COMMAND_KEY: &str = "command";
 pub(crate) const VALUE_LIMIT: usize = 96;
 /// Height of a collapsed tool row, so a long run of them stays a list.
 pub(crate) const TOOL_ROW_HEIGHT: Pixels = px(24.);
-/// Width of the disclosure and status columns of a tool row.
-const DISCLOSURE_WIDTH: Pixels = px(14.);
+/// The caret's column in a tool row's head: `Rows.css`'s `.tc-caret` is 16px
+/// square, holding the design's 12px chevron.
+const DISCLOSURE_WIDTH: Pixels = px(16.);
 /// The disclosure chevron: a glyph with about ten pixels of ink, centred in its
 /// own column. The glyph box is larger than the ink a chevron actually draws.
 /// Width of the key column of an expanded argument list: enough for a nested
