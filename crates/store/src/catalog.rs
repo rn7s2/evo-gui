@@ -216,7 +216,6 @@ impl Catalog {
     }
 
     /// One registration, by the pair evo identifies it with.
-    #[allow(dead_code)]
     pub fn model(&self, id: &str, provider: Option<&str>) -> Option<Model> {
         self.models()
             .into_iter()
