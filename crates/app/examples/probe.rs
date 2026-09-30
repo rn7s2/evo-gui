@@ -459,6 +459,13 @@ fn run(world: &str, out: &Path, script: &str) -> Result<(), Error> {
                     })?;
                 }
             }
+            "loads" => {
+                // The app's own background loads again — what startup runs, and
+                // what `screens.rs` runs between states: the session index a tab
+                // has just written is in the history rows only after this read.
+                cx.update(evo_desktop::start_background_loads);
+                pump(&mut cx, Duration::from_secs(2));
+            }
             "launch" => {
                 let tab = cx.update(|cx| view.read(cx).selected_tab().clone());
                 let folder = folder.clone();
