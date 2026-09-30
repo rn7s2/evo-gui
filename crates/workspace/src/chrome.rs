@@ -1447,9 +1447,9 @@ mod tests {
         }
     }
 
-    /// §7.3: the conversation is one column, top to bottom — the header, the
-    /// transcript, the composer, the status line. Everything the reader works with
-    /// is in the column the transcript is in, and the input sits under the
+    /// §7.3: the conversation is one column, top to bottom — the header band, the
+    /// transcript, and the composer's box at the foot of it. Everything the reader
+    /// works with is in the column the transcript is in, and the input sits under the
     /// transcript rather than off in a column of its own.
     #[gpui_kit::test]
     fn the_composer_sits_at_the_foot_of_the_conversation(cx: &mut TestAppContext) {
@@ -1459,21 +1459,24 @@ mod tests {
         let header = cx.update(|window, _| window.find("transcript-header").bounds());
         let column = cx.update(|window, _| window.find("conversation-column").bounds());
         let composer = cx.update(|window, _| window.find("composer").bounds());
-        let body = cx.update(|window, _| window.find("composer-body").bounds());
+        let box_ = cx.update(|window, _| window.find("composer-box").bounds());
         assert_eq!(
             header.top(),
             column.top(),
             "the header is the column's first row: {header:?} against {column:?}"
         );
-        // The header is one line of text, its padding and its hairline, whatever
-        // the theme makes those.
         assert_eq!(
             header.size.height,
-            crate::tab_page::HEADER_HEIGHT,
-            "the header is as tall as it has always been"
+            px(store::design::HEADER_HEIGHT),
+            "the band is the design's own height"
+        );
+        assert_eq!(
+            composer.bottom(),
+            column.bottom(),
+            "the box is the column's last row: {composer:?} against {column:?}"
         );
         assert!(
-            composer.top() >= header.bottom(),
+            composer.top() > header.bottom(),
             "the input is under the transcript, not over it: {composer:?} against {header:?}"
         );
         assert!(
@@ -1481,71 +1484,30 @@ mod tests {
             "and it is the column's own width: {composer:?} against {column:?}"
         );
 
-        // The action is under the input, on its own row, with the room the
-        // composer keeps there.
+        // The box on the reading measure, with the input inside it and the action at
+        // the foot of it.
+        assert_eq!(
+            box_.size.width,
+            px(store::design::MEASURE - 2. * store::design::INSET),
+            "the box is the measure, less the page's insets: {box_:?}"
+        );
+        assert!(
+            box_.top() == composer.top() + px(4.),
+            "the dock's own 4px above the box: {box_:?} against {composer:?}"
+        );
         let button = cx.update(|window, _| window.find(composer::BUTTON_ID).bounds());
         assert!(
-            button.top() > body.top(),
-            "the action is below the input, not beside it: {button:?}"
+            button.bottom() <= box_.bottom() && button.top() >= box_.top(),
+            "the action is inside the box: {button:?} against {box_:?}"
         );
-        assert!(
-            button.size.height <= px(28.),
-            "one control high: {button:?}"
-        );
-        assert!(
-            body.left() >= composer.left() && body.right() <= composer.right(),
-            "the input is drawn inside the composer: {body:?} against {composer:?}"
-        );
-        assert!(
-            body.size.width > column.size.width / 2.,
-            "and that is the column's own width, not a column of its own: {body:?} against {column:?}"
-        );
-    }
+        assert_eq!(button.size.height, px(28.), "one control high: {button:?}");
 
-    /// §7.3: the status line belongs to the page, not to the composer. It is the
-    /// conversation's last row — full width, under the transcript, the todos and
-    /// the composer — and the composer's own row is the input and the action alone.
-    #[gpui_kit::test]
-    fn the_status_line_is_the_foot_of_the_conversation(cx: &mut TestAppContext) {
-        let (_view, cx) = page_window(cx, test_root("status"), (1280., 800.));
-        cx.update(|window, cx| window.render_frame(cx));
-
-        let line = cx.update(|window, _| window.find(crate::READOUT_LINE_ID).bounds());
-        let column = cx.update(|window, _| window.find("conversation-column").bounds());
-        let header = cx.update(|window, _| window.find("transcript-header").bounds());
-        let composer = cx.update(|window, _| window.find("composer").bounds());
-        assert!(
-            line.bottom() == column.bottom(),
-            "the line is the column's last row: {line:?} against {column:?}"
-        );
-        assert!(
-            line.top() > header.bottom(),
-            "and it is under the transcript, not over it: {line:?} against {header:?}"
-        );
-        assert!(
-            (line.size.width - column.size.width).abs() <= px(1.),
-            "it spans the column: {line:?} against {column:?}"
-        );
-        let page = cx.update(|window, _| window.find("tab-page").bounds());
-        assert!(
-            line.left() >= page.left() && line.right() <= page.right(),
-            "the conversation's own foot, inside the page: {line:?} against {page:?}"
-        );
-        assert!(
-            line.top() >= composer.bottom(),
-            "and the composer is above it: {line:?} against {composer:?}"
-        );
-
-        // The composer's row: the input above, the action below it. Whatever the
-        // composer can still draw for itself, the page is not showing it.
+        // The status line the page used to draw is gone: its own words are the chips
+        // on the box's foot row now.
         cx.update(|window, _| {
             assert!(
-                window.try_find(composer::READOUT_ID).is_none(),
-                "the status line is not in the composer any more"
-            );
-            assert!(
-                window.find(composer::BUTTON_ID).visible(),
-                "the action is, where the reader expects it"
+                window.try_find("status-readout").is_none(),
+                "the readout line is not drawn under the transcript any more"
             );
         });
     }

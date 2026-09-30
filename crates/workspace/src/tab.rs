@@ -311,6 +311,9 @@ enum Pending {
     Send,
     /// A `run.interrupt`, from the button, from a lane's Stop, or from `Esc`.
     Interrupt,
+    /// `model.set` or `thinking.set`, from a drawer. The composer's button has nothing
+    /// to do with these: the reply only releases the composer's own in-flight flag.
+    Settings,
 }
 
 /// One tab's live swarm: the engine, the model its updates land in, and the pump
@@ -378,10 +381,6 @@ impl TabContent {
         );
 
         let composer = cx.new(|cx| Composer::new(window, cx));
-        // The status line is the tab page's, under the transcript, where it can
-        // name the agent being shown rather than the coordinator alone (§7.3):
-        // the composer keeps the input and the button.
-        composer.update(cx, |composer, cx| composer.set_show_readout(false, cx));
         let composer_subscription = cx.subscribe_in(
             &composer,
             window,
@@ -1087,18 +1086,36 @@ impl TabContent {
                 view.update(cx, |view, cx| view.set_todos(todos, cx));
             }
         }
-        let live = self.live.as_ref().expect("checked above");
-        let (left, right) = session::ordered_segments(live.model.selected_segments());
-        let left: Vec<session::Segment> = left.into_iter().cloned().collect();
-        let right: Vec<session::Segment> = right.into_iter().cloned().collect();
-        let swarm_busy = swarm_is_busy(&live.model);
-        self.composer.update(cx, |composer, cx| {
-            composer.set_segments(&left, &right, cx);
-            composer.set_swarm_busy(swarm_busy, cx);
-        });
-        // The left column takes the same facts, on the same batch (§7.3).
+        self.sync_composer(cx);
+        // The lane column takes the same facts, on the same batch (§7.3).
         self.sync_agents(cx);
         cx.notify();
+    }
+
+    /// Feed the composer from the model: the selected agent's own topic state — the
+    /// chips, the todos, the model and the goal it draws (CONTRACT §4.2) — and whether
+    /// this box may change the model and the effort.
+    ///
+    /// `model.set` and `thinking.set` act on the session (CONTRACT §5), and a lane's
+    /// model is the swarm's, fixed when it starts. So the coordinator's drawer is live
+    /// and a lane's states what it runs (§7.3).
+    fn sync_composer(&mut self, cx: &mut Context<Self>) {
+        let Some(live) = self.live.as_ref() else {
+            return;
+        };
+        let selected = live.model.selected();
+        let empty = session::TopicState::default();
+        let state = live.model.state(selected).unwrap_or(&empty).clone();
+        let busy = swarm_is_busy(&live.model);
+        let name = match selected {
+            AgentKey::Coordinator => "Coordinator".to_string(),
+            AgentKey::Lane(n) => format!("lane {n}"),
+        };
+        let settable = selected == AgentKey::Coordinator;
+        self.composer.update(cx, |composer, cx| {
+            composer.set_agent(&state, &name, settable, cx);
+            composer.set_swarm_busy(busy, cx);
+        });
     }
 
     /// Feed the agent list from the model: the rows, the coordinator's status and step
@@ -1263,6 +1280,15 @@ impl TabContent {
                     ComposerEvent::StopSwarm => (live.model.interrupt_swarm(), Pending::Interrupt),
                     ComposerEvent::Interrupt => {
                         (live.model.interrupt_session(), Pending::Interrupt)
+                    }
+                    // The drawer's two settings are the session's (CONTRACT §5): the
+                    // composer only offers them for the coordinator.
+                    ComposerEvent::ModelSet { id, provider } => (
+                        session::OpRequest::model_set(&id, Some(&provider)),
+                        Pending::Settings,
+                    ),
+                    ComposerEvent::ThinkingSet(level) => {
+                        (session::OpRequest::thinking_set(&level), Pending::Settings)
                     }
                 };
                 // The engine mints the request's id, and the reply comes back tagged
@@ -1596,7 +1622,7 @@ impl Render for TabContent {
         // ticker ends itself the moment it is not, and asks nothing of the
         // server (§7.3).
         self.ensure_step_ticker(window, cx);
-        self.render_for_state(cx)
+        self.render_for_state(window, cx)
     }
 }
 

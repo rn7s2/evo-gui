@@ -257,6 +257,25 @@ impl Catalog {
     }
 
     /// Entries evo could not encode, named rather than dropped silently (§5.6).
+    /// The thinking levels the server accepts, in its order — `thinking_levels`,
+    /// which CONTRACT §5.6 calls authoritative: a client never hard-codes the
+    /// ladder (`off low medium high xhigh max` on a full registration).
+    ///
+    /// A body without the key names none, which is not the same as an empty
+    /// ladder: the caller shows no effort control rather than inventing rungs.
+    pub fn thinking_levels(&self) -> Vec<String> {
+        self.body
+            .get("thinking_levels")
+            .and_then(Value::as_array)
+            .map(|levels| {
+                levels
+                    .iter()
+                    .filter_map(|level| level.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub fn warnings(&self) -> Vec<String> {
         string_array(self.body.get("warnings"))
     }
@@ -395,6 +414,19 @@ mod tests {
             ]},
             "warnings": ["mcp[2] could not be encoded"]
         })
+    }
+
+    /// The effort ladder is the server's, in the server's order (CONTRACT §5.6):
+    /// the list a client shows is read, never written down here.
+    #[test]
+    fn the_thinking_levels_are_read_in_the_servers_order() {
+        let catalog = Catalog::from_json(body());
+        assert_eq!(
+            catalog.thinking_levels(),
+            ["off", "low", "medium", "high", "xhigh"]
+        );
+        // A body that names none names none — not an empty list of rungs.
+        assert!(Catalog::empty().thinking_levels().is_empty());
     }
 
     #[test]
