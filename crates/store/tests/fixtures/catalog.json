@@ -1,0 +1,34 @@
+{
+  "models": [
+    {"id": "claude-opus-5", "provider": "anthropic", "name": "Claude Opus 5",
+     "api": "anthropic-messages", "context_window": 200000,
+     "reasoning": true, "images": true, "ready": true, "reason": null},
+    {"id": "ark-deepseek-v4.1-flash", "provider": "aiden", "name": "DeepSeek V4.1 Flash",
+     "api": "ark-chat", "context_window": 936000,
+     "reasoning": false, "images": false, "ready": true, "reason": null},
+    {"id": "claude-sonnet-5", "provider": "proxy", "name": "Claude Sonnet 5",
+     "api": "anthropic-oauth-messages", "context_window": 1000000,
+     "reasoning": true, "images": true, "ready": false, "reason": "no credential"}
+  ],
+  "providers": [
+    {"name": "anthropic", "api": "anthropic-messages", "has_key": true, "key_env": "ANTHROPIC_API_KEY"},
+    {"name": "proxy", "api": "anthropic-oauth-messages", "has_key": false, "key_env": null}
+  ],
+  "default_model": {"id": "ark-deepseek-v4.1-flash", "provider": "aiden"},
+  "thinking_levels": ["off", "low", "medium", "high", "xhigh"],
+  "languages": [{"code": "en", "name": "English"}, {"code": "zh", "name": "中文"}],
+  "ops": [
+    {"name": "input.send", "args": {"type": "object"}, "precondition": "none"},
+    {"name": "context.compact", "args": {"type": "object"}, "precondition": "idle"}
+  ],
+  "commands": [{"name": "model", "description": "Choose a model", "args_hint": "[id]"}],
+  "skills": [{"name": "humanizer", "description": "Take the AI out of the prose"}],
+  "tools": [{"name": "bash", "description": "Run a shell command"}],
+  "lanes": {"models": [
+    {"id": "claude-opus-5", "provider": "anthropic", "ok": true, "reason": null},
+    {"id": "ark-deepseek-v4.1-flash", "provider": "aiden", "ok": true, "reason": null},
+    {"id": "claude-sonnet-5", "provider": "proxy", "ok": false,
+     "reason": "api anthropic-oauth-messages is not in a lane"}
+  ]},
+  "warnings": ["mcp[2] could not be encoded"]
+}

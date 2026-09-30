@@ -4,13 +4,12 @@
 //! ~/.evo/desktop/
 //!   app.json           window bounds, tab set, binary paths, schema version
 //!   lock               single-instance lock (flock; pid inside)
-//!   model-cache.json   last /registry snapshot, for the empty tab's choosers
-//!   probe/             scratch cwd used only to learn the model catalog
-//!   tabs/<id>/         token (0600, written by the server), swarm.log, tab.json
+//!   model-cache.json   last `catalog --json` body, for the empty tab's choosers
+//!   tabs/<id>/         ready.json (0600, written by the server), swarm.log, tab.json
 //! ```
 //!
-//! Nothing here is ever written outside `root` — the sole exception is the
-//! managed block in a project's `.evo/swarm.lisp` (§9.6, see [`crate::swarm_config`]).
+//! Nothing here is ever written outside `root`. The app writes no project file:
+//! `swarm.lisp` belongs to the folder's author (§9, F3).
 
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -20,8 +19,9 @@ use std::path::{Path, PathBuf};
 
 use crate::time;
 
-/// Name of the per-tab bearer-token file, as passed to the server's `--token-file`.
-pub const TOKEN_FILE: &str = "token";
+/// Name of the per-tab ready file, as passed to the server's `--ready-file`: the
+/// port, url and bearer token it writes once it is listening (§1).
+pub const READY_FILE: &str = "ready.json";
 /// Name of a tab's captured stdout+stderr.
 pub const LOG_FILE: &str = "swarm.log";
 /// Name of a tab's own descriptor.
@@ -159,10 +159,6 @@ impl Root {
         self.path.join("model-cache.json")
     }
 
-    pub fn probe_dir(&self) -> PathBuf {
-        self.path.join("probe")
-    }
-
     pub fn activate_sock(&self) -> PathBuf {
         self.path.join(ACTIVATE_SOCK)
     }
@@ -179,11 +175,12 @@ impl Root {
         self.tab_dir(id).join(TAB_FILE)
     }
 
-    /// Where the server writes its bearer token (`--token-file`). We hand the
-    /// path to the server and never write, read or log the file itself
-    /// (§2 rule 4).
-    pub fn tab_token(&self, id: &TabId) -> PathBuf {
-        self.tab_dir(id).join(TOKEN_FILE)
+    /// Where the server writes its ready file (`--ready-file`). We hand the
+    /// path to the server and never write the file ourselves; what it holds —
+    /// the port, the url and the bearer token — is read from there and never
+    /// logged (§2 rule 4).
+    pub fn tab_ready(&self, id: &TabId) -> PathBuf {
+        self.tab_dir(id).join(READY_FILE)
     }
 
     /// Where a tab's `evo-swarm serve` stdout+stderr go (§3).
@@ -205,15 +202,7 @@ impl Root {
         Ok(dir)
     }
 
-    /// Create the scratch cwd the model-catalog probe runs in (§9.4).
-    pub fn ensure_probe_dir(&self) -> io::Result<PathBuf> {
-        self.ensure()?;
-        let dir = self.probe_dir();
-        create_dir_private(&dir)?;
-        Ok(dir)
-    }
-
-    /// Delete a closed tab's directory (token, log, tab.json). A no-op when it
+    /// Delete a closed tab's directory (ready file, log, tab.json). A no-op when it
     /// is already gone; refuses anything that is not a plain directory inside
     /// `tabs/`.
     pub fn remove_tab_dir(&self, id: &TabId) -> io::Result<()> {
@@ -366,13 +355,12 @@ mod tests {
             root.model_cache(),
             PathBuf::from("/tmp/whatever/model-cache.json")
         );
-        assert_eq!(root.probe_dir(), PathBuf::from("/tmp/whatever/probe"));
         let id = TabId::new();
         assert_eq!(
             root.tab_dir(&id),
             PathBuf::from(format!("/tmp/whatever/tabs/{id}"))
         );
-        assert_eq!(root.tab_token(&id), root.tab_dir(&id).join("token"));
+        assert_eq!(root.tab_ready(&id), root.tab_dir(&id).join("ready.json"));
         assert_eq!(root.tab_log(&id), root.tab_dir(&id).join("swarm.log"));
     }
 

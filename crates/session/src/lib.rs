@@ -241,10 +241,9 @@ pub use cache::{
 pub use effect::{Effect, RowChanges};
 pub use lanes::{lane_task_label, short_duration, LaneList, LaneRow, SwarmInfo};
 pub use launcher::{
-    coordinator_chooser, history_rows, home_short, lanes_chooser, lanes_model_note, relative_time,
-    swarm_lisp_path, swarm_workers_setting, workers_chooser, Choice, Chooser, ChooserOption,
-    HistoryEntry, HistoryRow, HistorySource, LaunchPlan, Launcher, When, DEFAULT_KEY,
-    NEEDS_EXTENSION_API, WORKERS_MAX,
+    coordinator_chooser, history_rows, home_short, lanes_chooser, relative_time,
+    thinking_chooser, workers_chooser, Choice, Chooser, ChooserOption, HistoryEntry, HistoryRow,
+    HistorySource, LaunchPlan, Launcher, Problem, ProblemTarget, DEFAULT_KEY, WORKERS_MAX,
 };
 pub use model::{AgentModel, StepClock};
 pub use readout::{k_tokens, round_div_half_even, CacheTotals, GoalState, Readout};
