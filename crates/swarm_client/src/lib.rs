@@ -57,7 +57,6 @@ pub use protocol::{
     SessionRef, Snapshot, StreamFrame, StreamResetReason, TopicResetReason, TOPIC_LANE_WILDCARD,
     TOPIC_SESSION, TOPIC_SWARM,
 };
-pub use redact::{redact, redact_json, MASK};
 pub use server::{
     log_tail, process_alive, BootCancel, Server, ServerConfig, Shutdown, ShutdownOutcome,
     StdinClose, SCRUB_ENV,

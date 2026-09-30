@@ -31,8 +31,9 @@ pub enum Update {
         port: u16,
         session: SessionRef,
     },
-    /// The server never came up; `log_tail` is what the tab shows.
-    BootFailed { message: String, log_tail: String },
+    /// The server never came up: `reason` is one line for the caption and
+    /// `log_tail` is the last of its log. The tab offers Retry.
+    BootFailed { reason: String, log_tail: String },
     /// One topic of a snapshot (§5.2), exactly as the server sent it: the body
     /// of `topics[name]` — `{state, items, has_more}`. `TabModel::on_snapshot`.
     Snapshot {

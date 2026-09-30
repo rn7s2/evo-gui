@@ -82,12 +82,18 @@ fn snapshot_of(topic: &str) -> impl Fn(&Update) -> bool + '_ {
     move |update| matches!(update, Update::Snapshot { topic: name, .. } if name == topic)
 }
 
-/// The epoch and process id the tab's server announced.
-fn ready(feed: &mut Feed) -> (String, u32) {
+/// Wait until the tab is serving *and* streaming: the epoch and process id it
+/// announced, and the stream live. A test that drives the server must not do it
+/// before the tab is listening to it.
+fn serving(feed: &mut Feed) -> (String, u32) {
     let update = feed.expect("Ready", |update| matches!(update, Update::Ready { .. }));
     let Update::Ready { epoch, pid, .. } = update else {
         unreachable!()
     };
+    feed.expect(
+        "the live stream",
+        |update| matches!(update, Update::Stream { status } if !status.is_reconnecting()),
+    );
     (epoch, pid)
 }
 
@@ -115,7 +121,7 @@ fn a_tab_boots_snapshots_every_topic_and_streams() {
         seen: Vec::new(),
     };
     feed.expect("Booting", |update| matches!(update, Update::Booting));
-    let (epoch, pid) = ready(&mut feed);
+    let (epoch, pid) = serving(&mut feed);
     assert!(!epoch.is_empty());
     assert!(pid > 0);
 
@@ -129,11 +135,7 @@ fn a_tab_boots_snapshots_every_topic_and_streams() {
         assert!(body.get("state").is_some(), "{topic}: {body}");
     }
 
-    // The stream is live, and the tab said so once.
-    feed.expect(
-        "the stream badge",
-        |update| matches!(update, Update::Stream { status } if !status.is_reconnecting()),
-    );
+    // `serving` waited for the live stream, and the tab's own server answers.
     assert!(Control::attach(dir.path()).is_ok());
     drop(handle);
 }
@@ -145,7 +147,7 @@ fn a_frame_reaches_the_model_as_an_op() {
         updates,
         seen: Vec::new(),
     };
-    ready(&mut feed);
+    serving(&mut feed);
     let control = Control::attach(dir.path()).unwrap();
     control
         .emit(json!({
@@ -182,7 +184,7 @@ fn a_topic_reset_re_reads_that_one_topic() {
         updates,
         seen: Vec::new(),
     };
-    ready(&mut feed);
+    serving(&mut feed);
     let control = Control::attach(dir.path()).unwrap();
     feed.expect("the first snapshot", snapshot_of("session"));
 
@@ -220,7 +222,7 @@ fn a_stream_reset_re_snapshots_everything_and_resumes_the_stream() {
         updates,
         seen: Vec::new(),
     };
-    ready(&mut feed);
+    serving(&mut feed);
     let control = Control::attach(dir.path()).unwrap();
     feed.expect("the first snapshot", snapshot_of("session"));
     control.requests(); // forget the boot's requests
@@ -266,7 +268,7 @@ fn a_refetch_asks_for_every_topic_again() {
         updates,
         seen: Vec::new(),
     };
-    ready(&mut feed);
+    serving(&mut feed);
     feed.expect("the first snapshot", snapshot_of("session"));
 
     assert!(handle.refetch());
@@ -281,7 +283,7 @@ fn a_request_from_the_model_becomes_a_post() {
         updates,
         seen: Vec::new(),
     };
-    ready(&mut feed);
+    serving(&mut feed);
     let control = Control::attach(dir.path()).unwrap();
     control.requests();
 
@@ -315,7 +317,7 @@ fn the_model_can_be_driven_entirely_from_the_updates() {
         updates,
         seen: Vec::new(),
     };
-    ready(&mut feed);
+    serving(&mut feed);
     let control = Control::attach(dir.path()).unwrap();
     let mut model = TabModel::new();
 
@@ -352,7 +354,7 @@ fn an_append_carries_its_id_field_and_text() {
         updates,
         seen: Vec::new(),
     };
-    ready(&mut feed);
+    serving(&mut feed);
     let control = Control::attach(dir.path()).unwrap();
     control
         .emit(json!({
@@ -389,7 +391,7 @@ fn a_server_that_dies_is_reported_and_the_tab_stops() {
         updates,
         seen: Vec::new(),
     };
-    let (_, pid) = ready(&mut feed);
+    let (_, pid) = serving(&mut feed);
 
     // Kill the process behind the tab: the stream cannot come back, and the tab
     // says so rather than reconnecting for ever.
@@ -406,7 +408,7 @@ fn dropping_the_handle_stops_the_server() {
         updates,
         seen: Vec::new(),
     };
-    let (_, pid) = ready(&mut feed);
+    let (_, pid) = serving(&mut feed);
     assert!(swarm_client::process_alive(pid));
 
     drop(handle);
@@ -424,7 +426,7 @@ fn joining_waits_for_the_server_to_be_gone() {
         updates,
         seen: Vec::new(),
     };
-    let (_, pid) = ready(&mut feed);
+    let (_, pid) = serving(&mut feed);
     handle.join();
     assert!(!swarm_client::process_alive(pid));
 }
@@ -444,10 +446,10 @@ fn a_boot_that_fails_says_so_with_the_log_tail() {
     let update = feed.expect("BootFailed", |update| {
         matches!(update, Update::BootFailed { .. })
     });
-    let Update::BootFailed { message, log_tail } = update else {
+    let Update::BootFailed { reason, log_tail } = update else {
         unreachable!()
     };
-    assert!(message.contains("exited during startup"), "{message}");
+    assert!(reason.contains("exited during startup"), "{reason}");
     assert!(log_tail.contains("boom"), "{log_tail}");
     drop(handle);
 }

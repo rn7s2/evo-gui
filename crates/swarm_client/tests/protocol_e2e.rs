@@ -328,7 +328,7 @@ fn a_server_that_exits_during_boot_names_the_exit() {
         panic!("{error:?}")
     };
     assert_eq!(failure.exit_code, Some(3));
-    assert!(failure.message.contains("exited during startup"));
+    assert!(failure.reason.contains("exited during startup"));
 }
 
 #[test]
@@ -344,9 +344,9 @@ fn a_server_that_never_writes_its_ready_file_times_out() {
         panic!("{error:?}")
     };
     assert!(
-        failure.message.contains("no ready file"),
+        failure.reason.contains("no ready file"),
         "{}",
-        failure.message
+        failure.reason
     );
 }
 

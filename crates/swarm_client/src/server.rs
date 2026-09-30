@@ -371,7 +371,7 @@ impl Server {
             match child.try_wait() {
                 Ok(Some(status)) => {
                     return Err(Error::Boot(Box::new(BootFailure {
-                        message: format!("the server exited during startup ({status})"),
+                        reason: format!("the server exited during startup ({status})"),
                         log_tail: log_tail(&cfg.log_path, 40),
                         log_path: Some(cfg.log_path.clone()),
                         exit_code: status.code(),
@@ -397,7 +397,7 @@ impl Server {
                 let mut proc = Proc::new(child, stdin.clone(), cfg);
                 proc.stop(None, cfg.shutdown_grace, cfg.term_grace);
                 return Err(Error::Boot(Box::new(BootFailure {
-                    message: format!(
+                    reason: format!(
                         "no ready file at {} after {:?}",
                         cfg.ready_file.display(),
                         cfg.ready_timeout
