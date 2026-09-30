@@ -126,10 +126,22 @@ pub fn launch_env(cx: &App) -> workspace::LaunchEnv {
         swarm_bin: shell.binaries.evo_swarm.clone(),
         agent_bin: shell.binaries.evo_agent.clone(),
         root: shell.root.clone(),
-        env: Vec::new(),
+        env: HOST_ENV
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect(),
         env_remove: Vec::new(),
     }
 }
+
+/// What every swarm the app starts is told about its host.
+///
+/// `EVO_BABY_EVO=0`: the "Baby Evo: I'm done!" banner (evo's
+/// `extensions/360-baby-evo.lisp`) is for a terminal left in the background; in
+/// the desktop app the tab's own dot already says a swarm finished, so the
+/// extension stays silent for the sessions this app runs — and only for those:
+/// the user's `init.lisp` and a terminal `evo` keep it.
+pub const HOST_ENV: &[(&str, &str)] = &[("EVO_BABY_EVO", "0")];
 
 /// Open the app: one instance, one window, and the background loads. Returns
 /// when the process is done.
@@ -313,5 +325,13 @@ fn spawn_activation_watcher(
         });
     if let Err(error) = spawned {
         log.error(format!("could not start the activation watcher: {error}"));
+    }
+}
+
+#[cfg(test)]
+mod host_env_tests {
+    #[test]
+    fn the_app_silences_baby_evo_in_the_swarms_it_starts() {
+        assert!(super::HOST_ENV.contains(&("EVO_BABY_EVO", "0")));
     }
 }
