@@ -1,0 +1,12 @@
+{
+  "ok": false,
+  "model": {"id": "claude-sonnet-5", "provider": "proxy", "ok": false,
+            "reason": "no credential for provider proxy"},
+  "lane_model": {"id": "claude-sonnet-5", "provider": "proxy", "ok": false,
+                 "reason": "api anthropic-oauth-messages is not in a lane"},
+  "problems": [
+    {"code": "model_not_ready", "message": "claude-sonnet-5 has no credential; pick another model"},
+    {"code": "lane_model_not_ready",
+     "message": "a lane cannot register claude-sonnet-5\nit needs the anthropic-oauth-messages api"}
+  ]
+}

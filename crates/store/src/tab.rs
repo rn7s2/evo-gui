@@ -2,7 +2,8 @@
 //!
 //! This is what a tab needs to exist again after a relaunch: where it runs,
 //! which session it resumed, which swarm it is, and the choices it was created
-//! with. The bearer token is *not* here — the server owns that file (§2 rule 4).
+//! with. Neither the bearer token nor the port is here: the server's ready file
+//! owns those (§1, §2 rule 4).
 
 use serde::{Deserialize, Serialize};
 use std::io;
@@ -10,21 +11,16 @@ use std::path::{Path, PathBuf};
 
 use crate::paths::{self, Root, TabId};
 
-/// The models a tab was created with. `None` means **Default** — nothing is
-/// passed to the server, and the lanes model block is not written (§9.6).
+/// The models a tab was created with, each as the `ID@PROVIDER` spec the launch
+/// flags take (§1). `None` means **Default** — nothing is passed to the server,
+/// which then applies its own rule, and no project file is touched either way.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
 #[serde(default)]
 pub struct TabModels {
-    /// Coordinator model id (`--model`).
+    /// The coordinator's `--model`.
     pub coordinator: Option<String>,
-    /// Lanes model id (written into the project's `.evo/swarm.lisp`).
+    /// The lanes' `--lane-model`.
     pub lanes: Option<String>,
-}
-
-impl TabModels {
-    pub fn is_default(&self) -> bool {
-        self.coordinator.is_none() && self.lanes.is_none()
-    }
 }
 
 /// `tabs/<id>/tab.json`.
@@ -117,9 +113,11 @@ mod tests {
         };
         tab.save(&root, &id).unwrap();
         assert_eq!(TabState::load(&root, &id), tab);
-        // No token path is ever written into a tab descriptor.
+        // Neither a token nor a ready-file path is ever written into a tab
+        // descriptor: the server's own 0600 file owns both (§2 rule 4).
         let raw = fs::read_to_string(root.tab_json(&id)).unwrap();
         assert!(!raw.contains("token"), "{raw}");
+        assert!(!raw.contains("ready"), "{raw}");
         fs::remove_dir_all(root.path()).unwrap();
     }
 

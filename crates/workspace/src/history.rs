@@ -1,4 +1,4 @@
-//! The resumable swarms listed under the empty tab's choosers (§7.2, §9.5).
+//! The resumable swarms listed under the empty tab's choosers (§7.2, §2).
 //!
 //! The display strings — the folder's own name, the `~`-shortened path, the meta line and
 //! the tooltip — come from `session::HistoryRow`, which is where the §9.5 rules live (paths
@@ -60,7 +60,7 @@ pub(crate) fn folder_name(folder: &Path) -> SharedString {
 
 /// The rows a fresh tab starts with: none.
 ///
-/// The list is filled by the background scan (§9.5) through
+/// The list is filled by the session index (§2) through
 /// [`TabContent::set_history_entries`](crate::TabContent::set_history_entries); this exists
 /// so the tab's own construction has nothing to invent in the meantime.
 pub fn placeholder_history() -> Vec<HistoryRow> {
@@ -73,7 +73,7 @@ mod tests {
 
     fn session_row() -> session::HistoryRow {
         session::HistoryRow {
-            title: "foo".to_string(),
+            title: "wire the history list to the session index".to_string(),
             subtitle: "~/coding/foo".to_string(),
             meta: "4 lanes · 2h ago · coordinator: gpt-5".to_string(),
             tooltip: "/Users/you/coding/foo · 2026-09-29 09:25:44 UTC (+00:00)".to_string(),
@@ -81,7 +81,7 @@ mod tests {
             folder: "/Users/you/coding/foo".to_string(),
             coordinator_model: Some("gpt-5".to_string()),
             lanes_model: None,
-            source: session::HistorySource::Scan,
+            source: session::HistorySource::Index,
             open_at_quit: false,
         }
     }
@@ -90,7 +90,7 @@ mod tests {
     fn a_row_keeps_the_model_display_text_and_adds_the_two_paths() {
         let row = HistoryRow::from_session(&session_row());
 
-        assert_eq!(row.title, "foo");
+        assert_eq!(row.title, "wire the history list to the session index");
         assert_eq!(row.subtitle, "~/coding/foo");
         assert_eq!(row.meta, "4 lanes · 2h ago · coordinator: gpt-5");
         assert!(row.tooltip.starts_with("/Users/you/coding/foo"));

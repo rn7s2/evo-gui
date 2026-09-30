@@ -4,13 +4,13 @@
 //! then the resumable swarms — and nothing else. The choosers' options, the note under the
 //! lanes select and the history rows all come from [`session::Launcher`]; this module owns
 //! only what the session model cannot know: the select widgets, the folder dialog, whether
-//! the catalog has arrived, and whether the history scan is still running.
+//! the catalog has arrived, and whether the session index is still being fetched.
 //!
 //! ```text
-//! set_registry / set_model_cache   the model catalog (§9.4)
-//! set_history_entries              the scan's rows (§9.5)
-//! set_scanning / set_catalog_error the two states with nothing to show yet
-//! → TabContentEvent::Launch        the folder plus the choosers' plan (§7.2, §9.6)
+//! set_catalog                      the /catalog body (§5.6): the cache, or a server
+//! set_history_entries              the session index's rows (§2)
+//! set_history_loading / set_catalog_error  the two states with nothing to show yet
+//! → TabContentEvent::Launch        the folder plus the choosers' plan (§7.2, §1)
 //! → TabContentEvent::Resume        a history row, by lane 1's ListEvent subscription
 //! ```
 
@@ -33,8 +33,8 @@ use gpui_kit::{
 };
 use serde_json::Value;
 use session::{Choice, ChooserOption, HistoryEntry, LaunchPlan, Launcher, DEFAULT_KEY};
-use store::ModelCache;
-use swarm_client::{Payload, Registry};
+use store::catalog::{CheckReport, Problem, ProblemTarget};
+use store::cli;
 
 use crate::history::{rows_from_session, HistoryRow};
 use crate::tab::{TabContent, TabContentEvent};
@@ -80,12 +80,17 @@ const CAPTION_HEIGHT: Pixels = px(40.);
 const CAPTION_INDENT: Pixels = px(166.);
 const CAPTION_ID: &str = "lanes-caption";
 
-/// What the caption says when the catalog could not be read at all (§9.4): one sentence
+/// The check's problem lines under the choosers (§9): one calm line each, and a click opens
+/// the chooser the line is about. There are none when the launch is fine.
+const PROBLEMS_ID: &str = "check-problems";
+const PROBLEM_ID: &str = "check-problem";
+
+/// What the caption says when the catalog could not be fetched at all (§5.6): one sentence
 /// about what the tab still does, because the server's own words — `http 500: The value
 /// "Bearer …"` — are evidence, not a message. They go in the line's tooltip and in
 /// `app.log`; the choosers stay usable on Default, so a swarm can still be started.
 const CATALOG_FAILED: &str = "Couldn't load the model list — Default models will be used.";
-/// … and when a probe failed but the last catalog is still in the choosers.
+/// … and when the catalog could not be fetched but the last one is still in the choosers.
 const CATALOG_STALE: &str = "Couldn't refresh the model list — using the last one it loaded.";
 
 /// The caption's warning tone, for the one line that is not the page's quiet grey.
@@ -93,7 +98,7 @@ const CATALOG_STALE: &str = "Couldn't refresh the model list — using the last 
 /// The kit's `warning` is a bright amber: 13:1 on the dark theme's near-black, but 1.9:1 on
 /// the light theme's white — a 12px line nobody can read. The light theme darkens that same
 /// hue until it clears AA (`#EAB308` → `#8D6C05`, 4.9:1); the tone stays amber, which is what
-/// it means here: not an error, something to notice (§9.4).
+/// it means here: not an error, something to notice.
 fn warning_ink(theme: &Theme) -> Hsla {
     if theme.is_dark() {
         theme.warning
@@ -108,7 +113,7 @@ struct Caption {
     text: SharedString,
     tone: CaptionTone,
     /// The words behind the line, when it is a summary of something longer: the catalog
-    /// probe's own error.
+    /// command's own error.
     detail: Option<SharedString>,
 }
 
@@ -116,9 +121,9 @@ struct Caption {
 enum CaptionTone {
     /// Nothing to say yet: the catalog is on its way.
     Loading,
-    /// Something went wrong that the tab copes with (§9.4) — quiet amber, never red.
+    /// Something went wrong that the tab copes with (§5.6) — quiet amber, never red.
     Warning,
-    /// The file a chosen lanes model will be written to (§9.6).
+    /// Every lane will run the model chosen here (§1).
     Note,
 }
 
@@ -144,7 +149,7 @@ const HISTORY_LABEL: &str = "Resumable swarms";
 /// the title, with the path and the facts under it.
 const ROW_ICON_SIZE: Pixels = px(14.);
 const ROW_TITLE_SIZE: Pixels = px(15.);
-/// The badge on a row the app had open when it last quit (§9.5).
+/// The badge on a row the app had open when it last quit (§2).
 const OPEN_AT_QUIT_ID: &str = "history-open-at-quit";
 const OPEN_AT_QUIT_TEXT: &str = "open at last quit";
 
@@ -155,7 +160,7 @@ struct ChooserItem {
     /// Stable identity of the option: what the launcher is told was chosen.
     key: SharedString,
     label: SharedString,
-    /// The detail under the label: the context window and what else the registry knows, or
+    /// The detail under the label: the context window and what else the catalog knows, or
     /// the reason the option cannot be used.
     detail: SharedString,
     available: bool,
@@ -192,7 +197,7 @@ impl SelectItem for ChooserItem {
     }
 
     /// A lanes model a lane cannot register is shown, not hidden: seeing why is the point
-    /// (§9.4).
+    /// (§5.6).
     fn disabled(&self) -> bool {
         !self.available
     }
@@ -252,7 +257,7 @@ impl Choosers {
         chosen_label(&self.state, Choice::Coordinator, cx)
     }
 
-    /// The chosen lanes model's label (§9.6).
+    /// The chosen lanes model's label.
     pub(crate) fn lanes_model(&self, cx: &App) -> SharedString {
         chosen_label(&self.state, Choice::Lanes, cx)
     }
@@ -262,7 +267,7 @@ impl Choosers {
         chosen_label(&self.state, Choice::Workers, cx)
     }
 
-    /// What the three choosers add up to (§7.2, §9.6).
+    /// What the choosers add up to (§7.2, §1).
     pub(crate) fn plan(&self, cx: &App) -> LaunchPlan {
         self.state.read(cx).launcher.plan()
     }
@@ -308,14 +313,15 @@ fn chosen_label(state: &Entity<EmptyTabState>, which: Choice, cx: &App) -> Share
 }
 
 struct EmptyTabState {
-    /// The choosers' model: options, the chosen keys, and the history rows (§7.2, §9.5).
+    /// The choosers' model: options, the chosen keys, and the history rows (§7.2, §2).
     launcher: Launcher,
     coordinator: Entity<SelectState<Vec<ChooserItem>>>,
     lanes: Entity<SelectState<Vec<ChooserItem>>>,
+    lane_thinking: Entity<SelectState<Vec<ChooserItem>>>,
     workers: Entity<SelectState<Vec<ChooserItem>>>,
     /// The home directory the `~` paths are shortened around.
     home: Option<String>,
-    /// The catalog has arrived, from the cache or from a probe: until it has, the model
+    /// The catalog has arrived, from the cache or from a server: until it has, the model
     /// choosers hold nothing but Default.
     catalog: bool,
     /// The catalog could not be read: shown instead of the loading hint.
@@ -323,20 +329,37 @@ struct EmptyTabState {
     /// The swarm binary cannot be run at all (§9.7): the line under the folder card. The
     /// app's words, so the tab does not have to know what a `--version` is.
     swarm_problem: Option<String>,
+    /// The `evo-swarm` a check runs. The app's own path from Settings, so the check is
+    /// about the swarm this app would really spawn.
+    swarm_bin: PathBuf,
+    /// What the last check found wrong with the launch the choosers describe (§9). One line
+    /// each, in evo's own words; empty when the launch is fine.
+    problems: Vec<Problem>,
+    /// Bumped on every check asked: an answer that is no longer the newest is dropped before
+    /// it is applied.
+    check_revision: u64,
+    /// Where a check's answer comes from.
+    check_probe: CheckProbe,
     /// Where a folder pick answers from.
     picker: FolderPicker,
-    /// The folder the app expects to be picked — the last one used, say — so the
-    /// `swarm.lisp` note can name a real path before the dialog answers. `None` keeps the
-    /// generic `<folder>`.
-    folder_hint: Option<PathBuf>,
     /// The folder card's own focus handle, so keyboard traversal and the focus ring have
     /// somewhere to land.
     folder_focus: FocusHandle,
-    /// DEBUG experiment
     history_focus: FocusHandle,
     /// The tab that owns this state: what a launch is emitted on.
     tab: WeakEntity<TabContent>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// Where a check's answer comes from: the swarm binary, or an answer already known.
+#[derive(Clone, Default)]
+enum CheckProbe {
+    /// Run it: `evo-swarm check --json`, on the app's own executor.
+    #[default]
+    Command,
+    /// Answer from this list, starting no process. For tests, which must not wait on a
+    /// swarm binary.
+    Fixed(Vec<Problem>),
 }
 
 impl EmptyTabState {
@@ -344,6 +367,7 @@ impl EmptyTabState {
         let launcher = Launcher::new();
         let coordinator = chooser_state(&launcher, Choice::Coordinator, window, cx);
         let lanes = chooser_state(&launcher, Choice::Lanes, window, cx);
+        let lane_thinking = chooser_state(&launcher, Choice::LaneThinking, window, cx);
         let workers = chooser_state(&launcher, Choice::Workers, window, cx);
         let subscriptions = vec![
             cx.subscribe_in(
@@ -361,6 +385,13 @@ impl EmptyTabState {
                 },
             ),
             cx.subscribe_in(
+                &lane_thinking,
+                window,
+                |this, _, event: &SelectEvent<Vec<ChooserItem>>, window, cx| {
+                    this.on_choose(Choice::LaneThinking, event, window, cx)
+                },
+            ),
+            cx.subscribe_in(
                 &workers,
                 window,
                 |this, _, event: &SelectEvent<Vec<ChooserItem>>, window, cx| {
@@ -372,13 +403,19 @@ impl EmptyTabState {
             launcher,
             coordinator,
             lanes,
+            lane_thinking,
             workers,
             home: std::env::var("HOME").ok(),
             catalog: false,
             catalog_error: None,
             swarm_problem: None,
+            // The app hands its own path in as soon as it can; until then this is where the
+            // installed binary is (§1).
+            swarm_bin: cli::swarm_bin(),
+            problems: Vec::new(),
+            check_revision: 0,
+            check_probe: CheckProbe::default(),
             picker: FolderPicker::Dialog,
-            folder_hint: None,
             folder_focus: cx.focus_handle(),
             history_focus: cx.focus_handle().tab_stop(true),
             tab,
@@ -386,8 +423,18 @@ impl EmptyTabState {
         }
     }
 
+    /// The select widget of one chooser row: what a click on a problem line focuses.
+    fn select(&self, which: Choice) -> Entity<SelectState<Vec<ChooserItem>>> {
+        match which {
+            Choice::Coordinator => self.coordinator.clone(),
+            Choice::Lanes => self.lanes.clone(),
+            Choice::LaneThinking => self.lane_thinking.clone(),
+            Choice::Workers => self.workers.clone(),
+        }
+    }
+
     /// A chooser committed an option. The launcher is the one who decides whether it means
-    /// anything: a rebuilt chooser can drop a choice that no longer exists (§9.4).
+    /// anything: a rebuilt chooser can drop a choice that no longer exists.
     fn on_choose(
         &mut self,
         which: Choice,
@@ -399,6 +446,8 @@ impl EmptyTabState {
             return;
         };
         if self.launcher.select(which, key) {
+            // A different launch is a different answer: ask again (§9).
+            self.run_check(cx);
             cx.notify();
         }
     }
@@ -406,11 +455,13 @@ impl EmptyTabState {
     /// Rebuild the selects from the launcher: the catalog arrived, or the project's worker
     /// count did.
     fn sync_choosers(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        for (which, state) in [
-            (Choice::Coordinator, self.coordinator.clone()),
-            (Choice::Lanes, self.lanes.clone()),
-            (Choice::Workers, self.workers.clone()),
+        for which in [
+            Choice::Coordinator,
+            Choice::Lanes,
+            Choice::LaneThinking,
+            Choice::Workers,
         ] {
+            let state = self.select(which);
             let items: Vec<ChooserItem> = self
                 .launcher
                 .chooser(which)
@@ -430,41 +481,100 @@ impl EmptyTabState {
         }
     }
 
-    /// The model catalog, from the cache or from a live server or probe (§9.4).
-    fn set_registry(
-        &mut self,
-        registry: &Payload<Registry>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    /// The catalog: the `/catalog` body (§5.6) the disk cache holds, or the one the running
+    /// server just answered with.
+    ///
+    /// The body carries everything the choosers need — the models with their `ready`/`reason`,
+    /// and the `lanes.models` list with evo's own `ok`/`reason` for each registration a lane
+    /// may run — so nothing here has to compare API sets.
+    fn set_catalog(&mut self, catalog: &Value, window: &mut Window, cx: &mut Context<Self>) {
         self.catalog = true;
         self.catalog_error = None;
-        self.launcher.set_registry(registry.raw());
+        self.launcher.set_catalog(catalog);
         self.sync_choosers(window, cx);
+        self.run_check(cx);
         cx.notify();
     }
 
-    /// The catalog the disk cache holds (§9.4's `model-cache.json`).
-    ///
-    /// The registry is the cache's own either way; what decides which models a lane may
-    /// offer is the **kernel api set** the cache remembers, not the registry's `apis` — a
-    /// live server's `apis` also carries the APIs its extensions added, while a lane only
-    /// has the kernel's own. A cache a live refresh moved forward keeps that set
-    /// ([`ModelCache::with_live_registry`]), so the lanes chooser stays exact after one
-    /// rather than falling back to uncertain.
-    fn set_model_cache(&mut self, cache: &ModelCache, window: &mut Window, cx: &mut Context<Self>) {
-        self.catalog = !cache.is_empty();
-        self.catalog_error = None;
-        if !self.catalog {
-            // An empty cache is the same as one that never arrived: Default, and the hint.
-            cx.notify();
+    /// The swarm binary a check runs: the app's own path, from Settings (§13).
+    fn set_swarm_bin(&mut self, bin: PathBuf, cx: &mut Context<Self>) {
+        if self.swarm_bin == bin {
             return;
         }
-        self.launcher.set_registry(&cache.registry);
-        self.launcher
-            .set_kernel_apis(kernel_apis_value(&cache.kernel_apis).as_ref());
-        self.sync_choosers(window, cx);
+        self.swarm_bin = bin;
+        self.run_check(cx);
+    }
+
+    /// What a check found, without running one: the tab's answer for a test.
+    #[allow(dead_code)]
+    fn set_problems(&mut self, problems: Vec<Problem>, cx: &mut Context<Self>) {
+        self.check_probe = CheckProbe::Fixed(problems);
+        self.run_check(cx);
+    }
+
+    /// Ask `evo-swarm check --json` about the launch the choosers describe (§9), off the
+    /// thread that draws: are the models resolvable, can a lane reach its API, is the key
+    /// there. The answer is the choosers' state — the lines this tab shows under them.
+    ///
+    /// A check that cannot run at all (no binary, a crash) is not a problem with the launch:
+    /// the tab then shows nothing, and the line under the folder card is the app's own
+    /// answer to a binary that does not run (§9.7).
+    fn run_check(&mut self, cx: &mut Context<Self>) {
+        let spec = crate::launch::check_spec(&self.launcher.plan());
+        self.check_revision += 1;
+        let revision = self.check_revision;
+
+        if let CheckProbe::Fixed(problems) = self.check_probe.clone() {
+            self.settle(&problems, revision, cx);
+            return;
+        }
+
+        let bin = self.swarm_bin.clone();
+        let argv = spec.check_argv();
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            // A process, but not on the thread that draws: the app's own executor runs it.
+            let problems = cx
+                .background_executor()
+                .spawn(async move {
+                    match cli::run_json(&bin, &argv) {
+                        Ok(body) => CheckReport::from_json(&body).problems,
+                        Err(_) => Vec::new(),
+                    }
+                })
+                .await;
+            let _ = this.update(cx, |state, cx| state.settle(&problems, revision, cx));
+        })
+        .detach();
+    }
+
+    /// Take a check's answer, if it is still the answer to the newest question asked.
+    fn settle(&mut self, problems: &[Problem], revision: u64, cx: &mut Context<Self>) {
+        if self.check_revision != revision || self.problems == problems {
+            return;
+        }
+        self.problems = problems.to_vec();
         cx.notify();
+    }
+
+    /// A click on a problem line: the chooser the line is about takes the keyboard — so the
+    /// arrows are already on it — or, for anything about the machine rather than the launch,
+    /// the app's Settings panel opens.
+    fn open_target(&mut self, target: ProblemTarget, window: &mut Window, cx: &mut Context<Self>) {
+        // A problem about the machine the swarm would run on — a binary that is not there —
+        // is not about anything on this screen: the app's Settings panel is where it is
+        // fixed (§13, §9.7).
+        let Some(which) = (match target {
+            ProblemTarget::Model => Some(Choice::Coordinator),
+            ProblemTarget::LaneModel => Some(Choice::Lanes),
+            ProblemTarget::Thinking => Some(Choice::LaneThinking),
+            ProblemTarget::Workers => Some(Choice::Workers),
+            ProblemTarget::Other => None,
+        }) else {
+            window.dispatch_action(Box::new(OpenSettings), cx);
+            return;
+        };
+        let handle = self.select(which).read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
     }
 
     fn set_catalog_error(&mut self, error: Option<String>, cx: &mut Context<Self>) {
@@ -530,13 +640,13 @@ impl EmptyTabState {
     }
 
     /// The caption under the lanes chooser: the one place the empty tab says something went
-    /// wrong, something is still loading, or a lanes model will be written to a file.
+    /// wrong, something is still loading, or what a chosen lanes model will do.
     fn caption(&self) -> Option<Caption> {
         if let Some(error) = &self.catalog_error {
             // The server's own words are evidence, not a message: they go in the hover (and
-            // in `app.log`, where the probe wrote them) and the line says what the tab does
+            // in `app.log`, where the app wrote them) and the line says what the tab does
             // about it — nothing, which is why it still works: every chooser is on Default,
-            // and the folder card opens a swarm from there (§9.4).
+            // and the folder card opens a swarm from there.
             let text = if self.catalog {
                 // A cache was in use, so the last catalog is still in the choosers.
                 CATALOG_STALE
@@ -558,21 +668,14 @@ impl EmptyTabState {
         }
         let lanes = self.launcher.selected(Choice::Lanes)?;
         if lanes.key == DEFAULT_KEY {
-            // Default writes nothing: the swarm keeps the project's own configuration.
+            // Default passes no flag: every lane runs what the coordinator runs, or what the
+            // project's own `swarm.lisp` says (§1).
             return None;
         }
-        // Choosing a folder is what this screen is for, so the note usually names a
-        // placeholder; when the app already knows the folder it expects (the last one used,
-        // say) the note names that instead (§9.6).
-        let folder = match &self.folder_hint {
-            Some(folder) => folder.display().to_string(),
-            None => "<folder>".to_string(),
-        };
+        // A lane's model is a launch flag now — the app never writes the project's
+        // `swarm.lisp` — so the note says what the flag means (§1, F3).
         Some(Caption {
-            text: SharedString::from(
-                self.launcher
-                    .lanes_model_note(&folder, self.home.as_deref()),
-            ),
+            text: SharedString::from(format!("Every lane runs {} (--lane-model)", lanes.key)),
             tone: CaptionTone::Note,
             detail: None,
         })
@@ -664,7 +767,16 @@ impl EmptyTabState {
                             .child(self.chooser_row("Lanes model", "lanes-model", &self.lanes, cx))
                             .child(self.render_caption(cx)),
                     )
-                    .child(self.chooser_row("Workers", "workers", &self.workers, cx)),
+                    .child(self.chooser_row(
+                        "Lane thinking",
+                        "lane-thinking",
+                        &self.lane_thinking,
+                        cx,
+                    ))
+                    .child(self.chooser_row("Workers", "workers", &self.workers, cx))
+                    .when_some(self.render_problems(cx), |rows, problems| {
+                        rows.child(problems)
+                    }),
             )
             .child(
                 v_flex()
@@ -679,6 +791,57 @@ impl EmptyTabState {
                         |column, problem| column.child(self.render_swarm_problem(problem, cx)),
                     ),
             )
+    }
+
+    /// What `evo-swarm check --json` found wrong with this launch (§9): one calm line each,
+    /// and a click opens the chooser the line is about. Nothing at all when the launch is
+    /// fine, which is the usual case.
+    fn render_problems(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        if self.problems.is_empty() {
+            return None;
+        }
+        let ink = warning_ink(cx.theme());
+        let lines: Vec<AnyElement> =
+            self.problems
+                .iter()
+                .enumerate()
+                .map(|(ix, problem)| {
+                    let line = SharedString::from(problem.line());
+                    let hovered = line.clone();
+                    let target = problem.target();
+                    div()
+                        .id(ElementId::NamedInteger(PROBLEM_ID.into(), ix as u64))
+                        .test_support()
+                        .w_full()
+                        .min_w_0()
+                        .text_xs()
+                        .text_color(ink)
+                        .cursor_pointer()
+                        .hover(|style| style.underline())
+                        // What a screen reader hears, and what the hover shows: the message
+                        // evo wrote, one line.
+                        .aria_label(line.clone())
+                        .tooltip(move |window, cx| {
+                            Tooltip::new(hovered.clone())
+                                .max_w(px(460.))
+                                .build(window, cx)
+                        })
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.open_target(target, window, cx)
+                        }))
+                        .child(line)
+                        .into_any_element()
+                })
+                .collect();
+        Some(
+            v_flex()
+                .id(PROBLEMS_ID)
+                .test_support()
+                .ml(CAPTION_INDENT)
+                .gap_1()
+                .children(lines)
+                .into_any_element(),
+        )
     }
 
     /// The line under the folder card when the swarm binary cannot be run at all (§9.7).
@@ -856,18 +1019,6 @@ fn chooser_state(
     cx.new(|cx| SelectState::new(items, Some(IndexPath::default()), window, cx))
 }
 
-/// The kernel API set a [`ModelCache`] recorded, as the `apis` array
-/// [`Launcher::set_kernel_apis`] reads. An empty set is `None`: no probe has said, so the
-/// lanes chooser reports uncertainty rather than claiming a model works in a lane.
-fn kernel_apis_value(apis: &[String]) -> Option<Value> {
-    if apis.is_empty() {
-        return None;
-    }
-    Some(Value::Array(
-        apis.iter().cloned().map(Value::String).collect(),
-    ))
-}
-
 impl TabContent {
     /// The empty tab (§7.2): the launcher block, then the resumable swarms.
     pub(crate) fn render_empty(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -948,11 +1099,11 @@ impl TabContent {
         }
     }
 
-    /// The resumable swarms, newest first (§9.5), with the two states that have no rows.
+    /// The resumable swarms, newest first (§2), with the two states that have no rows.
     fn render_history(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.history.read(cx).delegate();
         let rows = state.rows().len();
-        let count = match (rows, state.scanning()) {
+        let count = match (rows, state.loading()) {
             (0, true) => SharedString::default(),
             (0, false) => SharedString::default(),
             (1, _) => SharedString::from("1 resumable"),
@@ -1007,28 +1158,18 @@ impl TabContent {
             )
     }
 
-    /// The model catalog (§9.4), from a live server's `/registry`, or from a probe's.
-    pub fn set_registry(
-        &mut self,
-        registry: &Payload<Registry>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    /// The model catalog (§5.6): the body the disk cache holds, or the one the running
+    /// server answered `GET /catalog` with.
+    pub fn set_catalog(&mut self, catalog: &Value, window: &mut Window, cx: &mut Context<Self>) {
         let state = self.choosers.state.clone();
-        state.update(cx, |state, cx| state.set_registry(registry, window, cx));
+        state.update(cx, |state, cx| state.set_catalog(catalog, window, cx));
         cx.notify();
     }
 
-    /// The catalog the disk cache holds (§9.4), which also carries the kernel api set a
-    /// probe learned.
-    pub fn set_model_cache(
-        &mut self,
-        cache: &ModelCache,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    /// The `evo-swarm` this app would spawn, which is the binary a check runs (§9, §13).
+    pub fn set_swarm_bin(&mut self, bin: PathBuf, cx: &mut Context<Self>) {
         let state = self.choosers.state.clone();
-        state.update(cx, |state, cx| state.set_model_cache(cache, window, cx));
+        state.update(cx, |state, cx| state.set_swarm_bin(bin, cx));
         cx.notify();
     }
 
@@ -1047,7 +1188,7 @@ impl TabContent {
         cx.notify();
     }
 
-    /// The resumable swarms the scan found (§9.5), merged with the app's own recents.
+    /// The resumable swarms the index lists (§2), merged with the app's own recents.
     /// `now` is the clock the relative times read against, `offset_seconds` the local UTC
     /// offset the rows are shown in, `home` the directory the paths are shortened around.
     pub fn set_history_entries(
@@ -1075,32 +1216,19 @@ impl TabContent {
         cx.notify();
     }
 
-    /// The background scan is still walking `~/.evo/sessions` (§9.5): the list says so
-    /// instead of claiming there is nothing.
-    pub fn set_scanning(&mut self, scanning: bool, cx: &mut Context<Self>) {
+    /// The session index is still being fetched (§2): the list says so instead of claiming
+    /// there is nothing.
+    pub fn set_history_loading(&mut self, loading: bool, cx: &mut Context<Self>) {
         self.history.update(cx, |state, cx| {
-            state.delegate_mut().set_scanning(scanning, cx)
+            state.delegate_mut().set_loading(loading, cx)
         });
         cx.notify();
     }
 
-    /// The scan could not read the sessions directory: the list says why.
+    /// The session index could not be read: the list says why.
     pub fn set_history_error(&mut self, error: Option<String>, cx: &mut Context<Self>) {
         self.history
             .update(cx, |state, cx| state.delegate_mut().set_error(error, cx));
-        cx.notify();
-    }
-
-    /// The folder the app expects to be picked — the last one used, say. Until the dialog
-    /// answers, the `swarm.lisp` note names this folder's own file instead of `<folder>`.
-    pub fn set_folder_hint(&mut self, folder: Option<PathBuf>, cx: &mut Context<Self>) {
-        let state = self.choosers.state.clone();
-        state.update(cx, |state, cx| {
-            if state.folder_hint != folder {
-                state.folder_hint = folder;
-                cx.notify();
-            }
-        });
         cx.notify();
     }
 
@@ -1111,8 +1239,8 @@ impl TabContent {
         cx.notify();
     }
 
-    /// What the three choosers add up to (§7.2, §9.6): the coordinator's `--model`, the
-    /// lanes model to write into the folder's `swarm.lisp`, and `--workers`.
+    /// What the choosers add up to (§7.2, §1): the coordinator's `--model`, the lanes'
+    /// `--lane-model` and `--lane-thinking`, and `--workers`.
     pub fn launch_plan(&self, cx: &App) -> LaunchPlan {
         self.choosers.plan(cx)
     }
@@ -1147,12 +1275,12 @@ impl TabContent {
     }
 }
 
-/// The empty tab's history list (§9.5): the rows, and the states before there are any.
+/// The empty tab's history list (§2): the rows, and the states before there are any.
 pub(crate) struct HistoryList {
     rows: Vec<HistoryRow>,
-    /// The background scan is still running.
-    scanning: bool,
-    /// The scan could not read the sessions directory at all.
+    /// The session index is still being fetched.
+    loading: bool,
+    /// The index could not be fetched.
     error: Option<String>,
     selected: Option<IndexPath>,
 }
@@ -1161,7 +1289,7 @@ impl HistoryList {
     pub(crate) fn new(rows: Vec<HistoryRow>) -> Self {
         HistoryList {
             rows,
-            scanning: false,
+            loading: false,
             error: None,
             selected: None,
         }
@@ -1175,8 +1303,8 @@ impl HistoryList {
         self.rows.get(row)
     }
 
-    pub(crate) fn scanning(&self) -> bool {
-        self.scanning
+    pub(crate) fn loading(&self) -> bool {
+        self.loading
     }
 
     fn set_rows(&mut self, rows: Vec<HistoryRow>, cx: &mut Context<ListState<Self>>) {
@@ -1189,9 +1317,9 @@ impl HistoryList {
         cx.notify();
     }
 
-    fn set_scanning(&mut self, scanning: bool, cx: &mut Context<ListState<Self>>) {
-        if self.scanning != scanning {
-            self.scanning = scanning;
+    fn set_loading(&mut self, loading: bool, cx: &mut Context<ListState<Self>>) {
+        if self.loading != loading {
+            self.loading = loading;
             cx.notify();
         }
     }
@@ -1360,7 +1488,7 @@ impl ListDelegate for HistoryList {
         cx.notify();
     }
 
-    /// Nothing to list: say which nothing it is — the scan is still running, the scan
+    /// Nothing to list: say which nothing it is — the index is still being fetched, the
     /// failed, or there is genuinely nothing to resume.
     fn render_empty(
         &mut self,
@@ -1368,7 +1496,7 @@ impl ListDelegate for HistoryList {
         cx: &mut Context<ListState<Self>>,
     ) -> impl IntoElement {
         let muted = cx.theme().muted_foreground;
-        let (line, color) = match (&self.error, self.scanning) {
+        let (line, color) = match (&self.error, self.loading) {
             (Some(error), _) => (error.clone(), cx.theme().danger),
             (None, true) => ("Scanning sessions…".to_string(), muted),
             (None, false) => ("No resumable swarms yet".to_string(), muted),
@@ -1382,7 +1510,7 @@ impl ListDelegate for HistoryList {
             .items_center()
             .text_sm()
             .text_color(color)
-            .when(self.error.is_none() && self.scanning, |row| {
+            .when(self.error.is_none() && self.loading, |row| {
                 row.child(Spinner::new().small())
             })
             .child(line)
@@ -1403,35 +1531,30 @@ mod tests {
     /// A window wide enough for the 880 px block, and tall enough for the whole screen.
     const WINDOW: (f32, f32) = (1200., 800.);
 
-    /// A registry as a `--no-userspace` probe answers it: two models under different wire
-    /// APIs, and the kernel's own api set — which is what the lanes chooser measures
-    /// against (§9.4).
-    const REGISTRY: &str = r#"{
-      "version": 1,
-      "fetched_at": "2026-09-29T09:25:44Z",
-      "kernel_apis": ["anthropic-messages"],
-      "registry": {
-        "models": [
-          {
-            "id": "ark-deepseek-v4.1-flash",
-            "provider": "aiden",
-            "api": "openai-chat",
-            "context_window": 200000,
-            "vision": false,
-            "effort": ["low", "high"]
-          },
-          {
-            "id": "claude-opus-4.5",
-            "provider": "anthropic",
-            "api": "anthropic-messages",
-            "context_window": 1000000,
-            "vision": true,
-            "effort": ["low", "max"]
-          }
-        ],
-        "apis": ["anthropic-messages"]
-      }
-    }"#;
+    /// A `/catalog` body as `evo-swarm catalog --json` prints it (§5.6): two models a lane
+    /// may run, and one whose `lanes.models` entry says it may not.
+    fn catalog_body() -> Value {
+        serde_json::json!({
+            "models": [
+                {"id": "ark-deepseek-v4.1-flash", "provider": "aiden", "name": "DeepSeek V4.1",
+                 "api": "ark-chat", "context_window": 200000,
+                 "reasoning": false, "images": false, "ready": true, "reason": null},
+                {"id": "claude-opus-4.5", "provider": "anthropic", "name": "Claude Opus 4.5",
+                 "api": "anthropic-messages", "context_window": 1000000,
+                 "reasoning": true, "images": true, "ready": true, "reason": null}
+            ],
+            "providers": [{"name": "aiden", "api": "ark-chat", "has_key": true, "key_env": null}],
+            "default_model": {"id": "ark-deepseek-v4.1-flash", "provider": "aiden"},
+            "thinking_levels": ["off", "low", "medium", "high"],
+            "languages": [{"code": "en", "name": "English"}],
+            "lanes": {"models": [
+                {"id": "ark-deepseek-v4.1-flash", "provider": "aiden", "ok": false,
+                 "reason": "ark-chat is not an api a lane has"},
+                {"id": "claude-opus-4.5", "provider": "anthropic", "ok": true, "reason": null}
+            ]},
+            "warnings": []
+        })
+    }
 
     struct Fixture {
         window: AnyWindowHandle,
@@ -1465,7 +1588,7 @@ mod tests {
                 cx.new(|cx| {
                     TabContent::new(
                         crate::tab::TabId::new(1),
-                        std::sync::Arc::new(crate::SwarmConfig::default()),
+                        std::sync::Arc::new(crate::LaunchEnv::default()),
                         window,
                         cx,
                     )
@@ -1490,24 +1613,33 @@ mod tests {
         }
     }
 
-    /// A model cache on disk, as §9.4's background probe leaves it, loaded the way the app
-    /// loads it. The temp directory removes itself.
+    /// A `model-cache.json` on disk, as the app's own `catalog --json` fetch leaves it,
+    /// loaded the way the app loads it. The temp directory removes itself.
     struct CacheDir(std::path::PathBuf);
 
     impl CacheDir {
-        fn new(cx: &str) -> CacheDir {
+        fn new(catalog: &Value) -> CacheDir {
             let dir = std::env::temp_dir().join(format!(
                 "evo-desktop-empty-tab-{}-{:?}",
                 std::process::id(),
                 std::thread::current().id()
             ));
             std::fs::create_dir_all(&dir).expect("temp dir");
-            std::fs::write(dir.join("model-cache.json"), cx).expect("write cache");
+            let cache = serde_json::json!({
+                "version": 2,
+                "fetched_at": "2026-09-30T09:25:44Z",
+                "program": "evo-swarm",
+                "catalog": catalog,
+            });
+            std::fs::write(dir.join("model-cache.json"), cache.to_string()).expect("write cache");
             CacheDir(dir)
         }
 
-        fn cache(&self) -> ModelCache {
-            ModelCache::load(&Root::at(self.0.clone()))
+        /// The body the app hands the tab: what `ModelCache::load` read back.
+        fn catalog(&self) -> Value {
+            store::ModelCache::load(&Root::at(self.0.clone()))
+                .raw()
+                .clone()
         }
     }
 
@@ -1521,38 +1653,40 @@ mod tests {
         HistoryEntry {
             session_path: session.to_string(),
             folder: folder.to_string(),
-            when: session::When::Epoch(1_700_000_000 - minutes_ago * 60),
+            title: String::new(),
+            when: Some(1_700_000_000 - minutes_ago * 60),
             lanes: Some(4),
             coordinator_model: Some("ark-deepseek-v4.1-flash".to_string()),
             lanes_model: None,
-            source: session::HistorySource::Scan,
+            source: session::HistorySource::Index,
             open_at_quit: false,
         }
     }
 
-    /// The keys the lanes chooser offers, with whether each is available.
-    fn lanes_options(cx: &App, tab: &Entity<TabContent>) -> Vec<(String, bool)> {
+    /// The keys one chooser offers, with whether each is available.
+    fn options(cx: &App, tab: &Entity<TabContent>, which: Choice) -> Vec<(String, bool)> {
         tab.read(cx)
             .choosers
             .state
             .read(cx)
             .launcher
-            .lanes()
+            .chooser(which)
             .options
             .iter()
             .map(|option| (option.key.clone(), option.available))
             .collect()
     }
 
-    /// Whether the lanes chooser has not been measured against a kernel api set.
-    fn lanes_uncertain(cx: &App, tab: &Entity<TabContent>) -> bool {
+    /// The problem lines the last check left, as the tab shows them.
+    fn problem_lines(cx: &App, tab: &Entity<TabContent>) -> Vec<String> {
         tab.read(cx)
             .choosers
             .state
             .read(cx)
-            .launcher
-            .lanes()
-            .uncertain
+            .problems
+            .iter()
+            .map(|problem| problem.line())
+            .collect()
     }
 
     fn caption_text(cx: &App, tab: &Entity<TabContent>) -> String {
@@ -1603,7 +1737,7 @@ mod tests {
             assert_eq!(caption_text(cx, &f.tab), "Loading models…");
             assert!(window.find(CAPTION_ID).visible());
 
-            // Nothing has been scanned yet, so the history says so rather than showing
+            // No index has arrived yet, so the history says so rather than showing
             // placeholder rows.
             assert!(f.tab.read(cx).history_rows(cx).is_empty());
             assert!(window.find(HISTORY_HINT_ID).visible());
@@ -1612,46 +1746,48 @@ mod tests {
 
     #[gpui_kit::test]
     fn the_cached_catalog_fills_the_choosers_and_the_lanes_availability(cx: &mut TestAppContext) {
-        let cache = CacheDir::new(REGISTRY);
+        let cache = CacheDir::new(&catalog_body());
         let f = open(cx);
         f.act(cx, |window, cx| {
-            f.tab.update(cx, |tab, cx| {
-                tab.set_model_cache(&cache.cache(), window, cx)
-            });
+            f.tab
+                .update(cx, |tab, cx| tab.set_catalog(&cache.catalog(), window, cx));
             window.render_frame(cx);
 
-            // The catalog arrived: the loading hint is gone.
+            // The catalog arrived: the loading hint is gone, and both models are offered to
+            // the coordinator — a coordinator runs with the user's own userspace, so the
+            // catalog's own `ready` is the only answer it needs.
             assert_eq!(caption_text(cx, &f.tab), "");
-
-            // Both models are offered to the coordinator — the aiden one included, since a
-            // coordinator runs with the user's own userspace.
-            let coordinator: Vec<String> = lanes_options(cx, &f.tab)
-                .iter()
-                .map(|(key, _)| key.clone())
-                .collect();
+            let coordinator = options(cx, &f.tab, Choice::Coordinator);
+            assert_eq!(coordinator.len(), 3, "Default plus two models");
             assert!(
                 coordinator
                     .iter()
-                    .any(|key| key.starts_with("claude-opus-4.5")),
+                    .any(|(key, ok)| key == "claude-opus-4.5@anthropic" && *ok),
+                "{coordinator:?}"
+            );
+            assert!(
+                coordinator
+                    .iter()
+                    .any(|(key, ok)| key == "ark-deepseek-v4.1-flash@aiden" && *ok),
                 "{coordinator:?}"
             );
 
-            // A lane can only register the kernel's own wire APIs: the registry carries
-            // `apis`, so the aiden model is offered and marked unusable (§9.4).
-            let lanes = lanes_options(cx, &f.tab);
-            let available: Vec<&(String, bool)> =
+            // The lanes chooser offers the same registrations and greys out exactly the one
+            // `lanes.models` says a lane cannot run (§5.6) — evo's own words are the reason.
+            let lanes = options(cx, &f.tab, Choice::Lanes);
+            let offered: Vec<&(String, bool)> =
                 lanes.iter().filter(|(key, _)| key != DEFAULT_KEY).collect();
-            assert_eq!(available.len(), 2, "{lanes:?}");
+            assert_eq!(offered.len(), 2, "{lanes:?}");
             assert!(
-                available
+                offered
                     .iter()
-                    .any(|(key, ok)| key.starts_with("claude-opus-4.5") && *ok),
+                    .any(|(key, ok)| key == "claude-opus-4.5@anthropic" && *ok),
                 "{lanes:?}"
             );
             assert!(
-                available
+                offered
                     .iter()
-                    .any(|(key, ok)| key.starts_with("ark-deepseek") && !*ok),
+                    .any(|(key, ok)| key == "ark-deepseek-v4.1-flash@aiden" && !*ok),
                 "{lanes:?}"
             );
 
@@ -1663,73 +1799,79 @@ mod tests {
                 .state
                 .read(cx)
                 .launcher
-                .lanes()
+                .chooser(Choice::Lanes)
                 .options
                 .iter()
                 .find(|option| !option.available)
                 .expect("an unavailable lanes model");
             let item = ChooserItem::from(blocked);
             assert!(item.disabled(), "{}", item.label);
-            assert!(item.detail.contains("extension API"), "{}", item.detail);
+            assert!(
+                item.detail.contains("not an api a lane has"),
+                "{}",
+                item.detail
+            );
+
+            // The thinking row is the catalog's own levels, Default first (§1's
+            // `--lane-thinking`).
+            let thinking: Vec<String> = options(cx, &f.tab, Choice::LaneThinking)
+                .iter()
+                .map(|(key, _)| key.clone())
+                .collect();
+            assert_eq!(
+                thinking,
+                vec!["default", "off", "low", "medium", "high"],
+                "the catalog's levels, Default first"
+            );
         });
     }
 
+    /// The catalog is the only answer now: the body a running server answers `GET /catalog`
+    /// with is read exactly like the cached one, and a body that changes its mind about a
+    /// lane changes the chooser with it.
     #[gpui_kit::test]
-    fn a_live_registry_refresh_keeps_the_lanes_availability_exact(cx: &mut TestAppContext) {
-        let cache = CacheDir::new(REGISTRY);
+    fn a_live_catalog_refresh_answers_the_same_way(cx: &mut TestAppContext) {
+        let cache = CacheDir::new(&catalog_body());
         let f = open(cx);
         f.act(cx, |window, cx| {
-            // A probe's cache names the kernel api set, so the lanes chooser is measured.
-            let probe = cache.cache();
-            assert!(probe.kernel_apis_known());
             f.tab
-                .update(cx, |tab, cx| tab.set_model_cache(&probe, window, cx));
-            assert!(!lanes_uncertain(cx, &f.tab));
+                .update(cx, |tab, cx| tab.set_catalog(&cache.catalog(), window, cx));
+            assert!(
+                !options(cx, &f.tab, Choice::Lanes)
+                    .iter()
+                    .find(|(key, _)| key == "ark-deepseek-v4.1-flash@aiden")
+                    .expect("the aiden model")
+                    .1,
+                "a lane cannot run it, and the catalog said so"
+            );
 
-            // A live server's `/registry` moved the catalog forward (§9.4): it carries the
-            // models but not the kernel's own `apis` — a live body's `apis` holds the
-            // extensions the server added, which a lane cannot register. The cache kept the
-            // probe's set, so the lanes chooser stays exact instead of falling back to
-            // uncertain.
-            let mut live_body = probe.registry.clone();
-            live_body
-                .as_object_mut()
-                .expect("a registry object")
-                .remove("apis");
-            let live = probe.clone().with_live_registry(live_body);
+            // The server now says a lane can: the same registration turns available, with no
+            // API set to compare and nothing remembered between the two bodies.
+            let mut live = catalog_body();
+            live["lanes"]["models"][0]["ok"] = Value::Bool(true);
+            live["lanes"]["models"][0]["reason"] = Value::Null;
             f.tab
-                .update(cx, |tab, cx| tab.set_model_cache(&live, window, cx));
-
+                .update(cx, |tab, cx| tab.set_catalog(&live, window, cx));
             assert!(
-                !lanes_uncertain(cx, &f.tab),
-                "a live refresh lost the kernel api set"
-            );
-            let lanes = lanes_options(cx, &f.tab);
-            assert!(
-                lanes
+                options(cx, &f.tab, Choice::Lanes)
                     .iter()
-                    .any(|(key, ok)| key.starts_with("claude-opus-4.5") && *ok),
-                "{lanes:?}"
-            );
-            assert!(
-                lanes
-                    .iter()
-                    .any(|(key, ok)| key.starts_with("ark-deepseek") && !*ok),
-                "{lanes:?}"
+                    .find(|(key, _)| key == "ark-deepseek-v4.1-flash@aiden")
+                    .expect("the aiden model")
+                    .1,
+                "the catalog's newest answer is the one that counts"
             );
         });
     }
 
     #[gpui_kit::test]
-    fn choosing_a_lanes_model_shows_the_file_it_is_written_to_and_lands_in_the_plan(
+    fn choosing_a_lanes_model_says_every_lane_runs_it_and_lands_in_the_plan(
         cx: &mut TestAppContext,
     ) {
-        let cache = CacheDir::new(REGISTRY);
+        let cache = CacheDir::new(&catalog_body());
         let f = open(cx);
         f.act(cx, |window, cx| {
-            f.tab.update(cx, |tab, cx| {
-                tab.set_model_cache(&cache.cache(), window, cx)
-            });
+            f.tab
+                .update(cx, |tab, cx| tab.set_catalog(&cache.catalog(), window, cx));
             window.render_frame(cx);
 
             // The chooser commits the way the menu does: the select emits its Confirm.
@@ -1749,11 +1891,13 @@ mod tests {
         // caption is read in its own update.
         f.act(cx, |window, cx| {
             window.render_frame(cx);
-            // §9.6: the choice is written into the folder's own file, so the caption names
-            // it — with the placeholder folder while none is chosen.
+            // §1: the choice is a launch flag, not a file this app writes — the caption says
+            // what every lane will run.
             let caption = caption_text(cx, &f.tab);
-            assert!(caption.contains("<folder>/.evo/swarm.lisp"), "{caption}");
-            assert!(caption.contains("shared by every tab"), "{caption}");
+            assert_eq!(
+                caption,
+                "Every lane runs claude-opus-4.5@anthropic (--lane-model)"
+            );
 
             // ... and it is what the launch plan carries.
             let plan = f.tab.read(cx).launch_plan(cx);
@@ -1768,12 +1912,11 @@ mod tests {
 
     #[gpui_kit::test]
     fn a_chosen_folder_launches_with_the_plan(cx: &mut TestAppContext) {
-        let cache = CacheDir::new(REGISTRY);
+        let cache = CacheDir::new(&catalog_body());
         let f = open(cx);
         f.act(cx, |window, cx| {
-            f.tab.update(cx, |tab, cx| {
-                tab.set_model_cache(&cache.cache(), window, cx)
-            });
+            f.tab
+                .update(cx, |tab, cx| tab.set_catalog(&cache.catalog(), window, cx));
             f.tab.update(cx, |tab, cx| {
                 tab.choosers.state.update(cx, |state, cx| {
                     state.launcher.select(Choice::Workers, "6");
@@ -1794,6 +1937,7 @@ mod tests {
                 plan: LaunchPlan {
                     model: None,
                     lanes_model: None,
+                    lane_thinking: None,
                     workers: Some(6),
                 },
             }]
@@ -1836,7 +1980,7 @@ mod tests {
             });
             window.render_frame(cx);
 
-            // The rows carry the folder's name, the `~` path and the meta line (§9.5).
+            // The rows carry the folder's name, the `~` path and the meta line (§2).
             assert_eq!(f.tab.read(cx).history_rows(cx).len(), 2);
             assert_eq!(f.tab.read(cx).history_rows(cx)[0].title, "foo");
             assert_eq!(f.tab.read(cx).history_rows(cx)[0].subtitle, "~/coding/foo");
@@ -1857,7 +2001,7 @@ mod tests {
     fn only_a_row_the_app_had_open_wears_the_badge(cx: &mut TestAppContext) {
         let f = open(cx);
         f.act(cx, |window, cx| {
-            // The app's own recents know the tab was open when it last quit; the scan cannot.
+            // The app's own recents know the tab was open when it last quit; the index cannot.
             let mut opened = history_entry(
                 "/Users/you/.evo/sessions/a/1.sexp",
                 "/Users/you/coding/foo",
@@ -1865,14 +2009,14 @@ mod tests {
             );
             opened.open_at_quit = true;
             opened.source = session::HistorySource::Recent;
-            let scanned = history_entry(
+            let indexed = history_entry(
                 "/Users/you/.evo/sessions/b/2.sexp",
                 "/Users/you/coding/bar",
                 90,
             );
             f.tab.update(cx, |tab, cx| {
                 tab.set_history_entries(
-                    &[opened, scanned],
+                    &[opened, indexed],
                     1_700_000_000,
                     0,
                     Some("/Users/you"),
@@ -1892,7 +2036,7 @@ mod tests {
                 window
                     .try_find(ElementId::NamedInteger(OPEN_AT_QUIT_ID.into(), 1))
                     .is_none(),
-                "a session the scan alone found cannot say it was open at quit"
+                "a session the index alone found cannot say it was open at quit"
             );
             // A badge is decoration on the row, not a thing of its own: the pill takes no
             // click, so the click lands on the row under it and opens the session.
@@ -1916,6 +2060,7 @@ mod tests {
         match which {
             Choice::Coordinator => state.coordinator.clone(),
             Choice::Lanes => state.lanes.clone(),
+            Choice::LaneThinking => state.lane_thinking.clone(),
             Choice::Workers => state.workers.clone(),
         }
     }
@@ -1924,14 +2069,13 @@ mod tests {
     fn a_chooser_opens_from_space_walks_with_the_arrows_and_closes_on_escape(
         cx: &mut TestAppContext,
     ) {
-        let cache = CacheDir::new(REGISTRY);
+        let cache = CacheDir::new(&catalog_body());
         let f = open(cx);
         // Every step is its own act: opening and closing go through the select's own
         // actions, which GPUI dispatches on the way out of the update they were queued in.
         let trigger = f.act(cx, |window, cx| {
-            f.tab.update(cx, |tab, cx| {
-                tab.set_model_cache(&cache.cache(), window, cx)
-            });
+            f.tab
+                .update(cx, |tab, cx| tab.set_catalog(&cache.catalog(), window, cx));
             let chooser = chooser(&f, cx, Choice::Coordinator);
             let trigger = chooser.read(cx).focus_handle(cx);
             window.focus(&trigger, cx);
@@ -2160,14 +2304,14 @@ mod tests {
                 5,
             );
             opened.open_at_quit = true;
-            let scanned = history_entry(
+            let indexed = history_entry(
                 "/Users/you/.evo/sessions/b/2.sexp",
                 "/Users/you/coding/bar",
                 90,
             );
             f.tab.update(cx, |tab, cx| {
                 tab.set_history_entries(
-                    &[opened, scanned],
+                    &[opened, indexed],
                     1_700_000_000,
                     0,
                     Some("/Users/you"),
@@ -2184,15 +2328,15 @@ mod tests {
                     .to_string()
             };
             let opened_said = said(0);
-            let scanned_said = said(1);
+            let indexed_said = said(1);
             // The pill is the only place the row says this, so the name has to carry it.
             assert!(
                 opened_said.contains(OPEN_AT_QUIT_TEXT),
                 "the row's name must say what the pill says: {opened_said}"
             );
             assert!(
-                !scanned_said.contains(OPEN_AT_QUIT_TEXT),
-                "a row the scan alone found must not claim it: {scanned_said}"
+                !indexed_said.contains(OPEN_AT_QUIT_TEXT),
+                "a row the index alone found must not claim it: {indexed_said}"
             );
             // ... and the row still names itself: title, path and facts.
             assert!(opened_said.contains("foo"), "{opened_said}");
@@ -2208,13 +2352,15 @@ mod tests {
             // Nothing yet.
             assert!(window.find(HISTORY_HINT_ID).visible());
 
-            // The scan is running: it says so, with a spinner.
-            f.tab.update(cx, |tab, cx| tab.set_scanning(true, cx));
+            // The index is still coming: it says so, with a spinner.
+            f.tab
+                .update(cx, |tab, cx| tab.set_history_loading(true, cx));
             window.render_frame(cx);
             assert!(window.find(HISTORY_HINT_ID).visible());
 
-            // The scan could not read the sessions directory: it says why.
-            f.tab.update(cx, |tab, cx| tab.set_scanning(false, cx));
+            // The index could not be fetched: it says why.
+            f.tab
+                .update(cx, |tab, cx| tab.set_history_loading(false, cx));
             f.tab.update(cx, |tab, cx| {
                 tab.set_history_error(Some("~/.evo/sessions is not readable".to_string()), cx)
             });
@@ -2245,13 +2391,14 @@ mod tests {
         format!("{handle:?}")
     }
 
-    /// The tab's own focus handles, in the order they should be reached: the three
+    /// The tab's own focus handles, in the order they should be reached: the four
     /// choosers, the folder card, then the history list.
     fn focus_order(cx: &App, tab: &Entity<TabContent>) -> Vec<FocusHandle> {
         let state = tab.read(cx).choosers.state.read(cx);
         vec![
             state.coordinator.read(cx).focus_handle(cx),
             state.lanes.read(cx).focus_handle(cx),
+            state.lane_thinking.read(cx).focus_handle(cx),
             state.workers.read(cx).focus_handle(cx),
             state.folder_focus.clone(),
             // The frame around the list, not the list's own handle: the List does not take
@@ -2365,37 +2512,79 @@ mod tests {
         );
     }
 
+    /// §9: what `evo-swarm check --json` found wrong is said under the choosers, one calm
+    /// line each, and a click on a line opens the chooser it is about. Nothing is said when
+    /// the launch is fine.
     #[gpui_kit::test]
-    fn the_note_names_the_folder_the_app_expects(cx: &mut TestAppContext) {
-        let cache = CacheDir::new(REGISTRY);
+    fn the_checks_problems_are_lines_that_open_their_chooser(cx: &mut TestAppContext) {
+        let cache = CacheDir::new(&catalog_body());
         let f = open(cx);
         f.act(cx, |window, cx| {
+            f.tab
+                .update(cx, |tab, cx| tab.set_catalog(&cache.catalog(), window, cx));
+            window.render_frame(cx);
+            // A launch on Default has nothing wrong with it.
+            assert!(problem_lines(cx, &f.tab).is_empty());
+            assert!(window.try_find(PROBLEMS_ID).is_none());
+
+            // The check's answer, as evo's own `check --json` gives it: two problems, one
+            // about the coordinator's model and one about the lanes'.
             f.tab.update(cx, |tab, cx| {
-                tab.set_home(Some("/Users/you".to_string()), cx);
-                tab.set_folder_hint(Some(PathBuf::from("/Users/you/coding/foo")), cx);
-                tab.set_model_cache(&cache.cache(), window, cx);
+                tab.choosers.state.update(cx, |state, cx| {
+                    state.set_problems(
+                        vec![
+                            Problem {
+                                code: "model_not_ready".to_string(),
+                                message: "claude-opus-4.5 has no credential".to_string(),
+                            },
+                            Problem {
+                                code: "lane_model_not_ready".to_string(),
+                                message: "a lane cannot register\nthe aiden model".to_string(),
+                            },
+                        ],
+                        cx,
+                    )
+                })
             });
             window.render_frame(cx);
-            // The note is generic until a lanes model is chosen.
-            assert_eq!(caption_text(cx, &f.tab), "");
+            assert_eq!(
+                problem_lines(cx, &f.tab),
+                vec![
+                    "claude-opus-4.5 has no credential".to_string(),
+                    "a lane cannot register the aiden model".to_string(),
+                ],
+                "one line each, the message's own newline folded away"
+            );
+            assert!(window.find(PROBLEMS_ID).visible());
 
-            f.tab.update(cx, |tab, cx| {
-                let lanes = tab.choosers.state.read(cx).lanes.clone();
-                lanes.update(cx, |_, cx| {
-                    cx.emit(SelectEvent::Confirm(Some(SharedString::from(
-                        "claude-opus-4.5@anthropic",
-                    ))))
-                });
-            });
+            // The keyboard starts on the folder card: not on any chooser.
+            window.focus(
+                &f.tab.read(cx).choosers.state.read(cx).folder_focus.clone(),
+                cx,
+            );
+            window.click(ElementId::NamedInteger(PROBLEM_ID.into(), 1), cx);
         });
 
+        // The click is the lanes' line, so the lanes chooser is what has the keyboard —
+        // not the coordinator's, which is the row above it.
+        let lanes = f.act(cx, |window, cx| window.focused(cx));
+        assert_eq!(
+            lanes,
+            f.act(cx, |_, cx| chooser(&f, cx, Choice::Lanes)
+                .read(cx)
+                .focus_handle(cx)),
+            "the lanes line opens the lanes chooser"
+        );
+
         f.act(cx, |window, cx| {
+            // A clean check takes the lines away again.
+            f.tab.update(cx, |tab, cx| {
+                tab.choosers
+                    .state
+                    .update(cx, |state, cx| state.set_problems(Vec::new(), cx))
+            });
             window.render_frame(cx);
-            let caption = caption_text(cx, &f.tab);
-            assert!(
-                caption.contains("~/coding/foo/.evo/swarm.lisp"),
-                "the note should name the folder the app expects: {caption}"
-            );
+            assert!(window.try_find(PROBLEMS_ID).is_none());
         });
     }
 
@@ -2403,8 +2592,8 @@ mod tests {
     fn a_catalog_failure_reads_as_one_sentence_and_keeps_the_servers_words_for_the_hover(
         cx: &mut TestAppContext,
     ) {
-        // The error a real probe leaves behind: the server's own words, a bearer token and
-        // all. Under a chooser that reads as a broken screen (§9.4).
+        // The error a failing catalog fetch leaves behind: the command's own words, a
+        // bearer token and all. Under a chooser it reads as a broken screen.
         let raw = r#"http 500: The value "Bearer sk-live-9f3c…" is not a model"#;
         let f = open(cx);
         f.act(cx, |window, cx| {
@@ -2440,16 +2629,16 @@ mod tests {
         });
     }
 
-    /// A probe can fail while the last catalog is still in the choosers: then the line must
+    /// A fetch can fail while the last catalog is still in the choosers: then the line must
     /// not claim the list is gone when it is on the screen.
     #[gpui_kit::test]
     fn a_failed_refresh_says_the_last_catalog_is_still_in_use(cx: &mut TestAppContext) {
-        let cache = CacheDir::new(REGISTRY);
+        let cache = CacheDir::new(&catalog_body());
         let f = open(cx);
         f.act(cx, |window, cx| {
             f.tab.update(cx, |tab, cx| {
-                tab.set_model_cache(&cache.cache(), window, cx);
-                tab.set_catalog_error(Some("http 500: nope".to_string()), cx);
+                tab.set_catalog(&cache.catalog(), window, cx);
+                tab.set_catalog_error(Some("evo-swarm catalog --json exited 1".to_string()), cx);
             });
             window.render_frame(cx);
             assert_eq!(
@@ -2457,7 +2646,7 @@ mod tests {
                 "Couldn't refresh the model list — using the last one it loaded."
             );
             assert!(
-                lanes_options(cx, &f.tab).len() > 1,
+                options(cx, &f.tab, Choice::Lanes).len() > 1,
                 "the models the cache brought are still in the chooser"
             );
         });

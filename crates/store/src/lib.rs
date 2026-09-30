@@ -9,38 +9,42 @@
 //!   app.json           window bounds, tab set, binary paths, schema version
 //!   lock               single-instance lock (flock; pid inside)
 //!   activate.sock      a second launch knocks here so the first one can raise
-//!   model-cache.json   last /registry snapshot, for the empty tab's choosers
-//!   probe/             scratch cwd used only to learn the model catalog
-//!   tabs/<id>/         token (0600, written by the server), swarm.log, tab.json
+//!   model-cache.json   last `catalog --json` body, for the empty tab's choosers
+//!   tabs/<id>/         ready.json (written by the server, 0600), swarm.log, tab.json
 //! ```
 //!
-//! The three things that read outside that directory are read-only, except for
-//! the one write the spec asks for:
+//! Everything else the app needs from evo it asks evo for, through the offline
+//! CLIs (§9) — one process, one JSON document, no listener:
 //!
-//! * [`history`] walks `~/.evo/sessions/*/*.sexp` for resumable swarms (§9.5);
-//! * [`model_cache`] carries the model catalog and the kernel api set (§9.4);
-//! * [`swarm_config`] owns the managed block at the top of a project's
-//!   `.evo/swarm.lisp` (§9.6) — the only file outside our root we ever write.
+//! * [`history`] runs `evo-agent sessions --json` for the resumable swarms;
+//! * [`catalog`]/[`model_cache`] keep what `evo-swarm catalog --json` printed;
+//! * [`launch`] builds the argv of a `serve`, and the `check --json` that
+//!   validates it first.
 //!
-//! Every write is atomic (temp file + rename) and owner-only, every load is
-//! tolerant (a corrupt file becomes a `.bak` and the defaults apply), and
-//! nothing here holds a secret: the tab token stays in the server's own 0600
-//! file (§2 rule 4).
+//! Nothing here reads a journal, writes a project file, or starts a server. Every
+//! write is atomic (temp file + rename) and owner-only, every load is tolerant (a
+//! corrupt file becomes a `.bak` and the defaults apply), and nothing here holds
+//! a secret: the bearer token stays in the server's own 0600 ready file
+//! (§2 rule 4).
 
 pub mod app_state;
+pub mod catalog;
+pub mod cli;
 pub mod history;
+pub mod launch;
 pub mod model_cache;
 pub mod paths;
-pub mod sexp;
 pub mod single;
-pub mod swarm_config;
 pub mod tab;
 pub mod time;
 
 pub use app_state::{AppState, Binaries, Recent, Theme, WindowBounds, SCHEMA_VERSION};
-pub use history::{HistoryEntry, HistorySource, ScanBudget, ScanOutcome};
-pub use model_cache::{ModelCache, ModelInfo};
+pub use catalog::{
+    Catalog, CheckReport, LaneModel, Model, ModelCheck, ModelRef, Problem, ProblemTarget,
+};
+pub use history::{HistoryEntry, HistorySource, Session, SessionsQuery};
+pub use launch::{LaunchSpec, Program};
+pub use model_cache::ModelCache;
 pub use paths::{Root, TabId};
 pub use single::{Activation, Primary, Secondary, SingleInstance};
-pub use swarm_config::{LanesModel, WriteOutcome};
 pub use tab::{TabModels, TabState};
