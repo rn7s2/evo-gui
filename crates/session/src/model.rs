@@ -184,6 +184,10 @@ impl AgentModel {
     /// carries one) and tool calls paired with their results by call id. A rebuild starts
     /// a fresh row-id space and bumps the revision.
     pub fn rebuild_from_transcript(&mut self, transcript: &Value) -> Effect {
+        // The reader's words that evo has not taken yet. `/transcript` cannot carry
+        // them — they are not in the session — so they are put back after the
+        // rebuild, unless it turns out the transcript has them now.
+        let pending = self.pending_texts();
         self.rows.clear();
         self.tool_rows.clear();
         self.open_assistant = None;
@@ -197,6 +201,7 @@ impl AgentModel {
             .and_then(Value::as_array)
             .or_else(|| transcript.as_array());
         let Some(messages) = messages else {
+            self.carry_pending(pending);
             return Effect::REBUILT;
         };
         // Only the *last* message can still be growing: a transcript that ends on a tool
@@ -265,6 +270,7 @@ impl AgentModel {
         // A resync in the middle of a stream keeps appending to the message it caught
         // mid-flight instead of starting a second row for the same message.
         self.open_assistant = open_assistant;
+        self.carry_pending(pending);
         Effect::REBUILT
     }
 
@@ -355,6 +361,13 @@ impl AgentModel {
                 let text = string_field(data, "text").unwrap_or_default();
                 if text.is_empty() {
                     return Effect::NONE;
+                }
+                // The reader's own words may already be on screen as a pending row,
+                // sent while a run was in flight: evo has just drained its queue
+                // (`drain-steering`, `src/kernel/loop.lisp`), so this event is the
+                // row's promotion and not a second copy of it.
+                if self.promote_pending(&text) {
+                    return Effect::ROWS;
                 }
                 // A steering entry is not always the reader typing: the swarm steers
                 // the coordinator with its own words, and evo steers its own agent
@@ -494,6 +507,11 @@ impl AgentModel {
             // session switch the step that was running belongs to the old one.
             "hello" | "session-switched" => {
                 self.step = None;
+                // A different session: whatever the reader had queued was for the one
+                // being left, and the new session's transcript will never carry it.
+                if kind == "session-switched" {
+                    self.drop_pending();
+                }
                 Effect::RESYNC | Effect::STEP
             }
             "gap" => {
@@ -639,6 +657,153 @@ impl AgentModel {
         ids.sort_unstable();
         ids.dedup();
         RowChanges::Changed(ids)
+    }
+
+    // --- the reader's queued turn -----------------------------------------
+
+    /// Show TEXT as a queued turn of the reader's: the echo a send can show before
+    /// evo has taken the words.
+    ///
+    /// A `/prompt` the server only queues says nothing back — the reader's message
+    /// would be invisible until evo drains the queue at the running turn's next
+    /// boundary (`drain-steering`, `src/kernel/loop.lisp`), after the model
+    /// response and every tool call of the turn in flight. This row is what the
+    /// reader sees in the meantime, and the `user-input`/`steering` event that
+    /// carries the text promotes it ([`AgentModel::promote_pending`]).
+    ///
+    /// Blank text gets no row (the composer will not send one either), so the id
+    /// is optional.
+    pub fn push_pending_user(&mut self, text: &str) -> Option<RowId> {
+        if text.trim().is_empty() {
+            return None;
+        }
+        Some(self.push_row(RowKind::PendingUser {
+            text: text.to_string(),
+        }))
+    }
+
+    /// Take the pending row ID back: the send that carried its words never reached
+    /// the server, so the reader has to try again and nothing evo holds will ever
+    /// match those words.
+    ///
+    /// Only a row that is still pending goes: a text evo has taken in the meantime
+    /// is a turn of the transcript now, and a request that failed afterwards must
+    /// not delete it.
+    pub fn cancel_pending_user(&mut self, id: RowId) -> Effect {
+        if !matches!(
+            self.row(id).map(|row| &row.kind),
+            Some(RowKind::PendingUser { .. })
+        ) {
+            return Effect::NONE;
+        }
+        self.rows.retain(|row| row.id != id);
+        // A removed row is a `RowId` the UI must forget: it is in the change list
+        // and no longer in `rows`.
+        self.dirty_rows.push(id);
+        Effect::ROWS
+    }
+
+    /// Promote the oldest pending row whose text is exactly TEXT into the reader's
+    /// turn: evo has taken the words, so the queued echo *is* the turn now.
+    ///
+    /// The promoted row is appended at the tail, where evo just inserted the turn —
+    /// after the assistant message and tool calls of the run that was going, and
+    /// after anything else that landed while the words were queued. That is a move,
+    /// and a fresh row id is what carries it: the pending id is reported dirty and
+    /// is gone from `rows` (the UI reads a missing id as a removed row and drops
+    /// its view), and the new id is reported dirty and appends. The row's content is
+    /// unchanged, so nothing is duplicated: one reader turn, in the place evo put
+    /// it.
+    ///
+    /// `false` when no pending row holds TEXT — an ordinary turn, or a steering
+    /// entry of evo's own (`steered_row`).
+    fn promote_pending(&mut self, text: &str) -> bool {
+        let Some(index) = self.pending_index(text) else {
+            return false;
+        };
+        let id = self.rows.remove(index).id;
+        self.dirty_rows.push(id);
+        self.push_row(RowKind::User {
+            text: text.to_string(),
+        });
+        true
+    }
+
+    /// Drop every pending row, reporting each id so the UI drops its view: a
+    /// session switch leaves nothing of the reader's queued for this one.
+    fn drop_pending(&mut self) {
+        let ids: Vec<RowId> = self
+            .rows
+            .iter()
+            .filter(|row| matches!(row.kind, RowKind::PendingUser { .. }))
+            .map(|row| row.id)
+            .collect();
+        if ids.is_empty() {
+            return;
+        }
+        self.rows
+            .retain(|row| !matches!(row.kind, RowKind::PendingUser { .. }));
+        self.dirty_rows.extend(ids);
+    }
+
+    /// The reader's words still waiting for evo, oldest first — what a rebuild from
+    /// `/transcript` has to carry over.
+    fn pending_texts(&self) -> Vec<String> {
+        self.rows
+            .iter()
+            .filter_map(|row| match &row.kind {
+                RowKind::PendingUser { text } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The oldest pending row whose text is TEXT.
+    fn pending_index(&self, text: &str) -> Option<usize> {
+        self.rows.iter().position(
+            |row| matches!(&row.kind, RowKind::PendingUser { text: pending } if pending == text),
+        )
+    }
+
+    /// Keep the reader's queued words a rebuild did not find in the transcript.
+    ///
+    /// A resync rebuilds the rows from `/transcript`, which carries no pending row:
+    /// the words are not in the session yet. They are appended at the tail, where
+    /// the reader last saw them, unless the transcript *does* carry them now — evo
+    /// can have drained the queue while the fetch was in flight — in which case the
+    /// transcript's own row is the turn and the echo is dropped rather than shown
+    /// twice.
+    ///
+    /// The match is against the transcript's most recent user messages, one pending
+    /// per message, oldest first: a queue is drained at the boundary of the turn
+    /// that was running, so words that made it into the session can only be among
+    /// those — and an older turn the reader sent the same words in must not swallow
+    /// the new one.
+    fn carry_pending(&mut self, pending: Vec<String>) {
+        if pending.is_empty() {
+            return;
+        }
+        let mut recent: Vec<String> = self
+            .rows
+            .iter()
+            .filter_map(|row| match &row.kind {
+                RowKind::User { text } => Some(text.clone()),
+                _ => None,
+            })
+            .rev()
+            .take(pending.len())
+            .collect();
+        recent.reverse();
+        for text in pending {
+            match recent.iter().position(|recent| recent == &text) {
+                Some(index) => {
+                    recent.remove(index);
+                }
+                None => {
+                    self.push_row(RowKind::PendingUser { text });
+                }
+            }
+        }
     }
 
     /// A new assistant message begins. Any row still open (a `message-end` the stream

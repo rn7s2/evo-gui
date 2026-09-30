@@ -42,7 +42,7 @@ use serde_json::Value;
 
 use crate::cache::cache_totals_from_seed;
 use crate::{
-    Activity, AgentModel, DimStyle, LaneList, LaneRow, LaneStatus, Readout, Row, RowChanges,
+    Activity, AgentModel, DimStyle, LaneList, LaneRow, LaneStatus, Readout, Row, RowChanges, RowId,
     RowKind, StepClock, Todo,
 };
 
@@ -326,6 +326,37 @@ impl TabModel {
             changes.readout = true;
         }
         changes
+    }
+
+    // --- what the reader sends -------------------------------------------
+
+    /// The reader sent TEXT to the coordinator: put it on screen now, queued.
+    ///
+    /// While a run is in flight the server only queues a `/prompt` and evo says
+    /// nothing back until it drains the queue at the running turn's next boundary
+    /// (`drain-steering`, `src/kernel/loop.lisp`), so without this the reader's
+    /// message is invisible until then. The row is pushed from the moment of the
+    /// send — never waiting for the reply, which is the whole point — and taken
+    /// back by [`TabModel::cancel_send`] when the request fails; the
+    /// `user-input`/`steering` event that carries the text promotes it, so it is
+    /// never shown twice.
+    ///
+    /// Returns the pending row's id and what the UI has to re-set, or `None` for a
+    /// blank draft (which the composer does not send either).
+    pub fn begin_send(&mut self, text: &str) -> Option<(RowId, Changes)> {
+        let id = self.coordinator.push_pending_user(text)?;
+        Some((id, self.absorb(AgentKey::Coordinator, crate::Effect::ROWS)))
+    }
+
+    /// The `POST` that carried the pending row ID never reached the server: take
+    /// the row away — the composer is holding on to the draft, so the words are
+    /// still the reader's. A row evo has taken in the meantime is left alone
+    /// ([`AgentModel::cancel_pending_user`]).
+    ///
+    /// [`AgentModel::cancel_pending_user`]: crate::AgentModel::cancel_pending_user
+    pub fn cancel_send(&mut self, id: RowId) -> Changes {
+        let effect = self.coordinator.cancel_pending_user(id);
+        self.absorb(AgentKey::Coordinator, effect)
     }
 
     // --- updates from the I/O layer --------------------------------------

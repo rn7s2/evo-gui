@@ -253,6 +253,10 @@ fn copy_button(
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Group {
     User,
+    /// The reader's own words, still queued: drawn like a turn — it is one of
+    /// their messages — but with no turn boundary of its own, because it has not
+    /// opened one yet.
+    Pending,
     Assistant,
     Tool,
     Report,
@@ -265,6 +269,7 @@ impl Group {
     fn of(kind: &RowKind) -> Self {
         match kind {
             RowKind::User { .. } => Self::User,
+            RowKind::PendingUser { .. } => Self::Pending,
             RowKind::Assistant { .. } => Self::Assistant,
             RowKind::Tool { .. } => Self::Tool,
             RowKind::Report { .. } => Self::Report,
@@ -294,10 +299,15 @@ fn gap_before(previous: Option<&Row>, row: &Row) -> Pixels {
     if current == Group::User {
         return px(0.);
     }
+    // A queued turn draws no boundary of its own (see `Group::Pending`), so the
+    // row carries the space the boundary would have.
+    if current == Group::Pending {
+        return BLOCK_GAP;
+    }
     if previous == current {
         return match current {
             Group::Tool | Group::Dim | Group::Context => TIGHT_GAP,
-            Group::Assistant | Group::Report | Group::User => GROUP_GAP,
+            Group::Assistant | Group::Report | Group::User | Group::Pending => GROUP_GAP,
         };
     }
     BLOCK_GAP
@@ -351,6 +361,7 @@ pub(crate) fn render_row(
 
     stack = stack.child(match &row.kind {
         RowKind::User { text, .. } => user_row(row.id, text, &palette),
+        RowKind::PendingUser { text } => pending_user_row(row.id, text, &palette),
         RowKind::Context { key, text } => context_row(
             row.id,
             key,
@@ -457,6 +468,42 @@ fn user_row(id: RowId, text: &str, palette: &Palette) -> AnyElement {
             ("transcript-user-text", id),
             text.to_string(),
         ))
+        .test_support()
+        .into_any_element()
+}
+
+/// What a queued turn says under itself: where the reader's words are.
+const QUEUED_CAPTION: &str = "queued · sent at the next step";
+
+/// The reader's words from the moment they are sent, while evo still has them
+/// queued: the same card a turn is drawn on, held back — the accent bar and the
+/// text muted — with a line under it saying so.
+///
+/// It is deliberately not a turn yet: no `turn N` boundary is drawn (nothing has
+/// opened), which is also why the row carries the space a boundary would have.
+/// The `user-input`/`steering` event that carries the text replaces this row with
+/// a real one, in the place evo put the turn — separator and all.
+fn pending_user_row(id: RowId, text: &str, palette: &Palette) -> AnyElement {
+    let caption_id = ElementId::from(("transcript-pending", id));
+    div()
+        .id(("transcript-user", id))
+        .w_full()
+        .min_w_0()
+        .rounded(palette.radius)
+        .bg(palette.muted)
+        .border_l_3()
+        .border_color(palette.muted_foreground)
+        .px_3()
+        .py_2()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .text_color(palette.muted_foreground)
+        .child(SelectableText::new(
+            ("transcript-user-text", id),
+            text.to_string(),
+        ))
+        .child(caption(&caption_id, QUEUED_CAPTION, palette))
         .test_support()
         .into_any_element()
 }

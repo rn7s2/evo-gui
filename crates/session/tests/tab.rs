@@ -1170,3 +1170,63 @@ fn a_tool_only_step_reports_the_row_it_dropped() {
     );
     assert!(streaming[0] > opened, "it is not the row that was dropped");
 }
+
+/// §9.1: the reader's words, on screen from the moment they are sent. The coordinator
+/// is the only agent typed to (§14.4), so the queued row is always its own.
+#[test]
+fn a_send_shows_a_queued_row_until_evo_takes_it() {
+    let mut tab = TabModel::new();
+    assert!(tab.selected_rows().is_empty(), "a fresh tab has no rows");
+
+    // Sent while nothing is running — and while a run is in flight alike: the row is
+    // pushed at once, never waiting for the server.
+    let (id, changes) = tab.begin_send("read §9.1").expect("a row");
+    assert_eq!(
+        changes.rows_for(COORDINATOR),
+        Some(&RowChanges::Changed(vec![id])),
+        "the UI has one row to set: {changes:?}"
+    );
+    assert!(
+        matches!(
+            tab.selected_rows().last().map(|row| &row.kind),
+            Some(RowKind::PendingUser { text }) if text == "read §9.1"
+        ),
+        "{:?}",
+        tab.selected_rows()
+    );
+
+    // evo takes the words at the turn boundary: one row, promoted, no duplicate.
+    let changes = tab.on_event(COORDINATOR, 1, "steering", &json!({ "text": "read §9.1" }));
+    match changes.rows_for(COORDINATOR) {
+        Some(RowChanges::Changed(ids)) => assert_eq!(
+            ids.len(),
+            2,
+            "the queued id (the view drops it) and the turn's: {ids:?}"
+        ),
+        other => panic!("the rows changed: {other:?}"),
+    }
+    assert_eq!(tab.selected_rows().len(), 1);
+    assert!(
+        matches!(
+            tab.selected_rows().first().map(|row| &row.kind),
+            Some(RowKind::User { text }) if text == "read §9.1"
+        ),
+        "{:?}",
+        tab.selected_rows()
+    );
+
+    // A send the server never took takes its row back — the composer keeps the draft,
+    // so the words are still the reader's.
+    let (sent, _) = tab.begin_send("half sent").expect("a row");
+    assert_eq!(tab.selected_rows().len(), 2);
+    let changes = tab.cancel_send(sent);
+    assert_eq!(
+        changes.rows_for(COORDINATOR),
+        Some(&RowChanges::Changed(vec![sent]))
+    );
+    assert_eq!(tab.selected_rows().len(), 1, "the turn is untouched");
+    // An id that is not a queued row any more changes nothing, and a blank draft is
+    // never a row at all.
+    assert!(tab.cancel_send(sent).is_empty());
+    assert!(tab.begin_send("   \n").is_none());
+}

@@ -564,6 +564,7 @@ fn first_reply_shape(cx: &HeadlessAppContext, tab: &Entity<workspace::TabContent
         for row in rows {
             match &row.kind {
                 RowKind::User { .. } => users += 1,
+                RowKind::PendingUser { .. } => parts.push("queued user".to_string()),
                 RowKind::Context { key, .. } => parts.push(format!("context {key}")),
                 RowKind::LaneNotice { lane, .. } => parts.push(format!("lane {lane} notice")),
                 RowKind::GoalNudge { kind, .. } => parts.push(format!("goal {kind:?}")),
@@ -721,6 +722,7 @@ fn text_chars(cx: &HeadlessAppContext, tab: &Entity<workspace::TabContent>) -> u
 fn row_chars(row: &session::Row) -> usize {
     match &row.kind {
         RowKind::User { text } => text.chars().count(),
+        RowKind::PendingUser { text } => text.chars().count(),
         RowKind::Context { text, .. } => text.chars().count(),
         RowKind::LaneNotice { text, .. } => text.chars().count(),
         RowKind::GoalNudge { text, .. } => text.chars().count(),
@@ -789,6 +791,7 @@ fn row_lines(cx: &HeadlessAppContext, tab: &Entity<workspace::TabContent>) -> Ve
                     .map(|row| {
                         let (kind, text): (&str, String) = match &row.kind {
                             RowKind::User { text } => ("user", text.to_string()),
+                            RowKind::PendingUser { text } => ("queued", text.to_string()),
                             RowKind::Context { key, text } => ("context", format!("{key} {text}")),
                             RowKind::LaneNotice { lane, text, .. } => {
                                 ("lane notice", format!("{lane} {text}"))

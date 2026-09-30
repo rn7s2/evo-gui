@@ -1320,6 +1320,7 @@ fn row_dump(cx: &HeadlessAppContext, tab: &Entity<workspace::TabContent>) -> Vec
                     .map(|row| {
                         let (kind, text): (&str, String) = match &row.kind {
                             RowKind::User { text } => ("user", text.to_string()),
+                            RowKind::PendingUser { text } => ("queued", text.to_string()),
                             RowKind::Context { key, text } => ("context", format!("{key} {text}")),
                             RowKind::LaneNotice { lane, text, .. } => {
                                 ("lane notice", format!("{lane} {text}"))
@@ -1461,6 +1462,7 @@ fn text_chars(cx: &HeadlessAppContext, tab: &Entity<workspace::TabContent>) -> u
 fn row_chars(row: &session::Row) -> usize {
     match &row.kind {
         RowKind::User { text } => text.chars().count(),
+        RowKind::PendingUser { text } => text.chars().count(),
         RowKind::Context { text, .. } => text.chars().count(),
         RowKind::LaneNotice { text, .. } => text.chars().count(),
         RowKind::GoalNudge { text, .. } => text.chars().count(),

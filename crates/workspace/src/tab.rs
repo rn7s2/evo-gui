@@ -288,6 +288,9 @@ struct InFlight {
     req: ReqId,
     /// True when this request was the interrupt — the button's Stop, or `Esc`.
     interrupt: bool,
+    /// The queued row a send is showing the reader's words as, until evo takes
+    /// them (§9.1). The reply's error path is what takes the row back.
+    pending: Option<session::RowId>,
 }
 
 /// One tab's live swarm: the engine, the model its updates land in, and the pump
@@ -1047,6 +1050,13 @@ impl TabContent {
     }
 
     /// What the composer asked for: a turn, or an interrupt (§7.3, §9.2).
+    ///
+    /// A send is also a row: the reader's words go on screen at once, as a queued
+    /// turn (§9.1) — while a run is in flight the server only queues the prompt,
+    /// and evo says nothing back until it drains the queue at the running turn's
+    /// next boundary. The engine refusing the command (its thread already gone)
+    /// takes the row back with it, and a `POST` that fails later does the same in
+    /// [`TabContent::finish_post`].
     fn on_composer_event(
         &mut self,
         event: ComposerEvent,
@@ -1056,15 +1066,37 @@ impl TabContent {
         // Which of the two this is, so the reply is read for what it is: an
         // interrupt's `ok` is not a send's and must leave the draft alone.
         let interrupt = event == ComposerEvent::Interrupt;
+        let mut changes = Changes::default();
         let sent = match self.live.as_mut() {
             Some(live) => {
                 let req = live.next_req();
-                let sent = match event {
-                    ComposerEvent::Send(text) => live.engine.prompt(req, text),
-                    ComposerEvent::Interrupt => live.engine.interrupt(req),
+                let (sent, pending) = match event {
+                    ComposerEvent::Send(text) => {
+                        let queued = live.model.begin_send(&text);
+                        if live.engine.prompt(req, text) {
+                            match queued {
+                                Some((id, queued)) => {
+                                    changes = queued;
+                                    (true, Some(id))
+                                }
+                                None => (true, None),
+                            }
+                        } else {
+                            // Nothing left to send to: no row either.
+                            if let Some((id, _)) = queued {
+                                changes = live.model.cancel_send(id);
+                            }
+                            (false, None)
+                        }
+                    }
+                    ComposerEvent::Interrupt => (live.engine.interrupt(req), None),
                 };
                 if sent {
-                    live.in_flight = Some(InFlight { req, interrupt });
+                    live.in_flight = Some(InFlight {
+                        req,
+                        interrupt,
+                        pending,
+                    });
                 }
                 sent
             }
@@ -1072,6 +1104,9 @@ impl TabContent {
             // disabled waiting for a reply that cannot come.
             None => false,
         };
+        if !changes.is_empty() {
+            self.push(changes, cx);
+        }
         if !sent {
             self.composer.update(cx, |composer, cx| {
                 composer.request_finished(false, window, cx)
@@ -1157,6 +1192,15 @@ impl TabContent {
             });
         }
         if let Err(error) = result {
+            // A send the server never took: the queued row goes with it. The
+            // composer keeps the draft (§7.3), so the words are still the
+            // reader's, and nothing evo holds will ever match them.
+            if let Some(id) = asked.and_then(|asked| asked.pending) {
+                let changes = self.live.as_mut().map(|live| live.model.cancel_send(id));
+                if let Some(changes) = changes.filter(|changes| !changes.is_empty()) {
+                    self.push(changes, cx);
+                }
+            }
             let tone = notice_tone(&error);
             let (text, detail) = notice_words(&error);
             self.show_notice(text, detail, tone, cx);

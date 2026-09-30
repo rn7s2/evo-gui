@@ -154,6 +154,7 @@ pub fn transcript(cx: &mut TestAppContext, tab: &Entity<TabContent>) -> String {
             .iter()
             .map(|row| match &row.kind {
                 RowKind::User { text } => text.clone(),
+                RowKind::PendingUser { text } => format!("queued:{text}"),
                 RowKind::Context { key, text } => format!("context:{key} {text}"),
                 RowKind::LaneNotice { lane, text, .. } => format!("lane {lane}: {text}"),
                 RowKind::GoalNudge {

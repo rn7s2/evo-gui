@@ -9,7 +9,8 @@ mod common;
 use common::{apply_capture, fixture, sse_events, transcript_rows, RowView};
 use serde_json::json;
 use session::{
-    Activity, AgentModel, DimStyle, Effect, GoalNudgeKind, RowKind, StepClock, TodoStatus,
+    Activity, AgentModel, DimStyle, Effect, GoalNudgeKind, RowChanges, RowKind, StepClock,
+    TodoStatus,
 };
 
 fn kinds(model: &AgentModel) -> Vec<&RowKind> {
@@ -1681,4 +1682,293 @@ fn mentions(model: &AgentModel, needle: &str) -> usize {
             _ => false,
         })
         .count()
+}
+
+// --- the reader's queued turn ---------------------------------------------
+//
+// A `POST /prompt` issued while a run is in flight is only *queued* by the server (its
+// reply carries `"queued": true`), and evo says nothing until it drains the queue at the
+// running turn's next boundary — `drain-steering` in `src/kernel/loop.lisp`, past the
+// model response and every tool call of the turn. The tab fills that gap with a queued
+// row of its own, and the event that carries the words promotes it.
+
+/// The `steering`/`user-input` event that carries the reader's words once evo has them.
+fn evo_takes(model: &mut AgentModel, id: u64, kind: &str, text: &str) -> Effect {
+    model.apply_event(id, kind, &json!({ "text": text }))
+}
+
+#[test]
+fn a_queued_turn_is_promoted_by_the_event_that_carries_it() {
+    // A run in flight: the coordinator is mid-message.
+    let mut model = AgentModel::new();
+    model.apply_event(1, "message-start", &json!({}));
+    model.apply_event(2, "text-delta", &json!({ "text": "working on it" }));
+
+    // The reader sends while it runs: the words are on screen at once, queued.
+    let sent = "stop, read §9.1 first";
+    let id = model.push_pending_user(sent).expect("a row for the words");
+    assert!(
+        matches!(
+            model.rows().last().map(|row| &row.kind),
+            Some(RowKind::PendingUser { text }) if text == sent
+        ),
+        "{:?}",
+        model.rows()
+    );
+    assert_eq!(
+        model.take_row_changes(),
+        RowChanges::Changed(vec![1, id]),
+        "the message that was streaming, and the queued row"
+    );
+
+    // evo drains its queue at the turn boundary: the queued row *is* the turn now.
+    let effect = evo_takes(&mut model, 3, "steering", sent);
+    assert!(effect.contains(Effect::ROWS));
+    let rows = transcript_rows(&model);
+    assert_eq!(
+        rows.last(),
+        Some(&RowView::User(sent.to_string())),
+        "the turn is the last row, where evo inserted it: {rows:#?}"
+    );
+    assert_eq!(
+        rows.iter()
+            .filter(|row| matches!(row, RowView::User(_)))
+            .count(),
+        1,
+        "the reader's words are on screen once: {rows:#?}"
+    );
+    assert!(
+        !rows
+            .iter()
+            .any(|row| matches!(row, RowView::PendingUser(_))),
+        "no queued row is left behind: {rows:#?}"
+    );
+
+    // The queued row is gone and its id was reported — the view drops it — while a
+    // fresh id appends at the tail: that is what carries the move past the rows the
+    // turn was running behind.
+    assert!(model.row(id).is_none(), "the queued row is gone");
+    let promoted = model.rows().last().expect("the promoted row").id;
+    assert_ne!(promoted, id);
+    assert_eq!(
+        model.take_row_changes(),
+        RowChanges::Changed(vec![id, promoted])
+    );
+}
+
+#[test]
+fn an_idle_send_is_promoted_the_same_way() {
+    // When nothing runs, `/prompt` starts a run and `user-input` arrives at once
+    // (`:run-requested`, `src/serve/server.lisp`) — the queued row is the same row,
+    // promoted a moment later.
+    let mut model = AgentModel::new();
+    let sent = "hello there";
+    model.push_pending_user(sent).expect("a row");
+
+    evo_takes(&mut model, 1, "user-input", sent);
+
+    assert_eq!(
+        transcript_rows(&model),
+        vec![RowView::User(sent.to_string())],
+        "one turn, not two"
+    );
+    assert_eq!(
+        model.take_row_changes(),
+        RowChanges::Changed(vec![1, 2]),
+        "the queued id and the turn's"
+    );
+}
+
+#[test]
+fn two_queued_turns_are_taken_oldest_first() {
+    let mut model = AgentModel::new();
+    let first = model.push_pending_user("again").expect("the first");
+    let second = model.push_pending_user("again").expect("the second");
+    assert!(second > first, "ids are handed out in order");
+
+    // The drain takes the oldest row carrying those words.
+    evo_takes(&mut model, 1, "steering", "again");
+    assert_eq!(
+        model.rows().first().map(|row| row.id),
+        Some(second),
+        "the second send is still queued: {:?}",
+        model.rows()
+    );
+    assert!(
+        matches!(model.rows().last().map(|row| &row.kind), Some(RowKind::User { text }) if text == "again"),
+        "{:?}",
+        model.rows()
+    );
+
+    // The next one takes what is left: two sends, two turns, no third row.
+    evo_takes(&mut model, 2, "steering", "again");
+    assert_eq!(model.rows().len(), 2, "{:?}", model.rows());
+    assert!(model
+        .rows()
+        .iter()
+        .all(|row| matches!(row.kind, RowKind::User { .. })));
+}
+
+#[test]
+fn an_event_of_evos_own_is_not_a_queued_turn() {
+    // The words are the swarm's, not the reader's: nothing was queued, so the row is
+    // built the ordinary way (here, a lane notice).
+    let mut model = AgentModel::new();
+    model.push_pending_user("read §9.1").expect("a row");
+    model.take_row_changes();
+
+    evo_takes(
+        &mut model,
+        1,
+        "steering",
+        "[lane 2] run ended (stop) — task: x",
+    );
+
+    let rows = transcript_rows(&model);
+    assert!(
+        matches!(rows.last(), Some(RowView::LaneNotice { lane: 2, .. })),
+        "the swarm's line is built the ordinary way: {rows:#?}"
+    );
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row == &&RowView::PendingUser("read §9.1".to_string()))
+            .count(),
+        1,
+        "the queued row is untouched: {rows:#?}"
+    );
+}
+
+#[test]
+fn a_rebuild_keeps_the_words_evo_has_not_taken_yet() {
+    let mut model = AgentModel::new();
+    model.rebuild_from_transcript(&fixture("transcript.json"));
+    assert_eq!(model.take_row_changes(), RowChanges::Rebuilt);
+    let settled = model.rows().len();
+
+    let sent = "read the row-sync block";
+    model.push_pending_user(sent).expect("a row");
+
+    // A resync (`settled`, `gap`, `hello`) rebuilds from /transcript, which carries no
+    // row for words evo has not taken yet: the queued row is still there, at the tail.
+    assert_eq!(
+        model.rebuild_from_transcript(&fixture("transcript.json")),
+        Effect::REBUILT
+    );
+    let rows = transcript_rows(&model);
+    assert_eq!(rows.len(), settled + 1, "the queued row is the extra one");
+    assert_eq!(
+        rows.last(),
+        Some(&RowView::PendingUser(sent.to_string())),
+        "{rows:#?}"
+    );
+}
+
+#[test]
+fn a_rebuild_drops_a_queued_turn_the_transcript_now_carries() {
+    // evo drained the queue while the fetch was in flight: the transcript's own row is
+    // the turn, and the echo must not be shown beside it.
+    let mut model = AgentModel::new();
+    let sent = "read the row-sync block";
+    model.push_pending_user(sent).expect("a row");
+
+    model.rebuild_from_transcript(&json!({ "messages": [
+        { "role": "user", "content": [{ "type": "text", "text": "an older turn" }] },
+        { "role": "assistant", "content": [{ "type": "text", "text": "ok" }] },
+        { "role": "user", "content": [{ "type": "text", "text": sent }] },
+    ]}));
+
+    let rows = transcript_rows(&model);
+    assert_eq!(rows.len(), 3, "no queued row on top of the turn: {rows:#?}");
+    assert!(!rows
+        .iter()
+        .any(|row| matches!(row, RowView::PendingUser(_))));
+}
+
+#[test]
+fn a_rebuild_does_not_match_a_queued_turn_to_an_older_turn_of_the_same_words() {
+    // A queue is drained at the end of the run that was going, so the transcript's
+    // *most recent* turns are the only ones a queued row can have become. An older turn
+    // with the same words — the reader sending the same sentence twice in a session — is
+    // not it, and must not swallow the fresh send.
+    let mut model = AgentModel::new();
+    let sent = "carry on";
+    model.push_pending_user(sent).expect("a row");
+
+    model.rebuild_from_transcript(&json!({ "messages": [
+        { "role": "user", "content": [{ "type": "text", "text": sent }] },
+        { "role": "assistant", "content": [{ "type": "text", "text": "ok" }] },
+        { "role": "user", "content": [{ "type": "text", "text": "and now something else" }] },
+    ]}));
+
+    let rows = transcript_rows(&model);
+    assert_eq!(
+        rows.last(),
+        Some(&RowView::PendingUser(sent.to_string())),
+        "{rows:#?}"
+    );
+    assert_eq!(rows.len(), 4, "three turns and the queued row: {rows:#?}");
+}
+
+#[test]
+fn a_session_switch_drops_the_queued_turns() {
+    let mut model = AgentModel::new();
+    model.rebuild_from_transcript(&fixture("transcript.json"));
+    let settled = model.rows().len();
+    let id = model
+        .push_pending_user("for the old session")
+        .expect("a row");
+    model.take_row_changes();
+
+    let effect = model.apply_event(2, "session-switched", &json!({"session": "/x.sexp"}));
+
+    assert!(effect.contains(Effect::RESYNC));
+    assert_eq!(model.rows().len(), settled, "the queued row is gone");
+    assert!(model.row(id).is_none());
+    assert_eq!(
+        model.take_row_changes(),
+        RowChanges::Changed(vec![id]),
+        "its id is reported so the view drops it"
+    );
+    // And the rebuild that follows carries nothing of it either.
+    model.rebuild_from_transcript(&fixture("transcript.json"));
+    assert!(!transcript_rows(&model)
+        .iter()
+        .any(|row| matches!(row, RowView::PendingUser(_))));
+}
+
+#[test]
+fn a_send_that_never_landed_takes_its_queued_row_back() {
+    let mut model = AgentModel::new();
+    model.apply_event(1, "message-start", &json!({}));
+    let id = model.push_pending_user("half sent").expect("a row");
+    model.take_row_changes();
+
+    assert_eq!(model.cancel_pending_user(id), Effect::ROWS);
+    assert!(model.row(id).is_none(), "the queued row is gone");
+    assert_eq!(model.take_row_changes(), RowChanges::Changed(vec![id]));
+
+    // A row evo has taken in the meantime is not the failed request's to take back.
+    let taken = model.push_pending_user("taken").expect("a row");
+    evo_takes(&mut model, 2, "steering", "taken");
+    assert_eq!(model.cancel_pending_user(taken), Effect::NONE);
+    assert_eq!(
+        transcript_rows(&model)
+            .iter()
+            .filter(|row| row == &&RowView::User("taken".to_string()))
+            .count(),
+        1,
+        "the turn stays: {:?}",
+        model.rows()
+    );
+
+    // An id this model does not have as a queued row changes nothing.
+    assert_eq!(model.cancel_pending_user(9_999), Effect::NONE);
+}
+
+#[test]
+fn a_blank_draft_queues_nothing() {
+    let mut model = AgentModel::new();
+    assert!(model.push_pending_user("   \n  ").is_none());
+    assert!(model.rows().is_empty());
+    assert_eq!(model.take_row_changes(), RowChanges::Unchanged);
 }

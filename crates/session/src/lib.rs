@@ -33,6 +33,26 @@ pub enum RowKind {
     /// A user turn (`user-input`, `steering`, or a user message from /transcript
     /// that no extension injected — see [`RowKind::Context`]).
     User { text: String },
+    /// The reader's own words, shown from the moment they send them — before evo
+    /// has taken them.
+    ///
+    /// A `POST /prompt` issued while a run is in flight is only *queued* by the
+    /// server (its reply says `"queued": true`) and evo says nothing until it
+    /// drains the queue at the running turn's next boundary
+    /// (`src/kernel/loop.lisp`'s `drain-steering`), which is after the current
+    /// model response and all of its tool calls. Without this row the reader's
+    /// message is simply absent from the transcript until then — the tab looks as
+    /// if it had dropped it.
+    ///
+    /// The row is the reader's echo and nothing else: it is not a turn yet, so it
+    /// opens no turn boundary and no `user-input`/`steering` event carries it. The
+    /// event that does carry the text promotes it into a [`RowKind::User`] row,
+    /// which may sit later in the transcript than the pending row did — evo
+    /// inserts the turn after the assistant message and tool calls of the turn
+    /// that was running. See [`AgentModel::push_pending_user`].
+    ///
+    /// [`AgentModel::push_pending_user`]: crate::AgentModel::push_pending_user
+    PendingUser { text: String },
     /// Content an extension injected with `evo:inject-context`, which journals a
     /// `:custom-message` entry carrying a `:key`; the fold tags the message
     /// `:meta (:key ...)` and /transcript sends `"meta": {"key": "<key>"}`

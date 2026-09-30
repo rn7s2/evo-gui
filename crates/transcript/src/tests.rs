@@ -69,6 +69,15 @@ fn user(id: RowId, version: u64, text: &str) -> Row {
     }
 }
 
+/// The reader's words while evo still has them queued (§9.1).
+fn pending_user(id: RowId, text: &str) -> Row {
+    Row {
+        id,
+        version: 1,
+        kind: RowKind::PendingUser { text: text.into() },
+    }
+}
+
 fn assistant(id: RowId, version: u64, markdown: &str) -> Row {
     Row {
         id,
@@ -1116,6 +1125,77 @@ fn injected_context_does_not_open_a_turn(cx: &mut TestAppContext) {
         assert!(
             window.try_find(("transcript-turn", 3usize)).is_none(),
             "two injected messages are not three turns"
+        );
+    });
+}
+
+/// The reader's own words while evo has them queued (§9.1): the card a turn is
+/// drawn on, held back, with a caption saying where they are.
+///
+/// It is deliberately not a turn yet — nothing has opened — and the model replaces
+/// the row, in the place evo inserted the turn, when the event carrying the words
+/// arrives.
+#[gpui_kit::test]
+fn a_queued_turn_is_drawn_as_a_turn_that_has_not_opened_yet(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (host, cx) = cx.add_window_view(|_window, cx| TranscriptHost::new(cx));
+
+    host.update(cx, |host, cx| {
+        host.transcript.update(cx, |view, cx| {
+            view.replace(
+                1,
+                vec![
+                    context(1, "global-memory", "<global-memory>"),
+                    user(2, 1, "first"),
+                    assistant(3, 1, "working on it"),
+                    pending_user(4, "stop, read §9.1 first"),
+                ],
+                cx,
+            );
+        });
+    });
+
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        // The card is a turn's, with room for the words and the line under them.
+        let queued = window.find(("transcript-user", 4u64)).bounds();
+        assert!(queued.size.height > px(20.), "the queued card: {queued:?}");
+        // The caption says where the words are...
+        let caption: gpui_kit::ElementId = ("transcript-pending", 4u64).into();
+        assert_eq!(
+            window.find((caption, "caption")).label(),
+            Some("queued · sent at the next step")
+        );
+        // ...and no boundary is drawn: the reader's one turn is still turn 1.
+        assert!(window.try_find(("transcript-turn", 1usize)).is_some());
+        assert!(
+            window.try_find(("transcript-turn", 2usize)).is_none(),
+            "queued words have not opened a turn"
+        );
+
+        // evo takes them: the model drops the queued row and appends the turn. What is
+        // left is the same card, a turn boundary above it and no caption.
+        host.update(cx, |host, cx| {
+            host.transcript.update(cx, |view, cx| {
+                view.remove(1, 4, cx);
+                view.upsert(1, user(5, 1, "stop, read §9.1 first"), cx);
+            });
+        });
+        window.render_frame(cx);
+        assert!(window.try_find(("transcript-user", 4u64)).is_none());
+        let caption: gpui_kit::ElementId = ("transcript-pending", 5u64).into();
+        assert!(
+            window.try_find((caption, "caption")).is_none(),
+            "a turn evo has taken says nothing about being queued"
+        );
+        assert_eq!(
+            window.find(("transcript-user", 5u64)).bounds().size.height,
+            window.find(("transcript-user", 2u64)).bounds().size.height,
+            "the promoted card is the reader's plain turn"
+        );
+        assert!(
+            window.try_find(("transcript-turn", 2usize)).is_some(),
+            "the turn is open now"
         );
     });
 }

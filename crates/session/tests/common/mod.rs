@@ -87,6 +87,9 @@ pub fn apply_capture(model: &mut AgentModel, name: &str) -> Effect {
 #[derive(Clone, Debug, PartialEq)]
 pub enum RowView {
     User(String),
+    /// The reader's words, still queued: the same text as [`RowView::User`], but
+    /// not a turn yet.
+    PendingUser(String),
     Context {
         key: String,
         text: String,
@@ -136,6 +139,7 @@ impl RowView {
     pub fn of(row: &session::Row) -> RowView {
         match &row.kind {
             session::RowKind::User { text } => RowView::User(text.clone()),
+            session::RowKind::PendingUser { text } => RowView::PendingUser(text.clone()),
             session::RowKind::Context { key, text } => RowView::Context {
                 key: key.clone(),
                 text: text.clone(),

@@ -647,6 +647,7 @@ fn text_chars(cx: &HeadlessAppContext, tab: &Entity<workspace::TabContent>) -> u
 fn row_chars(row: &session::Row) -> usize {
     match &row.kind {
         session::RowKind::User { text } => text.chars().count(),
+        session::RowKind::PendingUser { text } => text.chars().count(),
         session::RowKind::Context { text, .. } => text.chars().count(),
         session::RowKind::LaneNotice { text, .. } => text.chars().count(),
         session::RowKind::GoalNudge { text, .. } => text.chars().count(),
