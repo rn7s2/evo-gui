@@ -806,7 +806,7 @@ fn a_long_transcript_opens_at_its_latest_row(cx: &mut TestAppContext) {
     let items: Vec<Item> = (0..40)
         .map(|i| user(&format!("u_{i:02}"), "a turn of its own"))
         .collect();
-    let (view, cx) = open!(cx, items);
+    let (_view, cx) = open!(cx, items);
     // The first frame lays the list out; the second applies the scroll the first
     // frame asked for (the rule runs in prepaint, so it is one frame behind).
     for _ in 0..4 {
