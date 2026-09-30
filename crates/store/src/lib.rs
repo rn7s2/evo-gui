@@ -30,6 +30,7 @@
 pub mod app_state;
 pub mod catalog;
 pub mod cli;
+pub mod design;
 pub mod history;
 pub mod launch;
 pub mod model_cache;
