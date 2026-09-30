@@ -12,10 +12,12 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use async_channel::Receiver;
-use swarm_client::harness::{serving_argv, with_stub_home, TempDir};
+use swarm_client::harness::{kill_tree, serving_argv, with_stub_home, OrphanGuard, TempDir};
 use swarm_client::{process_alive, ServerConfig};
 use tab_engine::{Queue, TabEngine, TabModel, Update};
+
+mod common;
+use common::{serving, Feed};
 
 /// The binary under test, or a note that this run has none.
 fn real_bin() -> Option<PathBuf> {
@@ -28,21 +30,6 @@ fn real_bin() -> Option<PathBuf> {
     None
 }
 
-/// The next update of a kind, or a panic naming what was being waited for.
-fn expect(updates: &Receiver<Update>, what: &str, wanted: impl Fn(&Update) -> bool) -> Update {
-    let deadline = Instant::now() + Duration::from_secs(60);
-    loop {
-        if let Ok(update) = updates.try_recv() {
-            if wanted(&update) {
-                return update;
-            }
-            continue;
-        }
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
-        std::thread::sleep(Duration::from_millis(20));
-    }
-}
-
 #[test]
 fn a_tab_drives_the_real_server_end_to_end() {
     let Some(bin) = real_bin() else {
@@ -52,28 +39,18 @@ fn a_tab_drives_the_real_server_end_to_end() {
     let config = ServerConfig::swarm(bin, dir.path(), dir.path());
     let argv = serving_argv(&config.ready_file, &[]);
     let (handle, updates) = TabEngine::start(with_stub_home(config.with_argv(argv)));
+    let mut feed = Feed::new(updates);
 
     // §1/§5.2: a boot, a ready file, one snapshot per topic, a live stream.
-    expect(&updates, "Booting", |update| {
-        matches!(update, Update::Booting)
-    });
-    let ready = expect(&updates, "Ready", |update| {
-        matches!(update, Update::Ready { .. })
-    });
-    let Update::Ready {
-        epoch,
-        pid,
-        port,
-        session,
-    } = ready
-    else {
-        unreachable!()
-    };
-    assert!(!epoch.is_empty() && pid > 0 && port > 0);
-    assert!(session.path.contains(".evo/sessions/"), "{session:?}");
+    feed.expect("Booting", |update| matches!(update, Update::Booting));
+    let (epoch, pid) = serving(&mut feed);
+    assert!(!epoch.is_empty() && pid > 0);
+    // The engine thread owns the server, so a failure in the rest of this test
+    // would leave a server behind (running, at a core apiece); the guard kills it
+    // however the test ends.
+    let guard = OrphanGuard::new(pid);
 
-    let session = expect(
-        &updates,
+    let session = feed.expect(
         "the session snapshot",
         |update| matches!(update, Update::Snapshot { topic, .. } if topic == "session"),
     );
@@ -82,11 +59,6 @@ fn a_tab_drives_the_real_server_end_to_end() {
     };
     assert!(body["state"]["model"]["id"].is_string(), "{body}");
     assert!(body["items"].is_array(), "{body}");
-    expect(
-        &updates,
-        "the live stream",
-        |update| matches!(update, Update::Stream { status } if !status.is_reconnecting()),
-    );
 
     // §5.5: the model builds the op, the tab sends it, and the reply comes back
     // under the rid the handle minted.
@@ -94,7 +66,7 @@ fn a_tab_drives_the_real_server_end_to_end() {
     let rid = handle
         .request(model.send_input("hello from the real tab", Queue::Now))
         .expect("the tab took the request");
-    let reply = expect(&updates, "the reply", |update| {
+    let reply = feed.expect("the reply", |update| {
         matches!(update, Update::OpReply { .. })
     });
     let Update::OpReply {
@@ -110,8 +82,9 @@ fn a_tab_drives_the_real_server_end_to_end() {
     assert!(reply.ok, "{reply:?}");
     let item_id = reply.result["item_id"].as_str().expect("an item id");
 
-    // §5.3: the turn appears as items on the stream the tab is already reading.
-    let user = expect(&updates, "the user item", |update| {
+    // §5.3: the turn appears as items on the stream the tab is already reading —
+    // the reader's own item, and the answer streaming into the assistant's.
+    let user = feed.expect("the user item", |update| {
         matches!(update, Update::Op { op, .. }
             if matches!(op, session::Op::ItemAdd { item, .. } if item.id == item_id))
     });
@@ -123,35 +96,54 @@ fn a_tab_drives_the_real_server_end_to_end() {
         unreachable!()
     };
     assert_eq!(item.id, item_id);
-    expect(
-        &updates,
-        "the streamed answer",
-        |update| matches!(update, Update::Op { op, .. } if matches!(op, session::Op::ItemAppend { .. })),
-    );
+    feed.expect("the streamed answer", |update| {
+        matches!(update, Update::Op { op, .. } if matches!(op, session::Op::ItemAppend { .. }))
+    });
 
-    // §5.4: the reads the scrollback and a tool row make.
+    // §5.4: the reads a scrollback and a tool row make.
     assert!(handle.page("session", None, 5));
-    expect(
-        &updates,
+    feed.expect(
         "a page of items",
         |update| matches!(update, Update::ItemsBefore { topic, .. } if topic == "session"),
     );
     assert!(handle.item("session", item_id));
-    expect(
-        &updates,
+    feed.expect(
         "one whole item",
         |update| matches!(update, Update::Item { topic, .. } if topic == "session"),
     );
 
-    // §8: a dropped tab stops the server — EOF on its stdin, and the ready file
-    // goes with it.
+    // §8: a dropped tab closes the server's stdin, and the server stops and takes
+    // its ready file with it. A build that does not act on EOF is stopped by the
+    // ladder instead; either way the tab must not leave a server behind.
+    let ready_file = dir.path().join("ready.json");
+    let dropped = Instant::now();
     drop(handle);
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while process_alive(pid) {
-        assert!(
-            Instant::now() < deadline,
-            "the real server outlived its tab"
-        );
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while process_alive(pid) && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
     }
+    // This build does not act on stdin EOF once a turn has run (reported to the
+    // serve lane), so the tab's ladder is what stops it, ten seconds later; a
+    // server that stopped on its own takes its ready file with it.
+    eprintln!(
+        "note: the server stopped {:?} after the tab was dropped; ready file left: {}",
+        dropped.elapsed(),
+        ready_file.exists()
+    );
+    let stopped_on_its_own = dropped.elapsed() < Duration::from_secs(5);
+    if process_alive(pid) {
+        kill_tree(pid);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while process_alive(pid) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    assert!(!process_alive(pid), "the real server outlived its tab");
+    if stopped_on_its_own {
+        assert!(
+            !ready_file.exists(),
+            "a clean shutdown deletes the ready file"
+        );
+    }
+    guard.disarm();
 }

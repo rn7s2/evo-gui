@@ -16,6 +16,9 @@ use swarm_client::harness::{Control, FakeSwarm, TempDir};
 use swarm_client::ServerConfig;
 use tab_engine::{EngineHandle, TabEngine, Update};
 
+mod common;
+use common::{serving, snapshot_of, Feed};
+
 /// The config a tab is started from: the fake server in `dir`, with extra argv.
 fn config(dir: &std::path::Path, extra: &[&str]) -> ServerConfig {
     swarm_client::harness::fake_config(dir, extra).expect("a fake server's config")
@@ -29,103 +32,10 @@ fn tab(tag: &str, extra: &[&str]) -> (TempDir, EngineHandle, Receiver<Update>) {
     (dir, handle, updates)
 }
 
-/// The updates a tab has sent, kept rather than skipped: a test that waits for
-/// one topic must not throw the other topics away (the server answers topics in
-/// its own order).
-struct Feed {
-    updates: Receiver<Update>,
-    seen: Vec<Update>,
-}
-
-impl Feed {
-    /// The next update of a kind, from what has arrived or from what comes next.
-    fn expect(&mut self, what: &str, wanted: impl Fn(&Update) -> bool) -> Update {
-        if let Some(index) = self.seen.iter().position(&wanted) {
-            return self.seen.remove(index);
-        }
-        let deadline = Instant::now() + Duration::from_secs(20);
-        loop {
-            match self.updates.try_recv() {
-                Ok(update) => {
-                    if wanted(&update) {
-                        return update;
-                    }
-                    self.seen.push(update);
-                }
-                Err(_) => {
-                    assert!(
-                        Instant::now() < deadline,
-                        "timed out waiting for {what}, saw {:?}",
-                        self.seen
-                    );
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-            }
-        }
-    }
-
-    /// Forget what has already arrived: what a test does when it cares only about
-    /// what happens *next* (a restart emits the same updates as a boot).
-    fn forget(&mut self) {
-        self.seen.clear();
-    }
-
-    /// Blocks until the model is in the state the caller describes, feeding it
-    /// every update on the way.
-    fn feed_model(&mut self, model: &mut TabModel, done: impl Fn(&TabModel) -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(20);
-        while !done(model) {
-            assert!(Instant::now() < deadline, "the model never caught up");
-            if let Ok(update) = self.updates.recv_blocking() {
-                apply(model, update);
-            }
-        }
-    }
-}
-
-/// Whether an update is a snapshot of this topic.
-fn snapshot_of(topic: &str) -> impl Fn(&Update) -> bool + '_ {
-    move |update| matches!(update, Update::Snapshot { topic: name, .. } if name == topic)
-}
-
-/// Wait until the tab is serving *and* streaming: the epoch and process id it
-/// announced, and the stream live. A test that drives the server must not do it
-/// before the tab is listening to it.
-fn serving(feed: &mut Feed) -> (String, u32) {
-    let update = feed.expect("Ready", |update| matches!(update, Update::Ready { .. }));
-    let Update::Ready { epoch, pid, .. } = update else {
-        unreachable!()
-    };
-    feed.expect(
-        "the live stream",
-        |update| matches!(update, Update::Stream { status } if !status.is_reconnecting()),
-    );
-    (epoch, pid)
-}
-
-/// Feed one update into the model, the way the workspace does.
-fn apply(model: &mut TabModel, update: Update) {
-    match update {
-        Update::Snapshot { topic, body } => {
-            model.on_snapshot(&topic, &body);
-        }
-        Update::Op { topic, op } => {
-            model.on_op(&topic, &op);
-        }
-        Update::Stream { status } => {
-            model.on_stream("session", status);
-        }
-        _ => {}
-    }
-}
-
 #[test]
 fn a_tab_boots_snapshots_every_topic_and_streams() {
     let (dir, handle, updates) = tab("boot", &["--workers", "2"]);
-    let mut feed = Feed {
-        updates,
-        seen: Vec::new(),
-    };
+    let mut feed = Feed::new(updates);
     feed.expect("Booting", |update| matches!(update, Update::Booting));
     let (epoch, pid) = serving(&mut feed);
     assert!(!epoch.is_empty());
@@ -149,10 +59,7 @@ fn a_tab_boots_snapshots_every_topic_and_streams() {
 #[test]
 fn a_frame_reaches_the_model_as_an_op() {
     let (dir, handle, updates) = tab("frames", &[]);
-    let mut feed = Feed {
-        updates,
-        seen: Vec::new(),
-    };
+    let mut feed = Feed::new(updates);
     serving(&mut feed);
     let control = Control::attach(dir.path()).unwrap();
     control
@@ -186,10 +93,7 @@ fn a_frame_reaches_the_model_as_an_op() {
 #[test]
 fn a_topic_reset_re_reads_that_one_topic() {
     let (dir, handle, updates) = tab("topic-reset", &[]);
-    let mut feed = Feed {
-        updates,
-        seen: Vec::new(),
-    };
+    let mut feed = Feed::new(updates);
     serving(&mut feed);
     let control = Control::attach(dir.path()).unwrap();
     feed.expect("the first snapshot", snapshot_of("session"));
@@ -224,10 +128,7 @@ fn a_topic_reset_re_reads_that_one_topic() {
 #[test]
 fn a_stream_reset_re_snapshots_everything_and_resumes_the_stream() {
     let (dir, handle, updates) = tab("stream-reset", &[]);
-    let mut feed = Feed {
-        updates,
-        seen: Vec::new(),
-    };
+    let mut feed = Feed::new(updates);
     serving(&mut feed);
     let control = Control::attach(dir.path()).unwrap();
     feed.expect("the first snapshot", snapshot_of("session"));
@@ -270,10 +171,7 @@ fn a_stream_reset_re_snapshots_everything_and_resumes_the_stream() {
 #[test]
 fn a_refetch_asks_for_every_topic_again() {
     let (_dir, handle, updates) = tab("refetch", &[]);
-    let mut feed = Feed {
-        updates,
-        seen: Vec::new(),
-    };
+    let mut feed = Feed::new(updates);
     serving(&mut feed);
     feed.expect("the first snapshot", snapshot_of("session"));
 
@@ -285,10 +183,7 @@ fn a_refetch_asks_for_every_topic_again() {
 #[test]
 fn a_request_from_the_model_becomes_a_post() {
     let (dir, handle, updates) = tab("ops", &[]);
-    let mut feed = Feed {
-        updates,
-        seen: Vec::new(),
-    };
+    let mut feed = Feed::new(updates);
     serving(&mut feed);
     let control = Control::attach(dir.path()).unwrap();
     control.requests();
@@ -333,10 +228,7 @@ fn the_model_can_be_driven_entirely_from_the_updates() {
     // The contract's bound: a tab's whole job is to feed the model. This is that
     // path, end to end, with the fake server on the other side.
     let (dir, handle, updates) = tab("model", &[]);
-    let mut feed = Feed {
-        updates,
-        seen: Vec::new(),
-    };
+    let mut feed = Feed::new(updates);
     serving(&mut feed);
     let control = Control::attach(dir.path()).unwrap();
     let mut model = TabModel::new();
@@ -370,10 +262,7 @@ fn the_model_can_be_driven_entirely_from_the_updates() {
 #[test]
 fn an_append_carries_its_id_field_and_text() {
     let (dir, handle, updates) = tab("append", &[]);
-    let mut feed = Feed {
-        updates,
-        seen: Vec::new(),
-    };
+    let mut feed = Feed::new(updates);
     serving(&mut feed);
     let control = Control::attach(dir.path()).unwrap();
     control
@@ -407,10 +296,7 @@ fn an_append_carries_its_id_field_and_text() {
 #[test]
 fn the_scrollback_pages_older_items_the_whole_item_and_an_image() {
     let (dir, handle, updates) = tab("reads", &[]);
-    let mut feed = Feed {
-        updates,
-        seen: Vec::new(),
-    };
+    let mut feed = Feed::new(updates);
     serving(&mut feed);
     let control = Control::attach(dir.path()).unwrap();
 
@@ -472,10 +358,7 @@ fn the_scrollback_pages_older_items_the_whole_item_and_an_image() {
 #[test]
 fn a_read_that_fails_comes_back_as_a_fetch_failed() {
     let (dir, handle, updates) = tab("reads-fail", &[]);
-    let mut feed = Feed {
-        updates,
-        seen: Vec::new(),
-    };
+    let mut feed = Feed::new(updates);
     serving(&mut feed);
     let control = Control::attach(dir.path()).unwrap();
     control.requests();
@@ -507,10 +390,7 @@ fn a_read_that_fails_comes_back_as_a_fetch_failed() {
 #[test]
 fn the_sink_is_the_fire_and_forget_form_of_the_same_request() {
     let (dir, handle, updates) = tab("sink", &[]);
-    let mut feed = Feed {
-        updates,
-        seen: Vec::new(),
-    };
+    let mut feed = Feed::new(updates);
     serving(&mut feed);
     let control = Control::attach(dir.path()).unwrap();
     control.requests();
@@ -539,10 +419,7 @@ fn the_sink_is_the_fire_and_forget_form_of_the_same_request() {
 #[test]
 fn a_supervisor_restart_is_followed_into_the_new_lifetime() {
     let (dir, handle, updates) = tab("restart", &[]);
-    let mut feed = Feed {
-        updates,
-        seen: Vec::new(),
-    };
+    let mut feed = Feed::new(updates);
     let (epoch, pid) = serving(&mut feed);
 
     // The server re-execs itself: a new epoch, a new port, the ready file
@@ -599,10 +476,7 @@ fn a_supervisor_restart_is_followed_into_the_new_lifetime() {
 #[test]
 fn a_server_that_dies_is_reported_and_the_tab_stops() {
     let (_dir, mut handle, updates) = tab("dies", &[]);
-    let mut feed = Feed {
-        updates,
-        seen: Vec::new(),
-    };
+    let mut feed = Feed::new(updates);
     let (_, pid) = serving(&mut feed);
 
     // Kill the process behind the tab: the stream cannot come back, and the tab
@@ -616,10 +490,7 @@ fn a_server_that_dies_is_reported_and_the_tab_stops() {
 #[test]
 fn dropping_the_handle_stops_the_server() {
     let (_dir, handle, updates) = tab("drop", &[]);
-    let mut feed = Feed {
-        updates,
-        seen: Vec::new(),
-    };
+    let mut feed = Feed::new(updates);
     let (_, pid) = serving(&mut feed);
     assert!(swarm_client::process_alive(pid));
 
@@ -634,10 +505,7 @@ fn dropping_the_handle_stops_the_server() {
 #[test]
 fn joining_waits_for_the_server_to_be_gone() {
     let (_dir, handle, updates) = tab("join", &[]);
-    let mut feed = Feed {
-        updates,
-        seen: Vec::new(),
-    };
+    let mut feed = Feed::new(updates);
     let (_, pid) = serving(&mut feed);
     handle.join();
     assert!(!swarm_client::process_alive(pid));
@@ -651,10 +519,7 @@ fn a_boot_that_fails_says_so_with_the_log_tail() {
     let config = ServerConfig::swarm(bin, dir.path(), dir.path());
     let argv = swarm_client::harness::serving_argv(&config.ready_file, &[]);
     let (handle, updates) = TabEngine::start(config.with_argv(argv));
-    let mut feed = Feed {
-        updates,
-        seen: Vec::new(),
-    };
+    let mut feed = Feed::new(updates);
     let update = feed.expect("BootFailed", |update| {
         matches!(update, Update::BootFailed { .. })
     });

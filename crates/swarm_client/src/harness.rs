@@ -120,6 +120,49 @@ pub fn kill_process(pid: u32) -> bool {
     unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) == 0 }
 }
 
+/// Kill a spawned server and everything under it: the supervisor is spawned as
+/// its own process group leader, so one signal reaches its serving child too.
+///
+/// `0` is not a pid — it means "my own process group" to `killpg` — so it is
+/// refused rather than obeyed.
+pub fn kill_tree(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    let sent = unsafe { libc::killpg(pid as libc::pid_t, libc::SIGKILL) };
+    sent == 0 || kill_process(pid)
+}
+
+/// A server this test must not outlive.
+///
+/// A test that drives a server from *another thread* — the tab's engine owns its
+/// `Server` — can fail before that thread runs the shutdown ladder, and a leaked
+/// server spins a core until somebody notices. This guard kills the tree when the
+/// test ends, however it ends.
+pub struct OrphanGuard {
+    pid: u32,
+}
+
+impl OrphanGuard {
+    pub fn new(pid: u32) -> OrphanGuard {
+        OrphanGuard { pid }
+    }
+
+    /// Forget it: the test stopped the server itself, and this pid may belong to
+    /// somebody else by now.
+    pub fn disarm(self) {
+        std::mem::forget(self);
+    }
+}
+
+impl Drop for OrphanGuard {
+    fn drop(&mut self) {
+        if self.pid != 0 {
+            let _ = kill_tree(self.pid);
+        }
+    }
+}
+
 /// A directory of one's own, removed when it goes out of scope.
 pub struct TempDir {
     path: PathBuf,
