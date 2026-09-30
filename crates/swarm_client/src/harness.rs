@@ -15,6 +15,7 @@
 //! `serve` command, for a test to fill in.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde_json::{json, Value};
 
@@ -66,12 +67,50 @@ pub fn with_stub_home(config: ServerConfig) -> ServerConfig {
         .with_env_removed("EVO_SUPERVISED_CHILD")
 }
 
+/// How long a server this harness started is given to stop before the ladder
+/// escalates. A real swarm stops its lanes one at a time, and these tests run in
+/// parallel on a machine that is not idle: ten seconds is enough for one server
+/// and not for thirteen at once.
+pub const STOP_PATIENCE: Duration = Duration::from_secs(30);
+
 /// A [`ServerConfig`] that runs the fake server in `dir`, with extra argv.
+///
+/// With `EVO_SWARM_BIN` set the same argv drives the *real* `evo-swarm`, and
+/// then three things differ, because a real server is not the fake:
+///
+/// * it gets `--workers 1` unless the caller asks for more — a swarm with its
+///   default workers is a supervisor, six lanes and their sessions, and a test
+///   of the protocol does not need them;
+/// * it gets `--evo $EVO_AGENT_BIN` when the environment names the agent its
+///   lanes run;
+/// * its ladder is given [`STOP_PATIENCE`], so a loaded machine still sees the
+///   graceful ending rather than the `SIGTERM` after it.
+///
+/// The stub home is applied here rather than by each caller: a real server needs
+/// one to answer without a key.
 pub fn fake_config(dir: &Path, extra: &[&str]) -> std::io::Result<ServerConfig> {
     let bin = fake_swarm_bin(dir)?;
+    let real = std::env::var_os("EVO_SWARM_BIN").is_some();
     let config = ServerConfig::swarm(bin, dir, dir);
-    let argv = serving_argv(&config.ready_file, extra);
-    Ok(config.with_argv(argv))
+    let mut extra: Vec<String> = extra.iter().map(|arg| (*arg).to_owned()).collect();
+    if real {
+        if !extra.iter().any(|arg| arg == "--workers") {
+            extra.push("--workers".to_owned());
+            extra.push("1".to_owned());
+        }
+        if let Some(agent) = std::env::var_os("EVO_AGENT_BIN") {
+            extra.push("--evo".to_owned());
+            extra.push(agent.to_string_lossy().into_owned());
+        }
+    }
+    let borrowed: Vec<&str> = extra.iter().map(String::as_str).collect();
+    let argv = serving_argv(&config.ready_file, &borrowed);
+    let mut config = with_stub_home(config.with_argv(argv));
+    if real {
+        config.shutdown_grace = STOP_PATIENCE;
+        config.term_grace = Duration::from_secs(15);
+    }
+    Ok(config)
 }
 
 /// A binary that runs the fake server: a one-line `sh` wrapper, because the
