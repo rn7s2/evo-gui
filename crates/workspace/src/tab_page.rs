@@ -294,6 +294,14 @@ impl TabContent {
         let tab = cx.entity().downgrade();
         Rc::new(move |handle, window, cx| {
             let tab = tab.clone();
+            // The design's `.workspace.resizing *{cursor:col-resize}`: while the split
+            // is being dragged the pointer is usually off the nine-pixel band, where
+            // nothing under it would say what the drag is doing, so the drag itself
+            // carries the cursor.
+            if handle.state().is_active() {
+                // `col-resize`, the same cursor the band itself wears while hovered.
+                cx.set_active_drag_cursor_style(gpui_kit::CursorStyle::ResizeColumn, window);
+            }
             let painted = kit(handle, window, cx);
             Some(
                 div()
@@ -367,7 +375,10 @@ impl TabContent {
             .border_b_1()
             .border_color(paint::color(palette.border))
             .text_color(paint::color(palette.fg))
-            .child(div().font_medium().child(name))
+            .child(
+                // `.ws-head{font-size:14px}` with `.ws-agent-name{font-weight:500}`.
+                div().font_medium().text_size(px(14.)).child(name),
+            )
             .child(
                 // One line, elided: a task is a sentence, and the transcript below is
                 // where the whole of it is read.

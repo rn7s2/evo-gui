@@ -45,9 +45,10 @@ use widgets::{paint, Chip, EffortSlider};
 /// The input grows from the design's two lines to as much as half the conversation
 /// pane, and scrolls inside itself past that (`AutoTextarea.tsx`).
 ///
-/// The rows are the kit's own unit — a row is one line of the input's text, which at
-/// the theme's size and padding lands the two-line floor on the design's 62px
-/// `min-height` — so the composer is told the pane's height and works in rows.
+/// The rows are the kit's own unit — a row is one line of the input's text, so two
+/// rows are the design's two lines and the box they make (60px against the design's
+/// 62px `min-height`) — and the composer is told the pane's height instead, working
+/// in rows.
 const MIN_ROWS: usize = 2;
 /// How much of the pane's height the input may take: `Math.floor(pane / 2)`.
 const ROOM_SHARE: f32 = 0.5;
@@ -105,6 +106,11 @@ const DRAWER_LABEL_MIN: Pixels = px(112.);
 /// the surface the drawer sits on (`--sidebar`), as the design's rows do it.
 const ITEM_HOVER_MIX: f32 = 6.;
 const ITEM_CHOSEN_MIX: f32 = 9.;
+
+/// The input's own type: `.composer-box textarea{font-size:14px;line-height:20px}`
+/// — a size of its own, not the theme's base, and the line the autogrow counts in.
+const INPUT_FONT: Pixels = px(14.);
+const INPUT_LINE: Pixels = px(20.);
 
 /// Sizes drawn from the design's CSS rather than from a shared token: the chrome
 /// text of a strip or a drawer, and the item text under it.
@@ -1218,10 +1224,13 @@ impl Composer {
 
 /// How many of the input's rows fit in `room`, with the design's floor.
 fn rows_for(room: Pixels) -> usize {
-    // A row of the kit's input is its line height at the theme's size; the design's
-    // own textarea is 14px text on 20px lines.
-    const LINE: f32 = 20.;
-    ((f32::from(room) / LINE).floor() as usize).max(MIN_ROWS)
+    // A row of this input is one line of its own type (`INPUT_LINE`): the kit grows
+    // in rows, and its row is the line the text is set on. The row box carries the
+    // textarea's own padding (`input_py`, 10px a side) on top of the rows, which is
+    // the whole of the difference between this cap and the design's — the design
+    // measures pixels, so its half-pane includes that padding and this one is at
+    // most one line over it.
+    ((f32::from(room) / f32::from(INPUT_LINE)).floor() as usize).max(MIN_ROWS)
 }
 
 /// One todo: its 14px box, and its text.
@@ -1372,6 +1381,8 @@ impl Render for Composer {
                                 .with_size(Size::Large)
                                 .appearance(false)
                                 .bordered(false)
+                                .text_size(INPUT_FONT)
+                                .line_height(INPUT_LINE)
                                 .w_full()
                                 .min_w_0(),
                         ),
