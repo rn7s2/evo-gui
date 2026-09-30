@@ -90,16 +90,12 @@ impl LaunchSpec {
     /// `serve` and its flags, in the order §1 writes them.
     pub fn argv(&self) -> Vec<String> {
         let mut argv = vec!["serve".to_owned()];
-        match &self.ready_file {
-            Some(path) => {
-                argv.push("--ready-file".to_owned());
-                argv.push(path.display().to_string());
-            }
-            // Without a ready file the child has no way to be attached to. The
-            // flag is required by the contract, so a launch that forgot it is a
-            // programming mistake, and the tests that build one always set it —
-            // but an argv still gets built rather than panicking in a UI path.
-            None => {}
+        // A launch without a ready file is one the app cannot attach to — the flag
+        // is required (§1) — but building an argv is not the place to panic: the
+        // spawn that waits for the file is where that failure surfaces.
+        if let Some(path) = &self.ready_file {
+            argv.push("--ready-file".to_owned());
+            argv.push(path.display().to_string());
         }
         if self.watch_stdin {
             argv.push("--watch-stdin".to_owned());

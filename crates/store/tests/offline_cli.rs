@@ -134,13 +134,11 @@ fn the_environment_names_the_binaries() {
 
     std::env::remove_var(cli::AGENT_BIN_ENV);
     std::env::remove_var(cli::SWARM_BIN_ENV);
-    match before.0 {
-        Some(value) => std::env::set_var(cli::AGENT_BIN_ENV, value),
-        None => {}
+    if let Some(value) = before.0 {
+        std::env::set_var(cli::AGENT_BIN_ENV, value);
     }
-    match before.1 {
-        Some(value) => std::env::set_var(cli::SWARM_BIN_ENV, value),
-        None => {}
+    if let Some(value) = before.1 {
+        std::env::set_var(cli::SWARM_BIN_ENV, value);
     }
 }
 
