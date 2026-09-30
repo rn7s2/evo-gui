@@ -1,9 +1,10 @@
 //! Small formats shared by every row and readout.
 //!
 //! These are the TUI's own numbers (`src/tui/tui.lisp`'s `fmt-ktokens`, evo's
-//! `short-duration`), kept here so the GUI and the TUI read one session the same way.
-//! A segment's *text* is no longer built here: the server publishes `segments` whole
-//! (CONTRACT §4.2) and the UI renders them.
+//! `short-duration`), kept here so the GUI and the TUI read one session the same way —
+//! [`k_tokens`] excepted, which the design's model rows push one step further
+//! (`1M ctx`, not `1000k ctx`). A segment's *text* is no longer built here: the server
+//! publishes `segments` whole (CONTRACT §4.2) and the UI renders them.
 
 /// `(round n 1000)` in Common Lisp, which rounds half to **even**: 1500 → 2, 2500 → 2,
 /// 3500 → 4. Integer arithmetic only, so the result is exact for any token count.
@@ -19,9 +20,21 @@ pub fn round_div_half_even(n: u64, d: u64) -> u64 {
     }
 }
 
-/// `(format nil "~dk" (round n 1000))` — the TUI's `fmt-ktokens`.
+/// A token count as a reader wants it: `200k`, or `1M` once it is a thousand thousand —
+/// the TUI's `fmt-ktokens` (`(format nil "~dk" (round n 1000))`) with the whole-millions
+/// step the design's model rows print (`1M ctx`, never `1000k ctx`).
+///
+/// Both steps round the same way, half to **even** ([`round_div_half_even`]): first the
+/// thousands, because that is what the `k` step is a rounding of, and then those
+/// thousands into millions. So `1_048_576` → `1049k` → `1M`, `1_500_000` → `2M`, and
+/// `999_000` → `999k` stays below the step.
 pub fn k_tokens(n: u64) -> String {
-    format!("{}k", round_div_half_even(n, 1000))
+    let thousands = round_div_half_even(n, 1000);
+    if thousands >= 1000 {
+        format!("{}M", round_div_half_even(thousands, 1000))
+    } else {
+        format!("{}k", thousands)
+    }
 }
 
 /// A compact elapsed clock: `45s`, `3m`, `1h2m` — `evo.tui:short-duration`.

@@ -12,8 +12,9 @@ mod common;
 use common::fixture;
 use serde_json::json;
 use session::{
-    history_rows, home_short, model_options, relative_time, thinking_levels, HistoryEntry,
-    HistorySource, LaunchPlan, Launcher, Role, DEFAULT_WORKERS, WORKERS_MAX, WORKERS_MIN,
+    history_rows, home_short, k_tokens, model_options, relative_time, thinking_levels,
+    HistoryEntry, HistorySource, LaunchPlan, Launcher, Role, DEFAULT_WORKERS, WORKERS_MAX,
+    WORKERS_MIN,
 };
 
 fn entry(path: &str, folder: &str) -> HistoryEntry {
@@ -47,7 +48,7 @@ fn every_registration_is_an_option_named_by_id_and_provider() {
     let opus = &options[0];
     assert_eq!(opus.id, "claude-opus-5");
     assert_eq!(opus.provider, "anthropic");
-    assert_eq!(opus.detail, "200k ctx · vision · reasons");
+    assert_eq!(opus.detail, "200k ctx · vision");
     assert!(opus.ready && opus.lane_ok);
     // A model evo cannot reach says so in its own words, and a lane cannot register it
     // either.
@@ -66,6 +67,50 @@ fn every_registration_is_an_option_named_by_id_and_provider() {
 
 fn keys_of(options: &[session::ModelOption]) -> Vec<&str> {
     options.iter().map(|m| m.key.as_str()).collect()
+}
+
+/// The menu's second line is as much of the design's as the catalog can fill: the ctx
+/// window, then the modalities. The design's own line ends with that model's effort range
+/// (`effort low–max`), which `/catalog` does not publish — the global `thinking_levels` is
+/// the session's ladder, not this model's — so it is left out rather than invented
+/// (docs/api-gaps.md); and `reasoning` is not a word, so it prints as nothing.
+#[test]
+fn a_models_detail_is_its_ctx_window_and_its_modalities() {
+    let options = model_options(&fixture("catalog.json"));
+    assert_eq!(options[0].detail, "200k ctx · vision");
+    assert_eq!(
+        options[1].detail, "936k ctx",
+        "a model that reasons still gets no effort range invented for it"
+    );
+    assert_eq!(options[2].detail, "1M ctx · vision", "not `1000k ctx`");
+    // Nothing else in the body is a second line: no window, no detail.
+    let bare = model_options(&json!({"models": [
+        {"id": "m", "provider": "p", "reasoning": true},
+        {"id": "n", "provider": "p", "context_window": 0}
+    ]}));
+    assert_eq!(bare[0].detail, "", "no API says a window was `0 ctx`");
+    assert_eq!(bare[1].detail, "");
+}
+
+/// §5.6: a token count reads the way the design's own rows print it — in thousands, and
+/// in whole millions once it is a thousand thousand (`1M ctx`, never `1000k ctx`). Both
+/// steps round half to even, the TUI's own rule.
+#[test]
+fn a_token_count_reads_in_thousands_and_then_in_whole_millions() {
+    for (tokens, reads) in [
+        (0, "0k"),
+        (200_000, "200k"),
+        (372_000, "372k"),
+        (936_000, "936k"),
+        (999_000, "999k"),
+        (999_499, "999k"),
+        (999_500, "1M"),
+        (1_000_000, "1M"),
+        (1_048_576, "1M"),
+        (1_500_000, "2M"),
+    ] {
+        assert_eq!(k_tokens(tokens), reads, "{tokens} tokens");
+    }
 }
 
 /// Without a `lanes` list (an `evo-agent` body) evo has made no judgement about lanes,

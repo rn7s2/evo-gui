@@ -304,8 +304,13 @@ pub fn thinking_levels(catalog: &Value) -> Vec<String> {
     }
 }
 
-/// One model's detail line: the context window, then what else the catalog says —
-/// `200k ctx · vision · reasons`.
+/// One model's detail line: as much of the design's as the catalog can fill — the context
+/// window, then the modalities — `200k ctx · vision`.
+///
+/// The design's own line ends with that model's effort range (`effort low–max`), which
+/// `/catalog` does not publish: the global `thinking_levels` is the session's ladder, not
+/// this model's. So it is left out rather than invented (`docs/api-gaps.md`); the
+/// `reasoning` flag has no words of its own in the design and prints nothing.
 fn model_detail(model: &Value) -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Some(window) = model.get("context_window").and_then(Value::as_u64) {
@@ -315,9 +320,6 @@ fn model_detail(model: &Value) -> String {
     }
     if model.get("images").and_then(Value::as_bool) == Some(true) {
         parts.push("vision".to_string());
-    }
-    if model.get("reasoning").and_then(Value::as_bool) == Some(true) {
-        parts.push("reasons".to_string());
     }
     parts.join(" · ")
 }
