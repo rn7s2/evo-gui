@@ -47,7 +47,7 @@ fn state(busy: bool) -> TopicState {
             {"name": "thinking", "order": 200, "side": "left", "text": "high", "data": {}},
             {"name": "context", "order": 300, "side": "left",
              "text": format!("ctx {}/936k (5%)", session::k_tokens(tokens)), "data": {}},
-            {"name": "cache-stats", "order": 350, "side": "left", "text": "97% cached",
+            {"name": "cache_stats", "order": 350, "side": "left", "text": "97% cached",
              "data": {}},
             {"name": "goal", "order": 400, "side": "left",
              "text": "goal a1b2c3d4 (active) 12k/50k", "data": {}},

@@ -95,10 +95,12 @@ impl Chip {
     pub fn render(self) -> AnyElement {
         let palette = self.palette;
         let interactive = self.interactive;
-        let rest = mix(palette.fg, REST_MIX, palette.input);
-        let hover = mix(palette.fg, HOVER_MIX, palette.input);
-        let open = mix(palette.fg, OPEN_MIX, palette.input);
-        let base = if self.open { open } else { rest };
+        // Both fills come from [`Chip::fill`], which is where the design's three
+        // states and their precedence live: `.chip-button.open` is written after
+        // `.chip-button:hover` in the sheet and has the same weight, so an open
+        // chip keeps its deeper fill with the pointer on it.
+        let base = self.fill(false);
+        let hover = self.fill(true);
 
         let mut chip = div()
             .id(self.id)
@@ -116,7 +118,9 @@ impl Chip {
             .text_color(crate::paint::color(palette.fg))
             .child(self.label);
         if interactive {
-            chip = chip.cursor_pointer();
+            // The design keeps the arrow over its chrome (`.chip{cursor:default}`),
+            // and a chip that opens a drawer is chrome like the rest.
+            chip = chip.cursor_default();
         }
         if let Some(dim) = self.dim {
             chip = chip.child(
@@ -167,6 +171,11 @@ mod tests {
 
     /// The three states are three different fills, each a step further in — and
     /// the chips of both themes are one rule.
+    ///
+    /// `render` draws exactly these two ([`Chip::fill`] with and without the
+    /// pointer), so what this pins is what the screen shows: an open chip is the
+    /// open fill even with the pointer on it, the way `.chip-button.open` beats
+    /// `.chip-button:hover` in the design's sheet.
     #[test]
     fn a_chip_has_three_fills_and_the_open_one_wins() {
         for palette in [&LIGHT, &DARK] {

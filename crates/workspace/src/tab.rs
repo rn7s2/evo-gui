@@ -26,7 +26,7 @@ use gpui_kit::{
 };
 
 use async_channel::Receiver;
-use composer::{Composer, ComposerEvent};
+use composer::{Composer, ComposerEvent, ModelRow};
 use session::{
     AgentKey, Changes, ItemChange, LaunchPlan, Op, Queue, Status, StreamStatus, TabModel,
 };
@@ -631,6 +631,7 @@ impl TabContent {
     ) {
         if let Some(catalog) = &data.catalog {
             self.set_catalog(catalog, window, cx);
+            self.set_composer_catalog(catalog, cx);
         }
         self.set_catalog_error(data.catalog_error.clone(), cx);
         self.set_history_loading(data.history_loading, cx);
@@ -1125,6 +1126,33 @@ impl TabContent {
         });
     }
 
+    /// Feed the composer's drawer from the catalog (§5.6): the same `/catalog` body the
+    /// empty tab's choosers read, in the two shapes the drawer draws.
+    ///
+    /// The ladder is the server's own (`thinking_levels`) — a client never writes the
+    /// rungs down — and the models are the registrations it lists, each with the
+    /// provider lower-cased and, where evo cannot reach one, evo's own reason for it.
+    /// Lives here rather than in the composer because it is the workspace that holds
+    /// both: the catalog body arrives at the tab, and a running tab keeps its composer.
+    fn set_composer_catalog(&mut self, catalog: &serde_json::Value, cx: &mut Context<Self>) {
+        let levels = session::thinking_levels(catalog);
+        let models = session::model_options(catalog)
+            .into_iter()
+            .map(|model| ModelRow {
+                reason: if model.ready {
+                    None
+                } else {
+                    model.ready_reason
+                },
+                id: model.id,
+                provider: model.provider,
+                detail: model.detail,
+            })
+            .collect();
+        self.composer
+            .update(cx, |composer, cx| composer.set_catalog(levels, models, cx));
+    }
+
     /// Feed the agent list from the model: the rows, the coordinator's status and step
     /// clock, the selection, and why each down lane is down (§7.3, §9.7).
     fn sync_agents(&mut self, cx: &mut Context<Self>) {
@@ -1524,23 +1552,10 @@ impl TabContent {
             return;
         }
         live.recording = true;
-        let models = self
-            .last_launch
-            .as_ref()
-            .and_then(|launch| launch.plan())
-            .map(|plan| store::tab::TabModels {
-                coordinator: plan.model.as_ref().map(|(id, _)| id.clone()),
-                lanes: plan.lanes_model.as_ref().map(|(id, _)| id.clone()),
-            })
-            .unwrap_or_default();
-        let lanes = self
-            .last_launch
-            .as_ref()
-            .and_then(|launch| launch.plan())
-            .and_then(|plan| plan.workers)
-            .map(u32::from)
-            .or_else(|| live.model.swarm().map(|swarm| swarm.workers as u32))
-            .unwrap_or_default();
+        let (models, lanes) = recorded_facts(
+            &live.model,
+            self.last_launch.as_ref().and_then(|launch| launch.plan()),
+        );
 
         let mut recent = store::app_state::Recent::new(session.clone(), folder, lanes);
         recent.models = models;
@@ -1599,6 +1614,37 @@ impl TabContent {
     }
 }
 
+/// What the app files about a session it started (§9.5): the models the swarm really
+/// runs with, and how many lanes it runs.
+///
+/// The **server's own topics** are the truth — the session's `model` is the coordinator
+/// evo resolved, the swarm's `config.lane_model` and `workers` are what the lanes got —
+/// because a launch passes only the controls a person set by hand: ask the plan alone
+/// and every swarm evo resolved for itself records "no model". The plan is the fallback
+/// for the moment before `/state` has spoken, when a person's own choice is all there is
+/// to say.
+fn recorded_facts(model: &TabModel, plan: Option<&LaunchPlan>) -> (store::tab::TabModels, u32) {
+    let asked_model = |pick: Option<&(String, String)>| pick.map(|(id, _)| id.clone());
+    let models = store::tab::TabModels {
+        coordinator: model
+            .state(AgentKey::Coordinator)
+            .and_then(|state| state.model.as_ref())
+            .map(|info| info.id.clone())
+            .or_else(|| asked_model(plan.and_then(|plan| plan.model.as_ref()))),
+        lanes: model
+            .swarm()
+            .and_then(|swarm| swarm.lane_model.as_ref())
+            .map(|info| info.id.clone())
+            .or_else(|| asked_model(plan.and_then(|plan| plan.lanes_model.as_ref()))),
+    };
+    let lanes = model
+        .swarm()
+        .map(|swarm| swarm.workers as u32)
+        .or_else(|| plan.and_then(|plan| plan.workers).map(u32::from))
+        .unwrap_or_default();
+    (models, lanes)
+}
+
 /// Whether the composer's button should be offering to stop the swarm (§7.5).
 ///
 /// The swarm topic's own flags count *lanes*: its `busy` is how many lanes are
@@ -1650,6 +1696,7 @@ mod tests {
         WindowOptions,
     };
     use session::Item;
+    use std::cell::RefCell;
     use swarm_client::ErrorCode;
 
     /// A tab showing a page of a swarm: what a refusal's line needs, and nothing more.
@@ -1676,6 +1723,48 @@ mod tests {
             })
             .expect("tab window")
         })
+    }
+
+    /// §9.5: a session is filed under what the swarm really ran — the server's own
+    /// topics — and not under the empty tab's controls, whose plan carries nothing for
+    /// anything evo resolved for itself. A server that has not spoken yet leaves the
+    /// person's own choices, and only those.
+    #[test]
+    fn a_recent_is_filed_with_what_the_swarm_really_runs() {
+        let mut model = TabModel::new();
+        model.on_snapshot(
+            "session",
+            &serde_json::json!({"state": {
+                "status": "idle",
+                "model": {"id": "claude-opus-5-5", "provider": "super_relay"}
+            }}),
+        );
+        model.on_snapshot(
+            "swarm",
+            &serde_json::json!({"state": {
+                "id": "sw", "workers": 9,
+                "status": {"busy": 0, "waiting_on_lanes": false},
+                "config": {"lane_model": {"id": "ark-deepseek-v4.1-flash",
+                                          "provider": "aiden"}}
+            }}),
+        );
+        let (models, lanes) = recorded_facts(&model, None);
+        assert_eq!(models.coordinator.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(models.lanes.as_deref(), Some("ark-deepseek-v4.1-flash"));
+        assert_eq!(lanes, 9);
+
+        // Before the server has said anything, a person's own picks are all there is:
+        // what the swarm resolves — and what the plan therefore leaves out — is not a
+        // model this app can name.
+        let asked = LaunchPlan {
+            model: Some(("seed-evolving".to_string(), "super_relay".to_string())),
+            workers: Some(4),
+            ..LaunchPlan::default()
+        };
+        let (models, lanes) = recorded_facts(&TabModel::new(), Some(&asked));
+        assert_eq!(models.coordinator.as_deref(), Some("seed-evolving"));
+        assert_eq!(models.lanes, None);
+        assert_eq!(lanes, 4);
     }
 
     /// One assistant answer, with or without the thinking behind it, as a fixture
@@ -2035,6 +2124,84 @@ mod tests {
             );
         })
         .expect("the page");
+    }
+
+    /// A `/catalog` body (§5.6), with evo's own casing on the providers and one
+    /// registration it cannot reach.
+    fn catalog_body() -> serde_json::Value {
+        serde_json::json!({
+            "models": [
+                {"id": "stub-a", "provider": "OPENAI", "name": "Stub A", "api": "openai-chat",
+                 "context_window": 200000, "reasoning": true, "images": true,
+                 "ready": true, "reason": null},
+                {"id": "stub-b", "provider": "OPENAI", "name": "Stub B", "api": "openai-chat",
+                 "context_window": 936000, "reasoning": false, "images": false,
+                 "ready": false, "reason": "no API key"},
+            ],
+            "thinking_levels": ["low", "medium", "high", "xhigh", "max"],
+        })
+    }
+
+    /// §5.6: the catalog the app learned reaches the composer of a tab that is already
+    /// running — not only the empty tab's choosers read it — so the drawer lists evo's
+    /// own registrations, and picking one is a `model.set` naming that registration.
+    ///
+    /// The id and the provider are the catalog's (a provider is matched lower-cased, as
+    /// §5.6 compares it); a registration evo cannot reach is listed with evo's reason.
+    #[gpui_kit::test]
+    fn the_catalogs_models_reach_a_running_tabs_drawer(cx: &mut TestAppContext) {
+        let (window, tab) = running_tab(cx);
+        let composer = cx.update(|cx| tab.read(cx).composer.clone());
+        let events: Rc<RefCell<Vec<ComposerEvent>>> = Rc::new(RefCell::new(Vec::new()));
+        let recorded = events.clone();
+        let _subscription = cx.update(|cx| {
+            cx.subscribe(&composer, move |_, event: &ComposerEvent, _| {
+                recorded.borrow_mut().push(event.clone())
+            })
+        });
+
+        cx.update_window(window, |_, window, cx| {
+            let data = LauncherData {
+                catalog: Some(catalog_body()),
+                ..LauncherData::default()
+            };
+            tab.update(cx, |tab, cx| tab.set_launcher_data(&data, window, cx));
+            // The selected agent's own state, which is what gives the drawer its chip.
+            composer.update(cx, |composer, cx| {
+                composer.set_agent(&model_state(), "Coordinator", true, cx)
+            });
+            window.render_frame(cx);
+            window.click("composer-chip-model", cx);
+            window.render_frame(cx);
+            assert!(
+                window.find("drawer-model-stub-a").visible()
+                    && window.find("drawer-model-stub-b").visible(),
+                "the catalog's registrations are in the drawer"
+            );
+            assert!(
+                window.find("composer-effort").visible(),
+                "and the ladder the session accepts"
+            );
+            assert_eq!(
+                window.find("drawer-model-stub-b").label(),
+                Some("openai · stub-b no API key"),
+                "a registration evo cannot reach is listed with evo's own reason"
+            );
+        })
+        .expect("the page");
+
+        cx.update_window(window, |_, window, cx| {
+            window.click("drawer-model-stub-b", cx)
+        })
+        .expect("the page");
+        assert_eq!(
+            events.borrow().as_slice(),
+            [ComposerEvent::ModelSet {
+                id: "stub-b".to_string(),
+                provider: "openai".to_string(),
+            }],
+            "picking a row is a model.set naming the catalog's registration"
+        );
     }
 
     /// One topic's own state, as the server publishes it: a model, so the foot row has

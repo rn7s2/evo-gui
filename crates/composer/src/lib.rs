@@ -79,11 +79,16 @@ const FOCUS_BORDER_MIX: f32 = 55.;
 const SHADOW_INK: paint::Rgb = paint::Rgb::new(0x3C, 0x28, 0x0A);
 
 /// The action button's height, and the row it shares with the chips
-/// (`.composer-send{height:28px}`, `.composer-foot{padding:6px 8px 8px 10px}`).
+/// (`.composer-send{height:28px}`, `.composer-foot{padding:6px 8px 8px 14px;gap:12px}`).
+///
+/// Two files carry a `.composer-foot` rule — `Composer.css` (6px gap, 10px of left
+/// padding) and `Workspace.css` (12px, 14px), which the page loads last and which is
+/// therefore what the design draws: measured off the rendered page, the first chip
+/// starts 14px inside the box and the chips stand 12px apart.
 const ACTION_HEIGHT: Pixels = px(28.);
 const ACTION_RADIUS: Pixels = px(RADIUS);
-const FOOT_GAP: Pixels = px(6.);
-const FOOT_PAD: (f32, f32, f32, f32) = (6., 8., 8., 10.);
+const FOOT_GAP: Pixels = px(12.);
+const FOOT_PAD: (f32, f32, f32, f32) = (6., 8., 8., 14.);
 
 /// The todo strip's rows: a 32px title row, and a list that scrolls past 156px
 /// (`.todo-strip-row`, `.todo-strip-list{max-height:156px}`).
@@ -114,6 +119,12 @@ const ITEM_CHOSEN_MIX: f32 = 9.;
 /// — a size of its own, not the theme's base, and the line the autogrow counts in.
 const INPUT_FONT: Pixels = px(14.);
 const INPUT_LINE: Pixels = px(20.);
+
+/// What the wrapper around the input adds to reach the design's `padding:11px 14px
+/// 4px` from the kit's own (top, right, bottom, left). The design's textarea paints
+/// its first line 11px down and 14px in, and its foot row 4px under the last line —
+/// the app matches it to the pixel rather than to the kit's 10/12/10.
+const INPUT_NUDGE: (f32, f32, f32, f32) = (1., 2., 4., 2.);
 
 /// Sizes drawn from the design's CSS rather than from a shared token: the chrome
 /// text of a strip or a drawer, and the item text under it.
@@ -895,6 +906,9 @@ impl Composer {
                     .child("Goal")
                     .child(
                         div()
+                            // `.drawer-dim{color:var(--muted-fg);font-weight:400}`: the
+                            // status is set back from the 500-weight title.
+                            .font_normal()
                             .text_color(paint::color(palette.muted_fg))
                             .child(SharedString::from(format!("({status})"))),
                     )
@@ -941,7 +955,10 @@ impl Composer {
                             div()
                                 .ml_auto()
                                 .flex_none()
-                                .child(Icon::new(IconName::ChevronDown).size(px(12.))),
+                                // The design's own toggle: the up chevron the todo
+                                // strip turns to when it is open — a way back, not a
+                                // way further out.
+                                .child(Icon::new(IconName::ChevronUp).size(px(12.))),
                         ),
                 )
                 .child(body)
@@ -982,11 +999,20 @@ impl Composer {
                 .as_ref()
                 .is_some_and(|(id, provider)| *id == model.id && *provider == model.provider);
             let (id, provider) = (model.id.clone(), model.provider.clone());
+            // The row's own words, as a reader that cannot see them hears them: the
+            // registration, then the line beside it.
+            let spoken = SharedString::from(format!(
+                "{} · {} {}",
+                model.provider,
+                model.id,
+                model.reason.as_ref().unwrap_or(&model.detail)
+            ));
             let hover = paint::color(paint::mix(palette.fg, ITEM_HOVER_MIX, palette.sidebar));
             let active = paint::color(paint::mix(palette.fg, ITEM_CHOSEN_MIX, palette.sidebar));
             let mut row = h_flex()
                 .id(ElementId::from(format!("drawer-model-{}", model.id)))
                 .test_support()
+                .aria_label(spoken)
                 .h(DRAWER_ITEM)
                 .w_full()
                 .items_center()
@@ -1013,7 +1039,16 @@ impl Composer {
                         .truncate()
                         .text_size(DETAIL_FONT)
                         .text_color(paint::color(palette.muted_fg))
-                        .child(SharedString::from(model.detail.clone())),
+                        // A registration evo cannot reach is listed with why not, in
+                        // evo's own words, in the detail slot's place: the context
+                        // window is not the fact that matters about a model that
+                        // could not be set.
+                        .child(SharedString::from(
+                            model
+                                .reason
+                                .clone()
+                                .unwrap_or_else(|| model.detail.clone()),
+                        )),
                 )
                 .child(div().w(px(14.)).flex_none().child(if is_chosen {
                     Icon::new(IconName::Check).size(px(14.)).into_any_element()
@@ -1025,7 +1060,9 @@ impl Composer {
                 let (id, provider) = (id.clone(), provider.clone());
                 row = row
                     .cursor_default()
-                    .hover(move |row| row.bg(hover))
+                    // `.drawer-item.chosen` is written after `.drawer-item:hover`, so
+                    // the ticked row keeps its own fill under the pointer.
+                    .when(!is_chosen, |row| row.hover(move |row| row.bg(hover)))
                     .on_click(move |_, _, cx| {
                         if let Some(composer) = weak.upgrade() {
                             composer.update(cx, |this, cx| this.choose_model(&id, &provider, cx));
@@ -1050,7 +1087,6 @@ impl Composer {
         cx: &Context<Self>,
     ) -> AnyElement {
         let level = self.agent.thinking.clone().unwrap_or_default();
-        let label = format!("Effort {level}");
         let row = h_flex()
             .id("drawer-effort")
             .test_support()
@@ -1064,10 +1100,18 @@ impl Composer {
             .border_color(paint::faded(palette.border, 0.7))
             .text_size(ITEM_FONT)
             .child(
-                div()
+                h_flex()
                     .flex_none()
                     .min_w(DRAWER_LABEL_MIN)
-                    .child(SharedString::from(label.clone())),
+                    // `Effort <span class="drawer-dim">medium</span>`: the level is
+                    // the dim half, as the model chip's effort is.
+                    .gap(px(4.))
+                    .child("Effort")
+                    .child(
+                        div()
+                            .text_color(paint::color(palette.muted_fg))
+                            .child(SharedString::from(level.clone())),
+                    ),
             );
         if self.levels.is_empty() {
             // The server published no ladder: say what the agent runs and change
@@ -1130,6 +1174,9 @@ impl Composer {
             .px(px(8.))
             .pb(px(4.))
             .text_size(ITEM_FONT)
+            // `.goal-text{font-size:13px;line-height:20px}`: the objective is read as
+            // prose, so its lines are the input's own leading.
+            .line_height(INPUT_LINE)
             .text_color(paint::color(palette.fg))
             .child(SharedString::from(objective))
     }
@@ -1349,7 +1396,6 @@ fn todo_box(status: TodoStatus, palette: &'static Palette) -> AnyElement {
 impl Render for Composer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = design::palette(cx.theme().mode.is_dark());
-        let input_background = cx.theme().input_background();
 
         // The caret is what "focused" means here: the ring belongs to the box, which
         // the input does not own.
@@ -1416,7 +1462,7 @@ impl Render for Composer {
                     .rounded(BOX_RADIUS)
                     .border(BOX_BORDER)
                     .border_color(border)
-                    .bg(input_background)
+                    .bg(paint::color(palette.input))
                     .shadow(shadows)
                     .overflow_hidden()
                     // Esc, with the caret anywhere in the box, is the coordinator's
@@ -1426,16 +1472,30 @@ impl Render for Composer {
                     .children(strip)
                     .children(drawer)
                     .child(
-                        div().w_full().min_w_0().child(
-                            Textarea::new(&self.input)
-                                .with_size(Size::Large)
-                                .appearance(false)
-                                .bordered(false)
-                                .text_size(INPUT_FONT)
-                                .line_height(INPUT_LINE)
-                                .w_full()
-                                .min_w_0(),
-                        ),
+                        // The kit's own input padding is a function of its size — a
+                        // `Large` input carries `input_py` 10px above and below and
+                        // `input_px` 12px beside — and no size it offers is the
+                        // design's `padding:11px 14px 4px`. The input is a child of
+                        // the box, so the difference is made up on the wrapper: the
+                        // text starts where the design starts it (11px down, 14px in)
+                        // and the foot row sits the design's 4px under the last line.
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            .pt(px(INPUT_NUDGE.0))
+                            .pr(px(INPUT_NUDGE.1))
+                            .pb(px(INPUT_NUDGE.2))
+                            .pl(px(INPUT_NUDGE.3))
+                            .child(
+                                Textarea::new(&self.input)
+                                    .with_size(Size::Large)
+                                    .appearance(false)
+                                    .bordered(false)
+                                    .text_size(INPUT_FONT)
+                                    .line_height(INPUT_LINE)
+                                    .w_full()
+                                    .min_w_0(),
+                            ),
                     )
                     .child(foot),
             )
@@ -1481,7 +1541,7 @@ mod tests {
                     "model" => "stub-a".to_string(),
                     "thinking" => level.to_string(),
                     "context" => "ctx 48k/936k (5%)".to_string(),
-                    "cache-stats" => "97% cached".to_string(),
+                    "cache_stats" => "97% cached".to_string(),
                     "goal" => "goal a1b2c3d4 (active) 12k/50k".to_string(),
                     other => other.to_string(),
                 };
@@ -2121,13 +2181,13 @@ mod tests {
     fn the_foot_row_is_the_topics_own_chips(cx: &mut TestAppContext) {
         let f = open(cx);
         f.act(cx, |window, cx| {
-            let state = state_with(&["model", "thinking", "context", "cache-stats", "goal"]);
+            let state = state_with(&["model", "thinking", "context", "cache_stats", "goal"]);
             f.set_agent(&state, cx);
             window.render_frame(cx);
 
             let model = window.find(chip_id("model"));
             let ctx = window.find(chip_id("context"));
-            let cache = window.find(chip_id("cache-stats"));
+            let cache = window.find(chip_id("cache_stats"));
             let goal = window.find(chip_id("goal"));
             assert!(model.visible() && ctx.visible() && cache.visible() && goal.visible());
             assert_eq!(
@@ -2141,14 +2201,63 @@ mod tests {
 
             // One row, left to right, in the server's order.
             let x = |id: &str| window.find(chip_id(id)).bounds().left();
-            assert!(x("model") < x("context") && x("context") < x("cache-stats"));
-            assert!(x("cache-stats") < x("goal"));
-            for id in ["model", "context", "cache-stats", "goal"] {
+            assert!(x("model") < x("context") && x("context") < x("cache_stats"));
+            assert!(x("cache_stats") < x("goal"));
+            for id in ["model", "context", "cache_stats", "goal"] {
                 assert_eq!(
                     window.find(chip_id(id)).bounds().size.height,
                     px(widgets::chip::HEIGHT)
                 );
             }
+        });
+    }
+
+    /// The core's own cache segment is a chip of its own (§4.2, the design's `cache
+    /// chip`): whatever the topic publishes is drawn, and nothing is hidden.
+    ///
+    /// The document is the wire's own: `cache_stats` (the enum-string name, order 350,
+    /// side left), the text evo paints, and the `cache_stats` state key beside it — a
+    /// key this crate's view model does not read, which must not cost the segment
+    /// beside it.
+    #[gpui_kit::test]
+    fn the_servers_own_cache_segment_is_a_chip_of_its_own(cx: &mut TestAppContext) {
+        let state = TopicState::from_json(&serde_json::json!({
+            "status": "idle",
+            "model": {"id": "stub-a", "provider": "openai", "ready": true},
+            "thinking": "medium",
+            "cache_stats": {"input": 0, "cache_read": 0, "cache_write": 0},
+            "segments": [
+                {"name": "model", "order": 100, "side": "left", "text": "stub-a", "data": {}},
+                {"name": "thinking", "order": 200, "side": "left", "text": "medium",
+                 "data": {}},
+                {"name": "context", "order": 300, "side": "left", "text": "ctx 0k/200k (0%)",
+                 "data": {}},
+                {"name": "cache_stats", "order": 350, "side": "left", "text": "0% cached",
+                 "data": {"input": 0, "cache_read": 0, "cache_write": 0}},
+                {"name": "goal", "order": 400, "side": "left", "text": "goal a1b2c3d4 (active)",
+                 "data": {}},
+            ],
+        }));
+        assert!(
+            state
+                .segments
+                .iter()
+                .any(|segment| segment.name == "cache_stats"),
+            "the state key the view model does not know costs nothing beside it"
+        );
+
+        let f = open(cx);
+        f.act(cx, |window, cx| {
+            f.set_agent(&state, cx);
+            window.render_frame(cx);
+            let cache = window.find(chip_id("cache_stats"));
+            assert!(cache.visible(), "the cache is a chip of its own");
+            assert_eq!(cache.label(), Some("0% cached"), "in the server's words");
+            assert_eq!(cache.bounds().size.height, px(widgets::chip::HEIGHT));
+            // The server's own order: after the context, before the goal.
+            let x = |id: &str| window.find(chip_id(id)).bounds().left();
+            assert!(x("context") < x("cache_stats"), "after `context`");
+            assert!(x("cache_stats") < x("goal"), "before `goal`");
         });
     }
 
