@@ -195,16 +195,9 @@ fn a_check_opens_the_sliders_and_the_count_on_what_it_resolved() {
     assert_eq!(launcher.level(Role::Coordinator), Some("xhigh"));
     assert_eq!(launcher.level(Role::Lanes), Some("low"));
     assert_eq!(launcher.workers(), 12);
-    assert_eq!(
-        launcher.plan(),
-        LaunchPlan {
-            model: Some(("ark-deepseek-v4.1-flash".to_string(), "aiden".to_string())),
-            thinking: Some("xhigh".to_string()),
-            workers: Some(12),
-            lanes_model: Some(("ark-deepseek-v4.1-flash".to_string(), "aiden".to_string())),
-            lane_thinking: Some("low".to_string()),
-        }
-    );
+    // The controls show what the check resolved, and pass it to nobody: the launch and the
+    // next check go out with no flags, and evo resolves these same values itself (§9).
+    assert!(launcher.plan().is_default(), "shown, not passed");
 
     // A count off the wire is clamped like one typed: a launch may carry 1–64.
     launcher.set_check(&json!({"ok": true, "workers": 999, "thinking": "max"}));
@@ -372,35 +365,75 @@ fn the_count_and_the_slider_clamp_to_what_a_launch_allows() {
     assert_eq!(launcher.effort(Role::Coordinator), 1, "medium");
 }
 
-/// The plan is the five flags a launch passes (§1), always — nothing is left to evo.
+/// §1, §9: the plan is the flags a **person** set, and only those. A control evo resolved
+/// passes nothing, so a launch (and the check about it) leaves it to evo — which is what
+/// keeps the page's numbers evo's own rather than this app's guesses echoed back.
 #[test]
-fn the_plan_names_the_flags_a_launch_passes() {
+fn the_plan_carries_only_what_a_person_set() {
     let mut launcher = Launcher::new();
-    // Before any catalog there is no model to pass — but the count and the rung are
-    // already the ones the controls show, so the launch carries them from the start.
-    let fresh = launcher.plan();
-    assert_eq!(fresh.model, None);
-    assert_eq!(fresh.workers, Some(DEFAULT_WORKERS));
-    assert_eq!(fresh.thinking.as_deref(), Some("medium"));
+    assert!(
+        launcher.plan().is_default(),
+        "a fresh tab passes nothing: evo resolves all five itself"
+    );
 
     launcher.set_catalog(&fixture("catalog.json"));
-    launcher.choose(Role::Coordinator, "claude-opus-5@anthropic");
-    launcher.choose(Role::Lanes, "claude-opus-5@anthropic");
-    launcher.set_effort(Role::Coordinator, 2);
-    launcher.set_effort(Role::Lanes, 3);
-    launcher.set_workers(4);
+    launcher.set_check(&json!({
+        "ok": true,
+        "model": {"id": "claude-opus-5", "provider": "anthropic", "ok": true},
+        "lane_model": {"id": "ark-deepseek-v4.1-flash", "provider": "aiden", "ok": true},
+        "thinking": "low",
+        "lane_thinking": "medium",
+        "workers": 9,
+        "problems": []
+    }));
+    // The check has answered and the controls show what it resolved — exactly what a
+    // launch with no flags gets, so not one of them becomes a flag.
+    assert_eq!(
+        launcher.chosen_key(Role::Coordinator),
+        Some("claude-opus-5@anthropic")
+    );
+    assert_eq!(launcher.workers(), 9);
+    assert!(
+        launcher.plan().is_default(),
+        "the shown values are not flags"
+    );
+
+    // One control at a time, and only that one appears.
+    assert!(
+        launcher.choose(Role::Coordinator, "claude-opus-5@anthropic"),
+        "a hand on the value the card already showed is still a hand"
+    );
     let plan = launcher.plan();
     assert_eq!(
         plan.model,
         Some(("claude-opus-5".to_string(), "anthropic".to_string()))
     );
-    assert_eq!(plan.thinking.as_deref(), Some("high"));
+    assert_eq!(plan.thinking, None);
+    assert_eq!(
+        plan.workers, None,
+        "the count evo resolved is not handed back"
+    );
+    assert_eq!(plan.lanes_model, None);
+    assert_eq!(plan.lane_thinking, None);
+
+    launcher.set_effort(Role::Lanes, 4);
+    let plan = launcher.plan();
+    assert_eq!(plan.lane_thinking.as_deref(), Some("max"));
+    assert_eq!(plan.thinking, None, "the card nobody moved is left to evo");
+
+    launcher.set_workers(4);
+    let plan = launcher.plan();
+    assert_eq!(plan.workers, Some(4));
+    assert_eq!(plan.lanes_model, None, "still nobody's pick");
+
+    launcher.choose(Role::Lanes, "ark-deepseek-v4.1-flash@aiden");
+    launcher.set_effort(Role::Coordinator, 2);
+    let plan = launcher.plan();
     assert_eq!(
         plan.lanes_model,
-        Some(("claude-opus-5".to_string(), "anthropic".to_string()))
+        Some(("ark-deepseek-v4.1-flash".to_string(), "aiden".to_string()))
     );
-    assert_eq!(plan.lane_thinking.as_deref(), Some("xhigh"));
-    assert_eq!(plan.workers, Some(4));
+    assert_eq!(plan.thinking.as_deref(), Some("high"));
     assert!(!plan.is_default());
 
     // The pair becomes the spec the flag takes (§1).
@@ -410,8 +443,44 @@ fn the_plan_names_the_flags_a_launch_passes() {
     );
     assert_eq!(
         LaunchPlan::spec(plan.lanes_model.as_ref().unwrap()),
-        "claude-opus-5@anthropic"
+        "ark-deepseek-v4.1-flash@aiden"
     );
+
+    // A person's pick stays theirs: a later check moves what it resolved and leaves the
+    // four flags where they were put.
+    launcher.set_check(&json!({
+        "ok": true,
+        "model": {"id": "ark-deepseek-v4.1-flash", "provider": "aiden"},
+        "lane_model": {"id": "ark-deepseek-v4.1-flash", "provider": "aiden"},
+        "thinking": "low",
+        "workers": 9
+    }));
+    let plan = launcher.plan();
+    assert_eq!(
+        plan.model,
+        Some(("claude-opus-5".to_string(), "anthropic".to_string()))
+    );
+    assert_eq!(plan.thinking.as_deref(), Some("high"));
+    assert_eq!(plan.workers, Some(4));
+    assert_eq!(plan.lane_thinking.as_deref(), Some("max"));
+}
+
+/// A check that failed resolves nothing, so the controls show evo's own last fallback —
+/// and still pass nothing, which is the same thing evo would do with no flags (§9).
+#[test]
+fn a_failed_check_leaves_the_shown_fallbacks_out_of_the_plan() {
+    let mut launcher = Launcher::new();
+    launcher.set_catalog(&fixture("catalog.json"));
+    launcher.set_check(&json!({
+        "ok": null,
+        "model": {"id": null, "provider": null, "reason": "no model is configured"},
+        "problems": [{"code": "model_unresolved", "message": "no model is configured"}]
+    }));
+    // The fallbacks are on show...
+    assert_eq!(launcher.workers(), DEFAULT_WORKERS);
+    assert_eq!(launcher.level(Role::Coordinator), Some("medium"));
+    // ...and out of the plan: evo runs its own default, which is what they stand for.
+    assert!(launcher.plan().is_default());
 }
 
 // --- history (§2) -------------------------------------------------------------------

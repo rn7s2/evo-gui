@@ -8,8 +8,7 @@
 //!
 //! # The controls open on resolved values
 //!
-//! There is no "Default" anywhere. Every control opens on what evo would run **now**,
-//! and what it shows is what the launch passes:
+//! There is no "Default" anywhere. Every control opens on what evo would run **now**:
 //!
 //! * the coordinator's model — `check`'s own `model`, else `/catalog.default_model`,
 //!   else the first registration the catalog says is `ready`;
@@ -18,6 +17,26 @@
 //!   register it, else the first registration a lane can;
 //! * the lanes' effort — `check`'s `lane_thinking`;
 //! * the worker count — `check`'s own `workers`;
+//!
+//! # What a launch passes: only what a person set
+//!
+//! What the controls *show* is not what a launch passes. [`Launcher::plan`] carries a
+//! value only for a control a **person** set — a model they picked, a slider they moved,
+//! a count they typed — and passes nothing for the rest, which is how evo gets to resolve
+//! them by its own chains (§9):
+//!
+//! * `check` is asked about the flags a launch would pass and nothing else, so handing it
+//!   a value the page merely shows would be asking evo to confirm this app's own guess —
+//!   the answer would be that guess, echoed back, and the page would show the app's
+//!   numbers where evo's belong (the check would say `--workers 6` because the app said
+//!   `--workers 6`, however many lanes evo would really run);
+//! * before anyone touches a control, then, both the check and the launch carry no flags
+//!   at all, and `check` answers with what evo itself resolves: its own model chain, its
+//!   own effort chain, its own lane and worker defaults.
+//!
+//! A by-hand choice that happens to equal what evo resolved is passed like any other: it
+//! asks for the same thing twice, which costs nothing, and it is what keeps a person's
+//! pick theirs if evo's own answer later moves.
 //!
 //! A model is chosen by its **`ID@PROVIDER` pair**: `--model id@provider` selects
 //! exactly that registration (§1), so two registrations of one id are two options, each
@@ -37,6 +56,10 @@
 //! rung of the ladder and [`DEFAULT_WORKERS`]. Both are marked as such: the moment a
 //! check answers, a control the launcher opened (nobody has touched it) is moved onto
 //! what the check resolved, and a control the person moved is left alone.
+//!
+//! Those fallbacks are shown, never passed: a check that failed leaves every untouched
+//! control out of the plan, so the launch carries no flag and evo runs its own default —
+//! which is what a person who changed nothing asked for.
 //!
 //! # The effort ladder
 //!
@@ -111,12 +134,14 @@ impl Role {
 /// One card's model field: the registration it shows, and who put it there.
 ///
 /// The distinction is what keeps a person's own choice: a document that resolves another
-/// registration moves a field the launcher resolved, and never one they picked.
+/// registration moves a field the launcher resolved, and never one they picked — and it
+/// is what a plan reads, since only a picked one becomes a flag.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Field {
     /// The registration the card shows, as `ID@PROVIDER`.
     key: Option<String>,
-    /// The person picked this one, so the next document that resolves another leaves it be.
+    /// The person picked this one, so the next document that resolves another leaves it
+    /// be, and a launch passes it.
     by_hand: bool,
 }
 
@@ -160,9 +185,12 @@ impl ModelOption {
     }
 }
 
-/// What the controls add up to (§7.2, §1): the flags a launch passes. Every field is
-/// `Some` once the catalog has arrived; before that the tab is still loading and the
-/// plan is empty.
+/// What the controls add up to (§7.2, §1, §9): the flags a launch passes — and the flags
+/// `evo-swarm check` is asked about, which are the same ones.
+///
+/// A field is `Some` only when a **person** set that control by hand: everything else is
+/// `None`, so evo resolves it itself, exactly as the check reported it. A launch whose
+/// plan [`is_default`](LaunchPlan::is_default) passes no flags at all.
 ///
 /// This is a **new** swarm's plan. A swarm resumed from history takes the coordinator's
 /// own record instead — its models are the session's, not the empty tab's — so the
@@ -182,7 +210,8 @@ pub struct LaunchPlan {
 }
 
 impl LaunchPlan {
-    /// Whether this plan passes nothing at all — a tab with no catalog yet.
+    /// Whether this plan passes nothing at all — nobody has set a control by hand, so a
+    /// launch leaves all five to evo and a check is asked about the bare launch.
     pub fn is_default(&self) -> bool {
         self.model.is_none()
             && self.thinking.is_none()
@@ -304,6 +333,10 @@ fn model_detail(model: &Value) -> String {
 /// [`DEFAULT_WORKERS`]). A value the launcher resolved is re-resolved whenever a document
 /// arrives — the check is newer than the catalog, and the catalog newer than nothing —
 /// while a control the person set themselves stays where they put it.
+///
+/// What a control *shows* and what a launch *passes* are two different things: only the
+/// controls the person set are flags ([`Launcher::plan`]), and the ones the launcher
+/// resolved are left to evo.
 #[derive(Clone, Debug, Default)]
 pub struct Launcher {
     /// The last `/catalog` body, and what `check --json` resolved the launch to: the
@@ -435,18 +468,22 @@ impl Launcher {
             .or_else(|| Some("No models are registered".to_string()))
     }
 
-    /// Choose a registration — a person's own pick, which the launcher then leaves alone.
-    /// An unknown key is ignored: the fields are rebuilt from the catalog, and a choice
-    /// cannot outlive the option it named. Returns whether the choice changed.
+    /// Choose a registration — a person's own pick, which the launcher then leaves alone
+    /// **and** the launch passes ([`Launcher::plan`]). An unknown key is ignored: the
+    /// fields are rebuilt from the catalog, and a choice cannot outlive the option it
+    /// named. Returns whether the choice changed anything the next launch would see —
+    /// which includes putting a hand on the value the card already showed.
     pub fn choose(&mut self, role: Role, key: &str) -> bool {
-        if self.model(key).is_none() || self.chosen_key(role) == Some(key) {
+        if self.model(key).is_none() {
             return false;
         }
-        self.fields[role.slot()] = Field {
-            key: Some(key.to_string()),
-            by_hand: true,
-        };
-        true
+        let field = &mut self.fields[role.slot()];
+        // Picking what the card already shows is a choice like any other: the resolved
+        // value was `None` in a plan, this one is a flag.
+        let changed = !(field.by_hand && field.key.as_deref() == Some(key));
+        field.key = Some(key.to_string());
+        field.by_hand = true;
+        changed
     }
 
     /// Where one card's effort slider sits.
@@ -491,16 +528,37 @@ impl Launcher {
         typed
     }
 
-    /// What the controls add up to (§7.2): the coordinator's `--model` and `--thinking`,
-    /// `--workers`, and the lanes' `--lane-model` and `--lane-thinking`.
+    /// What the controls add up to (§7.2, §9): the flags a launch passes, and the flags a
+    /// check is asked about.
+    ///
+    /// **Only a control a person set is in it.** A field nobody touched is `None`, so evo
+    /// resolves it itself, by the same chains `check` reported — the values the page shows
+    /// are evo's, and handing them back as flags would only ask evo to agree with itself.
+    /// A launch whose plan is [`LaunchPlan::is_default`] passes no flag at all.
     pub fn plan(&self) -> LaunchPlan {
         LaunchPlan {
-            model: self.chosen(Role::Coordinator).map(pair),
-            thinking: self.level(Role::Coordinator).map(str::to_owned),
-            workers: Some(self.workers),
-            lanes_model: self.chosen(Role::Lanes).map(pair),
-            lane_thinking: self.level(Role::Lanes).map(str::to_owned),
+            model: self.by_hand_model(Role::Coordinator),
+            thinking: self.by_hand_level(Role::Coordinator),
+            workers: self.count_by_hand.then_some(self.workers),
+            lanes_model: self.by_hand_model(Role::Lanes),
+            lane_thinking: self.by_hand_level(Role::Lanes),
         }
+    }
+
+    /// The `ID@PROVIDER` pair one card contributes to a plan: its own choice, or nothing
+    /// at all when the launcher resolved it.
+    fn by_hand_model(&self, role: Role) -> Option<(String, String)> {
+        self.fields[role.slot()]
+            .by_hand
+            .then(|| self.chosen(role).map(pair))
+            .flatten()
+    }
+
+    /// The rung one card contributes to a plan, on the same rule.
+    fn by_hand_level(&self, role: Role) -> Option<String> {
+        self.effort_by_hand[role.slot()]
+            .then(|| self.level(role).map(str::to_owned))
+            .flatten()
     }
 
     /// Fill in every control from what evo resolved — and leave a person's own pick alone:
