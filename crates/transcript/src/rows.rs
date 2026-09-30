@@ -1126,6 +1126,7 @@ fn tool_row(
 
     if expanded {
         let full = data.full_results.get(&id);
+        let can_fetch = data.on_fetch_item.borrow().is_some();
         row = row.child(
             div()
                 .flex()
@@ -1134,7 +1135,14 @@ fn tool_row(
                 .pt(px(2.))
                 .pb(px(4.))
                 .child(arguments_block(id.clone(), &tool.args, palette))
-                .child(result_block(id.clone(), tool, full, view, palette)),
+                .child(result_block(
+                    id.clone(),
+                    tool,
+                    full,
+                    can_fetch,
+                    view,
+                    palette,
+                )),
         );
     }
 
@@ -1197,6 +1205,7 @@ fn result_block(
     id: ItemId,
     tool: &ToolItem,
     full: Option<&String>,
+    can_fetch: bool,
     view: &WeakEntity<TranscriptView>,
     palette: &Palette,
 ) -> AnyElement {
@@ -1252,8 +1261,17 @@ fn result_block(
                     palette,
                 ),
             });
-            if needs_full {
+            // The offer only exists when there is a way to fetch: a tab whose owner
+            // cannot read `/items/<id>` says what the panel left out instead of
+            // offering a button that would do nothing.
+            if needs_full && can_fetch {
                 block = block.child(load_more_row(id, view, palette));
+            } else if needs_full {
+                block = block.child(cap_note(
+                    row_id("transcript-tool-result-note", &id),
+                    (result.chars as usize).saturating_sub(result.text.chars().count()),
+                    palette,
+                ));
             }
         }
     }

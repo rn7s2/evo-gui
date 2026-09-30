@@ -2570,9 +2570,9 @@ mod tests {
         let lanes = f.act(cx, |window, cx| window.focused(cx));
         assert_eq!(
             lanes,
-            f.act(cx, |_, cx| chooser(&f, cx, Choice::Lanes)
-                .read(cx)
-                .focus_handle(cx)),
+            f.act(cx, |_, cx| Some(
+                chooser(&f, cx, Choice::Lanes).read(cx).focus_handle(cx)
+            )),
             "the lanes line opens the lanes chooser"
         );
 

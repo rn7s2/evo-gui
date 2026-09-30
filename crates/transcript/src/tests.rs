@@ -420,9 +420,17 @@ fn a_compaction_is_drawn_as_a_divider(cx: &mut TestAppContext) {
 fn the_history_header_asks_for_older_items_only_when_there_are_some(cx: &mut TestAppContext) {
     let (view, cx) = open!(cx, vec![user("e_1", "the tail")]);
     let asked = std::rc::Rc::new(std::cell::RefCell::new(0));
+    let oldest_seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let oldest_handle = oldest_seen.clone();
     let recorded = asked.clone();
     view.update(cx, |view, cx| {
-        view.on_load_older(move |_window, _cx| *recorded.borrow_mut() += 1, cx);
+        view.on_load_older(
+            move |oldest, _window, _cx| {
+                oldest_handle.borrow_mut().push(oldest.to_string());
+                *recorded.borrow_mut() += 1;
+            },
+            cx,
+        );
     });
 
     cx.update(|window, cx| window.render_frame(cx));
@@ -440,6 +448,11 @@ fn the_history_header_asks_for_older_items_only_when_there_are_some(cx: &mut Tes
         window.click("transcript-load-older", cx);
     });
     assert_eq!(*asked.borrow(), 1);
+    assert_eq!(
+        oldest_seen.borrow().as_slice(),
+        ["e_1"],
+        "the page is asked for from the oldest item on screen"
+    );
 
     // While a page is in flight the header says so.
     view.update(cx, |view, cx| view.set_history(true, true, cx));

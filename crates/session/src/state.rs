@@ -130,6 +130,11 @@ impl Status {
         }
     }
 
+    /// Whether the topic is doing something: a run in flight or a compaction.
+    pub fn is_busy(self) -> bool {
+        matches!(self, Status::Running | Status::Compacting)
+    }
+
     /// The word a row shows for it.
     pub fn label(self) -> &'static str {
         match self {

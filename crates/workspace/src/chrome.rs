@@ -24,18 +24,15 @@ use gpui_kit::{
     TestSupportExt as _, Window, WindowBounds, WindowOptions,
 };
 
-use std::rc::Rc;
-
 use serde_json::Value;
 use session::{HistoryEntry, LaunchPlan};
 use store::app_state::Panes;
-use store::model_cache::ModelCache;
 use tab_engine::EngineHandle;
 
 use crate::history::folder_name;
-use crate::launch::{stop_in_background, Launch, SwarmConfig};
+use crate::launch::{Launch, LaunchEnv};
 use crate::panes;
-use crate::tab::{RegistryHook, TabContent, TabContentEvent, TabId};
+use crate::tab::{TabContent, TabContentEvent, TabId};
 
 /// The app's own name: what the bundle, the menu bar and the About window call it
 /// (`scripts/bundle.sh`, `crates/app`). The window title ends with it (§7.1).
@@ -241,26 +238,20 @@ pub type QuitHook = Box<dyn Fn(QuitRequest, &mut Window, &mut App) -> bool + 'st
 /// ones opened afterwards.
 #[derive(Clone, Default)]
 pub struct LauncherData {
-    /// The last `/registry` seen, as it arrived (a live server's, or a probe's).
-    pub registry: Option<Value>,
-    /// The catalog the disk cache holds, which also carries the kernel api set.
-    pub model_cache: Option<ModelCache>,
+    /// The catalog body (`evo-swarm catalog --json`, or a server's `GET /catalog`),
+    /// as it arrived: the model choosers and the launch check read it (§5.6).
+    pub catalog: Option<Value>,
     /// Why the catalog could not be read, when it could not.
     pub catalog_error: Option<String>,
-    /// The session scan is still walking `~/.evo/sessions`.
-    pub scanning: bool,
-    /// The resumable swarms the scan found (§9.5).
+    /// The session index is still being read.
+    pub history_loading: bool,
+    /// The resumable swarms the index lists (§2).
     pub history: Vec<HistoryEntry>,
     /// The clock the rows' relative times read against, and the local offset.
     pub now: i64,
     pub offset_seconds: i32,
-    /// Why the scan failed, when it did.
+    /// Why the index could not be read, when it could not.
     pub history_error: Option<String>,
-    /// Why the swarm cannot be started at all, when it cannot: the `evo_swarm` path
-    /// `app.json` names is not a binary that runs (§9.7). The app learns it from the
-    /// same `--version` probe the About dialog reads; the empty tabs say it under the
-    /// folder card, where a launch would otherwise fail.
-    pub swarm_problem: Option<String>,
     /// `$HOME`, for shortening the paths in the rows.
     pub home: Option<String>,
 }
@@ -300,16 +291,13 @@ pub struct WorkspaceView {
     /// One subscription per tab, dropped with it so a closed tab stops sending.
     subscriptions: VecDeque<(TabId, Subscription)>,
     /// What every tab of this window starts its swarms with (§3).
-    config: Arc<SwarmConfig>,
+    config: Arc<LaunchEnv>,
     /// What the app wants done when the window is closed (§9.8). Without one the
     /// window stops every tab's swarm and then closes.
     quit_hook: Option<QuitHook>,
     /// The catalog and the session list the app pushed, waiting for the tabs that
     /// show them (§9.4, §9.5).
     launcher: LauncherData,
-    /// Called with every live tab's `/registry`, so the app can refresh its cache
-    /// from a real server (§9.4).
-    registry_hook: Option<RegistryHook>,
     /// Tabs whose run ended while another tab was being shown: the strip keeps a
     /// dot on them until they are looked at (§7.1).
     finished: BTreeSet<TabId>,
@@ -347,13 +335,13 @@ impl WorkspaceView {
     /// A window with one empty tab: the app never auto-starts a swarm and never
     /// has an empty window (§7.2, §14.6).
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        WorkspaceView::with_config(Arc::new(SwarmConfig::default()), window, cx)
+        WorkspaceView::with_config(Arc::new(LaunchEnv::default()), window, cx)
     }
 
     /// The same window, with the binaries, the app root and the environment its
     /// tabs start their swarms with.
     pub fn with_config(
-        config: Arc<SwarmConfig>,
+        config: Arc<LaunchEnv>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -368,7 +356,6 @@ impl WorkspaceView {
             config,
             quit_hook: None,
             launcher: LauncherData::default(),
-            registry_hook: None,
             finished: BTreeSet::new(),
             window_title: None,
             close_hook_installed: false,
@@ -487,9 +474,8 @@ impl WorkspaceView {
     /// Take every tab's engine, so the caller can stop them all (§9.8).
     ///
     /// The tabs keep what they show; they stop watching and stop typing to their
-    /// servers. Each engine's shutdown ladder is the caller's to run — off the UI
-    /// thread, with [`stop_in_background`](crate::stop_in_background) or
-    /// [`tab_engine::shutdown_all`].
+    /// servers. Dropping a handle closes that child's stdin, which is the server's
+    /// own signal to stop, so the caller has nothing else to run.
     pub fn take_engines(&mut self, cx: &mut Context<Self>) -> Vec<EngineHandle> {
         self.tabs
             .iter()
@@ -555,24 +541,9 @@ impl WorkspaceView {
     /// What every tab this window opens **from now on** starts its swarm with
     /// (§13): what Settings saved. A tab that is already running keeps the binaries
     /// it started with, which is what the panel's own note says.
-    pub fn set_swarm_config(&mut self, config: Arc<SwarmConfig>, cx: &mut Context<Self>) {
+    pub fn set_launch_env(&mut self, config: Arc<LaunchEnv>, cx: &mut Context<Self>) {
         self.config = config;
         cx.notify();
-    }
-
-    /// Called with every live tab's `/registry` — the app refreshes its model
-    /// cache from a real server with this (§9.4).
-    pub fn on_registry(
-        &mut self,
-        hook: impl Fn(&Value, &mut App) + 'static,
-        cx: &mut Context<Self>,
-    ) {
-        let hook: RegistryHook = Rc::new(hook);
-        self.registry_hook = Some(hook.clone());
-        for tab in &self.tabs {
-            let hook = hook.clone();
-            tab.update(cx, |tab, _cx| tab.set_registry_hook(Some(hook)));
-        }
     }
 
     pub fn tabs(&self) -> &[Entity<TabContent>] {
@@ -624,8 +595,6 @@ impl WorkspaceView {
         // A tab opened now shows what the app already learned (§9.4, §9.5).
         let launcher = self.launcher.clone();
         tab.update(cx, |tab, cx| tab.set_launcher_data(&launcher, window, cx));
-        let registry_hook = self.registry_hook.clone();
-        tab.update(cx, |tab, _cx| tab.set_registry_hook(registry_hook));
         // The tab being shown is where the keyboard goes (§7.1). It matters beyond
         // typing: GPUI resolves a keystroke against the *focused* element's place in
         // the frame, so a keyboard left on a tab that is no longer drawn is a
@@ -779,7 +748,7 @@ impl WorkspaceView {
         self.subscriptions.retain(|(closed, _)| *closed != id);
         if let Some(engine) = tab.update(cx, |tab, cx| tab.take_engine(cx)) {
             // Nothing waits for it: the tab is already gone from the window.
-            drop(stop_in_background(vec![engine]));
+            drop(engine);
         }
         if self.tabs.is_empty() {
             self.open_empty_tab(window, cx);
@@ -1146,16 +1115,12 @@ impl WorkspaceView {
             return self.may_close;
         }
 
-        let report = stop_in_background(engines);
-        self.stopping = Some(cx.spawn_in(window, async move |this, cx| {
-            let _ = report.recv().await;
-            let _ = this.update_in(cx, |view, window, _cx| {
-                view.stopping = None;
-                view.may_close = true;
-                window.remove_window();
-            });
-        }));
-        false
+        // Dropping an engine closes the child's stdin, which is the server's own
+        // signal to stop; the ladder itself runs on the engine's thread, so the
+        // window can close now.
+        drop(engines);
+        self.stopping = None;
+        true
     }
 }
 
@@ -1251,9 +1216,9 @@ mod tests {
         cx.update(gpui_kit::init);
         let (view, cx) = cx.add_window_view(move |window, cx| {
             WorkspaceView::with_config(
-                Arc::new(SwarmConfig {
+                Arc::new(LaunchEnv {
                     root: store::paths::Root::at(root),
-                    ..SwarmConfig::default()
+                    ..LaunchEnv::default()
                 }),
                 window,
                 cx,
@@ -1395,10 +1360,10 @@ mod tests {
         let mut ids: Vec<u64> = Vec::new();
         let (handle, view) = window_with(cx, (1280., 800.), move |window, cx| {
             WorkspaceView::with_config(
-                Arc::new(SwarmConfig {
+                Arc::new(LaunchEnv {
                     swarm_bin: PathBuf::from("/nonexistent/evo-swarm"),
                     root: store::paths::Root::at(root),
-                    ..SwarmConfig::default()
+                    ..LaunchEnv::default()
                 }),
                 window,
                 cx,
@@ -1834,7 +1799,7 @@ mod tests {
                     cx,
                     |window, cx| {
                         cx.new(|cx| {
-                            WorkspaceView::with_config(Arc::new(SwarmConfig::default()), window, cx)
+                            WorkspaceView::with_config(Arc::new(LaunchEnv::default()), window, cx)
                         })
                     },
                 )

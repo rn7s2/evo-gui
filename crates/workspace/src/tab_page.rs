@@ -377,7 +377,7 @@ impl TabContent {
             (AgentKey::Lane(n), Some(model)) => model
                 .lane_rows()
                 .iter()
-                .find(|lane| lane.n as u32 == n)
+                .find(|lane| lane.n == n)
                 .map(|lane| lane.status)
                 .unwrap_or(LaneStatus::Idle),
             _ => LaneStatus::Idle,
@@ -386,7 +386,7 @@ impl TabContent {
             (AgentKey::Lane(n), Some(model)) => model
                 .lane_rows()
                 .iter()
-                .find(|lane| lane.n as u32 == n)
+                .find(|lane| lane.n == n)
                 .and_then(|lane| lane.task.as_deref())
                 .filter(|task| !task.is_empty())
                 .map(lane_task_label),
@@ -516,18 +516,28 @@ impl TabContent {
     }
 }
 
-/// What the status line under the transcript says: the readout of the agent
-/// being shown, or the UI's own words while nothing about it is known (§7.3).
+/// What the status line under the transcript says: the selected topic's own
+/// `segments`, joined as the server built them (CONTRACT §4.2).
 ///
-/// The coordinator's line is made of `/state` and `/registry`; a lane's of its
-/// own transcript and usage. A lane selected before anything about it has been
-/// read has no line at all — which is a fact about that agent, not an empty
-/// space, and is said in the same muted voice.
+/// Nothing is composed here — not the model label, not the context figure, not the
+/// goal — so the TUI's status line and this one cannot drift apart. An agent whose
+/// topic has not been read yet has no segments at all, which is a fact about that
+/// agent rather than an empty space, and is said in the same muted voice.
 fn status_text(model: Option<&TabModel>) -> SharedString {
-    model
-        .and_then(|model| model.selected_readout_text())
-        .map(SharedString::from)
-        .unwrap_or_else(|| SharedString::from("no metrics yet"))
+    let Some(model) = model else {
+        return SharedString::from("no metrics yet");
+    };
+    let (left, _right) = session::ordered_segments(model.selected_segments());
+    let line = left
+        .iter()
+        .map(|segment| segment.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" · ");
+    if line.is_empty() {
+        SharedString::from("no metrics yet")
+    } else {
+        SharedString::from(line)
+    }
 }
 
 /// The status line itself: one muted line at the foot of the middle column, with
@@ -900,17 +910,23 @@ still here";
         );
 
         let mut model = TabModel::new();
-        model.on_state(&serde_json::json!({
-            "status": "idle",
-            "model": "ark-deepseek-v4.1-flash",
-            "thinking": "max",
-            "context_tokens": 48_000,
-            "context_window": 936_000,
-        }));
+        model.on_snapshot(
+            "session",
+            &serde_json::json!({
+                "state": {
+                    "status": "idle",
+                    "segments": [
+                        { "name": "model", "order": 100, "side": "left", "text": "ark-deepseek-v4.1-flash", "data": {} },
+                        { "name": "context", "order": 300, "side": "left", "text": "ctx 48k/936k (5%)", "data": {} }
+                    ]
+                },
+                "items": []
+            }),
+        );
         let line = status_text(Some(&model));
         assert!(
             line.contains("ark-deepseek-v4.1-flash") && line.contains("ctx 48k/936k"),
-            "the coordinator's own line: {line}"
+            "the segments the server built, rendered as they are: {line}"
         );
 
         // A lane selected before anything about it has been read: the same words

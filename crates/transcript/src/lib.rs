@@ -58,11 +58,9 @@ use crate::style::Palette;
 /// How many assistant items keep their parsed document.
 const KEPT_DOCUMENTS: usize = 128;
 
-/// What the view asks its owner to do, through the handler its owner set. Every one of
-/// them is an op on the server, which the owner (the tab's transport) sends.
-pub type Handler = Rc<dyn Fn(&mut Window, &mut App)>;
-/// A handler that names the item it is about: the tool whose whole output is wanted, or the
-/// queued input to take back.
+/// A handler that names the item it is about: the tool whose whole output is wanted, the
+/// queued input to take back, or the oldest item the scrollback pages back from. Every one
+/// is a read or an op on the server, which the owner (the tab's transport) performs.
 pub type ItemHandler = Rc<dyn Fn(&str, &mut Window, &mut App)>;
 
 /// The data the row renderer reads.
@@ -85,7 +83,7 @@ pub(crate) struct TranscriptData {
     pub(crate) copy_feedback: Arc<CopyFeedback>,
     pub(crate) focus: FocusHandle,
     /// What the owner does for each thing a row can ask for.
-    pub(crate) on_load_older: RefCell<Option<Handler>>,
+    pub(crate) on_load_older: RefCell<Option<ItemHandler>>,
     pub(crate) on_fetch_item: RefCell<Option<ItemHandler>>,
     pub(crate) on_cancel_input: RefCell<Option<ItemHandler>>,
 }
@@ -257,10 +255,10 @@ impl TranscriptView {
     /// or to take a queued input back. Each is an op the owner sends; the view only asks.
     pub fn on_load_older(
         &mut self,
-        handler: impl Fn(&mut Window, &mut App) + 'static,
+        handler: impl Fn(&str, &mut Window, &mut App) + 'static,
         cx: &mut Context<Self>,
     ) {
-        let handler: Handler = Rc::new(handler);
+        let handler: ItemHandler = Rc::new(handler);
         self.data.update(cx, |data, _| {
             *data.on_load_older.borrow_mut() = Some(handler)
         });
@@ -578,11 +576,13 @@ fn empty_state(agent: AgentKey, palette: &Palette) -> AnyElement {
 /// cut off, which is not a number a reader has a use for.
 fn history_header(
     loading: bool,
+    oldest: Option<String>,
     palette: &Palette,
     data: &Entity<TranscriptData>,
     cx: &App,
 ) -> Option<AnyElement> {
     let handler = data.read(cx).on_load_older.borrow().clone()?;
+    let oldest = oldest?;
     let label = if loading {
         "Loading earlier items…"
     } else {
@@ -608,7 +608,7 @@ fn history_header(
                     .cursor_pointer()
                     .hover(|style| style.text_color(palette.foreground))
                     .aria_label(label.to_string())
-                    .on_click(move |_, window, cx| handler(window, cx))
+                    .on_click(move |_, window, cx| handler(&oldest, window, cx))
                     .child(label)
                     .test_support(),
             )
@@ -631,7 +631,10 @@ impl Render for TranscriptView {
         let mut column = v_flex().size_full().min_h_0();
         if self.has_older {
             let palette = Palette::from_app(cx);
-            if let Some(header) = history_header(self.loading_older, &palette, &self.data, cx) {
+            let oldest = self.data.read(cx).items.first().map(|item| item.id.clone());
+            if let Some(header) =
+                history_header(self.loading_older, oldest, &palette, &self.data, cx)
+            {
                 column = column.child(header);
             }
         }
