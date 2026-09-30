@@ -1,0 +1,23 @@
+{
+  "items": [
+    {
+      "id": "e_0a",
+      "ts": 1759199000000,
+      "kind": "user",
+      "text": "the earlier half of the session",
+      "images": [],
+      "status": "sent",
+      "queue": null
+    },
+    {
+      "id": "e_0b",
+      "ts": 1759199001000,
+      "kind": "compaction",
+      "summary": "The first compaction: the plan was settled.",
+      "tokens_before": 180000,
+      "tokens_after": 9000,
+      "manual": true
+    }
+  ],
+  "has_more": false
+}

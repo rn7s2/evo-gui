@@ -15,13 +15,6 @@ pub fn now_epoch() -> u64 {
         .unwrap_or(0)
 }
 
-/// Epoch seconds of a [`SystemTime`].
-pub fn epoch_of(t: SystemTime) -> u64 {
-    t.duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
 /// `2026-09-29T09:09:56Z` — the shape evo itself writes in journal headers.
 pub fn format_rfc3339(epoch: u64) -> String {
     let days = (epoch / SECS_PER_DAY) as i64;
