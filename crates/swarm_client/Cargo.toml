@@ -5,11 +5,9 @@ edition.workspace = true
 
 [features]
 default = []
-# The reusable real-server test harness (`harness`): a temp HOME whose init.lisp
-# registers a stub provider, plus a live `evo-swarm serve` with scripted lanes.
-# Off by default so a production consumer never compiles it; this crate's own
-# tests turn it on through the self dev-dependency below, so
-# `cargo test -p swarm_client` still runs the end-to-end tests.
+# The fake serve this crate's tests (and its dependents' tests) drive the client
+# against: a temp tab directory, a real spawn, the protocol on the wire. Off by
+# default so a production consumer never compiles it.
 test-harness = []
 
 [dependencies]
@@ -20,18 +18,9 @@ libc = "0.2"
 
 [dev-dependencies]
 # Features are unified for the test build, which turns `test-harness` on for
-# `cargo test -p swarm_client` without a plain dependent (`default-features`
-# on, feature off) ever compiling the harness.
+# `cargo test -p swarm_client` without a plain dependent ever compiling it.
 swarm_client = { path = ".", features = ["test-harness"] }
-serde_json = { workspace = true }
-# The real-environment examples (`real_readout`, `real_catalog`, `real_history`)
-# render what the app's own models make of a live server: the §7.3 readout line,
-# the catalog probe and the model choosers, and the history rows. Dev-only: the
-# library's dependency graph is unchanged, so no production build compiles these.
-session = { path = "../session" }
-store = { path = "../store" }
-tab_engine = { path = "../tab_engine" }
 
 [[test]]
-name = "swarm_e2e"
+name = "protocol_e2e"
 required-features = ["test-harness"]

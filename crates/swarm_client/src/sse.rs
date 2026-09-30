@@ -1,16 +1,16 @@
-//! The SSE wire format, parsed line by line (docs/serve.md §Events).
+//! The SSE wire format, parsed line by line (CONTRACT.md §5.3).
 //!
-//! serve writes `id:`, `event:`, `data:` and a blank line after each event, and
-//! `: keepalive` every 15 s of silence. The parser is pure so the framing can be
-//! tested without a socket.
+//! serve writes `id: <epoch>.<seq>`, `event: op`, `data: <json>` and a blank
+//! line after each frame, and a `: ping` comment every 15 s of silence. The
+//! parser is pure, so the framing can be tested without a socket.
 
 /// One event off the wire.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SseEvent {
-    /// serve numbers events consecutively from 1 within one process; the cursor
-    /// a reconnect resumes from.
-    pub id: Option<i64>,
-    /// `event:` — the event's kind (`text-delta`, `settled`, …).
+    /// The `id:` line — `<epoch>.<seq>`, the cursor a reconnect resumes from.
+    /// Kept as text because the epoch is the server's to mint.
+    pub id: Option<String>,
+    /// `event:` — always `op` in this protocol.
     pub kind: Option<String>,
     /// `data:` lines joined with newlines. serve sends one, a JSON object.
     pub data: String,
@@ -18,7 +18,7 @@ pub struct SseEvent {
 
 #[derive(Debug, Default)]
 pub struct SseParser {
-    id: Option<i64>,
+    id: Option<String>,
     kind: Option<String>,
     data: Vec<String>,
     seen: bool,
@@ -30,14 +30,14 @@ impl SseParser {
     }
 
     /// Feed one line, without its terminator. Returns the event when the blank
-    /// line that ends it arrives. `:` comments (keepalives) are dropped.
+    /// line that ends it arrives. `:` comments (the 15 s pings) are dropped.
     pub fn feed(&mut self, line: &str) -> Option<SseEvent> {
         if line.is_empty() {
             if !self.seen {
                 return None;
             }
             let event = SseEvent {
-                id: self.id,
+                id: self.id.take(),
                 kind: self.kind.take(),
                 data: self.data.join("\n"),
             };
@@ -45,8 +45,8 @@ impl SseParser {
             self.seen = false;
             return Some(event);
         }
-        if let Some(rest) = line.strip_prefix(':') {
-            let _ = rest; // a keepalive; nothing to do with it
+        if line.starts_with(':') {
+            // A ping; nothing to do with it.
             return None;
         }
         let (field, value) = match line.split_once(':') {
@@ -55,10 +55,7 @@ impl SseParser {
         };
         match field {
             "id" => {
-                // An id that is not a number is not our cursor; ignore it.
-                if let Ok(n) = value.trim().parse::<i64>() {
-                    self.id = Some(n);
-                }
+                self.id = Some(value.trim().to_owned());
                 self.seen = true;
             }
             "event" => {
@@ -86,61 +83,68 @@ mod tests {
     }
 
     #[test]
-    fn one_event() {
+    fn one_frame() {
         let events = parse(&[
-            "id: 57",
-            "event: text-delta",
-            "data: {\"type\":\"text-delta\",\"text\":\"hi\"}",
+            "id: 7f3a.1042",
+            "event: op",
+            "data: {\"op\":\"item.append\",\"id\":\"e_1\",\"text\":\"hi\"}",
             "",
         ]);
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].id, Some(57));
-        assert_eq!(events[0].kind.as_deref(), Some("text-delta"));
-        assert_eq!(events[0].data, "{\"type\":\"text-delta\",\"text\":\"hi\"}");
+        assert_eq!(events[0].id.as_deref(), Some("7f3a.1042"));
+        assert_eq!(events[0].kind.as_deref(), Some("op"));
+        assert_eq!(
+            events[0].data,
+            "{\"op\":\"item.append\",\"id\":\"e_1\",\"text\":\"hi\"}"
+        );
     }
 
     #[test]
-    fn comments_and_blanks_are_not_events() {
-        let events = parse(&[": keepalive", "", ": evo-swarm events after 0", ""]);
+    fn pings_and_blanks_are_not_frames() {
+        let events = parse(&[": ping", "", ": ping", ""]);
         assert!(events.is_empty());
     }
 
     #[test]
-    fn two_events_and_a_keepalive_between() {
+    fn two_frames_with_a_ping_between() {
         let events = parse(&[
-            "id: 1",
-            "event: hello",
-            "data: {\"type\":\"hello\"}",
+            "id: 7f3a.1",
+            "event: op",
+            "data: {\"op\":\"hello\",\"epoch\":\"7f3a\",\"seq\":1}",
             "",
-            ": keepalive",
+            ": ping",
             "",
-            "id: 2",
-            "event: ready",
-            "data: {\"type\":\"ready\",\"resumed\":null}",
+            "id: 7f3a.2",
+            "event: op",
+            "data: {\"op\":\"stream.reset\",\"reason\":\"restarted\"}",
             "",
         ]);
         assert_eq!(events.len(), 2);
-        assert_eq!(events[1].id, Some(2));
-        assert_eq!(events[1].kind.as_deref(), Some("ready"));
+        assert_eq!(events[1].id.as_deref(), Some("7f3a.2"));
+        assert_eq!(events[1].kind.as_deref(), Some("op"));
     }
 
     #[test]
-    fn data_without_a_space_and_a_non_numeric_id() {
-        let events = parse(&["id: abc", "event:output", "data:{}", ""]);
+    fn a_data_line_without_a_space_and_a_missing_id() {
+        let events = parse(&["event: op", "data:{}", ""]);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].id, None);
-        assert_eq!(events[0].kind.as_deref(), Some("output"));
         assert_eq!(events[0].data, "{}");
     }
 
     #[test]
-    fn a_parser_can_end_mid_event_and_resume() {
+    fn a_parser_can_end_mid_frame_and_resume() {
         let mut parser = SseParser::new();
-        assert!(parser.feed("id: 9").is_none());
-        assert!(parser.feed("event: output").is_none());
-        let event = parser.feed("data: {\"type\":\"output\"}").is_none();
-        assert!(event);
-        let done = parser.feed("").unwrap();
-        assert_eq!(done.id, Some(9));
+        assert!(parser.feed("id: 7f3a.9").is_none());
+        assert!(parser.feed("event: op").is_none());
+        assert!(parser.feed("data: {\"op\":\"hello\"}").is_none());
+        let frame = parser.feed("").unwrap();
+        assert_eq!(frame.id.as_deref(), Some("7f3a.9"));
+        assert_eq!(frame.data, "{\"op\":\"hello\"}");
+        // And a fresh frame after it starts clean.
+        assert!(parser.feed("id: 7f3a.10").is_none());
+        let next = parser.feed("").unwrap();
+        assert_eq!(next.id.as_deref(), Some("7f3a.10"));
+        assert_eq!(next.data, "");
     }
 }
