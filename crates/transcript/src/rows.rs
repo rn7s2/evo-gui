@@ -2160,6 +2160,8 @@ fn text_block(
 ) -> AnyElement {
     let id = id.into();
     let (body, hidden) = cap_text(text, total_chars, limit);
+    // `Rows.css`'s `.tc-result`: the payload as plain text under its caption, on
+    // the card's own body — the frame is the card's, not a box of its own.
     let mut block = div()
         .id(id.clone())
         .flex()
@@ -2167,11 +2169,6 @@ fn text_block(
         .gap_1()
         .w_full()
         .min_w_0()
-        .rounded(palette.radius)
-        .border_1()
-        .border_color(palette.border)
-        .px_2()
-        .py_1()
         .child(caption(&id, label, palette))
         // A body with no keys of its own starts at the panel's own edge, under
         // its caption: a text result is the whole width of the panel, not a
@@ -2182,8 +2179,8 @@ fn text_block(
                 .w_full()
                 .min_w_0()
                 .font_family(palette.mono.clone())
-                .text_size(palette.payload_size)
-                .line_height(palette.payload_size * PAYLOAD_LINE_HEIGHT)
+                .text_size(px(13.))
+                .line_height(px(19.))
                 .text_color(palette.foreground)
                 .child(SelectableText::new((id.clone(), "body"), body))
                 .test_support(),
