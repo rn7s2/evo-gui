@@ -18,7 +18,7 @@ use gpui_kit::{
 };
 use store::design::{Palette, BUSY_PERIOD_MS, BUSY_RING, DOT, IDLE_OPACITY, IDLE_RING};
 
-use crate::paint::{color, mix, wash, Rgb};
+use crate::paint::{color, mix_ink, wash, Rgb};
 
 /// How long one breath lasts: `标签栏.工作周期`, 1600ms.
 pub const BREATH_PERIOD: Duration = Duration::from_millis(BUSY_PERIOD_MS as u64);
@@ -40,7 +40,21 @@ pub fn breath_k(delta: f32) -> f32 {
 /// black to white on an active tab in the light theme, black to grey on a
 /// background one (one rule, both ends).
 pub fn breath_fill(fg: Rgb, surface: Rgb, delta: f32) -> Rgb {
-    mix(fg, breath_k(delta) * 100., surface)
+    crate::paint::mix(fg, breath_k(delta) * 100., surface)
+}
+
+/// The same rule on two colours a widget is already drawing with: what an
+/// overridden ink mixes towards.
+pub fn breath_between(ink: Hsla, surface: Hsla, delta: f32) -> Hsla {
+    mix_ink(ink, breath_k(delta) * 100., surface)
+}
+
+/// `color-mix(in srgb, ink pct%, transparent)` on a colour already in hand.
+fn wash_ink(ink: Hsla, pct: f32) -> Hsla {
+    gpui_kit::Hsla {
+        a: ink.a * (pct / 100.).clamp(0., 1.),
+        ..ink
+    }
 }
 
 /// A working agent's dot, or an idle agent's ring.
@@ -51,8 +65,14 @@ pub fn breath_fill(fg: Rgb, surface: Rgb, delta: f32) -> Rgb {
 pub struct BreathingDot {
     id: ElementId,
     busy: bool,
-    palette: &'static Palette,
-    surface: Rgb,
+    /// The ink a busy dot fills towards, and the idle ring's colour unless
+    /// [`BreathingDot::ring`] overrides it.
+    ink: Hsla,
+    /// The colour an idle dot's ring is drawn in. `currentColor` in the design:
+    /// the foreground on a shown tab, the muted ink on a background one.
+    ring: Hsla,
+    /// The surface a busy dot mixes towards at the quiet end of its breath.
+    surface: Hsla,
     size: f32,
     idle_opacity: f32,
     period: Duration,
@@ -64,21 +84,42 @@ impl BreathingDot {
     /// The id is per slot (`"tab-busy-evo-1"`, `"lane-3-dot"`): the animation is
     /// keyed by it, so two dots sharing an id would share a phase.
     pub fn new(id: impl Into<ElementId>, busy: bool) -> Self {
+        let light = &store::design::LIGHT;
         Self {
             id: id.into(),
             busy,
-            palette: &store::design::LIGHT,
-            surface: store::design::LIGHT.muted,
+            ink: color(light.fg),
+            ring: color(light.muted_fg),
+            surface: color(light.muted),
             size: DOT,
             idle_opacity: IDLE_OPACITY,
             period: BREATH_PERIOD,
         }
     }
 
-    /// The mode's palette.
+    /// The mode's palette: the ink, the idle ring (`muted_fg`) and the surface
+    /// (`muted`, which is the strip) in one call.
     pub fn palette(mut self, palette: &'static Palette) -> Self {
-        self.palette = palette;
-        self.surface = palette.muted;
+        self.ink = color(palette.fg);
+        self.ring = color(palette.muted_fg);
+        self.surface = color(palette.muted);
+        self
+    }
+
+    /// The ink a busy dot fills towards — the foreground unless a caller says
+    /// otherwise.
+    pub fn ink(mut self, ink: impl Into<Hsla>) -> Self {
+        self.ink = ink.into();
+        self
+    }
+
+    /// The colour an idle dot's ring is drawn in, on its own.
+    ///
+    /// The design writes the ring as `currentColor`: the foreground on the tab
+    /// being shown and the muted ink on the others, so the two are set apart by
+    /// weight as well as by fill.
+    pub fn ring(mut self, ring: impl Into<Hsla>) -> Self {
+        self.ring = ring.into();
         self
     }
 
@@ -87,7 +128,13 @@ impl BreathingDot {
     /// the sidebar, a selected row against the row's own fill, a tab against the
     /// strip. Defaults to the palette's `muted`, which is the strip.
     pub fn surface(mut self, surface: Rgb) -> Self {
-        self.surface = surface;
+        self.surface = color(surface);
+        self
+    }
+
+    /// The same, for a caller that already has a colour.
+    pub fn on(mut self, surface: impl Into<Hsla>) -> Self {
+        self.surface = surface.into();
         self
     }
 
@@ -118,22 +165,22 @@ impl BreathingDot {
                 .flex_none()
                 .rounded_full()
                 .border(px(IDLE_RING))
-                .border_color(color(self.palette.muted_fg))
+                .border_color(self.ring)
                 .opacity(self.idle_opacity)
                 .into_any_element();
         }
 
-        let (fg, surface) = (self.palette.fg, self.surface);
+        let (ink, surface) = (self.ink, self.surface);
         div()
             .size(px(self.size))
             .flex_none()
             .rounded_full()
             .border(px(BUSY_RING))
-            .border_color(wash(fg, RING_MIX))
+            .border_color(wash_ink(ink, RING_MIX))
             .with_animation(
                 self.id,
                 Animation::new(self.period).repeat(),
-                move |dot, delta| dot.bg(color(breath_fill(fg, surface, delta))),
+                move |dot, delta| dot.bg(breath_between(ink, surface, delta)),
             )
             .into_any_element()
     }
@@ -230,5 +277,38 @@ mod tests {
             .period(Duration::from_millis(800));
         assert_eq!(Rgba::from(mid_breath(&LIGHT, LIGHT.tab_strip)).a, 1.0);
         let _ = small;
+    }
+}
+
+#[cfg(test)]
+mod override_tests {
+    use super::*;
+    use gpui_kit::Rgba;
+
+    /// The ring is `currentColor` in the design: a caller sets it on its own, and
+    /// it is what an idle dot is drawn in — the shown tab in the foreground, the
+    /// others in the muted ink.
+    #[test]
+    fn a_ring_can_be_set_apart_from_the_ink() {
+        let dot = BreathingDot::new("tab-1", false)
+            .palette(&store::design::LIGHT)
+            .ink(color(store::design::LIGHT.fg))
+            .ring(color(store::design::LIGHT.fg));
+        assert_eq!(dot.ring, color(store::design::LIGHT.fg));
+
+        // A busy dot: its fill breathes between the ink and the surface, and its
+        // ring is 45% of the ink whatever the ink is.
+        let busy = BreathingDot::new("tab-2", true)
+            .palette(&store::design::LIGHT)
+            .ink(color(store::design::DARK.fg))
+            .surface(store::design::LIGHT.tab_strip);
+        assert_eq!(Rgba::from(wash_ink(busy.ink, 45.)).a, 0.45);
+        let mid = breath_between(busy.ink, busy.surface, 0.5);
+        assert_eq!(mid, busy.ink, "the loud end is the ink it was given");
+        assert_eq!(
+            breath_between(busy.ink, busy.surface, 0.),
+            busy.surface,
+            "the quiet end is the surface"
+        );
     }
 }

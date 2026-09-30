@@ -7251,6 +7251,7 @@ dependencies = [
  "serde_json",
  "session",
  "store",
+ "widgets",
 ]
 
 [[package]]

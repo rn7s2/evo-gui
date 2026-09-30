@@ -20,9 +20,9 @@ pub struct HistoryRow {
     /// The folder's own name — the row's primary line.
     pub title: SharedString,
     /// The `~`-shortened folder path under it.
-    pub subtitle: SharedString,
-    /// `4 lanes · 2h ago · coordinator: …`, with the unknown parts left out.
-    pub meta: SharedString,
+    pub folder_short: SharedString,
+    /// How long ago it ran, in the list's own words: `2h ago`, `yesterday`, `12 Sep`.
+    pub when: SharedString,
     /// Everything known about the session, for the row's tooltip.
     pub tooltip: SharedString,
     /// The app had this session open when it last quit: the row wears a badge for it.
@@ -36,8 +36,8 @@ impl HistoryRow {
             folder: PathBuf::from(&row.folder),
             session_path: PathBuf::from(&row.session_path),
             title: SharedString::from(row.title.clone()),
-            subtitle: SharedString::from(row.subtitle.clone()),
-            meta: SharedString::from(row.meta.clone()),
+            folder_short: SharedString::from(row.folder_short.clone()),
+            when: SharedString::from(row.when.clone()),
             tooltip: SharedString::from(row.tooltip.clone()),
             open_at_quit: row.open_at_quit,
         }
@@ -74,8 +74,8 @@ mod tests {
     fn session_row() -> session::HistoryRow {
         session::HistoryRow {
             title: "wire the history list to the session index".to_string(),
-            subtitle: "~/coding/foo".to_string(),
-            meta: "4 lanes · 2h ago · coordinator: gpt-5".to_string(),
+            folder_short: "~/coding/foo".to_string(),
+            when: "2h ago".to_string(),
             tooltip: "/Users/you/coding/foo · 2026-09-29 09:25:44 UTC (+00:00)".to_string(),
             session_path: "/Users/you/.evo/sessions/x/1.sexp".to_string(),
             folder: "/Users/you/coding/foo".to_string(),
@@ -91,8 +91,8 @@ mod tests {
         let row = HistoryRow::from_session(&session_row());
 
         assert_eq!(row.title, "wire the history list to the session index");
-        assert_eq!(row.subtitle, "~/coding/foo");
-        assert_eq!(row.meta, "4 lanes · 2h ago · coordinator: gpt-5");
+        assert_eq!(row.folder_short, "~/coding/foo");
+        assert_eq!(row.when, "2h ago");
         assert!(row.tooltip.starts_with("/Users/you/coding/foo"));
         // What the workspace acts on: resume this journal, run in this folder.
         assert_eq!(row.folder, PathBuf::from("/Users/you/coding/foo"));

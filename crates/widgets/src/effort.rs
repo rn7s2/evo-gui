@@ -47,6 +47,10 @@ pub const TRACK_RADIUS: f32 = 2.;
 pub const THUMB_SIZE: f32 = 16.;
 pub const TICK_SIZE: f32 = 2.;
 
+/// The rail's hover group: what makes the thumb's ring appear when the pointer is
+/// anywhere on the slider.
+const SLIDER_GROUP: &str = "effort-slider";
+
 /// How long a move takes, and the curve it takes it on.
 pub const MOVE: Duration = Duration::from_millis(140);
 pub const MOVE_X1: f32 = 0.3;
@@ -329,6 +333,11 @@ impl EffortSlider {
             .border(px(1.))
             .border_color(thumb_border)
             .shadow(thumb_shadows(pressed, focused, ink))
+            // `.es:hover .es-thumb`: gpui has no descendant selector, so the rail
+            // is a group and the thumb asks what state it is in.
+            .group_hover(SLIDER_GROUP, move |style| {
+                style.shadow(hover_shadows(hover_ring))
+            })
             .with_animation(
                 ElementId::from(format!("{:?}-thumb", self.id)),
                 Animation::new(MOVE).with_easing({
@@ -352,14 +361,12 @@ impl EffortSlider {
         let mut slider = div()
             .on_children_prepainted(measure)
             .id(self.id.clone())
+            .group(SLIDER_GROUP)
             .relative()
             .h(px(HEIGHT))
             .w_full()
             .cursor_pointer()
             .child(rail)
-            // A hovered rail rings the thumb, which the design writes as
-            // `.es:hover .es-thumb`.
-            .hover(move |style| style.shadow(hover_shadows(hover_ring)))
             .on_mouse_down(MouseButton::Left, {
                 let (pressed, notify, pick) =
                     (self.pressed.clone(), self.notify.clone(), pick.clone());

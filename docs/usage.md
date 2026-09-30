@@ -47,7 +47,7 @@ which are the same actions as `⌃⇥`, `⌃⇧⇥` and `⌘9`; `⌘1`…`⌘8` 
 shortcuts.
 
 Switching tabs takes the keyboard with it: the composer of the tab you land on
-gets the caret, and an empty tab hands it to its first chooser — a keystroke
+gets the caret, and an empty tab hands it to its first control — a keystroke
 nobody hears is worse than one the window handles.
 
 ## Tabs
@@ -76,86 +76,101 @@ Two small marks answer questions a label cannot:
 
 ## The empty tab: choosing a swarm
 
-```
-New swarm
-Pick models, then a folder
+Every new tab opens on the New Swarm page (`design/doc28/NewSwarm.tsx`): what the
+launch will be, then the folder to run it in, then what can be resumed.
 
-Coordinator model  [ Default ▾ ]            ┌────────────────────────┐
-Lanes model        [ Default ▾ ]            │  [folder icon]         │
-Workers            [ Default ▾ ]            │  Select folder…        │
-                                            │  The swarm starts in   │
-                                            │  the folder you pick   │
-                                            └────────────────────────┘
-  ⚠ lane_model_not_found: no registration … — fix the lanes model
+```
+New Swarm
+Choose how it runs, then select a project folder.
+
+┌─ Coordinator ──────────────────────────┐   ┌────────────────────────┐
+│ Model                                  │   │   [folder icon]        │
+│ [ aiden · ark-deepseek-v4.1-flash   ▾ ]│   │   Select folder…       │
+│ Effort                          medium │   │   The swarm starts in  │
+│ ──●─────────────────────────────────── │   │   the folder you pick  │
+└────────────────────────────────────────┘   └────────────────────────┘
+┌─ Workers ────────────── Count ── 6 ─+ ─┐
+│ Model                                  │
+│ [ anthropic · claude-opus-4.5       ▾ ]│
+│ Effort                          medium │
+│ ──●─────────────────────────────────── │
+└────────────────────────────────────────┘
+  ⚠ config.file: no registration for … — fix it in Settings…
 
 History  6 resumable
-  evo-gui  [open at last quit]
-           ~/coding/evo-gui · 6 lanes · 11m ago · coordinator: ark-…
-  foo      ~/coding/foo     · 4 lanes · 2h ago  · coordinator: …
+┌───────────────────────────────────────────────────────────────────────┐
+│ 📁 evo-gui  [open at last quit]                                    ›  │
+│    ~/coding/evo-gui · 11m ago                                         │
+└───────────────────────────────────────────────────────────────────────┘
 ```
 
-- **Coordinator model** — passed to the swarm as `--model ID@PROVIDER`. On
-  **Default** (`evo's own default`) nothing is passed and evo's own default
-  applies. The menu lists the models the catalog knows, sorted by provider then
-  id, each with a detail line — `200k ctx · vision · reasons`. A model
-  registered under several providers is listed per registration, and the option
-  carries the `id@provider` the flag will be given.
-- **Lanes model** — passed as `--lane-model ID@PROVIDER`, which is what the
-  lanes register. On **Default** (`follows the coordinator`) nothing is passed
-  and every lane inherits the coordinator's model. The list is the same catalog
-  filtered by `/catalog.lanes.models`: a model a lane could not register is
-  greyed with evo's own reason beside it. The app writes no project file — the
-  lanes' model is a launch flag, and `<folder>/.evo/swarm.lisp` stays yours.
-- **Lanes thinking** — `--lane-thinking`, the effort the lanes start at; Default
-  follows the coordinator's.
-- **Workers** — `--workers`, 1–64. On **Default** evo's own `:swarm-workers`
-  setting decides (else 6). Only a swarm created from a folder takes this count:
-  a resumed swarm keeps the lane count its own record kept.
+**Nothing here is called "Default".** Every control opens on what evo would run
+*now*, and what it shows is exactly what the launch passes — so a page that shows
+a model is a launch that runs it:
+
+- **Coordinator — Model** is `--model ID@PROVIDER`: what `evo-swarm check --json`
+  resolved, else `/catalog.default_model`, else the first registration the
+  catalog says is `ready`. The menu lists every registration, `provider · id`,
+  each with a detail line — `200k ctx · vision · reasons` — and a registration
+  evo cannot reach is greyed with evo's own reason.
+- **Coordinator — Effort** is `--thinking`, and **Workers — Effort** is
+  `--lane-thinking`: the rungs `/catalog.thinking_levels` lists, without `off`
+  (evo retired that rung, and `--thinking` refuses it). Both open on the middle
+  rung; click, drag or use the arrows, and the level's name is beside the label.
+- **Workers — Count** is `--workers`, 1–64. Typing clamps to the range — `0`,
+  `99` or a word lands on the nearest count — and `−`/`+` step one at a time. It
+  opens on evo-swarm's own 6, which is what it starts with when neither
+  `--workers` nor the `swarm-workers` setting says otherwise.
+- **Workers — Model** is `--lane-model`: what `check` resolved for a lane, else
+  the default when a lane can register it, else the first registration a lane
+  can. The list is the same catalog judged by `/catalog.lanes.models` — a model a
+  lane could not register is greyed with evo's reason beside it. The app writes
+  no project file: the lanes' model is a launch flag, and
+  `<folder>/.evo/swarm.lisp` stays yours.
 - **Select folder…** — the native folder dialog. Picking a folder starts the
   swarm there and turns the tab into a tab page; cancelling leaves the tab empty.
 
-Under the choosers, one caption carries what has something to say: `Loading
-models…` until the catalog is known; `Couldn't load the model list — Default
-models will be used.` (or `Couldn't refresh the model list — using the last one
-it loaded.` when a cached catalog is already in the choosers), with evo's own
-error in the hover; and, when `evo-swarm check --json` judges the launch the
-choosers describe, one calm line per problem — the lanes model that is not
-registered, a missing key, a worker count evo refuses. A problem line is
-clickable: it opens the chooser it is about, or Settings when it is about the
-machine. The check runs again on every chooser change, so these lines describe
-what **Select folder…** would actually start.
+Under the cards, one calm line each: what `evo-swarm check --json` found wrong
+with the launch the controls describe — a model evo cannot reach, a lane that
+cannot register one, a missing key — and, when the catalog itself could not be
+read, what the page does without it. A line is clickable: it puts the keyboard on
+the control it is about, or opens Settings when it is about the machine (the
+binary that is not there). The check runs again on every model change, so these
+lines describe what **Select folder…** would actually start.
 
 The tab's models are fixed when the swarm starts — the tab page has no model
 selector, only the readout that shows what is running.
 
 ### Keyboard on the empty tab
 
-Tab moves the keyboard between the three choosers, the folder drop target and the
-history list (the target and the history frame draw a hairline focus ring while
-they hold it). A chooser opens with `Enter`, `Space` or an arrow; the arrows walk
-its options, `Enter` picks, `Esc` closes it without leaving the tab (and without
-choosing). The history frame takes the arrows and `Home`/`End`; `Enter` resumes
-the selected row, the same as clicking it.
+Tab walks the page in the order it is read: the Coordinator's model field and
+effort slider, the Workers' count, model and slider, the folder card, then the
+history rows. The two model fields open with `Enter`, `Space` or an arrow, the
+arrows walk the options, `Enter` picks, `Esc` closes the menu without leaving the
+tab; the count box takes digits; a slider takes the arrows, `Home` and `End`; the
+folder card and every history row are buttons, so `Enter` is what a click is.
+A focused model field or count box draws the design's ring — a primary border
+with a 2px muted halo — and a focused slider rings its thumb.
 
 ### History
 
 The history lists every resumable swarm `evo-agent sessions --json` reports —
 any folder, not only the ones this app started — merged with the app's own recent
 sessions, newest first. The app reads no journal: evo keeps an index and prints
-it. A row leads with the session's own title (its first user text) and the
-folder's name under it, then what is known about the session, joined by `·` —
-the lanes, how long ago, the coordinator's model (`4 lanes · 2h ago ·
-coordinator: ark-deepseek-v4.1-flash`); each part is left out when it is unknown.
-A session the app had open when it last quit wears an `open at last quit` pill.
-Hovering shows the full path, the journal's name, the absolute time, and the
-models.
+it. A row leads with the session's own title (its first user text) and, under it,
+the `~`-shortened folder with how long ago it ran, joined by `·`; a session the
+app had open when it last quit wears an `open at last quit` pill beside its
+title, and the `›` at the row's end says what a click does. Hovering shows the
+full path, the journal's name, the absolute time, the models and the lane count.
 
-Click a row (or select it and press `Enter`) to open it as a new tab: the swarm
-resumes that session (`--resume <that exact journal>`) in the folder it ran in,
-so two tabs in one folder can never cross sessions. The list has three quiet
-states of its own: `Scanning sessions…` while the index is being read, `No
-resumable swarms yet`, and the read's error in the danger colour. The calm one is
-what a first run shows: there is nothing to resume yet, which is not a failure.
+Click a row (or press `Enter` while it has the keyboard) to open it as a new tab:
+the swarm resumes that session (`--resume <that exact journal>`) in the folder it
+ran in, so two tabs in one folder can never cross sessions. The list scrolls
+inside the height that is left, under the fixed head and cards; and it has three
+quiet states of its own: `Looking for sessions…` while the index is read, `No
+swarms to resume yet.`, and the read's error in words. The calm one is what a
+first run shows: there is nothing to resume yet, which is not a failure.
+
 
 ## The tab page
 
@@ -358,14 +373,14 @@ The app keeps its own data in `~/.evo/desktop/`:
 |---|---|
 | `app.json` | window bounds, the recorded tab set, binary paths, recent sessions, theme |
 | `lock`, `activate.sock` | the single-instance lock and its activation socket |
-| `model-cache.json` | the last `catalog --json` body, for the empty tab's choosers |
+| `model-cache.json` | the last `catalog --json` body, for the New Swarm page's controls |
 | `tabs/<id>/ready.json` | where the server publishes its port, URL and bearer token (0600) |
 | `tabs/<id>/swarm.log` | the swarm's stdout and stderr |
 | `app.log` | the app's own log, one line per event, each with a UTC timestamp |
 
 The token in `ready.json` is never logged and never shown. Nothing else is
 written: the app reads no journal and edits no project file. What it shows comes
-from evo itself — `evo-swarm catalog --json` for the choosers (at startup, and
+from evo itself — `evo-swarm catalog --json` for the controls (at startup, and
 again whenever the binaries change), `evo-agent sessions --json` for the history
 list, `evo-swarm check --json` for the problem lines, and the running swarm for
 everything on the tab page. Model names are never hardcoded.
