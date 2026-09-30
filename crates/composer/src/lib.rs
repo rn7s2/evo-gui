@@ -1,11 +1,26 @@
-//! composer — the right column of the tab page (§7.3): the coordinator's input,
-//! and one status row under it carrying the session readout on the left and the
-//! single Send/Stop button flush right.
+//! composer — the box under the transcript (`Workspace.css`'s `.composer-box`): the
+//! coordinator's input, the todo strip and the drawers that fold out of it, the chips
+//! that state what the selected agent is working with, and the one Send/Stop button.
+//!
+//! The box sits on the transcript's reading measure, at the foot of the conversation
+//! column, so what is written lines up with what is read. Everything inside it is the
+//! *selected agent's own* state (CONTRACT §4.2): the chips are the topic's status
+//! segments in the server's words and order, the todos are the topic's todos, and the
+//! model drawer ticks the model the topic reports. Nothing is composed here, and
+//! nothing survives a selection — another agent is another set of facts.
+//!
+//! The effort ladder is the server's too (`catalog`'s `thinking_levels`, §5.6): a
+//! client never writes the rungs down.
+//!
+//! Two of the design's controls are the coordinator's alone. `model.set` and
+//! `thinking.set` act on the session (CONTRACT §5), and a lane's model is the swarm's,
+//! fixed when it starts — so a lane's drawer states what that lane runs and says that
+//! this box is not what changes it. Nothing is offered that the server would refuse.
 //!
 //! The composer does no I/O. It emits [`ComposerEvent`] and the owner posts the
-//! request, then reports the outcome with [`Composer::request_finished`]: that
-//! is what keeps a failed send's draft alive, and what keeps the button
-//! disabled only while its own request is in flight.
+//! request, then reports the outcome with [`Composer::request_finished`]: that is what
+//! keeps a failed send's draft alive, and what keeps the button disabled only while
+//! its own request is in flight.
 
 use gpui_kit::base::input::Position;
 use gpui_kit::base::TextSelection;
@@ -13,70 +28,138 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{InputEvent, Textarea, TextareaState},
-    tooltip::Tooltip,
-    v_flex, ActiveTheme as _, Disableable as _, IconName, Sizable as _, Size,
+    v_flex, ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, Size, StyledExt as _,
 };
-use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::prelude::*;
 use gpui_kit::{
-    div, px, App, AppContext as _, ClipboardItem, Context, Entity, EventEmitter, Global,
-    InteractiveElement as _, IntoElement, KeyBinding, Keystroke, KeystrokeEvent,
-    ParentElement as _, Pixels, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Subscription, TestSupportExt as _, WeakEntity, Window,
+    div, px, AnyElement, App, BoxShadow, ClipboardItem, Context, ElementId, Entity, EventEmitter,
+    FocusHandle, Global, IntoElement, KeyBinding, Keystroke, KeystrokeEvent, MouseButton, Pixels,
+    Render, ScrollHandle, SharedString, Subscription, TestSupportExt as _, WeakEntity, Window,
 };
-use session::Segment;
+use session::{ordered_segments, Segment, Todo, TodoStatus, TopicState};
+use store::design::{self, Palette, INSET, MEASURE, RADIUS};
+use widgets::{paint, Chip, EffortSlider};
 
-/// The input grows from two rows to eight; past that it scrolls.
+/// The input grows from the design's two lines to as much as half the conversation
+/// pane, and scrolls inside itself past that (`AutoTextarea.tsx`).
+///
+/// The rows are the kit's own unit — a row is one line of the input's text, which at
+/// the theme's size and padding lands the two-line floor on the design's 62px
+/// `min-height` — so the composer is told the pane's height and works in rows.
 const MIN_ROWS: usize = 2;
-const MAX_ROWS: usize = 8;
-
-/// The input is a card: a chat input, not a form field.
-const INPUT_RADIUS: Pixels = px(10.);
-const INPUT_BORDER: Pixels = px(1.);
-/// The focus ring: a band around the card, in the focus colour, while the caret
-/// is in the input. The band is a wash, not a second outline — the card marks
-/// focus with one hairline, and this is the soft edge around it.
-const FOCUS_RING: Pixels = px(3.);
-const FOCUS_RING_INK: f32 = 0.12;
+/// How much of the pane's height the input may take: `Math.floor(pane / 2)`.
+const ROOM_SHARE: f32 = 0.5;
 
 /// What the input is for, and the two keys that submit it.
 ///
-/// The hint is a line of its own: a column this narrow cannot show the whole
-/// sentence at once, and the placeholder of a multi-line input is drawn line by
-/// line (`placeholder_line_runs` splits on newlines), so it stays readable here
-/// instead of being clipped at the input's edge.
+/// One placeholder for every agent: `input.send` posts to the session (CONTRACT §5),
+/// so whatever transcript is above the box, what is typed here reaches the
+/// coordinator — and the box says so rather than naming the lane it is shown under.
+/// A lane is driven by the coordinator, never by the box.
 const PLACEHOLDER: &str =
     "Message the coordinator\u{2026}\n(Enter to send, Shift+Enter for newline)";
 
-/// The action button's height: a compact control sharing the readout's line.
+/// The box's own furniture: `12px` radius, one hairline, and the shadow under it
+/// (`.composer-box`).
+const BOX_RADIUS: Pixels = px(12.);
+const BOX_BORDER: Pixels = px(1.);
+/// The focus ring: `box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 12%,
+/// transparent)`, and the border it comes with — `55%` of the primary into the
+/// border.
+const RING: Pixels = px(3.);
+const RING_MIX: f32 = 12.;
+const FOCUS_BORDER_MIX: f32 = 55.;
+/// The ink the box's own shadow is drawn in: `rgba(60,40,10,.05)`.
+const SHADOW_INK: paint::Rgb = paint::Rgb::new(0x3C, 0x28, 0x0A);
+
+/// The action button's height, and the row it shares with the chips
+/// (`.composer-send{height:28px}`, `.composer-foot{padding:6px 8px 8px 10px}`).
 const ACTION_HEIGHT: Pixels = px(28.);
-/// The readout's size: the TUI's dim status line, small enough to stay one line.
-const READOUT_SIZE: Pixels = px(12.);
-/// The width the readout's tooltip wraps to: the column's own width.
-const READOUT_TOOLTIP_WIDTH: Pixels = px(340.);
+const ACTION_RADIUS: Pixels = px(RADIUS);
+const FOOT_GAP: Pixels = px(6.);
+const FOOT_PAD: (f32, f32, f32, f32) = (6., 8., 8., 10.);
+
+/// The todo strip's rows: a 32px title row, and a list that scrolls past 156px
+/// (`.todo-strip-row`, `.todo-strip-list{max-height:156px}`).
+const STRIP_ROW: Pixels = px(32.);
+const STRIP_LIST_MAX: Pixels = px(156.);
+/// One todo, its box, and the box's own 14px frame with its 3px radius.
+const TODO_ROW: Pixels = px(18.);
+const TODO_BOX: Pixels = px(14.);
+const TODO_BOX_RADIUS: Pixels = px(3.);
+const TODO_BOX_INSET: Pixels = px(6.);
+/// The drawer's rows and its model items.
+const DRAWER_ROW: Pixels = px(32.);
+const DRAWER_ITEM: Pixels = px(30.);
+const DRAWER_ITEM_RADIUS: Pixels = px(RADIUS);
+const DRAWER_EFFORT_ROW: Pixels = px(36.);
+const DRAWER_LABEL_MIN: Pixels = px(112.);
+
+/// Where an item's hover and its chosen fill come from: the ink a few percent into
+/// the surface the drawer sits on (`--sidebar`), as the design's rows do it.
+const ITEM_HOVER_MIX: f32 = 6.;
+const ITEM_CHOSEN_MIX: f32 = 9.;
+
+/// Sizes drawn from the design's CSS rather than from a shared token: the chrome
+/// text of a strip or a drawer, and the item text under it.
+const STRIP_FONT: Pixels = px(12.5);
+const ITEM_FONT: Pixels = px(13.);
+const DETAIL_FONT: Pixels = px(12.);
 
 /// Key context of the composer, so `Esc` reaches the composer even though the
 /// textarea holds the focus and handles `Escape` first.
 const KEY_CONTEXT: &str = "Composer";
 
-/// How many prompts one composer remembers for its ↑/↓ history; the oldest fall
-/// off past this. In memory, per tab: a composer is not a shell, and nothing
-/// here is written down.
+/// How many prompts one composer remembers for its ↑/↓ history; the oldest fall off
+/// past this. In memory, per tab: a composer is not a shell, and nothing here is
+/// written down.
 const HISTORY_LIMIT: usize = 64;
 
 /// The action button's element id: one button, addressed by name.
 pub const BUTTON_ID: &str = "composer-action";
-/// The readout's element id; it also carries the full line as its tooltip.
-pub const READOUT_ID: &str = "composer-readout";
 
 gpui_kit::actions!(composer, [Interrupt]);
+
+/// One chip on the foot row: a fact the topic published, and whether it opens
+/// something.
+#[derive(Clone, Debug, PartialEq)]
+struct ChipFact {
+    /// The segment's own name — the chip's element id, and what a test addresses.
+    name: String,
+    text: SharedString,
+    /// The dim second half: the effort level beside a model.
+    dim: Option<SharedString>,
+    /// The drawer this chip opens, when it opens one.
+    opens: Option<Drawer>,
+}
+
+/// The fold-out a chip opens, inside the box (`.drawer`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Drawer {
+    Model,
+    Goal,
+}
+
+/// The facts one agent's topic reports, as this box draws them.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Agent {
+    chips: Vec<ChipFact>,
+    todos: Vec<Todo>,
+    /// The model the topic reports: what the drawer ticks.
+    model: Option<(String, String)>,
+    /// The effort level the topic reports, as it is (`state.thinking`).
+    thinking: Option<String>,
+    /// The goal, for the drawer's body: its status and the objective in full.
+    goal: Option<(String, String)>,
+}
 
 /// What the composer asks its owner to do. Each is one op the owner sends
 /// (`session::OpRequest`): the composer names the action, never the endpoint.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ComposerEvent {
-    /// Post this text as the coordinator's turn. It lands at the running turn's
-    /// next boundary, so text sent while the agent works is queued, not lost.
-    /// The op is `input.send`.
+    /// Post this text as the coordinator's turn. It lands at the running turn's next
+    /// boundary, so text sent while the agent works is queued, not lost. The op is
+    /// `input.send`.
     Send(String),
     /// Stop the coordinator's own run (the TUI's esc) — `run.interrupt` with scope
     /// `session`. The draft is untouched.
@@ -84,6 +167,11 @@ pub enum ComposerEvent {
     /// Stop the whole swarm — `run.interrupt` with scope `swarm`: every lane, and the
     /// coordinator with it (CONTRACT §7.5).
     StopSwarm,
+    /// Change the coordinator's model (`model.set`, CONTRACT §5). A lane's model is
+    /// the swarm's, so this is emitted for the coordinator alone.
+    ModelSet { id: String, provider: String },
+    /// Change the coordinator's effort (`thinking.set`).
+    ThinkingSet(String),
 }
 
 /// What the one button says — and therefore what clicking it does.
@@ -103,9 +191,9 @@ impl ActionFace {
         }
     }
 
-    /// The glyph leading the label: an up arrow to send. Stop's square is part of
-    /// its label instead — the icon set the app bundles carries no plain square,
-    /// and the screen's own glyph draws one at the label's own size.
+    /// The glyph leading the label: an up arrow to send. Stop's square is part of its
+    /// label instead — the icon set the app bundles carries no plain square, and the
+    /// screen's own glyph draws one at the label's own size.
     pub fn icon(self) -> Option<IconName> {
         match self {
             Self::Send => Some(IconName::ArrowUp),
@@ -114,9 +202,8 @@ impl ActionFace {
     }
 }
 
-/// Where the caret goes when a prompt is recalled: the end of it, on the last
-/// line. Columns are counted in characters, which is what the input's cursor
-/// positions are.
+/// Where the caret goes when a prompt is recalled: the end of it, on the last line.
+/// Columns are counted in characters, which is what the input's cursor positions are.
 fn end_position(text: &str) -> Position {
     let line = text.matches('\n').count();
     let character = text
@@ -132,60 +219,113 @@ fn is_submit(keystroke: &Keystroke) -> bool {
     keystroke.key == "enter" && !keystroke.modifiers.modified()
 }
 
-/// Whether a keystroke is this platform's copy shortcut — the chord the input's
-/// own `Copy` is bound to, and the one the window's `Copy` answers.
+/// Whether a keystroke is this platform's copy shortcut — the chord the input's own
+/// `Copy` is bound to, and the one the window's `Copy` answers.
 fn is_copy_shortcut(keystroke: &Keystroke) -> bool {
     if keystroke.key != "c" || keystroke.modifiers.shift || keystroke.modifiers.alt {
         return false;
     }
-    #[cfg(target_os = "macos")]
-    {
+    if cfg!(target_os = "macos") {
         keystroke.modifiers.platform
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
+    } else {
         keystroke.modifiers.control
     }
 }
 
-/// Marks the app-wide key binding as installed, so any number of composers
-/// share one binding.
+/// Whether one-shot bindings have been installed (the keys are global to the app).
 struct KeysBound;
 impl Global for KeysBound {}
 
-/// The coordinator's composer.
+/// The chips the topic's own segments make (CONTRACT §4.2).
+///
+/// The server's registry built them, so this walks them and folds the two that belong
+/// together: `thinking` is the dim half of the `model` chip — `stub-a medium`, the way
+/// the design draws it. A `goal` segment opens the goal drawer, when the topic
+/// carries the goal itself; everything else is a chip of its own, in the server's
+/// order. Right-hand segments are the swarm's own summary (`2 lanes`), which the lane
+/// column already states, so they are not repeated here.
+fn chips_of(segments: &[Segment], has_goal: bool) -> Vec<ChipFact> {
+    let (left, _right) = ordered_segments(segments);
+    let effort = left
+        .iter()
+        .find(|segment| segment.name == "thinking")
+        .map(|segment| SharedString::from(segment.text.clone()));
+    let has_model = left.iter().any(|segment| segment.name == "model");
+    let mut chips = Vec::new();
+    for segment in left {
+        let name = segment.name.as_str();
+        // The effort rides on the model chip; with no model to ride on it is a fact
+        // of its own rather than a dropped one.
+        if name == "thinking" && has_model {
+            continue;
+        }
+        let opens = match name {
+            "model" => Some(Drawer::Model),
+            "goal" if has_goal => Some(Drawer::Goal),
+            _ => None,
+        };
+        chips.push(ChipFact {
+            name: segment.name.clone(),
+            text: SharedString::from(segment.text.clone()),
+            dim: (name == "model").then(|| effort.clone()).flatten(),
+            opens,
+        });
+    }
+    chips
+}
+
+/// The composer.
 pub struct Composer {
     input: Entity<TextareaState>,
-    readout: SharedString,
-    /// The right-hand segments (`2 lanes`), at the row's end before the button.
-    trailing: Option<SharedString>,
-    /// Whether this composer draws the status readout on its own row. The app
-    /// turns it off: the line belongs to the tab page now, under the transcript,
-    /// where it can speak for the agent being shown rather than for the
-    /// coordinator alone (§7.3). A composer on its own — the demo — keeps it.
-    show_readout: bool,
+    /// The selected agent's own facts: the chips, the todos, the model, the goal.
+    agent: Agent,
+    /// The agent's name, as the drawer's title says it (`Coordinator`, `lane 3`).
+    name: SharedString,
+    /// Whether this box may change the model and the effort: `model.set` and
+    /// `thinking.set` act on the session, so only the coordinator's are its to send.
+    settable: bool,
+    /// The ladder `thinking.set` accepts, in the server's order (`catalog`'s
+    /// `thinking_levels`, CONTRACT §5.6).
+    levels: Vec<SharedString>,
+    /// The models the catalog lists, for the drawer (§5.6).
+    models: Vec<ModelRow>,
+    /// The fold-out that is open, if any.
+    drawer: Option<Drawer>,
+    /// Whether the todo list is unfolded.
+    todos_open: bool,
     /// The swarm's own busy flag: what the action button's face follows.
     busy: bool,
-    /// True while this composer's own request is in flight — the only reason
-    /// the button is disabled.
+    /// True while this composer's own request is in flight — the only reason the
+    /// button is disabled.
     in_flight: bool,
     /// The prompts this tab has sent, oldest first: what ↑/↓ walks.
     history: Vec<String>,
     /// Where in `history` the input is, while it is showing a recalled prompt.
-    /// `None` means the input holds the reader's own draft.
     walking: Option<usize>,
-    /// The text the walk put in the input, so an edit of it — the reader typing
-    /// over a recalled prompt — is visible before the input's own `Change` event
-    /// has had a chance to arrive.
+    /// The text the walk put in the input, so an edit of it is visible before the
+    /// input's own `Change` event has had a chance to arrive.
     recalled: String,
-    /// The draft as `Enter` found it.
-    ///
-    /// The input's own `PressEnter` reaches this composer at the end of the
-    /// update the key arrived in, and the text would be read off the input then:
-    /// anything that rewrites the input in between — a prefill, a mention the
-    /// reader picked — must not change the prompt that goes out.
+    /// The draft as `Enter` found it (see [`Composer::new`]).
     pending_send: Option<String>,
+    /// The tallest the input may grow: half the conversation pane, as the page
+    /// measured it. The floor is the design's 62px, which the kit's two rows are.
+    room: Pixels,
+    /// The todo list's own scroll position, kept across frames.
+    todos_scroll: ScrollHandle,
+    /// The rail's keyboard focus, so the arrows move the effort while it is held.
+    effort_focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
+}
+
+/// One model the drawer offers, as `GET /catalog` describes it (§5.6).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelRow {
+    pub id: String,
+    pub provider: String,
+    /// The dim line under the name: the context window and what else evo reports.
+    pub detail: String,
+    /// Whether evo can reach it right now; the rest are listed with why not.
+    pub reason: Option<String>,
 }
 
 impl EventEmitter<ComposerEvent> for Composer {}
@@ -196,7 +336,7 @@ impl Composer {
 
         let input = cx.new(|cx| {
             TextareaState::new(window, cx)
-                .auto_grow(MIN_ROWS, MAX_ROWS)
+                .auto_grow(MIN_ROWS, MIN_ROWS)
                 .placeholder(PLACEHOLDER)
                 // `Enter` submits, `Shift+Enter` inserts a newline.
                 .submit_on_enter(true)
@@ -205,8 +345,8 @@ impl Composer {
             match event {
                 // `Shift+Enter` already inserted its newline in the state.
                 InputEvent::PressEnter { shift: false, .. } => {
-                    // The draft as the keypress found it, not as the input holds
-                    // it when this event lands at the end of the update.
+                    // The draft as the keypress found it, not as the input holds it
+                    // when this event lands at the end of the update.
                     let draft = match this.pending_send.take() {
                         Some(draft) => draft,
                         // An event nobody pressed for is still the input's text.
@@ -215,8 +355,8 @@ impl Composer {
                     this.send(draft, cx);
                 }
                 InputEvent::Change => {
-                    // An edit is what ends a walk through the history: the reader
-                    // has taken the recalled prompt and made it their own draft.
+                    // An edit is what ends a walk through the history: the reader has
+                    // taken the recalled prompt and made it their own draft.
                     this.walking = None;
                     cx.notify();
                 }
@@ -225,8 +365,8 @@ impl Composer {
         });
 
         // The keys the input handles itself but has no use for here: a window
-        // selection is not the input's to copy, and an empty composer has no
-        // caret to walk through its own prompts.
+        // selection is not the input's to copy, and an empty composer has no caret to
+        // walk through its own prompts.
         let weak_input = input.downgrade();
         let weak_self = cx.weak_entity();
         let interceptor = cx.intercept_keystrokes(move |event, window, cx| {
@@ -239,21 +379,28 @@ impl Composer {
 
         Self {
             input,
-            readout: SharedString::default(),
-            trailing: None,
-            show_readout: true,
+            agent: Agent::default(),
+            name: "main".into(),
+            settable: true,
+            levels: Vec::new(),
+            models: Vec::new(),
+            drawer: None,
+            todos_open: false,
             busy: false,
             in_flight: false,
             history: Vec::new(),
             walking: None,
             recalled: String::new(),
             pending_send: None,
+            room: px(320.),
+            todos_scroll: ScrollHandle::new(),
+            effort_focus: cx.focus_handle(),
             _subscriptions: vec![subscription, interceptor],
         }
     }
 
-    /// The prompts this composer has sent, oldest first — the tab's own history
-    /// for ↑/↓, and nothing that outlives the process.
+    /// The prompts this composer has sent, oldest first — the tab's own history for
+    /// ↑/↓, and nothing that outlives the process.
     pub fn history(&self) -> &[String] {
         &self.history
     }
@@ -268,44 +415,85 @@ impl Composer {
         cx.bind_keys([KeyBinding::new("escape", Interrupt, Some(KEY_CONTEXT))]);
     }
 
-    /// The status line the owner wants shown: the topic's own `segments`, rendered as
-    /// they are (CONTRACT §4.2). Nothing is composed here — the server's segment registry
-    /// built each piece, so the TUI and this row cannot drift apart.
+    /// The agent this box is showing: everything the box draws comes from its topic's
+    /// state, so one call is the whole update (CONTRACT §4.2).
     ///
-    /// The left side is the line itself; the right side sits at the row's end, before the
-    /// action button. Long lines are ellipsized and carried whole in a tooltip.
-    pub fn set_segments(&mut self, left: &[Segment], right: &[Segment], cx: &mut Context<Self>) {
-        let join = |segments: &[Segment]| {
-            segments
-                .iter()
-                .map(|segment| segment.text.as_str())
-                .collect::<Vec<_>>()
-                .join(" · ")
+    /// `name` is what the drawer's title calls the agent, and `settable` is whether
+    /// the model and the effort may be changed from here — true for the coordinator,
+    /// whose session is what `model.set` and `thinking.set` act on.
+    pub fn set_agent(
+        &mut self,
+        state: &TopicState,
+        name: &str,
+        settable: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let goal = state
+            .goal
+            .as_ref()
+            .map(|goal| (goal.status.clone(), goal.objective.clone()));
+        let agent = Agent {
+            chips: chips_of(&state.segments, goal.is_some()),
+            todos: state.todos.clone(),
+            model: state
+                .model
+                .as_ref()
+                .map(|model| (model.id.clone(), model.provider.clone())),
+            thinking: state.thinking.clone(),
+            goal,
         };
-        let readout: SharedString = join(left).into();
-        let trailing: Option<SharedString> = match right {
-            [] => None,
-            segments => Some(join(segments).into()),
-        };
-        if self.readout != readout || self.trailing != trailing {
-            self.readout = readout;
-            self.trailing = trailing;
+        let name: SharedString = name.into();
+        let mut changed = false;
+        if self.agent != agent {
+            self.agent = agent;
+            changed = true;
+        }
+        if self.name != name || self.settable != settable {
+            self.name = name;
+            self.settable = settable;
+            changed = true;
+        }
+        if changed {
             cx.notify();
         }
     }
 
-    /// The whole line the row shows, as the tooltip and the accessible name carry it.
-    pub fn readout(&self) -> &str {
-        &self.readout
-    }
-
-    /// Whether the readout shares the action row. Off, the row is the button
-    /// alone, at its right-hand end (§7.3).
-    pub fn set_show_readout(&mut self, show: bool, cx: &mut Context<Self>) {
-        if self.show_readout != show {
-            self.show_readout = show;
+    /// The models the drawer offers, and the effort ladder `thinking.set` accepts:
+    /// both are the server's (`GET /catalog`, §5.6), and both come in one call.
+    pub fn set_catalog(
+        &mut self,
+        levels: Vec<String>,
+        models: Vec<ModelRow>,
+        cx: &mut Context<Self>,
+    ) {
+        let levels: Vec<SharedString> = levels.into_iter().map(SharedString::from).collect();
+        if self.levels != levels || self.models != models {
+            self.levels = levels;
+            self.models = models;
             cx.notify();
         }
+    }
+
+    /// Fold the open drawer back, as selecting another agent does.
+    pub fn close_drawer(&mut self, cx: &mut Context<Self>) {
+        if self.drawer.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// How tall the conversation pane is: what the input may grow to half of
+    /// (`AutoTextarea.tsx`). The page measures itself and says so on every frame it
+    /// is rendered at, so a window resize re-fits the input.
+    pub fn set_pane_height(&mut self, pane: Pixels, cx: &mut Context<Self>) {
+        let room = px(f32::from(pane) * ROOM_SHARE);
+        if self.room == room {
+            return;
+        }
+        self.room = room;
+        let rows = rows_for(room);
+        self.input
+            .update(cx, |input, cx| input.set_auto_grow(MIN_ROWS, rows, cx));
+        cx.notify();
     }
 
     /// Whether anything is going on — the window's own reading of the model: the
@@ -320,8 +508,8 @@ impl Composer {
 
     /// Report the outcome of this composer's own request.
     ///
-    /// `ok` clears the draft — the input is emptied only after the server took
-    /// the text. A failed send (or an interrupt) leaves it alone.
+    /// `ok` clears the draft — the input is emptied only after the server took the
+    /// text. A failed send (or an interrupt) leaves it alone.
     pub fn request_finished(&mut self, ok: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.in_flight = false;
         if ok {
@@ -333,7 +521,8 @@ impl Composer {
 
     /// The button's face: `Send` while nothing is going on, and `Stop swarm` while the
     /// swarm is busy or held for its lanes — the one action that means the whole swarm
-    /// (CONTRACT §7.5). The per-lane Stop lives in the agent list, where a lane is named.
+    /// (CONTRACT §7.5). The per-lane Stop lives in the lane column, where a lane is
+    /// named.
     pub fn face(&self) -> ActionFace {
         if self.busy {
             ActionFace::StopSwarm
@@ -342,8 +531,8 @@ impl Composer {
         }
     }
 
-    /// Whether the button accepts a click right now: enabled only when the face
-    /// has something to do and this composer has no request in flight.
+    /// Whether the button accepts a click right now: enabled only when the face has
+    /// something to do and this composer has no request in flight.
     pub fn is_action_enabled(&self, cx: &App) -> bool {
         if self.in_flight {
             return false;
@@ -376,8 +565,8 @@ impl Composer {
 
     /// Remember a prompt this tab sent, so ↑ can bring it back.
     fn remember(&mut self, prompt: &str) {
-        // Sending the same prompt again — the retry after a refusal, most often
-        // — is one entry, not two.
+        // Sending the same prompt again — the retry after a refusal, most often — is
+        // one entry, not two.
         if self.history.last().map(String::as_str) == Some(prompt) {
             return;
         }
@@ -387,8 +576,8 @@ impl Composer {
         self.history.push(prompt.to_string());
     }
 
-    /// Walk the sent prompts: ↑ back in time, ↓ forward, past the newest one and
-    /// out of the walk.
+    /// Walk the sent prompts: ↑ back in time, ↓ forward, past the newest one and out
+    /// of the walk.
     ///
     /// The input a walk starts from is empty, which is the draft it comes back to.
     fn recall(&mut self, back: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -412,14 +601,14 @@ impl Composer {
         cx.notify();
     }
 
-    /// Take the keys the input handles without doing what the reader means,
-    /// while its caret is in this composer.
+    /// Take the keys the input handles without doing what the reader means, while its
+    /// caret is in this composer.
     ///
-    /// The input owns ↑/↓ (caret movement) and the copy shortcut (its own
-    /// selection), and handles both itself rather than letting either through.
-    /// An empty composer has no caret to move and nothing to copy, though: ↑
-    /// belongs to the tab's prompt history, and a window selection — the
-    /// reader's, made in the transcript — is what the shortcut was aimed at.
+    /// The input owns ↑/↓ (caret movement) and the copy shortcut (its own selection),
+    /// and handles both itself rather than letting either through. An empty composer
+    /// has no caret to move and nothing to copy, though: ↑ belongs to the tab's prompt
+    /// history, and a window selection — the reader's, made in the transcript — is
+    /// what the shortcut was aimed at.
     fn intercept(
         &mut self,
         input: &WeakEntity<TextareaState>,
@@ -439,8 +628,8 @@ impl Composer {
             return;
         }
 
-        // A recalled prompt the reader has typed in is their draft now, whatever
-        // the input's own `Change` event has yet to say about it.
+        // A recalled prompt the reader has typed in is their draft now, whatever the
+        // input's own `Change` event has yet to say about it.
         if self
             .walking
             .is_some_and(|index| input.read(cx).value().as_ref() != self.history[index].as_str())
@@ -450,9 +639,9 @@ impl Composer {
 
         let keystroke = &event.keystroke;
 
-        // A plain `Enter` submits, but the input submits at the end of this
-        // update: the reader's words are taken now, at the key, so that whatever
-        // rewrites the input in between is not what goes out.
+        // A plain `Enter` submits, but the input submits at the end of this update:
+        // the reader's words are taken now, at the key, so that whatever rewrites the
+        // input in between is not what goes out.
         if is_submit(keystroke) {
             self.pending_send = Some(input.read(cx).value().to_string());
         }
@@ -467,8 +656,8 @@ impl Composer {
                 self.recall(false, window, cx);
                 cx.stop_propagation();
             }
-            // With nothing of its own selected the input has no copy to make;
-            // the window's selection is the one the reader means.
+            // With nothing of its own selected the input has no copy to make; the
+            // window's selection is the one the reader means.
             "c" if is_copy_shortcut(keystroke)
                 && !input.read(cx).is_copyable()
                 && self.copy_window_selection(window, cx) =>
@@ -479,9 +668,9 @@ impl Composer {
         }
     }
 
-    /// Copy what the window has selected — a selection the reader made outside
-    /// the input — the way the window's own copy does. Answers whether there was
-    /// anything to copy.
+    /// Copy what the window has selected — a selection the reader made outside the
+    /// input — the way the window's own copy does. Answers whether there was anything
+    /// to copy.
     fn copy_window_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let text = TextSelection::selected_text(window, cx).trim().to_string();
         if text.is_empty() {
@@ -505,39 +694,468 @@ impl Composer {
         self.interrupt(cx);
     }
 
-    fn readout_element(&self, cx: &Context<Self>) -> impl IntoElement {
-        let full = self.readout.clone();
-        let tooltip = full.clone();
-        div()
-            .id(READOUT_ID)
+    /// The todo strip: the title row, always, and the list under it while it is open.
+    ///
+    /// An agent with no todos has no strip — `Todos 0/0` over nothing is a row of
+    /// chrome that says only that there is nothing to say.
+    fn todo_strip(&self, palette: &'static Palette, cx: &Context<Self>) -> Option<AnyElement> {
+        if self.agent.todos.is_empty() {
+            return None;
+        }
+        let done = self
+            .agent
+            .todos
+            .iter()
+            .filter(|todo| todo.status == TodoStatus::Done)
+            .count();
+        let open = self.todos_open;
+        let stripe = paint::color(palette.sidebar);
+        let ink = paint::color(palette.muted_fg);
+        let mut strip = v_flex()
+            .id("todo-strip")
             .test_support()
-            .flex_1()
-            .min_w_0()
-            .truncate()
-            .text_size(READOUT_SIZE)
-            .text_color(cx.theme().muted_foreground)
-            // The whole line as the element's accessible name: the visible cell is
-            // truncated to the column, and this is what a reader who cannot see the
-            // ellipsis (or a test) is meant to read.
-            .aria_label(full.clone())
-            // The whole line, wrapped rather than a single line wider than the
-            // window it is read in.
-            .tooltip(move |window, cx| {
-                // The whole line, in a card the width of the column it belongs
-                // to: a status line is wider than the window it is read in, and
-                // an unwrapped tooltip runs off the screen.
-                let line = tooltip.clone();
-                Tooltip::element(move |_, _| div().w(READOUT_TOOLTIP_WIDTH).child(line.clone()))
-                    .build(window, cx)
-            })
-            .child(full)
+            .w_full()
+            .flex_none()
+            .bg(stripe)
+            .border_b_1()
+            .border_color(paint::color(palette.border))
+            .child(
+                h_flex()
+                    .id("todo-strip-row")
+                    .test_support()
+                    .aria_label(SharedString::from(format!(
+                        "Todos {done}/{}",
+                        self.agent.todos.len()
+                    )))
+                    .h(STRIP_ROW)
+                    .w_full()
+                    .items_center()
+                    .gap(px(10.))
+                    .pl(px(14.))
+                    .pr(px(10.))
+                    .cursor_pointer()
+                    .text_size(STRIP_FONT)
+                    // `.todo-strip-row:hover{color:var(--fg)}`: the row's own words
+                    // take the ink; the count is already the ink.
+                    .text_color(ink)
+                    .hover(move |row| row.text_color(paint::color(palette.fg)))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.todos_open = !this.todos_open;
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .flex_none()
+                            .font_medium()
+                            .text_color(paint::color(palette.fg))
+                            .child(SharedString::from(format!(
+                                "Todos {done}/{}",
+                                self.agent.todos.len()
+                            ))),
+                    )
+                    .child(
+                        div()
+                            .ml_auto()
+                            .flex_none()
+                            .text_color(paint::color(palette.muted_fg))
+                            .child(
+                                Icon::new(if open {
+                                    IconName::ChevronUp
+                                } else {
+                                    IconName::ChevronDown
+                                })
+                                .size(px(12.)),
+                            ),
+                    ),
+            );
+        if open {
+            strip = strip.child(
+                div()
+                    .id("todo-list")
+                    .test_support()
+                    .w_full()
+                    .max_h(STRIP_LIST_MAX)
+                    .overflow_y_scroll()
+                    .track_scroll(&self.todos_scroll)
+                    .pb(px(4.))
+                    .px(px(14.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.))
+                    .children(
+                        self.agent
+                            .todos
+                            .iter()
+                            .enumerate()
+                            .map(|(index, todo)| todo_row(index, todo, palette)),
+                    ),
+            );
+        }
+        Some(strip.into_any_element())
+    }
+
+    /// The drawer a chip opened, folded out inside the box under the todo row.
+    fn drawer_panel(
+        &self,
+        palette: &'static Palette,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> Option<AnyElement> {
+        let drawer = self.drawer?;
+        let title: AnyElement = match drawer {
+            Drawer::Model => h_flex()
+                .gap(px(6.))
+                .child(SharedString::from(format!("{} model", self.name)))
+                .into_any_element(),
+            Drawer::Goal => {
+                let status = self
+                    .agent
+                    .goal
+                    .as_ref()
+                    .map(|(status, _)| status.clone())
+                    .unwrap_or_default();
+                h_flex()
+                    .gap(px(6.))
+                    .child("Goal")
+                    .child(
+                        div()
+                            .text_color(paint::color(palette.muted_fg))
+                            .child(SharedString::from(format!("({status})"))),
+                    )
+                    .into_any_element()
+            }
+        };
+        let body: AnyElement = match drawer {
+            Drawer::Model => self.model_body(palette, window, cx),
+            Drawer::Goal => self.goal_body(palette).into_any_element(),
+        };
+        Some(
+            v_flex()
+                .id("composer-drawer")
+                .test_support()
+                .w_full()
+                .flex_none()
+                .bg(paint::color(palette.sidebar))
+                .border_b_1()
+                .border_color(paint::color(palette.border))
+                .child(
+                    // The title row folds the drawer back, the way the todo row does.
+                    h_flex()
+                        .id("drawer-row")
+                        .test_support()
+                        .h(DRAWER_ROW)
+                        .w_full()
+                        .items_center()
+                        .gap(px(10.))
+                        .pl(px(14.))
+                        .pr(px(10.))
+                        .cursor_pointer()
+                        .text_size(STRIP_FONT)
+                        .text_color(paint::color(palette.muted_fg))
+                        .hover(move |row| row.text_color(paint::color(palette.fg)))
+                        .on_click(cx.listener(|this, _, _, cx| this.close_drawer(cx)))
+                        .child(
+                            div()
+                                .flex_none()
+                                .font_medium()
+                                .text_color(paint::color(palette.fg))
+                                .child(title),
+                        )
+                        .child(
+                            div()
+                                .ml_auto()
+                                .flex_none()
+                                .child(Icon::new(IconName::ChevronDown).size(px(12.))),
+                        ),
+                )
+                .child(body)
+                .into_any_element(),
+        )
+    }
+
+    /// The model drawer: the catalog's models, and the effort ladder under them.
+    ///
+    /// For a lane the list states what that lane runs and nothing here clicks: a
+    /// lane's model is the swarm's, fixed when the swarm starts, so the row says so
+    /// rather than offering a change the server would refuse.
+    fn model_body(
+        &self,
+        palette: &'static Palette,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let chosen = self.agent.model.clone();
+        let mut body = v_flex().w_full().px(px(6.)).pb(px(6.));
+        if !self.settable {
+            body = body.child(
+                div()
+                    .px(px(8.))
+                    .pb(px(6.))
+                    .text_size(DETAIL_FONT)
+                    .text_color(paint::color(palette.muted_fg))
+                    .child(SharedString::from(format!(
+                        "{} runs the swarm's lane model: evo fixes it when the swarm starts.",
+                        self.name
+                    ))),
+            );
+        }
+        let settable = self.settable;
+        let weak = cx.entity().downgrade();
+        let items = self.models.iter().map(|model| {
+            let is_chosen = chosen
+                .as_ref()
+                .is_some_and(|(id, provider)| *id == model.id && *provider == model.provider);
+            let (id, provider) = (model.id.clone(), model.provider.clone());
+            let hover = paint::color(paint::mix(palette.fg, ITEM_HOVER_MIX, palette.sidebar));
+            let active = paint::color(paint::mix(palette.fg, ITEM_CHOSEN_MIX, palette.sidebar));
+            let mut row = h_flex()
+                .id(ElementId::from(format!("drawer-model-{}", model.id)))
+                .test_support()
+                .h(DRAWER_ITEM)
+                .w_full()
+                .items_center()
+                .gap(px(12.))
+                .px(px(8.))
+                .rounded(DRAWER_ITEM_RADIUS)
+                .text_size(ITEM_FONT)
+                .text_color(paint::color(palette.fg))
+                .child(
+                    h_flex()
+                        .flex_none()
+                        .gap(px(5.))
+                        .child(
+                            div()
+                                .text_color(paint::color(palette.muted_fg))
+                                .child(format!("{} ·", model.provider)),
+                        )
+                        .child(SharedString::from(model.id.clone())),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(DETAIL_FONT)
+                        .text_color(paint::color(palette.muted_fg))
+                        .child(SharedString::from(model.detail.clone())),
+                )
+                .child(div().w(px(14.)).flex_none().child(if is_chosen {
+                    Icon::new(IconName::Check).size(px(14.)).into_any_element()
+                } else {
+                    div().into_any_element()
+                }));
+            if settable {
+                let weak = weak.clone();
+                let (id, provider) = (id.clone(), provider.clone());
+                row = row
+                    .cursor_pointer()
+                    .hover(move |row| row.bg(hover))
+                    .on_click(move |_, _, cx| {
+                        if let Some(composer) = weak.upgrade() {
+                            composer.update(cx, |this, cx| this.choose_model(&id, &provider, cx));
+                        }
+                    });
+            }
+            if is_chosen {
+                row = row.bg(active);
+            }
+            row
+        });
+        body = body.children(items);
+        body.child(self.effort_row(palette, window, cx))
+            .into_any_element()
+    }
+
+    /// The effort row: the level's name, and the rail that changes it.
+    fn effort_row(
+        &self,
+        palette: &'static Palette,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let level = self.agent.thinking.clone().unwrap_or_default();
+        let label = format!("Effort {level}");
+        let row = h_flex()
+            .id("drawer-effort")
+            .test_support()
+            .h(DRAWER_EFFORT_ROW)
+            .w_full()
+            .items_center()
+            .gap(px(16.))
+            .px(px(8.))
+            .mt_1()
+            .border_t_1()
+            .border_color(paint::faded(palette.border, 0.7))
+            .text_size(ITEM_FONT)
+            .child(
+                div()
+                    .flex_none()
+                    .min_w(DRAWER_LABEL_MIN)
+                    .child(SharedString::from(label.clone())),
+            );
+        if self.levels.is_empty() {
+            // The server published no ladder: say what the agent runs and change
+            // nothing, rather than draw rungs a client made up.
+            return row.into_any_element();
+        }
+        if !self.settable {
+            // A lane's effort belongs to the swarm, as its model does.
+            return row.into_any_element();
+        }
+        let levels = self.levels.clone();
+        let index = levels
+            .iter()
+            .position(|name| name.as_str() == level)
+            .unwrap_or(0);
+        let weak = cx.entity().downgrade();
+        row.child(
+            div()
+                .id("composer-effort")
+                .test_support()
+                .w(px(200.))
+                .flex_none()
+                .ml_auto()
+                .child(
+                    EffortSlider::with_levels(
+                        "composer-effort-rail",
+                        levels.iter().cloned(),
+                        index,
+                    )
+                    .palette(palette)
+                    .focus(self.effort_focus.clone())
+                    .on_change(move |level: usize, _, cx: &mut App| {
+                        if let Some(composer) = weak.upgrade() {
+                            composer.update(cx, |this, cx| {
+                                if let Some(name) =
+                                    this.levels.get(level).map(|name| name.to_string())
+                                {
+                                    this.choose_effort(&name, cx);
+                                }
+                            });
+                        }
+                    })
+                    .render(window),
+                ),
+        )
+        .into_any_element()
+    }
+
+    /// The goal drawer: the objective in full, under its status.
+    fn goal_body(&self, palette: &'static Palette) -> impl IntoElement {
+        let objective = self
+            .agent
+            .goal
+            .as_ref()
+            .map(|(_, objective)| objective.clone())
+            .unwrap_or_default();
+        div()
+            .id("drawer-goal-text")
+            .test_support()
+            .px(px(8.))
+            .pb(px(4.))
+            .text_size(ITEM_FONT)
+            .text_color(paint::color(palette.fg))
+            .child(SharedString::from(objective))
+    }
+
+    /// Send `model.set` for a model the drawer picked.
+    fn choose_model(&mut self, id: &str, provider: &str, cx: &mut Context<Self>) {
+        if !self.settable || self.in_flight {
+            return;
+        }
+        if self
+            .agent
+            .model
+            .as_ref()
+            .is_some_and(|(chosen, chosen_provider)| chosen == id && chosen_provider == provider)
+        {
+            return;
+        }
+        self.in_flight = true;
+        cx.emit(ComposerEvent::ModelSet {
+            id: id.to_string(),
+            provider: provider.to_string(),
+        });
+        cx.notify();
+    }
+
+    /// Send `thinking.set` for a rung the slider picked.
+    fn choose_effort(&mut self, level: &str, cx: &mut Context<Self>) {
+        if !self.settable || self.in_flight {
+            return;
+        }
+        if self.agent.thinking.as_deref() == Some(level) {
+            return;
+        }
+        self.in_flight = true;
+        cx.emit(ComposerEvent::ThinkingSet(level.to_string()));
+        cx.notify();
+    }
+
+    /// The foot row: the chips that state what the agent is working with, and the one
+    /// action button at the end of them.
+    fn foot(&self, palette: &'static Palette, cx: &Context<Self>) -> AnyElement {
+        let mut row = h_flex()
+            .id("composer-foot")
+            .test_support()
+            .w_full()
+            .items_center()
+            .gap(FOOT_GAP)
+            .pt(px(FOOT_PAD.0))
+            .pr(px(FOOT_PAD.1))
+            .pb(px(FOOT_PAD.2))
+            .pl(px(FOOT_PAD.3));
+        let open = self.drawer;
+        let weak = cx.entity().downgrade();
+        for chip in &self.agent.chips {
+            // The slot is the composer's: it carries the chip's own words as its
+            // accessible name (the widget draws the pill, which states no name of its
+            // own), and it is what a test addresses the chip by.
+            let label = match &chip.dim {
+                Some(dim) => format!("{} {dim}", chip.text),
+                None => chip.text.to_string(),
+            };
+            let mut slot = div()
+                .id(ElementId::from(format!("composer-chip-{}", chip.name)))
+                .test_support()
+                .flex_none()
+                .aria_label(label);
+            let mut pill = Chip::new(chip.name.clone(), chip.text.clone()).palette(palette);
+            if let Some(dim) = chip.dim.clone() {
+                pill = pill.dim(dim);
+            }
+            if let Some(drawer) = chip.opens {
+                let weak = weak.clone();
+                pill = pill.open(open == Some(drawer)).interactive(move |_, cx| {
+                    // A chip is a button: clicking the open one folds the drawer
+                    // back, clicking the other one switches to it.
+                    if let Some(composer) = weak.upgrade() {
+                        composer.update(cx, |this, cx| {
+                            if this.drawer == Some(drawer) {
+                                this.close_drawer(cx);
+                            } else {
+                                this.drawer = Some(drawer);
+                                cx.notify();
+                            }
+                        });
+                    }
+                });
+            }
+            slot = slot.child(pill.render());
+            row = row.child(slot);
+        }
+        row.child(div().flex_1())
+            .child(self.action_button(cx))
+            .into_any_element()
     }
 
     fn action_button(&self, cx: &Context<Self>) -> impl IntoElement {
         let face = self.face();
         let mut button = Button::new(BUTTON_ID)
-            .small()
             .h(ACTION_HEIGHT)
+            .px(px(12.))
+            .rounded(ACTION_RADIUS)
+            .text_size(px(13.))
             .label(face.label())
             // The glyph is decoration: what the button is called is the word.
             .accessibility_label(face.label())
@@ -564,90 +1182,170 @@ impl Composer {
     }
 }
 
+/// How many of the input's rows fit in `room`, with the design's floor.
+fn rows_for(room: Pixels) -> usize {
+    // A row of the kit's input is its line height at the theme's size; the design's
+    // own textarea is 14px text on 20px lines.
+    const LINE: f32 = 20.;
+    ((f32::from(room) / LINE).floor() as usize).max(MIN_ROWS)
+}
+
+/// One todo: its 14px box, and its text.
+fn todo_row(index: usize, todo: &Todo, palette: &'static Palette) -> AnyElement {
+    let (ink, struck) = match todo.status {
+        TodoStatus::Done => (palette.muted_fg, true),
+        TodoStatus::InProgress => (palette.fg, false),
+        TodoStatus::Pending => (palette.muted_fg, false),
+    };
+    let text = div()
+        .min_w_0()
+        .truncate()
+        .text_color(paint::color(ink))
+        .child(SharedString::from(todo.text.clone()));
+    h_flex()
+        .id(ElementId::from(format!("todo-{index}")))
+        .test_support()
+        .aria_label(SharedString::from(todo.text.clone()))
+        .h(TODO_ROW)
+        .w_full()
+        .items_center()
+        .gap(px(8.))
+        .text_size(ITEM_FONT)
+        .child(todo_box(todo.status, palette))
+        .child(if struck {
+            text.line_through()
+                .text_decoration_color(paint::faded(palette.muted_fg, 0.55))
+                .into_any_element()
+        } else {
+            text.into_any_element()
+        })
+        .into_any_element()
+}
+
+/// The todo's box: one 14px frame for every state — filled with a tick when done, a
+/// smaller square inside while in progress, empty when pending (`.todo-box`).
+fn todo_box(status: TodoStatus, palette: &'static Palette) -> AnyElement {
+    let ink = match status {
+        TodoStatus::Done => palette.muted_fg,
+        TodoStatus::InProgress => palette.fg,
+        TodoStatus::Pending => palette.muted_fg,
+    };
+    let frame = match status {
+        TodoStatus::Pending => paint::faded(ink, 0.7),
+        _ => paint::color(ink),
+    };
+    let mut box_ = div()
+        .size(TODO_BOX)
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(TODO_BOX_RADIUS)
+        .border(px(1.2))
+        .border_color(frame);
+    match status {
+        TodoStatus::Done => {
+            box_ = box_.bg(paint::color(ink)).child(
+                Icon::new(IconName::Check)
+                    .size(px(10.))
+                    .text_color(paint::color(palette.sidebar)),
+            );
+        }
+        TodoStatus::InProgress => {
+            box_ = box_.child(
+                div()
+                    .size(TODO_BOX_INSET)
+                    .rounded(px(1.5))
+                    .bg(paint::color(ink)),
+            );
+        }
+        TodoStatus::Pending => {}
+    }
+    box_.into_any_element()
+}
+
 impl Render for Composer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme().clone();
-        let readout = self.show_readout.then(|| self.readout_element(cx));
-        let button = self.action_button(cx);
-        // The caret is what "focused" means here: the ring belongs to the card,
-        // which the input does not own. Focus is the theme's focus colour, and
-        // only a hairline of it: the band around the card carries the weight.
+        let palette = design::palette(cx.theme().mode.is_dark());
+        let input_background = cx.theme().input_background();
+
+        // The caret is what "focused" means here: the ring belongs to the box, which
+        // the input does not own.
         let focused = self
             .input
             .read(cx)
             .presentation()
             .focus_handle()
             .is_focused(window);
-        let edge = if focused { theme.ring } else { theme.border };
+        let border = if focused {
+            paint::color(paint::mix(
+                palette.primary,
+                FOCUS_BORDER_MIX,
+                palette.border,
+            ))
+        } else {
+            paint::color(palette.border)
+        };
+        let mut shadows =
+            vec![BoxShadow::new(px(0.), px(1.), paint::wash(SHADOW_INK, 5.)).blur_radius(px(2.))];
+        if focused {
+            shadows.push(
+                BoxShadow::new(px(0.), px(0.), paint::wash(palette.primary, RING_MIX))
+                    .spread_radius(RING),
+            );
+        }
 
-        // The composer is the input and its status row, and nothing more (§7.3):
-        // it stands at the foot of the conversation at its own height, and the
-        // page owns everything around it.
-        v_flex()
+        let strip = self.todo_strip(palette, cx);
+        let drawer = self.drawer_panel(palette, window, cx);
+        let foot = self.foot(palette, cx);
+
+        // The dock: the box sits on the transcript's reading measure, at the foot of
+        // the conversation, and the page owns everything above it.
+        div()
+            .id("composer")
+            .test_support()
+            .flex_none()
             .w_full()
-            .items_stretch()
-            .gap_2()
-            .key_context(KEY_CONTEXT)
-            .on_action(cx.listener(Self::interrupt_action))
+            .flex()
+            .justify_center()
+            .px(px(INSET))
+            .pt(px(4.))
+            .pb(px(INSET))
+            // A press inside the box is not a press outside it: the page folds an open
+            // drawer on a click away from the box, and this is what tells it apart.
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(
-                // A chat input: a rounded card with one hairline edge, and the
-                // hint that this is where a message is typed — the focus
-                // colour, as a soft band around the card while the caret is in
-                // it. The input draws none of this itself, so the card can
-                // round further than the theme's default radius and pad the
-                // text by the size's own 12px without a second inset around it.
-                div()
+                v_flex()
+                    .id("composer-box")
+                    .test_support()
                     .w_full()
-                    .min_w_0()
-                    .rounded(INPUT_RADIUS + FOCUS_RING)
-                    .p(FOCUS_RING)
-                    .when(focused, |this| this.bg(theme.ring.alpha(FOCUS_RING_INK)))
+                    .max_w(px(MEASURE - 2. * INSET))
+                    .rounded(BOX_RADIUS)
+                    .border(BOX_BORDER)
+                    .border_color(border)
+                    .bg(input_background)
+                    .shadow(shadows)
+                    .overflow_hidden()
+                    // Esc, with the caret anywhere in the box, is the coordinator's
+                    // own interrupt (the TUI's).
+                    .key_context(KEY_CONTEXT)
+                    .on_action(cx.listener(Self::interrupt_action))
+                    .children(strip)
+                    .children(drawer)
                     .child(
-                        div()
-                            .w_full()
-                            .min_w_0()
-                            .rounded(INPUT_RADIUS)
-                            .border(INPUT_BORDER)
-                            .border_color(edge)
-                            .bg(theme.input_background())
-                            .child(
-                                Textarea::new(&self.input)
-                                    .with_size(Size::Large)
-                                    .appearance(false)
-                                    .bordered(false)
-                                    .w_full()
-                                    .min_w_0(),
-                            ),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .w_full()
-                    .min_w_0()
-                    .items_center()
-                    .gap_2()
-                    // The readout is the flexible cell of this row; without it the
-                    // button is the row, and stays where it was (§7.3).
-                    .when_some(readout, |row, readout| row.child(readout))
-                    // The right-hand segments (`2 lanes`) sit where they belong: at the
-                    // end of the row, before the action.
-                    .when_some(self.trailing.clone(), |row, trailing| {
-                        row.child(
-                            div()
-                                .id("composer-readout-right")
-                                .test_support()
-                                .flex_none()
-                                .text_size(READOUT_SIZE)
-                                .text_color(theme.muted_foreground)
-                                .child(trailing),
-                        )
-                    })
-                    .when(!self.show_readout, |row| row.justify_end())
-                    .child(button),
+                        div().w_full().min_w_0().child(
+                            Textarea::new(&self.input)
+                                .with_size(Size::Large)
+                                .appearance(false)
+                                .bordered(false)
+                                .w_full()
+                                .min_w_0(),
+                        ),
+                    )
+                    .child(foot),
             )
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -660,11 +1358,86 @@ mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;
 
-    /// The right column is ~360 px wide (§7.3), so the tests use one.
-    const COLUMN: gpui_kit::Size<gpui_kit::Pixels> = gpui_kit::Size {
-        width: px(360.),
-        height: px(320.),
+    /// The conversation pane the design draws the box in: the reading measure at its
+    /// widest, so the box fills it exactly (`800 - 2 * 16`).
+    const PANE: gpui_kit::Size<gpui_kit::Pixels> = gpui_kit::Size {
+        width: px(MEASURE),
+        height: px(720.),
     };
+
+    /// The chip's element id, as the box names it.
+    fn chip_id(name: &str) -> String {
+        format!("composer-chip-{name}")
+    }
+
+    /// A topic state whose segments are the named ones, in this order, with the text a
+    /// server would publish for each.
+    fn state_with(names: &[&str]) -> TopicState {
+        state_with_level(names, "high")
+    }
+
+    /// The same, with the effort the topic reports.
+    fn state_with_level(names: &[&str], level: &str) -> TopicState {
+        let segments: Vec<serde_json::Value> = names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| {
+                let text = match *name {
+                    "model" => "stub-a".to_string(),
+                    "thinking" => level.to_string(),
+                    "context" => "ctx 48k/936k (5%)".to_string(),
+                    "cache-stats" => "97% cached".to_string(),
+                    "goal" => "goal a1b2c3d4 (active) 12k/50k".to_string(),
+                    other => other.to_string(),
+                };
+                serde_json::json!({
+                    "name": name,
+                    "order": index as i64,
+                    "side": "left",
+                    "text": text,
+                    "data": {},
+                })
+            })
+            .collect();
+        TopicState::from_json(&serde_json::json!({
+            "model": {"id": "stub-a", "provider": "openai", "ready": true},
+            "thinking": level,
+            "goal": {"goal_id": "a1b2c3d4", "objective": "ship the redesign",
+                     "status": "active", "budget": 50000, "tokens": 12000},
+            "todos": [
+                {"text": "port the view model", "status": "done"},
+                {"text": "trim the workspace", "status": "in_progress"},
+                {"text": "re-take the screens", "status": "pending"},
+            ],
+            "segments": segments,
+        }))
+    }
+
+    /// The models a catalog would list, one of them chosen already.
+    fn catalog_models() -> Vec<ModelRow> {
+        vec![
+            ModelRow {
+                id: "stub-a".to_string(),
+                provider: "openai".to_string(),
+                detail: "200k ctx · vision · effort".to_string(),
+                reason: None,
+            },
+            ModelRow {
+                id: "stub-b".to_string(),
+                provider: "openai".to_string(),
+                detail: "936k ctx".to_string(),
+                reason: None,
+            },
+        ]
+    }
+
+    /// The ladder evo's own registration declares (CONTRACT §5.6).
+    fn catalog_levels() -> Vec<String> {
+        ["low", "medium", "high", "xhigh", "max"]
+            .iter()
+            .map(|level| level.to_string())
+            .collect()
+    }
 
     struct Fixture {
         window: AnyWindowHandle,
@@ -694,6 +1467,20 @@ mod tests {
         fn busy(&self, busy: bool, cx: &mut App) {
             self.composer
                 .update(cx, |composer, cx| composer.set_swarm_busy(busy, cx));
+        }
+
+        /// The selected agent's own state, as the page hands it in.
+        fn set_agent(&self, state: &TopicState, cx: &mut App) {
+            self.composer.update(cx, |composer, cx| {
+                composer.set_agent(state, "Coordinator", true, cx)
+            });
+        }
+
+        /// The server's catalog: the effort ladder and the models the drawer offers.
+        fn set_catalog(&self, cx: &mut App) {
+            self.composer.update(cx, |composer, cx| {
+                composer.set_catalog(catalog_levels(), catalog_models(), cx)
+            });
         }
 
         /// Focus the input the way a user does, then type into it.
@@ -905,7 +1692,7 @@ mod tests {
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds {
                 origin: point(px(0.), px(0.)),
-                size: COLUMN,
+                size: PANE,
             })),
             ..Default::default()
         }
@@ -936,52 +1723,50 @@ mod tests {
         }
     }
 
+    /// The design's box (`Workspace.css`'s `.composer-box`): the input, and the foot
+    /// row of chips and the one button under it, inside one hairline on the
+    /// transcript's reading measure.
     #[gpui_kit::test]
-    fn the_input_is_a_card_at_the_top_and_the_action_is_one_compact_button(
-        cx: &mut TestAppContext,
-    ) {
+    fn the_box_holds_the_input_and_the_foot_row_on_the_reading_measure(cx: &mut TestAppContext) {
         let f = open(cx);
         f.act(cx, |window, cx| {
             window.render_frame(cx);
 
-            // The input opens the column, and what it is for is its own
-            // placeholder — including the two keys that submit it (§7.3).
+            let box_ = window.find("composer-box").bounds();
             let input = window.find(f.input_frame(cx));
-            assert!(input.visible(), "the input is the top of the column");
+            assert!(input.visible(), "the box holds the input");
+            assert_eq!(input.label(), Some(PLACEHOLDER));
             assert!(
-                input.bounds().origin.y <= px(4.),
-                "the input opens the column — only its ring and border sit above it: {:?}",
+                input.bounds().top() >= box_.top() && input.bounds().bottom() <= box_.bottom(),
+                "the input is inside the box: {:?} in {box_:?}",
                 input.bounds()
             );
-            assert_eq!(input.label(), Some(PLACEHOLDER));
 
-            // Under it, one status row: the readout on the left, the action
-            // button flush right, both on one line of the button's height.
-            let readout = window.find(READOUT_ID).bounds();
-            let button = window.find(BUTTON_ID).bounds();
-            assert!(
-                button.origin.y >= input.bounds().bottom(),
-                "the button left the row under the input: input {:?}, button {:?}",
-                input.bounds(),
-                button
-            );
-            assert_eq!(button.size.height, ACTION_HEIGHT);
-            // The readout is the row's flexible cell: it takes every pixel left
-            // over from the button, so a long status line is elided by the
-            // button's own gap and not by slack in the layout.
+            // The box is on the reading measure, centred in the column: the design's
+            // `max-width: calc(var(--measure) - 2 * var(--inset))`.
             assert_eq!(
-                button.left() - readout.right(),
-                px(8.),
-                "the readout stops short of the action: {readout:?} vs {button:?}"
+                box_.size.width,
+                px(MEASURE - 2. * INSET),
+                "the box is the measure, less the page's own insets"
             );
+            assert_eq!(box_.left(), px(INSET), "and it is centred on it: {box_:?}");
 
-            // The rest of the column is empty: the composer owns the top of it,
-            // not its height (§7.3).
-            assert!(
-                button.bottom() < window.bounds().size.height / 2.,
-                "the composer filled the column: button {button:?} in {:?}",
-                window.bounds()
+            // The foot row: the chips, then the button at the row's right-hand end,
+            // inside the box.
+            let button = window.find(BUTTON_ID).bounds();
+            assert_eq!(button.size.height, ACTION_HEIGHT);
+            assert_eq!(
+                button.right(),
+                box_.right() - px(FOOT_PAD.1) - BOX_BORDER,
+                "the button ends on the foot's own inset, inside the box's hairline: \
+                 {button:?} in {box_:?}"
             );
+            assert!(
+                button.top() >= input.bounds().bottom(),
+                "the foot is under the input: input {:?}, button {button:?}",
+                input.bounds()
+            );
+            assert!(button.bottom() <= box_.bottom(), "{button:?} vs {box_:?}");
         });
     }
 
@@ -1222,104 +2007,237 @@ mod tests {
         assert_eq!(f.draft_now(cx), "still working");
     }
 
+    /// The foot row is the topic's own chips (CONTRACT §4.2): the model with its
+    /// effort beside it, then the context, the cache and the goal, in the order the
+    /// server published them — and the goal chip opens the goal drawer.
     #[gpui_kit::test]
-    fn a_long_readout_is_ellipsized_and_keeps_the_button_on_its_line(cx: &mut TestAppContext) {
+    fn the_foot_row_is_the_topics_own_chips(cx: &mut TestAppContext) {
         let f = open(cx);
         f.act(cx, |window, cx| {
+            let state = state_with(&["model", "thinking", "context", "cache-stats", "goal"]);
+            f.set_agent(&state, cx);
             window.render_frame(cx);
-            let line = "ark-deepseek-v4.1-flash \u{b7} max \u{b7} ctx 48k/936k (5%) \u{b7} 97% cached \u{b7} \
-                        goal a1b2c3d4 (active) 12k/50k \u{b7} \
-                        0123456789 0123456789 0123456789 0123456789 0123456789";
+
+            let model = window.find(chip_id("model"));
+            let ctx = window.find(chip_id("context"));
+            let cache = window.find(chip_id("cache-stats"));
+            let goal = window.find(chip_id("goal"));
+            assert!(model.visible() && ctx.visible() && cache.visible() && goal.visible());
+            assert_eq!(
+                model.label(),
+                Some("stub-a high"),
+                "the model, then the effort"
+            );
+            assert_eq!(ctx.label(), Some("ctx 48k/936k (5%)"));
+            assert_eq!(cache.label(), Some("97% cached"));
+            assert_eq!(goal.label(), Some("goal a1b2c3d4 (active) 12k/50k"));
+
+            // One row, left to right, in the server's order.
+            let x = |id: &str| window.find(chip_id(id)).bounds().left();
+            assert!(x("model") < x("context") && x("context") < x("cache-stats"));
+            assert!(x("cache-stats") < x("goal"));
+            for id in ["model", "context", "cache-stats", "goal"] {
+                assert_eq!(
+                    window.find(chip_id(id)).bounds().size.height,
+                    px(widgets::chip::HEIGHT)
+                );
+            }
+        });
+    }
+
+    /// A chip that opens something is a button: clicking it folds the drawer out
+    /// inside the box, clicking it again folds it back.
+    #[gpui_kit::test]
+    fn the_model_chip_folds_the_model_drawer_out_and_back(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.act(cx, |window, cx| {
+            f.set_catalog(cx);
+            let state = state_with(&["model", "thinking"]);
+            f.set_agent(&state, cx);
+            window.render_frame(cx);
+            assert!(
+                window.try_find("composer-drawer").is_none(),
+                "nothing is open to begin with"
+            );
+
+            window.click(chip_id("model"), cx);
+            window.render_frame(cx);
+            let drawer = window.find("composer-drawer").bounds();
+            let box_ = window.find("composer-box").bounds();
+            assert!(
+                drawer.top() >= box_.top() && drawer.bottom() <= box_.bottom(),
+                "the drawer folds out inside the box: {drawer:?} in {box_:?}"
+            );
+            assert!(
+                window.find("drawer-model-stub-a").visible(),
+                "the catalog's models are in it"
+            );
+            assert!(
+                window.find("composer-effort").visible(),
+                "and the effort rail"
+            );
+
+            // The same chip folds it back.
+            window.click(chip_id("model"), cx);
+            window.render_frame(cx);
+            assert!(window.try_find("composer-drawer").is_none());
+        });
+    }
+
+    /// The drawer's models are the catalog's, and picking one is a `model.set`; the
+    /// rail picks a rung of the server's ladder and that is a `thinking.set`.
+    #[gpui_kit::test]
+    fn the_drawer_sends_model_set_and_thinking_set(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.act(cx, |window, cx| {
+            f.set_catalog(cx);
+            // The agent runs the ladder's first rung, so a press on the middle of the
+            // rail is a rung it is not on.
+            let state = state_with_level(&["model", "thinking"], "low");
+            f.set_agent(&state, cx);
+            window.render_frame(cx);
+            window.click(chip_id("model"), cx);
+            window.render_frame(cx);
+        });
+        f.act(cx, |window, cx| window.click("drawer-model-stub-b", cx));
+        assert_eq!(
+            f.events(),
+            vec![ComposerEvent::ModelSet {
+                id: "stub-b".to_string(),
+                provider: "openai".to_string(),
+            }]
+        );
+
+        // The reply lands (the owner reports it), and the rail is clicked: a press on
+        // the rail picks the rung under the pointer.
+        f.act(cx, |window, cx| {
             f.composer.update(cx, |composer, cx| {
-                composer.set_segments(
-                    &[Segment {
-                        name: "line".to_string(),
-                        order: 1,
-                        side: session::Side::Left,
-                        text: line.to_string(),
-                        data: Default::default(),
-                    }],
-                    &[],
-                    cx,
-                )
+                composer.request_finished(false, window, cx)
+            });
+            window.click("composer-effort", cx);
+        });
+        assert!(
+            matches!(f.events().last(), Some(ComposerEvent::ThinkingSet(_))),
+            "the rail picked a rung: {:?}",
+            f.events()
+        );
+    }
+
+    /// A lane's drawer states what that lane runs and offers no change: `model.set`
+    /// and `thinking.set` act on the session, and a lane's model is the swarm's.
+    #[gpui_kit::test]
+    fn a_lanes_drawer_states_what_it_runs_and_changes_nothing(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.act(cx, |window, cx| {
+            f.set_catalog(cx);
+            let state = state_with(&["model", "thinking"]);
+            f.composer.update(cx, |composer, cx| {
+                composer.set_agent(&state, "lane 3", false, cx)
             });
             window.render_frame(cx);
-
-            let readout = window.find(READOUT_ID);
-            let button = window.find(BUTTON_ID);
-            assert!(readout.visible() && button.visible());
-
-            // The cell is truncated to the column, so the whole line is its
-            // accessible name — what a workspace test asserts the status row says.
-            assert_eq!(readout.label(), Some(line), "the readout's own line");
-
-            // One line high and on the same row: readout left, button right.
+            window.click(chip_id("model"), cx);
+            window.render_frame(cx);
+        });
+        assert!(
+            f.act(cx, |window, _| window.find("composer-drawer").visible()),
+            "the drawer opens"
+        );
+        // Nothing here is a button: the crate's own event log stays empty whichever
+        // model is pressed.
+        f.act(cx, |window, cx| window.click("drawer-model-stub-b", cx));
+        assert_eq!(
+            f.events(),
+            vec![],
+            "a lane's model is not this box's to set"
+        );
+        f.act(cx, |window, _| {
             assert!(
-                readout.bounds().size.height <= px(24.),
-                "the readout wrapped: {:?}",
-                readout.bounds()
+                window.find("drawer-effort").visible(),
+                "the effort the lane runs is stated"
             );
             assert!(
-                readout.bounds().origin.y < button.bounds().bottom()
-                    && button.bounds().origin.y < readout.bounds().bottom(),
-                "the button left the readout's line: readout {:?}, button {:?}",
-                readout.bounds(),
-                button.bounds()
-            );
-            assert!(
-                readout.bounds().right() <= button.bounds().left(),
-                "the readout overlaps the button: {:?} vs {:?}",
-                readout.bounds(),
-                button.bounds()
+                window.try_find("composer-effort").is_none(),
+                "and there is no rail to change it with"
             );
         });
     }
 
-    /// §7.3: the app takes the readout off this row — the tab page draws it under
-    /// the transcript — and the row is then the action alone, at its right-hand
-    /// end: the button does not move to the left, and nothing of the readout is
-    /// left behind.
+    /// The todo strip: one title row with the count, and the list under it while it is
+    /// open — folded to begin with, as the design's default.
     #[gpui_kit::test]
-    fn without_the_readout_the_row_is_the_button_at_its_right(cx: &mut TestAppContext) {
+    fn the_todo_strip_counts_the_todos_and_folds_them_out(cx: &mut TestAppContext) {
         let f = open(cx);
         f.act(cx, |window, cx| {
+            let state = state_with(&["model"]);
+            f.set_agent(&state, cx);
+            window.render_frame(cx);
+            let row = window.find("todo-strip-row");
+            assert_eq!(row.label(), Some("Todos 1/3"), "the strip's own count");
+            assert!(
+                window.try_find("todo-list").is_none(),
+                "the list is folded away to begin with"
+            );
+
+            window.click("todo-strip-row", cx);
+            window.render_frame(cx);
+            let list = window.find("todo-list").bounds();
+            assert!(
+                list.size.height <= px(156.),
+                "the list caps at 156px: {list:?}"
+            );
+            let first = window.find("todo-0").bounds();
+            let row_ = window.find("todo-strip-row").bounds();
+            assert!(
+                first.top() >= row_.bottom(),
+                "the items are under the title row: {first:?} vs {row_:?}"
+            );
+            assert_eq!(window.find("todo-0").label(), Some("port the view model"));
+        });
+    }
+
+    /// An agent with no todos has no strip: a title row over nothing would be chrome
+    /// that says only that there is nothing to say.
+    #[gpui_kit::test]
+    fn an_agent_with_no_todos_has_no_strip(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.act(cx, |window, cx| {
+            let mut state = state_with(&["model", "thinking"]);
+            state.todos.clear();
             f.composer.update(cx, |composer, cx| {
-                composer.set_segments(
-                    &[Segment {
-                        name: "context".to_string(),
-                        order: 1,
-                        side: session::Side::Left,
-                        text: "ctx 48k/936k".to_string(),
-                        data: Default::default(),
-                    }],
-                    &[],
-                    cx,
-                )
+                composer.set_agent(&state, "Coordinator", true, cx)
             });
+            window.render_frame(cx);
+            assert!(window.try_find("todo-strip-row").is_none());
+            assert!(
+                window.find("composer-box").visible(),
+                "the box is still there"
+            );
+        });
+    }
+
+    /// The input grows with what is typed and stops at half the pane
+    /// (`AutoTextarea.tsx`): the page hands in its own height, and a shorter pane
+    /// makes a shorter ceiling.
+    #[gpui_kit::test]
+    fn the_input_grows_to_half_the_pane(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.act(cx, |window, cx| {
             f.composer
-                .update(cx, |composer, cx| composer.set_show_readout(false, cx));
+                .update(cx, |composer, cx| composer.set_pane_height(px(600.), cx));
             window.render_frame(cx);
+            let short = window.find(f.input_frame(cx)).bounds().size.height;
 
-            let button = window.find(BUTTON_ID);
-            assert!(button.visible(), "the button is the row");
+            f.composer
+                .update(cx, |composer, cx| composer.set_pane_height(px(2400.), cx));
+            window.render_frame(cx);
+            let tall = window.find(f.input_frame(cx)).bounds().size.height;
             assert!(
-                window.try_find(READOUT_ID).is_none(),
-                "the readout is not drawn here any more"
-            );
-            // Right-aligned in the column — which here is the whole window, so
-            // the row's right-hand end is its width.
-            assert!(
-                (button.bounds().right() - COLUMN.width).abs() <= px(1.),
-                "the button is at the row's right-hand end: {:?}",
-                button.bounds()
+                tall >= short,
+                "a taller pane allows a taller input: {short:?} then {tall:?}"
             );
         });
     }
 
-    /// §9.2: the prompt that goes out is the one the reader had in front of them
-    /// when they pressed `Enter`. The input's own event lands at the end of that
-    /// update, so a prefill — a mention they picked, a program that rewrites the
-    /// input — must not be what is sent.
     #[gpui_kit::test]
     fn enter_sends_the_draft_as_the_keypress_found_it(cx: &mut TestAppContext) {
         let f = open(cx);

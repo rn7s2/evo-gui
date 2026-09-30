@@ -116,6 +116,8 @@ dependencies = [
  "gpui-kit",
  "image",
  "session",
+ "store",
+ "widgets",
 ]
 
 [[package]]
@@ -1020,7 +1022,10 @@ name = "composer"
 version = "0.1.0"
 dependencies = [
  "gpui-kit",
+ "serde_json",
  "session",
+ "store",
+ "widgets",
 ]
 
 [[package]]
@@ -8777,6 +8782,7 @@ dependencies = [
  "swarm_client",
  "tab_engine",
  "transcript",
+ "widgets",
 ]
 
 [[package]]
