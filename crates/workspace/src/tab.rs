@@ -927,7 +927,7 @@ impl TabContent {
                     cx,
                 );
             }
-            Update::OpReply(reply) => self.on_op_reply(*reply, window, cx),
+            Update::OpReply { reply, .. } => self.on_op_reply(*reply, window, cx),
             Update::ServerGone => self.server_gone(window, cx),
             Update::Exited { outcome } => {
                 // The engine stopped. A tab being closed never sees this; one that
@@ -1248,7 +1248,7 @@ impl TabContent {
                         live.model.interrupt_session()
                     }
                 };
-                live.engine.request(request)
+                live.engine.request(request).is_some()
             }
             // No swarm: there is nothing to send to, and the button must not stay
             // disabled waiting for a reply that cannot come.
