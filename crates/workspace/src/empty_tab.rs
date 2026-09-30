@@ -1325,8 +1325,7 @@ impl EmptyTabState {
                         .hover(|style| style.underline())
                         .aria_label(line.clone())
                         .tooltip(move |window, cx| {
-                            Tooltip::new(hovered.clone())
-                                .max_w(px(460.))
+                            wrapped_tooltip(None, vec![hovered.clone()], window, cx)
                                 .build(window, cx)
                         })
                         .on_click(cx.listener(move |this, _, window, cx| {
@@ -1354,9 +1353,7 @@ impl EmptyTabState {
                     .text_size(SMALL)
                     .text_color(warning_ink(cx.theme()))
                     .tooltip(move |window, cx| {
-                        Tooltip::new(detail.clone())
-                            .max_w(px(460.))
-                            .build(window, cx)
+                        wrapped_tooltip(None, vec![detail.clone()], window, cx).build(window, cx)
                     })
                     .child(text)
                     .into_any_element(),
@@ -1586,38 +1583,8 @@ impl EmptyTabState {
                     .map(|line| SharedString::from(line.to_string()))
                     .collect();
                 move |window, cx| {
-                    let lines = lines.clone();
-                    Tooltip::element(move |window, _| {
-                        // A definite width — the widest line as the window's own text
-                        // system shapes it, capped — is what lets a longer line wrap:
-                        // content-sized text in the kit's flex row has no width to
-                        // wrap against and lays out 0px wide.
-                        let style = window.text_style();
-                        let size = px(TOOLTIP_TEXT);
-                        let widest = lines
-                            .iter()
-                            .map(|line| {
-                                let run = style.to_run(line.len());
-                                window
-                                    .text_system()
-                                    .shape_line(line.clone(), size, &[run], None)
-                                    .width
-                            })
-                            .fold(px(0.), |a, b| a.max(b));
-                        v_flex()
-                            .id(HISTORY_TOOLTIP_ID)
-                            .test_support()
-                            .w((widest + px(1.)).min(px(TOOLTIP_MAX_W)))
-                            .text_size(size)
-                            .py_1()
-                            .gap_0p5()
-                            .children(
-                                lines
-                                    .iter()
-                                    .map(|line| div().w_full().min_w_0().child(line.clone())),
-                            )
-                    })
-                    .build(window, cx)
+                    wrapped_tooltip(Some(HISTORY_TOOLTIP_ID), lines.clone(), window, cx)
+                        .build(window, cx)
                 }
             })
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -1797,6 +1764,46 @@ fn model_state(
     let items = model_items(launcher, role);
     let selected = selected_row(launcher, role, &items);
     cx.new(|cx| SelectState::new(items, selected, window, cx))
+}
+
+/// A tooltip whose text wraps inside `TOOLTIP_MAX_W`: one line per entry, the box as
+/// wide as its widest line (as the window's own text system shapes it) and never wider.
+///
+/// The kit's `Tooltip::new(text).max_w(…)` does not wrap: it lays the text in a flex
+/// row, so a long path or one of evo's longer sentences ran past its own box and the
+/// window's edge. A definite width is what gives a line something to wrap against.
+fn wrapped_tooltip(
+    id: Option<&'static str>,
+    lines: Vec<SharedString>,
+    _window: &mut Window,
+    _cx: &mut App,
+) -> Tooltip {
+    Tooltip::element(move |window, _| {
+        let style = window.text_style();
+        let size = px(TOOLTIP_TEXT);
+        let widest = lines
+            .iter()
+            .map(|line| {
+                let run = style.to_run(line.len());
+                window
+                    .text_system()
+                    .shape_line(line.clone(), size, &[run], None)
+                    .width
+            })
+            .fold(px(0.), |a, b| a.max(b));
+        v_flex()
+            .id(id.unwrap_or("wrapped-tooltip"))
+            .test_support()
+            .w((widest + px(1.)).min(px(TOOLTIP_MAX_W)))
+            .text_size(size)
+            .py_1()
+            .gap_0p5()
+            .children(
+                lines
+                    .iter()
+                    .map(|line| div().w_full().min_w_0().child(line.clone())),
+            )
+    })
 }
 
 /// What the caption says when the catalog could not be fetched at all (§5.6): one sentence
