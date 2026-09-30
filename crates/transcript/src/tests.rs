@@ -740,6 +740,17 @@ fn a_tool_calls_sentence_comes_from_its_arguments() {
     let (_, summary) = crate::rows::tool_sentence(&json!({"path": "a", "task": long}));
     assert!(summary.chars().count() <= 121, "{}", summary.len());
     assert!(summary.ends_with('…'));
+
+    // Multi-byte text around the cut — a `…` or CJK straddling byte 120 — is cut
+    // on a character, not inside one (this panicked on a real resumed session).
+    for long in [
+        format!("{}…{}", "x".repeat(118), "y".repeat(200)),
+        "项目".repeat(100),
+    ] {
+        let (_, summary) = crate::rows::tool_sentence(&json!({"path": "a", "task": long}));
+        assert_eq!(summary.chars().count(), 121, "{summary}");
+        assert!(summary.ends_with('…'));
+    }
 }
 
 /// Switching agent starts the new transcript at its latest item, whatever the old

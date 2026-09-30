@@ -1387,8 +1387,11 @@ pub(crate) fn tool_sentence(args: &Value) -> (String, String) {
             summary = value;
         }
     }
-    if summary.len() > TC_SUMMARY_LIMIT {
-        summary = format!("{}…", &summary[..TC_SUMMARY_LIMIT.min(summary.len())]);
+    // Counted in characters: a byte cut can land inside a multi-byte one (an
+    // argument that already carries `…` did, and took the app down).
+    if summary.chars().count() > TC_SUMMARY_LIMIT {
+        let head: String = summary.chars().take(TC_SUMMARY_LIMIT).collect();
+        summary = format!("{head}…");
     }
     (target, summary)
 }
