@@ -854,18 +854,31 @@ impl EmptyTabState {
                     .child(MODEL_LABEL),
             )
             .child(
+                // `.select-summary{height:34px;border:1px solid var(--border);border-radius:
+                // var(--radius);background:var(--bg)}` — the box, not the control inside it,
+                // is the field's frame. Which is what lets `:focus-within` below repaint
+                // *this* border, as `.number-input` does: the design's focus state is a
+                // primary border with the muted ring around it, and a ring around a border
+                // owned by another element would be only half of it.
                 div()
                     .id(ElementId::Name(format!("{id}-box").into()))
                     .test_support()
                     .relative()
                     .w_full()
                     .h(SELECT_H)
+                    .rounded(px(design::RADIUS))
+                    .border_1()
+                    .border_color(border)
+                    .bg(theme.background)
                     .track_focus(&handle)
-                    // `:focus-within`: the ring is the design's `0 0 0 2px var(--muted)`
-                    // over a primary border. Painted by the element that carries the
-                    // handle, so it follows the keyboard without a re-render of the page.
+                    // `.shad-select-wrap:focus-within .select-summary{border-color:
+                    // var(--primary);box-shadow:0 0 0 2px var(--muted)}`. Painted by the
+                    // element that carries the handle, so it follows the keyboard without a
+                    // re-render of the page.
                     .focus(move |style| style.border_color(primary).shadow(vec![ring(2., muted)]))
                     .child(
+                        // The control fills the frame and draws nothing of its own: the
+                        // border, the radius and the surface are the box's.
                         Select::new(field)
                             .id(id)
                             .appearance(false)
@@ -875,12 +888,8 @@ impl EmptyTabState {
                             // another registration would come from.
                             .placeholder(note)
                             .w_full()
-                            .h(SELECT_H)
+                            .h_full()
                             .px(SELECT_PAD)
-                            .rounded(px(design::RADIUS))
-                            .border_1()
-                            .border_color(border)
-                            .bg(theme.background)
                             .text_size(FIELD_TEXT)
                             .line_height(FIELD_LINE)
                             .text_color(theme.foreground)
@@ -2480,6 +2489,18 @@ mod tests {
             let other = window.find(ElementId::Name(format!("{WORKERS_MODEL_ID}-box").into()));
             assert!(other.visible());
             assert_eq!(box_.bounds().origin.x, other.bounds().origin.x);
+            // The field's frame is the box, not the control inside it — which is what lets
+            // the focus style repaint *that* border, and what the design's `:focus-within`
+            // does (`border-color:var(--primary);box-shadow:0 0 0 2px var(--muted)`).
+            assert_eq!(box_.bounds().size.height, SELECT_H);
+            let control = window.find(COORDINATOR_MODEL_ID);
+            assert_eq!(control.bounds().origin.x, box_.bounds().origin.x + px(1.));
+            assert_eq!(control.bounds().origin.y, box_.bounds().origin.y + px(1.));
+            assert_eq!(control.bounds().size.height, SELECT_H - px(2.));
+            assert_eq!(
+                control.bounds().size.width,
+                box_.bounds().size.width - px(2.)
+            );
         });
     }
 }
