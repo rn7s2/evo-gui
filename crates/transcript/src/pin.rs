@@ -146,8 +146,21 @@ impl Pin {
 mod tests {
     use super::*;
 
-    fn at(ms: u64) -> Instant {
-        Instant::now() + Duration::from_millis(ms)
+    /// A clock a test drives itself: every instant is measured from one moment,
+    /// so a machine that takes a millisecond longer between two lines cannot move
+    /// a boundary case. An `Instant::now()` per call does exactly that — `at(499)`
+    /// then lands past the 500ms window whenever the lines between them are slow,
+    /// which is what a suite running under load does to it.
+    struct Clock(Instant);
+
+    impl Clock {
+        fn new() -> Clock {
+            Clock(Instant::now())
+        }
+
+        fn at(&self, ms: u64) -> Instant {
+            self.0 + Duration::from_millis(ms)
+        }
     }
 
     /// The list opens at its latest item: pinned, nothing to jump back to.
@@ -162,15 +175,16 @@ mod tests {
     /// stops following, and "Jump to latest" shows once they are 240px away.
     #[test]
     fn the_readers_own_scroll_unpins_and_the_pill_appears_at_240px() {
+        let clock = Clock::new();
         let mut pin = Pin::new();
-        pin.touched_at(at(0));
-        assert_eq!(pin.on_scroll_at(300., at(10)), Action::Leave);
+        pin.touched_at(clock.at(0));
+        assert_eq!(pin.on_scroll_at(300., clock.at(10)), Action::Leave);
         assert!(!pin.is_pinned(), "300px up is not the latest");
         assert!(pin.is_away(), "and it is past the 240px threshold");
 
         // Back within the slack: pinned again, and the pill goes.
-        pin.touched_at(at(20));
-        assert_eq!(pin.on_scroll_at(20., at(30)), Action::Leave);
+        pin.touched_at(clock.at(20));
+        assert_eq!(pin.on_scroll_at(20., clock.at(30)), Action::Leave);
         assert!(pin.is_pinned());
         assert!(!pin.is_away());
     }
@@ -195,12 +209,13 @@ mod tests {
     /// are reading something, and the list must not yank them back.
     #[test]
     fn a_layout_scroll_leaves_a_reader_where_they_are() {
+        let clock = Clock::new();
         let mut pin = Pin::new();
-        pin.touched_at(at(0));
-        pin.on_scroll_at(600., at(0));
+        pin.touched_at(clock.at(0));
+        pin.on_scroll_at(600., clock.at(0));
         assert!(!pin.is_pinned());
         // Long after the reader's own scroll, the list is still theirs.
-        assert_eq!(pin.on_scroll_at(900., at(5_000)), Action::Leave);
+        assert_eq!(pin.on_scroll_at(900., clock.at(5_000)), Action::Leave);
         assert!(!pin.is_pinned());
         assert!(pin.is_away());
     }
@@ -209,23 +224,25 @@ mod tests {
     /// list is following, and one after it is the layout's.
     #[test]
     fn the_user_window_is_500ms() {
+        let clock = Clock::new();
         let mut pin = Pin::new();
-        pin.touched_at(at(0));
-        assert_eq!(pin.on_scroll_at(300., at(499)), Action::Leave);
+        pin.touched_at(clock.at(0));
+        assert_eq!(pin.on_scroll_at(300., clock.at(499)), Action::Leave);
         assert!(!pin.is_pinned(), "inside the window: theirs");
 
         let mut pin = Pin::new();
-        pin.touched_at(at(0));
-        assert_eq!(pin.on_scroll_at(300., at(500)), Action::SnapToBottom);
+        pin.touched_at(clock.at(0));
+        assert_eq!(pin.on_scroll_at(300., clock.at(500)), Action::SnapToBottom);
         assert!(pin.is_pinned(), "outside it: the layout's");
     }
 
     /// A reader who jumps back is following again, at once.
     #[test]
     fn jumping_back_follows_the_tail_again() {
+        let clock = Clock::new();
         let mut pin = Pin::new();
-        pin.touched_at(at(0));
-        pin.on_scroll_at(600., at(1));
+        pin.touched_at(clock.at(0));
+        pin.on_scroll_at(600., clock.at(1));
         assert!(pin.is_away());
 
         pin.jumped();
@@ -233,16 +250,20 @@ mod tests {
         assert!(!pin.is_away());
         // And the next scroll from the layout — long after the reader's own — is
         // pulled back as before.
-        assert_eq!(pin.on_scroll_at(400., at(10_000)), Action::SnapToBottom);
+        assert_eq!(
+            pin.on_scroll_at(400., clock.at(10_000)),
+            Action::SnapToBottom
+        );
     }
 
     /// Switching agent resets the reader's place: another agent's transcript
     /// opens at its latest, whatever the last one's reader was doing.
     #[test]
     fn switching_agent_starts_at_the_latest_again() {
+        let clock = Clock::new();
         let mut pin = Pin::new();
-        pin.touched_at(at(0));
-        pin.on_scroll_at(900., at(1));
+        pin.touched_at(clock.at(0));
+        pin.on_scroll_at(900., clock.at(1));
         assert!(!pin.is_pinned() && pin.is_away());
 
         pin.reset();
@@ -261,10 +282,11 @@ mod tests {
         assert_eq!(Pin::gap(1000., 400., 0.), 600.);
         assert!(Pin::gap(200., 400., 0.) < 0., "shorter than the pane");
 
+        let clock = Clock::new();
         let mut pin = Pin::new();
-        pin.touched_at(at(0));
+        pin.touched_at(clock.at(0));
         assert_eq!(
-            pin.on_scroll_at(Pin::gap(200., 400., 0.), at(0)),
+            pin.on_scroll_at(Pin::gap(200., 400., 0.), clock.at(0)),
             Action::Leave
         );
         assert!(pin.is_pinned());
