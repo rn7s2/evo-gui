@@ -3,7 +3,9 @@
 
 use gpui_kit::component::text::TextViewStyle;
 use gpui_kit::component::ActiveTheme as _;
-use gpui_kit::{px, rems, App, Hsla, Overflow, Pixels, SharedString, StyleRefinement, Styled as _};
+use gpui_kit::{
+    px, rems, App, FontWeight, Hsla, Overflow, Pixels, SharedString, StyleRefinement, Styled as _,
+};
 
 /// The widest a row's content gets.
 ///
@@ -27,6 +29,7 @@ pub(crate) const TIGHT_GAP: Pixels = px(3.);
 /// those come from there.
 #[derive(Clone)]
 pub(crate) struct Palette {
+    pub(crate) background: Hsla,
     pub(crate) foreground: Hsla,
     pub(crate) muted: Hsla,
     pub(crate) muted_foreground: Hsla,
@@ -34,6 +37,13 @@ pub(crate) struct Palette {
     pub(crate) primary: Hsla,
     pub(crate) destructive: Hsla,
     pub(crate) success: Hsla,
+    /// The chrome surface a card's head is drawn on.
+    pub(crate) sidebar: Hsla,
+    /// The lightest surface: a card's body, an input.
+    pub(crate) input: Hsla,
+    /// A status pill's ink — the success colour most of the way to the ink, which
+    /// is what `Rows.css` mixes its `.tc-status` text from.
+    pub(crate) pill_ink: Hsla,
     pub(crate) warning: Hsla,
     pub(crate) info: Hsla,
     pub(crate) mono: SharedString,
@@ -46,15 +56,48 @@ pub(crate) struct Palette {
     /// like the prose of the message it belongs to.
     pub(crate) payload_size: Pixels,
     pub(crate) radius: Pixels,
-    pub(crate) radius_lg: Pixels,
+}
+
+/// `color-mix(in srgb, a pct%, b)`, the design's mixing rule, on two theme
+/// colours. sRGB, channel by channel, with `pct` percent taken from `a`.
+pub(crate) fn mix(a: Hsla, pct: f32, b: Hsla) -> Hsla {
+    let (a, b) = (gpui_kit::Rgba::from(a), gpui_kit::Rgba::from(b));
+    let t = (pct / 100.).clamp(0., 1.);
+    gpui_kit::Rgba {
+        r: a.r * t + b.r * (1. - t),
+        g: a.g * t + b.g * (1. - t),
+        b: a.b * t + b.b * (1. - t),
+        a: a.a * t + b.a * (1. - t),
+    }
+    .into()
 }
 
 impl Palette {
+    /// A card's hairline: `color-mix(in srgb, var(--fg) 17%, var(--bg))` — the
+    /// rule a table's frame is drawn with, strong enough to read on the warm
+    /// surface.
+    pub(crate) fn rule(&self) -> Hsla {
+        mix(self.foreground, 17., self.background)
+    }
+
+    /// The softer one inside a card: `color-mix(in srgb, var(--fg) 10%, var(--bg))`.
+    pub(crate) fn rule_soft(&self) -> Hsla {
+        mix(self.foreground, 10., self.background)
+    }
+
+    pub(crate) fn pill_ground(&self, surface: Hsla) -> Hsla {
+        mix(self.success, 12., surface)
+    }
+
     pub(crate) fn from_app(cx: &App) -> Self {
         let theme = cx.theme();
         let colors = theme.semantic_tokens().colors;
         Self {
+            background: colors.background,
             foreground: colors.foreground,
+            sidebar: theme.sidebar,
+            input: theme.input,
+            pill_ink: mix(theme.success, 85., colors.foreground),
             muted: colors.muted,
             muted_foreground: colors.muted_foreground,
             border: colors.border,
@@ -67,7 +110,6 @@ impl Palette {
             font_size: theme.font_size,
             payload_size: theme.mono_font_size - px(0.5),
             radius: theme.radius,
-            radius_lg: theme.radius_lg,
         }
     }
 }
@@ -79,27 +121,66 @@ impl Palette {
 /// the measure scrolls inside its own block rather than spilling out of the
 /// column or squeezing its cells into unreadable columns.
 pub(crate) fn text_style(cx: &App) -> TextViewStyle {
-    let base = cx.theme().font_size;
+    let theme = cx.theme();
+    let base = theme.font_size;
+    let palette = Palette::from_app(cx);
+    let rule = palette.rule();
+    let rule_soft = palette.rule_soft();
+
+    // `Rows.css`'s `.measure table`: a rounded frame on the lightest surface, a
+    // tinted header row, and rules strong enough to read against the warm editor.
+    // Horizontal scroll rather than squeezing: a table that does not fit reads in
+    // its own frame instead of in unreadable columns.
     let mut table = StyleRefinement::default();
     table.overflow.x = Some(Overflow::Scroll);
+    let table = table
+        .border_1()
+        .border_color(rule)
+        .rounded(px(8.))
+        .bg(palette.input);
 
-    // A cell draws a little padding of its own — deliberately less than the
-    // 16px gpui-base assumes.
+    // The header row: the chrome surface, the second voice, and a touch smaller
+    // than the cells under it.
+    let table_head = StyleRefinement::default()
+        .bg(palette.sidebar)
+        .text_color(palette.muted_foreground)
+        .text_size(px(12.5))
+        .font_weight(FontWeight::MEDIUM);
+
+    // A cell: `7px 12px` of air, a rule under it and a softer one to its right —
+    // the frame's own edges come from the table.
     //
-    // gpui-base measures a scroll-layout column as `text + CELL_PAD_PX (16) +
-    // border` and uses that as the column's flex floor, while the cell it
-    // renders carries whatever padding the `table_cell` refinement asks for.
-    // Asking for the 8px a side that measurement assumes leaves the text box
-    // exactly as wide as the text, and the flex pass then hands the column a
-    // fraction less than its floor — so a word that fits at all gets broken
-    // mid-word ("call|s", "cach|e"). Asking for 4px a side leaves half of the
-    // measured 16px as slack, so no column shrinks below its longest word —
-    // and a cell still has air around it, which a table with no padding at all
-    // does not: its columns run together ("91%crates/transcript/src/rows.rs").
-    let table_cell = StyleRefinement::default().px(px(4.));
+    // The padding is what gpui-base measures a column's floor with (16px plus the
+    // border), so a wider padding than its assumption lets a column shrink under
+    // its longest word and break it mid-word; 12px a side keeps a half-cell of
+    // slack, and a cell still has air around it.
+    let table_cell = StyleRefinement::default()
+        .px(px(12.))
+        .py(px(7.))
+        .text_size(px(13.5))
+        .border_b_1()
+        .border_r_1()
+        .border_color(rule_soft)
+        .font_weight(FontWeight::NORMAL);
+
+    // A fenced block: the muted surface, 10px 12px of padding, and the design's
+    // 10px above and below.
+    let code_block = StyleRefinement::default()
+        .my(px(10.))
+        .px(px(12.))
+        .py(px(10.))
+        .rounded(palette.radius)
+        .bg(palette.muted);
+
+    // Inline code: the mono face at the mono size, on the muted surface.
+    let inline_code = gpui_kit::HighlightStyle {
+        background_color: Some(palette.muted),
+        ..Default::default()
+    };
 
     TextViewStyle {
-        paragraph_gap: rems(0.5),
+        // `p { margin: 10px 0 }`
+        paragraph_gap: rems(0.625),
         heading_base_font_size: base,
         heading_font_size: Some(std::sync::Arc::new(|level, base| {
             let scale = match level {
@@ -111,7 +192,10 @@ pub(crate) fn text_style(cx: &App) -> TextViewStyle {
             px(f32::from(base) * scale)
         })),
         table,
+        table_head,
         table_cell,
+        code_block,
+        inline_code,
         ..TextViewStyle::default()
     }
 }

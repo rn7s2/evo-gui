@@ -7,8 +7,10 @@
 //!   extended with `set_text` so markdown is **rendered live while it streams** — never
 //!   recreated per delta, and never a second parse for a delta that arrived between two
 //!   frames;
-//! * one [`MessageScrollerState`] per view, which follows the tail while the reader is at
-//!   the bottom and offers the jump-to-latest button when they are not;
+//! * the reader's place in the list, which is [`pin`]'s: one agent's transcript opens at
+//!   its latest item and stays there while the pane changes height, and only the reader's
+//!   own scroll unpins it (the design's `Transcript.tsx`, to the pixel and the
+//!   millisecond);
 //! * the tools the reader opened, and the untruncated results fetched for them;
 //! * the todos of the agent the view shows.
 //!
@@ -28,6 +30,7 @@
 mod imgcheck;
 mod link;
 mod markdown;
+pub mod pin;
 mod rows;
 mod style;
 mod todo;
@@ -40,23 +43,24 @@ pub use todo::TodoPanel;
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::base::TextViewState;
-use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
-use gpui_kit::component::{v_flex, ActiveTheme as _, Icon, IconName, Sizable as _};
+use gpui_kit::component::{v_flex, ActiveTheme as _, Icon, IconName};
 use gpui_kit::{
-    div, px, AnyElement, App, AppContext as _, Context, Entity, FocusHandle,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render,
-    StatefulInteractiveElement as _, StyleRefinement, Styled as _, TestSupportExt as _, WeakEntity,
-    Window,
+    div, linear_color_stop, linear_gradient, point, px, Animation, AnimationExt as _, AnyElement,
+    App, AppContext as _, Bounds, Context, Entity, FocusHandle, Hsla, InteractiveElement as _,
+    IntoElement, MouseButton, ParentElement as _, Pixels, Render, ScrollHandle,
+    StatefulInteractiveElement as _, Styled as _, Task, TestSupportExt as _, WeakEntity, Window,
 };
 use session::{AgentKey, Item, ItemId, ItemKind, Todo};
+use std::time::Duration;
 
+use crate::pin::{Action, Pin};
 use crate::rows::CopyFeedback;
 use crate::style::Palette;
+use store::design::{INSET, MEASURE};
 
 /// How many assistant items keep their parsed document.
 const KEPT_DOCUMENTS: usize = 128;
@@ -174,39 +178,15 @@ impl TranscriptData {
     }
 }
 
-/// What a list update did, so the scroller can be told about it.
-enum ListChange {
-    Remeasure,
-    Reset(usize),
-    Append(usize),
-    Prepend(usize),
-    Remove(Range<usize>),
-}
-
-impl ListChange {
-    fn between(old: &[Item], new: &[Item]) -> Self {
-        let prefix = old
-            .iter()
-            .zip(new)
-            .take_while(|(old, new)| old.id == new.id)
-            .count();
-
-        if prefix == old.len() && prefix == new.len() {
-            Self::Remeasure
-        } else if prefix == old.len() {
-            Self::Append(new.len() - old.len())
-        } else if prefix == new.len() {
-            Self::Remove(new.len()..old.len())
-        } else {
-            Self::Reset(new.len())
-        }
-    }
-}
-
 /// One agent's transcript: a tail-following virtual list of items.
 pub struct TranscriptView {
     data: Entity<TranscriptData>,
-    scroller: Entity<MessageScrollerState>,
+    /// The reader's place in the list: [`Pin`] decides it, and this is what it
+    /// moves.
+    scroll: ScrollHandle,
+    pin: Pin,
+    /// The step-by-step return to the latest, while one is running.
+    jump: Option<Task<()>>,
     todos: Vec<Todo>,
     /// Whether the agent's topic has items older than the ones held.
     has_older: bool,
@@ -219,9 +199,6 @@ pub struct TranscriptView {
 
 impl TranscriptView {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let scroller = cx.new(|cx| MessageScrollerState::new(0, cx));
-        cx.observe(&scroller, |_, _, cx| cx.notify()).detach();
-
         Self {
             data: cx.new(|cx| TranscriptData {
                 focus: cx.focus_handle(),
@@ -240,7 +217,9 @@ impl TranscriptView {
                 images: HashMap::new(),
                 full_images: HashSet::new(),
             }),
-            scroller,
+            scroll: ScrollHandle::new(),
+            pin: Pin::new(),
+            jump: None,
             todos: Vec::new(),
             has_older: false,
             loading_older: false,
@@ -253,11 +232,16 @@ impl TranscriptView {
         self.agent
     }
 
+    /// Show another agent's transcript. The new one opens at its latest item, as a
+    /// transcript does when it is first shown — however far up the last one's
+    /// reader had scrolled.
     pub fn set_agent(&mut self, agent: AgentKey, cx: &mut Context<Self>) {
         if self.agent == agent {
             return;
         }
         self.agent = agent;
+        self.pin.reset();
+        self.scroll.scroll_to_bottom();
         cx.notify();
     }
 
@@ -376,43 +360,39 @@ impl TranscriptView {
 
     /// Replace the whole list, as a snapshot or a `topic.reset` does.
     pub fn replace(&mut self, items: Vec<Item>, cx: &mut Context<Self>) {
-        let change = self.data.update(cx, |data, _| {
-            let change = ListChange::between(&data.items, &items);
+        self.data.update(cx, |data, _| {
             data.items = items;
             data.retain_documents();
-            change
         });
-        self.apply_list_change(change, cx);
         cx.notify();
     }
 
     /// Put older items in front of what is held — the scrollback walking back through
     /// compactions. An item already held is not added twice.
     pub fn prepend(&mut self, items: Vec<Item>, cx: &mut Context<Self>) {
-        let (change, added) = self.data.update(cx, |data, _| {
+        let added = self.data.update(cx, |data, _| {
             let fresh: Vec<Item> = items
                 .into_iter()
                 .filter(|item| !data.items.iter().any(|held| held.id == item.id))
                 .collect();
             if fresh.is_empty() {
-                return (ListChange::Remeasure, 0);
+                return 0;
             }
             let added = fresh.len();
             let mut next = fresh;
             next.append(&mut data.items);
             data.items = next;
             data.retain_documents();
-            (ListChange::Prepend(added), added)
+            added
         });
         if added > 0 {
-            self.apply_list_change(change, cx);
+            cx.notify();
         }
-        cx.notify();
     }
 
     /// Add or replace one item, by its id. Returns whether the view changed.
     pub fn upsert(&mut self, item: Item, cx: &mut Context<Self>) -> bool {
-        let change = self
+        let changed = self
             .data
             .update(cx, |data, _| match data.index_of(&item.id) {
                 Some(index) => {
@@ -426,22 +406,21 @@ impl TranscriptView {
                     );
                     data.items[index] = item;
                     // A row whose content is unchanged (a status flip, or an op the view has
-                    // already drawn) needs no remeasure: only its own cell changed.
+                    // already drawn) needs no re-render: only its own cell changed.
                     if waiting {
-                        return None;
+                        return false;
                     }
-                    Some(ListChange::Remeasure)
+                    true
                 }
                 None => {
                     data.items.push(item);
-                    Some(ListChange::Append(1))
+                    true
                 }
             });
 
-        let Some(change) = change else {
+        if !changed {
             return false;
-        };
-        self.apply_list_change(change, cx);
+        }
         cx.notify();
         true
     }
@@ -457,12 +436,9 @@ impl TranscriptView {
             data.full_results.remove(id);
             Some(index)
         });
-        let Some(index) = index else {
+        if index.is_none() {
             return false;
-        };
-        self.scroller.update(cx, |scroller, cx| {
-            scroller.splice(index..index + 1, 0, cx);
-        });
+        }
         cx.notify();
         true
     }
@@ -484,18 +460,37 @@ impl TranscriptView {
             data.expanded.clear();
             data.full_results.clear();
         });
-        self.scroller
-            .update(cx, |scroller, cx| scroller.reset(0, cx));
+        self.pin.reset();
+        self.scroll.scroll_to_bottom();
         cx.notify();
     }
 
-    pub fn is_following_tail(&self, cx: &App) -> bool {
-        self.scroller.read(cx).is_following_tail()
+    /// Whether the list is following its tail.
+    pub fn is_following_tail(&self, _cx: &App) -> bool {
+        self.pin.is_pinned()
     }
 
+    /// Whether "↓ Jump to latest" is showing.
+    pub fn is_away_from_latest(&self, _cx: &App) -> bool {
+        self.pin.is_away()
+    }
+
+    /// Take the reader back to the latest item: follow the tail again, and go
+    /// there — not in a jump, which is what the design's `smooth` asks for.
     pub fn scroll_to_latest(&mut self, cx: &mut Context<Self>) {
-        self.scroller
-            .update(cx, |scroller, cx| scroller.scroll_to_end(cx));
+        self.pin.jumped();
+        cx.notify();
+        let scroll = self.scroll.clone();
+        let from = f32::from(scroll.offset().y);
+        let to = f32::from(scroll.max_offset().y);
+        self.jump = Some(cx.spawn(async move |_view, cx| {
+            for step in 1..=JUMP_STEPS {
+                cx.background_executor().timer(JUMP_STEP).await;
+                let t = step as f32 / JUMP_STEPS as f32;
+                let y = from + (to - from) * ease_out(t);
+                scroll.set_offset(point(scroll.offset().x, px(y)));
+            }
+        }));
     }
 
     pub fn is_showing_thinking(&self, cx: &App) -> bool {
@@ -570,26 +565,6 @@ impl TranscriptView {
         if let Some(handler) = handler {
             handler(id, window, cx);
         }
-    }
-
-    fn apply_list_change(&mut self, change: ListChange, cx: &mut Context<Self>) {
-        self.scroller.update(cx, |scroller, cx| {
-            match change {
-                ListChange::Remeasure => scroller.remeasure(cx),
-                ListChange::Reset(count) => scroller.reset(count, cx),
-                ListChange::Append(count) => {
-                    scroller.append(count, cx);
-                }
-                // Older items went in front: an insert at the head, so the reader's
-                // place in what they were reading is kept.
-                ListChange::Prepend(count) => {
-                    scroller.splice(0..0, count, cx);
-                }
-                ListChange::Remove(range) => {
-                    scroller.splice(range, 0, cx);
-                }
-            };
-        });
     }
 }
 
@@ -703,12 +678,11 @@ fn history_header(
 
 impl Render for TranscriptView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let data = self.data.clone();
-        let view = cx.weak_entity();
         let theme = cx.theme().clone();
+        let palette = Palette::from_app(cx);
 
         if self.data.read(cx).items.is_empty() {
-            return empty_state(self.agent, &Palette::from_app(cx)).into_any_element();
+            return empty_state(self.agent, &palette).into_any_element();
         }
 
         self.data.update(cx, |data, _| data.begin_frame());
@@ -752,42 +726,241 @@ impl Render for TranscriptView {
             }
         }
 
-        let mut column = v_flex().size_full().min_h_0();
+        let rows_held = self.data.read(cx).items.len();
+        let before = {
+            let data = self.data.clone();
+            let view = cx.weak_entity();
+            let mut rows = Vec::with_capacity(rows_held);
+            for index in 0..rows_held {
+                rows.push(data.update(cx, |data, cx| rows::render_row(data, index, &view, cx)));
+            }
+            rows
+        };
+
+        let mut measure = div()
+            .id("transcript-measure")
+            .flex()
+            .flex_col()
+            .w_full()
+            .max_w(px(MEASURE))
+            .px(px(INSET))
+            .children(before);
         if self.has_older {
-            let palette = Palette::from_app(cx);
             let oldest = self.data.read(cx).items.first().map(|item| item.id.clone());
             let weak = cx.weak_entity();
             if let Some(header) =
                 history_header(self.loading_older, oldest, &palette, &self.data, &weak, cx)
             {
-                column = column.child(header);
+                measure = measure.child(header);
             }
         }
+        let content = div()
+            .w_full()
+            .flex()
+            .justify_center()
+            .pt(px(INSET))
+            .pb(px(INSET))
+            .child(measure);
 
-        let view = view.clone();
-        column
-            .child(
-                MessageScroller::new(
-                    "transcript",
-                    self.scroller.clone(),
-                    move |index, _window, cx| {
-                        data.update(cx, |data, cx| rows::render_row(data, index, &view, cx))
+        // Every frame the list is painted is a chance for the design's rule to run
+        // — the same chance a scroll event gives it in a browser, and the one that
+        // catches a pane that changed height under a reader who is following.
+        let on_painted = {
+            let weak = cx.weak_entity();
+            move |_bounds: Vec<Bounds<Pixels>>, _window: &mut Window, cx: &mut App| {
+                let _ = weak.update(cx, |view, cx| view.on_painted(cx));
+            }
+        };
+
+        // The reader's own scroll: a wheel, a touch, a key or a pointer press opens
+        // the design's 500ms window in which a scroll is theirs.
+        let touched = cx.listener(
+            |view: &mut Self,
+             _: &gpui_kit::ScrollWheelEvent,
+             _: &mut Window,
+             cx: &mut Context<Self>| {
+                view.pin.touched();
+                cx.notify();
+            },
+        );
+        let pressed = cx.listener(
+            |view: &mut Self,
+             _: &gpui_kit::MouseDownEvent,
+             _: &mut Window,
+             cx: &mut Context<Self>| {
+                view.pin.touched();
+                cx.notify();
+            },
+        );
+        let keyed = cx.listener(
+            |view: &mut Self,
+             _: &gpui_kit::KeyDownEvent,
+             _: &mut Window,
+             cx: &mut Context<Self>| {
+                view.pin.touched();
+                cx.notify();
+            },
+        );
+
+        let scroll = div()
+            .on_children_prepainted(on_painted)
+            .id("transcript-scroll")
+            .test_support()
+            .size_full()
+            .overflow_y_scroll()
+            .track_scroll(&self.scroll)
+            .on_scroll_wheel(touched)
+            .on_mouse_down(MouseButton::Left, pressed)
+            .on_key_down(keyed)
+            .child(content);
+
+        // The 20px fade the design puts over the last of the list, so a row leaving
+        // the top of the dock is not cut off mid-line.
+        let background: Hsla = theme.background;
+        let fade = div()
+            .id("transcript-fade")
+            .absolute()
+            .left(px(0.))
+            .right(px(0.))
+            .bottom(px(0.))
+            .h(px(FADE_HEIGHT))
+            .bg(linear_gradient(
+                180.,
+                linear_color_stop(
+                    Hsla {
+                        a: 0.,
+                        ..background
                     },
-                )
-                .with_list_style(StyleRefinement::default().px_4().py_4())
-                .with_row_style(StyleRefinement::default().pb_0())
-                .with_jump_button_renderer(|button| button.small().label("Jump to latest"))
-                .with_jump_button_style(
-                    StyleRefinement::default()
-                        .bg(theme.secondary)
-                        .border_color(theme.border)
-                        .text_color(theme.secondary_foreground)
-                        .shadow_sm(),
-                )
-                .with_jump_button_label("Jump to latest")
-                .size_full()
-                .min_h_0(),
-            )
+                    0.,
+                ),
+                linear_color_stop(background, 1.),
+            ));
+
+        div()
+            .id("transcript")
+            .test_support()
+            .relative()
+            .size_full()
+            .min_h_0()
+            .child(scroll)
+            .child(fade)
+            .children(self.jump_pill(cx))
             .into_any_element()
     }
+}
+
+/// The height of the fade over the list's last pixels.
+const FADE_HEIGHT: f32 = 20.;
+
+/// How long "↓ Jump to latest" takes to come and go, and how far it lifts.
+const JUMP_FADE: Duration = Duration::from_millis(160);
+const JUMP_LIFT: f32 = 6.;
+
+/// How long "↓ Jump to latest" takes to come and go, and how far it lifts.
+impl TranscriptView {
+    /// The design's `↓ Jump to latest`, shown only once the reader is [`pin::JUMP_AT`]
+    /// away.
+    ///
+    /// Its two states are one transition each way — `opacity .16s ease, transform .16s
+    /// ease`, and 6px of lift — which is what the animation's two ids give it: a state
+    /// change starts a fresh 160ms run from the other end.
+    fn jump_pill(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let away = self.pin.is_away();
+        let palette = Palette::from_app(cx);
+        let theme = cx.theme().clone();
+        let jump = cx.listener(
+            |view: &mut Self,
+             _: &gpui_kit::MouseDownEvent,
+             _: &mut Window,
+             cx: &mut Context<Self>| {
+                view.scroll_to_latest(cx);
+            },
+        );
+
+        let pill = div()
+            .id(("transcript-jump", away as usize))
+            .h(px(28.))
+            .flex()
+            .items_center()
+            .gap_1()
+            .px(px(12.))
+            .rounded_full()
+            .border_1()
+            .border_color(palette.border)
+            .bg(theme.input)
+            .text_size(px(12.))
+            .text_color(palette.foreground)
+            .shadow_sm()
+            .cursor_pointer()
+            .on_mouse_down(MouseButton::Left, jump)
+            .child("↓ Jump to latest")
+            .test_support()
+            .with_animation(
+                ("transcript-jump-motion", away as usize),
+                Animation::new(JUMP_FADE),
+                move |el, delta| {
+                    // Away: in, lifted to its place. Back: out, and 6px down.
+                    let (from, to) = if away { (0., 1.) } else { (1., 0.) };
+                    let t = from + (to - from) * delta;
+                    el.opacity(t).relative().top(px(JUMP_LIFT * (1. - t)))
+                },
+            );
+
+        // Centred on the transcript's own middle, 12px above its bottom, as the design
+        // places it. Hidden outright while the reader is at the latest, so it is not a
+        // target for a click or a hover.
+        let mut slot = div()
+            .id("transcript-jump-slot")
+            .absolute()
+            .left(px(0.))
+            .right(px(0.))
+            .bottom(px(12.))
+            .flex()
+            .justify_center()
+            .child(pill);
+        if !away {
+            slot = slot.invisible();
+        }
+        Some(slot.into_any_element())
+    }
+}
+
+impl Drop for TranscriptView {
+    fn drop(&mut self) {
+        // The return to the latest, if one is running, ends with the view.
+        self.jump.take();
+    }
+}
+
+/// What the design's rule makes of the reader's distance from the bottom.
+///
+/// The distance is the scroll's own: gpui keeps the offset from the top as a
+/// negative number and the greatest offset as a positive one, so their sum is
+/// `scrollHeight - scrollTop - clientHeight` exactly — 0 at the bottom, growing as
+/// the reader goes up, and 0 for a list shorter than its pane.
+impl TranscriptView {
+    fn on_painted(&mut self, cx: &mut Context<Self>) {
+        let gap = f32::from(self.scroll.max_offset().y + self.scroll.offset().y);
+        let away = self.pin.is_away();
+        match self.pin.on_scroll(gap) {
+            // The layout moved under a reader who is following: pull the list back
+            // rather than letting their place drift.
+            Action::SnapToBottom => self.scroll.scroll_to_bottom(),
+            Action::Leave => {}
+        }
+        if self.pin.is_away() != away {
+            cx.notify();
+        }
+    }
+}
+
+/// The return to the latest, step by step: `smooth` in the design's `scrollTo`.
+const JUMP_STEPS: u32 = 12;
+const JUMP_STEP: Duration = Duration::from_millis(15);
+
+/// A decelerating ramp for the return — `ease-out`, which is what a scroll on a
+/// trackpad ends like.
+fn ease_out(t: f32) -> f32 {
+    let t = t.clamp(0., 1.);
+    1. - (1. - t) * (1. - t)
 }

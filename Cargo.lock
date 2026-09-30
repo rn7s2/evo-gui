@@ -7249,6 +7249,7 @@ dependencies = [
  "image",
  "serde_json",
  "session",
+ "store",
 ]
 
 [[package]]

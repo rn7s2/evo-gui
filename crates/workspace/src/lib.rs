@@ -13,6 +13,7 @@ mod launch;
 mod panes;
 mod tab;
 mod tab_page;
+mod tab_strip;
 
 pub use bridge::{Bridge, BridgeSender, Revision, Tagged, Worker};
 pub use chrome::{

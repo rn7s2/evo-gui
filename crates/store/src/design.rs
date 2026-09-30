@@ -223,11 +223,19 @@ pub const CLOSE_HOVER_MIX: f32 = 0.11;
 /// edge (`margin: 0 0 calc((tab-h - 30px) / 2) 8px`).
 pub const ADD: f32 = 30.;
 pub const ADD_RADIUS: f32 = 6.;
-pub const ADD_ICON: f32 = 14.;
+pub const ADD_ICON: f32 = 16.;
 pub const ADD_GAP: f32 = 8.;
 /// The strip's own padding around its row: `padding: 0 8px 0 4px`.
 pub const TAB_ROW_PAD: (f32, f32) = (4., 8.);
-/// The tab strip's ink when it is not the active tab; the active one uses `fg`.
+/// How far a tab's divider is inset from the top and the bottom: `top: 25%;
+/// bottom: 25%`.
+pub const TAB_DIVIDER_INSET: f32 = 0.25;
+/// The close button's `×` and the `+`: the design's stroke widths, at the sizes
+/// the CSS gives them (10px for the `×`, 16 for the `+`, whose markup is a 14px
+/// glyph the CSS scales).
+pub const CLOSE_STROKE: f32 = 1.3;
+pub const ADD_STROKE: f32 = 1.6;
+/// The header row below the strip: the tab page's own top line (`--header`).
 pub const HEADER_HEIGHT: f32 = 38.;
 /// The reading measure of prose and tables (`布局.正文测量`).
 pub const MEASURE: f32 = 800.;

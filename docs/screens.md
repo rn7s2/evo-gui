@@ -1,6 +1,6 @@
 # Screens
 
-Eighteen pictures of the real window, taken by a real run: the app's own `Shell`,
+Twenty pictures of the real window, taken by a real run: the app's own `Shell`,
 the real `evo-swarm` / `evo-agent` binaries, and the scripted model — nothing drawn
 by hand, nothing mocked.
 
@@ -38,6 +38,7 @@ call one tool, `SLOW …` makes it answer in sixty deltas over six seconds.
 | `06-report-*` | What a lane's report looks like when it arrives: the `Lane 1 report` card with the fields the lane sent (`done`, `evidence`, `next`), which is the item a client renders instead of reading `[lane 1 report]` out of a sentence. Above it, the notice the swarm published for the same report — today labelled `command`, because the swarm's own notice goes out through the serve's command channel (`source: "command"`), which is what a client is told. |
 | `07-history-*` | A second tab in the same window, after that session: the empty tab again, with the resumable swarm in the history list under the choosers — its title, its folder, how long ago. |
 | `08-check-problem-*` | The empty tab when the binary `app.json` names cannot be run: the catalog caption (`Couldn't load the model list — Default models will be used.`) and, under the choosers, the check's own line — `/nonexistent/evo-swarm could not be run — fix it in Settings…` — which is what a click on it opens. This is also the window that shows a history row with a real title. |
+| `10-tabs-*` | The tab strip with four tabs, the first of them working and the second under the pointer: the design's own subject (`design/doc28/TabStrip.tsx`). The shown tab carries the page's surface and the outward corner at each end, the pointed-at one its own fill, the last two keep the strip's own colour — and the divider rule is visible: none beside the shown tab or the pointed-at one, one between the last two. Taken where the swarm is at work, so the working tab's dot is mid-breath. |
 | `09-boot-failure-*` | The same binary, launched in a folder: *Could not start a swarm*, the folder it could not start in, the engine's one-line reason, the empty log box, and **Retry** / **Close** (§9.7). |
 
 ## What is not here yet

@@ -567,6 +567,24 @@ fn an_overflowing_strip_keeps_the_add_button_and_shows_the_selected_tab(cx: &mut
     .unwrap();
 }
 
+/// Stop a tab's engine, and wait for its thread to end.
+///
+/// A tab with a process behind it has a thread of its own, and that thread wakes
+/// the view when it has something to say — a wake from another thread is what
+/// gpui's test scheduler calls non-deterministic, and it fires the instant the
+/// wake lands after the test's last frame. Joining the engine before the frames
+/// end is what makes a test that launches a tab (a binary that is not there
+/// reaches its folder without a process) deterministic.
+macro_rules! retire_engine {
+    ($tab:expr, $cx:expr) => {{
+        let engine = $tab.update($cx, |tab, cx| tab.take_engine(cx));
+        if let Some(mut engine) = engine {
+            engine.shutdown();
+            engine.join();
+        }
+    }};
+}
+
 /// §7.1: the window is named after what it is working on — Mission Control, ⌘`
 /// and the window menu show this — and after nothing but the app while the tab
 /// being shown has no folder.
@@ -599,7 +617,7 @@ fn the_window_is_named_after_the_folder_of_the_tab_being_shown(cx: &mut TestAppC
             "an empty tab leaves the window the app's own name"
         );
 
-        view.update(cx, |view, cx| {
+        let tab = view.update(cx, |view, cx| {
             let tab = view.selected_tab().clone();
             tab.update(cx, |tab, cx| {
                 tab.launch(
@@ -611,7 +629,12 @@ fn the_window_is_named_after_the_folder_of_the_tab_being_shown(cx: &mut TestAppC
                     cx,
                 )
             });
+            tab
         });
+        // The folder is the tab's from the launch on; the engine is not what this
+        // test is about, so it is stopped and joined here rather than left to wake
+        // the test's scheduler from its own thread.
+        retire_engine!(tab, cx);
         window.render_frame(cx);
         let named = "a-folder-of-its-own — Evo Desktop";
         assert_eq!(
@@ -684,6 +707,10 @@ fn the_add_button_never_sits_on_a_tab(cx: &mut TestAppContext) {
                         cx,
                     )
                 });
+                // Fourteen tabs means fourteen engines; each is stopped and joined
+                // as it is made, so the strip is what this test measures and no
+                // thread of a tab's own is left to wake the scheduler.
+                retire_engine!(tab, cx);
             }
             // A tab in the middle of the strip: the seven tabs to its right are
             // past the window's edge, which is where the `+` is.
@@ -694,7 +721,7 @@ fn the_add_button_never_sits_on_a_tab(cx: &mut TestAppContext) {
         // the most tabs behind the button.
         window.render_frame(cx);
 
-        let add = window.find("tab-add-box");
+        let add = window.find("tab-add");
         let add_bounds = add.bounds();
         let strip = window.find("tab-strip-scroll").bounds();
         assert!(
