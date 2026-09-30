@@ -3,7 +3,9 @@
 A native macOS app for the evo agent runtime (sibling repo `../evo-agent`): one window whose
 title bar is a browser-like tab strip, named after the folder of the tab you are looking at;
 one tab per `evo-swarm serve` process — a coordinator agent plus a pool of worker lanes. The
-app is a *client*: it drives evo over its HTTP API and reimplements none of it.
+app is a *client*: it drives evo over one loopback protocol (a ready file, a snapshot, one
+stream of ops, and `POST /ops` — `CONTRACT.md` at the workspace root) and reimplements none of
+it.
 
 ![evo-desktop icon](assets/icon/icon-1024.png)
 
@@ -76,18 +78,16 @@ Everything the app owns lives in `~/.evo/desktop/` (§6 of the spec):
 |---|---|
 | `app.json` | window bounds, the recorded tab set, the binary paths, the recent sessions, the theme |
 | `lock`, `activate.sock` | the single-instance lock (`flock`, dies with the process) and its activation socket |
-| `model-cache.json` | the last `/registry` catalog, for the empty tab's choosers |
-| `probe/` | scratch directory for the catalog probe |
-| `tabs/<id>/tab.json` | one tab: folder, resumed session, swarm id, chosen models, workers |
-| `tabs/<id>/token` | that swarm's bearer token, written by the server (0600) — never logged, never shown |
+| `model-cache.json` | the last `catalog --json` body, for the empty tab's choosers |
+| `tabs/<id>/ready.json` | where the server publishes its port, URL and bearer token (0600) once it is listening — never logged, never shown |
 | `tabs/<id>/swarm.log` | that swarm's stdout and stderr (the log a tab shows when boot fails) |
 | `app.log` | the app's own log (RFC 3339 UTC timestamps) |
 
-The one file it writes outside that directory is the managed block at the top
-of a project's `<folder>/.evo/swarm.lisp`, which is what gives that project's
-lanes their model (§9.6). Everything else it reads — journals under
-`~/.evo/sessions`, a swarm's directory under `~/.evo/swarm/<id>` — is
-read-only.
+Nothing else is written anywhere: the app reads no journal, writes no project
+file, and asks evo for what it shows — `evo-swarm catalog --json` for the
+choosers, `evo-agent sessions --json` for the history list, and one running
+swarm for everything a tab page draws. The lanes' model is a launch flag
+(`--lane-model`), so `<folder>/.evo/swarm.lisp` stays the project's own.
 
 A launch always opens **one empty tab**, whatever `app.json` said (§14.6): the
 tab set is recorded for the app's own bookkeeping, not reopened. The sessions
@@ -116,8 +116,9 @@ Settings panel).
 
 What is genuinely not here:
 
-- A command surface (slash commands) and lane control endpoints — deliberate v1
-  non-goals; lanes are watched, never typed to.
+- A command surface (slash commands) and lane *steering*: a person can stop work
+  (`run.interrupt`, scope `swarm` or `lane`) and the coordinator is told, but
+  redirecting a lane stays the coordinator's job.
 - Windows and Linux packaging: the bundle target is macOS.
 - Settings covers the two binaries and the theme and nothing else (§13); there
   is no other preference to change.

@@ -79,7 +79,7 @@ fn capture(dir: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
                 ..AppState::default()
             };
             Shell::new(root.clone(), log, state, ModelCache::default()).install(cx);
-            let config = Arc::new(evo_desktop::swarm_config(cx));
+            let config = Arc::new(evo_desktop::launch_env(cx));
             gpui_kit::open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(Bounds {

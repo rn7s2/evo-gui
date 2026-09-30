@@ -164,7 +164,7 @@ fn load_catalog(cx: &mut App, root: Root, bin: PathBuf) {
                 log.info(format!(
                     "catalog: {} model(s), {} lane model(s)",
                     cache.models().len(),
-                    cache.lane_models().map_or(0, |lanes| lanes.len())
+                    cache.catalog().lane_models().map_or(0, |lanes| lanes.len())
                 ));
                 if let Err(error) = cache.save(&root) {
                     log.error(format!(
@@ -262,7 +262,7 @@ mod tests {
         }));
         assert_eq!(cache.models().len(), 1);
         assert!(!cache.is_empty());
-        assert!(cache.lane_model_ok("m", Some("p")));
+        assert!(cache.catalog().lane_model_ok("m", Some("p")));
         assert!(cache.fetched_epoch().is_some(), "a read is stamped");
     }
 

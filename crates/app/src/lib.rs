@@ -202,7 +202,7 @@ pub fn run() {
                 // The window's tabs start servers with the binaries `app.json`
                 // names, out of this app's own root.
                 let env = std::sync::Arc::new(launch_env(cx));
-                let view = cx.new(|cx| WorkspaceView::with_env(env, window, cx));
+                let view = cx.new(|cx| WorkspaceView::with_config(env, window, cx));
                 cx.update_global::<Shell, _>(|shell, _| shell.tracker = Some(tracker));
                 view
             });

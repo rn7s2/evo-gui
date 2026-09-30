@@ -1735,6 +1735,7 @@ dependencies = [
  "anyhow",
  "async-channel",
  "gpui-kit",
+ "libc",
  "serde_json",
  "session",
  "settings",
