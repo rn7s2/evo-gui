@@ -76,7 +76,8 @@ pub fn stub_script() -> PathBuf {
     }
     let repo = std::env::var_os("EVO_AGENT_REPO")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/Users/bytedance/coding/evo-agent"));
+        // The sibling checkout, as scripts/stub_home.sh finds it: `<root>/../evo-agent`.
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../evo-agent"));
     repo.join("tests/stub-messages.py")
 }
 
