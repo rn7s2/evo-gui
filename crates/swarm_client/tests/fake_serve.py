@@ -20,6 +20,8 @@ server):
     POST /_drop      {}                   close every open stream (a reconnect test)
     POST /_reset     {"reason": "restarted"}   publish a stream.reset to every stream
     POST /_epoch     {"epoch": "abcd"}    become a different process lifetime
+    POST /_restart   {}                   re-exec: a new epoch, a new port, the
+                                          same argv (a supervisor restart)
     POST /_forget    {}                   the next `since` is older than retention
 """
 
@@ -183,6 +185,7 @@ class Handler(BaseHTTPRequestHandler):
             "/_reset": self.control_reset,
             "/_epoch": self.control_epoch,
             "/_forget": self.control_forget,
+            "/_restart": self.control_restart,
         }.get(url.path)
         if handler is None:
             if url.path.startswith("/items/"):
@@ -416,6 +419,21 @@ class Handler(BaseHTTPRequestHandler):
             self.server.state.epoch = body.get("epoch") or uuid.uuid4().hex[:8]
             self.server.state.seq = 1
         self.reply(200, {"ok": True, "epoch": self.server.state.epoch})
+
+    def control_restart(self, _query, _body):
+        """Re-exec this server: a fresh epoch, a fresh port, the same argv.
+
+        That is what a supervisor restart looks like from a client's side — the
+        ready file is rewritten and the old connection dies — and it is why a
+        client must re-read the ready file rather than trust the port it saw.
+        """
+        self.reply(200, {"ok": True})
+        self.wfile.flush()
+        threading.Thread(target=self._reexec, daemon=True).start()
+
+    def _reexec(self):
+        time.sleep(0.2)
+        os.execv(sys.executable, [sys.executable] + sys.argv)
 
     def control_forget(self, _query, _body):
         with self.server.state.lock:

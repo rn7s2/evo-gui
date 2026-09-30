@@ -319,6 +319,8 @@ pub struct Server {
     proc: Proc,
     ready: ReadyFile,
     client: Client,
+    /// Kept for [`Server::follow_ready`]: the new client gets the same patience.
+    config: ServerConfig,
 }
 
 impl std::fmt::Debug for Server {
@@ -391,6 +393,7 @@ impl Server {
                     proc: Proc::new(child, stdin, cfg),
                     ready,
                     client,
+                    config: cfg.clone(),
                 });
             }
             if Instant::now() >= deadline {
@@ -414,6 +417,28 @@ impl Server {
     /// The ready file this server last wrote — and rewrites on every restart.
     pub fn ready(&self) -> &ReadyFile {
         &self.ready
+    }
+
+    /// Re-read the ready file, and follow the server if it says it is a different
+    /// process lifetime: the port can change with a supervisor restart, and the
+    /// epoch is what says so. `Some(ready)` when the file moved on.
+    ///
+    /// The client it returns talks to the server the file now names; the caller's
+    /// old connections are dead and must be replaced.
+    pub fn follow_ready(&mut self) -> Option<ReadyFile> {
+        let ready = read_ready(&self.proc.ready_file)?;
+        if ready.epoch == self.ready.epoch {
+            return None;
+        }
+        let client = client_of(&ready, self.client_config())?;
+        self.client = client;
+        self.ready = ready;
+        Some(self.ready.clone())
+    }
+
+    /// The patience this server's client was built with.
+    fn client_config(&self) -> &ServerConfig {
+        &self.config
     }
 
     pub fn pid(&self) -> u32 {

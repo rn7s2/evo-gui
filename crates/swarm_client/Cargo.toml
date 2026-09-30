@@ -24,3 +24,7 @@ swarm_client = { path = ".", features = ["test-harness"] }
 [[test]]
 name = "protocol_e2e"
 required-features = ["test-harness"]
+
+[[test]]
+name = "real_server"
+required-features = ["test-harness"]

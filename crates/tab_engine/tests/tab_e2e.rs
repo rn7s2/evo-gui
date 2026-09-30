@@ -64,6 +64,12 @@ impl Feed {
         }
     }
 
+    /// Forget what has already arrived: what a test does when it cares only about
+    /// what happens *next* (a restart emits the same updates as a boot).
+    fn forget(&mut self) {
+        self.seen.clear();
+    }
+
     /// Blocks until the model is in the state the caller describes, feeding it
     /// every update on the way.
     fn feed_model(&mut self, model: &mut TabModel, done: impl Fn(&TabModel) -> bool) {
@@ -527,6 +533,66 @@ fn the_sink_is_the_fire_and_forget_form_of_the_same_request() {
     assert_eq!(posted.len(), 1, "{posted:?}");
     assert_eq!(posted[0]["body"]["op"], "run.interrupt");
     assert_eq!(posted[0]["body"]["args"]["scope"], "swarm");
+    drop(handle);
+}
+
+#[test]
+fn a_supervisor_restart_is_followed_into_the_new_lifetime() {
+    let (dir, handle, updates) = tab("restart", &[]);
+    let mut feed = Feed {
+        updates,
+        seen: Vec::new(),
+    };
+    let (epoch, pid) = serving(&mut feed);
+
+    // The server re-execs itself: a new epoch, a new port, the ready file
+    // rewritten — what a supervisor restart looks like from a client's side.
+    Control::attach(dir.path()).unwrap().restart().unwrap();
+
+    let update = feed.expect(
+        "the new lifetime's Ready",
+        |update| matches!(update, Update::Ready { epoch: seen, .. } if *seen != epoch),
+    );
+    let Update::Ready {
+        epoch: restarted,
+        pid: restarted_pid,
+        port,
+        session,
+    } = update
+    else {
+        unreachable!()
+    };
+    // The epoch is what says the lifetime changed — never the pid (a re-exec'd
+    // process keeps its pid, a supervised one gets a new one).
+    assert_ne!(restarted, epoch);
+    assert!(restarted_pid > 0 && restarted_pid != 0);
+    let _ = pid;
+    assert!(port > 0);
+    assert!(!session.id.is_empty());
+
+    // Everything is re-read from the new server, and the tab is live against it:
+    // an op the new process publishes reaches the UI, which only works if the
+    // stream was replaced along with the client. Only what arrives *after* the
+    // restart's Ready counts.
+    feed.forget();
+    feed.expect("the new lifetime's snapshot", snapshot_of("session"));
+    feed.expect(
+        "the new lifetime's live stream",
+        |update| matches!(update, Update::Stream { status } if !status.is_reconnecting()),
+    );
+    let control = Control::attach(dir.path()).unwrap();
+    control
+        .emit(json!({"op": "state.patch", "topic": "session", "patch": {"thinking": "high"}}))
+        .unwrap();
+    feed.expect("a frame from the new server", |update| {
+        matches!(
+            update,
+            Update::Op {
+                op: Op::StatePatch { .. },
+                ..
+            }
+        )
+    });
     drop(handle);
 }
 

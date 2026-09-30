@@ -270,19 +270,21 @@ fn run(
                     }
                 }
             }
-            Ok(Ended::Disconnected) => {
+            // A connect that failed is a connection that is not there *yet*: the
+            // server may be mid-restart, or — as a supervisor restart does in this
+            // build — serving on a new port that the consumer is about to find in
+            // the ready file. Retrying is the whole point of the backoff.
+            Ok(Ended::Disconnected) | Err(_) => {
                 if stopped.load(Ordering::SeqCst) {
                     break;
                 }
                 let retry_in = config.backoff.wait(attempt);
                 attempt = attempt.saturating_add(1);
-                let _ = &attempt;
                 let _ = messages.send_blocking(StreamMsg::Reconnecting { retry_in });
                 if !sleep_until(retry_in, &stopped) {
                     break;
                 }
             }
-            Err(_) => break,
         }
     }
     let _ = messages.send_blocking(StreamMsg::Stopped);

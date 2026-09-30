@@ -307,35 +307,22 @@ fn run(
         session: ready.session.clone(),
     });
 
-    let client = server.client().clone();
-    // One snapshot, then one stream from its cursor: there is no window between
-    // the two in which an op could be missed.
-    let snapshot = match client.snapshot(&engine.topics, None) {
-        Ok(snapshot) => snapshot,
-        Err(error) => {
-            engine.send(Update::BootFailed {
-                reason: format!("the server answered the ready file but not a snapshot: {error}"),
-                log_tail: server.log_tail(40),
-            });
-            let outcome = server
-                .shutdown()
-                .map(|shutdown| shutdown.outcome)
-                .unwrap_or(ShutdownOutcome::Killed);
-            engine.send(Update::Exited { outcome });
-            return;
-        }
+    let Some((mut live, snapshot)) = Live::connect(&server, &engine.topics, &commands) else {
+        engine.send(Update::BootFailed {
+            reason: "the server answered the ready file but not a snapshot".into(),
+            log_tail: server.log_tail(40),
+        });
+        let outcome = server
+            .shutdown()
+            .map(|shutdown| shutdown.outcome)
+            .unwrap_or(ShutdownOutcome::Killed);
+        engine.send(Update::Exited { outcome });
+        return;
     };
-    let stream = EventStream::start(
-        client.clone(),
-        StreamConfig::new(engine.topics.clone()).from(snapshot.cursor()),
-    );
-    let forwarder = forward_stream(stream.clone(), &commands);
     engine.topics_of(&snapshot);
 
-    let outcome = engine_loop(&mut engine, &mut server, &client, &stream, &mailbox);
-    stream.stop();
-    drop(stream);
-    let _ = forwarder.join();
+    let outcome = engine_loop(&mut engine, &mut server, &mut live, &commands, &mailbox);
+    live.stop();
     let outcome = match outcome {
         Some(outcome) => outcome,
         None => match server.shutdown() {
@@ -344,6 +331,66 @@ fn run(
         },
     };
     engine.send(Update::Exited { outcome });
+}
+
+/// The tab's connection to one process lifetime: the client, the stream it reads,
+/// and the thread that forwards what the stream sees.
+///
+/// A supervisor restart is a *new* lifetime — a new epoch, and in this build also
+/// a new port — so the connection is rebuilt rather than hoped for: the ready
+/// file is re-read, a client is made for the server it now names, and a fresh
+/// snapshot + stream replace the dead ones.
+struct Live {
+    client: Client,
+    stream: EventStream,
+    forwarder: Option<JoinHandle<()>>,
+}
+
+impl Live {
+    /// Snapshot, then one stream from that snapshot's cursor: there is no window
+    /// between the two in which an op could be missed.
+    fn connect(
+        server: &Server,
+        topics: &[String],
+        commands: &Sender<Inbound>,
+    ) -> Option<(Live, Snapshot)> {
+        let client = server.client().clone();
+        let snapshot = client.snapshot(topics, None).ok()?;
+        let stream = EventStream::start(
+            client.clone(),
+            StreamConfig::new(topics.to_vec()).from(snapshot.cursor()),
+        );
+        let forwarder = forward_stream(stream.clone(), commands);
+        Some((
+            Live {
+                client,
+                stream,
+                forwarder: Some(forwarder),
+            },
+            snapshot,
+        ))
+    }
+
+    /// Follow the server into the lifetime its ready file now names.
+    fn follow(
+        &mut self,
+        server: &Server,
+        topics: &[String],
+        commands: &Sender<Inbound>,
+    ) -> Option<Snapshot> {
+        self.stop();
+        let (live, snapshot) = Live::connect(server, topics, commands)?;
+        *self = live;
+        Some(snapshot)
+    }
+
+    /// Stop reading, and wait for the forwarding thread to end.
+    fn stop(&mut self) {
+        self.stream.stop();
+        if let Some(forwarder) = self.forwarder.take() {
+            let _ = forwarder.join();
+        }
+    }
 }
 
 /// Why a boot failed, in one line, for a tab's caption.
@@ -378,8 +425,8 @@ fn forward_stream(stream: EventStream, mailbox: &Sender<Inbound>) -> JoinHandle<
 fn engine_loop(
     engine: &mut Engine,
     server: &mut Server,
-    client: &Client,
-    stream: &EventStream,
+    live: &mut Live,
+    commands: &Sender<Inbound>,
     mailbox: &Receiver<Inbound>,
 ) -> Option<ShutdownOutcome> {
     loop {
@@ -392,16 +439,31 @@ fn engine_loop(
         match message {
             Inbound::Shutdown => return None,
             Inbound::Snapshot => {
-                engine.snapshot(client, None);
+                engine.snapshot(&live.client, None);
             }
-            Inbound::Request { rid, request } => post(engine, client, rid, *request),
-            Inbound::Fetch(fetch) => fetch_off_loop(engine, client, fetch),
+            Inbound::Request { rid, request } => post(engine, &live.client, rid, *request),
+            Inbound::Fetch(fetch) => fetch_off_loop(engine, &live.client, fetch),
             Inbound::Stream(StreamMsg::Connected { .. }) => {
                 engine.send(Update::Stream {
                     status: crate::types::StreamStatus::Connected,
                 });
             }
             Inbound::Stream(StreamMsg::Reconnecting { retry_in }) => {
+                // A supervisor restart is a new process lifetime, and a new
+                // lifetime can mean a new port: the ready file is the only place
+                // that says so, so it is read before believing the stream died.
+                if let Some(ready) = server.follow_ready() {
+                    engine.send(Update::Ready {
+                        epoch: ready.epoch.clone(),
+                        pid: ready.pid,
+                        port: ready.port,
+                        session: ready.session.clone(),
+                    });
+                    if let Some(snapshot) = live.follow(server, &engine.topics, commands) {
+                        engine.topics_of(&snapshot);
+                    }
+                    continue;
+                }
                 // A stream that cannot come back is a server that is not there.
                 if !server.is_running() {
                     engine.send(Update::ServerGone);
@@ -416,7 +478,7 @@ fn engine_loop(
                     let topic = frame.topic().unwrap_or_default().to_owned();
                     engine.frame(frame);
                     // That one topic is stale; everything else stands.
-                    engine.snapshot(client, Some(topic));
+                    engine.snapshot(&live.client, Some(topic));
                 } else {
                     engine.frame(frame);
                 }
@@ -432,8 +494,8 @@ fn engine_loop(
                         reason: reason.as_str().to_owned(),
                     },
                 });
-                if let Some(snapshot) = engine.snapshot(client, None) {
-                    stream.resume_from(snapshot.cursor());
+                if let Some(snapshot) = engine.snapshot(&live.client, None) {
+                    live.stream.resume_from(snapshot.cursor());
                 }
             }
             Inbound::Stream(StreamMsg::Stopped) => {

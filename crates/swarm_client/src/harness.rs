@@ -43,6 +43,29 @@ pub fn serving_argv(ready_file: &Path, extra: &[&str]) -> Vec<String> {
     argv
 }
 
+/// Hand a real server the stub home it needs to answer without a key.
+///
+/// `EVO_TEST_HOME` is a `scripts/stub_home.sh` directory; it becomes the child's
+/// `HOME`/`EVO_HOME` (`EVO_TEST_EVO_HOME` overrides the latter), and the
+/// variables that would tie the child to *our* evo session are dropped. Without
+/// `EVO_TEST_HOME` the config is returned as it was, so a test in a normal
+/// environment behaves as before.
+pub fn with_stub_home(config: ServerConfig) -> ServerConfig {
+    let Some(home) = std::env::var_os("EVO_TEST_HOME") else {
+        return config;
+    };
+    let home = PathBuf::from(home);
+    let evo_home = std::env::var_os("EVO_TEST_EVO_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".evo/"));
+    let _ = std::fs::create_dir_all(&evo_home);
+    config
+        .with_env("HOME", home.to_string_lossy())
+        .with_env("EVO_HOME", evo_home.to_string_lossy())
+        .with_env_removed("EVO_SESSIONS_DIR")
+        .with_env_removed("EVO_SUPERVISED_CHILD")
+}
+
 /// A [`ServerConfig`] that runs the fake server in `dir`, with extra argv.
 pub fn fake_config(dir: &Path, extra: &[&str]) -> std::io::Result<ServerConfig> {
     let bin = fake_swarm_bin(dir)?;
@@ -255,6 +278,13 @@ impl Control {
     /// Publish a `stream.reset` with this reason.
     pub fn stream_reset(&self, reason: &str) -> Result<()> {
         self.control("/_reset", json!({"reason": reason}))?;
+        Ok(())
+    }
+
+    /// Re-exec the server: a new epoch, a new port, the same argv — what a
+    /// supervisor restart looks like from a client's side.
+    pub fn restart(&self) -> Result<()> {
+        self.control("/_restart", json!({}))?;
         Ok(())
     }
 
