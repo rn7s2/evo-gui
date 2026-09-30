@@ -1,0 +1,64 @@
+{
+  "epoch": "7f3a91c2",
+  "seq": 60,
+  "topics": {
+    "lane:1": {
+      "state": {
+        "status": "compacting",
+        "task": {
+          "id": "tk_lane_1",
+          "kind": "compact",
+          "turn": null,
+          "started_at": 1759200030000,
+          "step_started_at": 1759200030000
+        },
+        "model": { "id": "stub-b", "provider": "openai", "ready": true, "reason": null },
+        "thinking": "medium",
+        "language": "en",
+        "context": { "tokens": 21000, "window": 200000, "source": "estimate" },
+        "goal": { "goal_id": "b1", "objective": "the view model", "status": "active", "budget": null, "tokens": 4000 },
+        "todos": [{ "text": "write items", "status": "done" }],
+        "queue": [],
+        "jobs": [],
+        "segments": [
+          { "name": "model", "order": 100, "side": "left", "text": "stub-b", "data": {} },
+          { "name": "context", "order": 300, "side": "left", "text": "ctx 21k/200k (11%)", "data": {} }
+        ],
+        "session": {
+          "id": "20260929T092600Z_aa11bb22",
+          "path": "/home/.evo/swarm/20260929T092544Z-90a1/lane-1.sexp",
+          "leaf": "l_4",
+          "program": "lane",
+          "started_at": 1759200010000
+        }
+      },
+      "items": [
+        { "id": "l_1", "ts": 1759200010000, "kind": "user", "text": "port the view model", "images": [], "status": "sent", "queue": null },
+        {
+          "id": "l_2",
+          "ts": 1759200015000,
+          "kind": "tool",
+          "call_id": "lcall_1",
+          "name": "edit",
+          "args": { "path": "crates/session/src/item.rs" },
+          "status": "ok",
+          "result": { "text": "wrote 400 lines", "chars": 15, "truncated": false },
+          "parent": null
+        },
+        {
+          "id": "l_3",
+          "ts": 1759200020000,
+          "kind": "assistant",
+          "text": "Now the transcript.",
+          "thinking": "",
+          "status": "final",
+          "error": null,
+          "model": "stub-b",
+          "provider": "openai",
+          "usage": { "input": 21000, "output": 300, "cache_read": 0, "cache_write": 0 }
+        }
+      ],
+      "has_more": false
+    }
+  }
+}

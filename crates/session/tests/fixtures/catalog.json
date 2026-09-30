@@ -1,0 +1,25 @@
+{
+  "models": [
+    { "id": "stub-a", "provider": "stub", "name": "Stub A", "api": "anthropic-messages", "context_window": 200000, "reasoning": true, "images": true, "ready": true, "reason": null },
+    { "id": "stub-b", "provider": "stub", "name": "Stub B", "api": "anthropic-messages", "context_window": 100000, "reasoning": true, "images": true, "ready": true, "reason": null },
+    { "id": "unready", "provider": "stub", "name": "Unready", "api": "anthropic-messages", "context_window": 8000, "reasoning": false, "images": false, "ready": false, "reason": "no API key for this provider" }
+  ],
+  "providers": [
+    { "name": "stub", "api": "anthropic-messages", "has_key": true, "key_env": null }
+  ],
+  "default_model": { "id": "stub-a", "provider": "stub" },
+  "thinking_levels": ["off", "low", "medium", "high", "xhigh", "max"],
+  "languages": [{ "code": "en", "name": "English" }],
+  "ops": [{ "name": "input.send", "args": {}, "precondition": "none" }],
+  "commands": [{ "name": "lore", "description": "show lore, or add guidance", "args_hint": "<text>" }],
+  "skills": [],
+  "tools": [],
+  "lanes": {
+    "models": [
+      { "id": "stub-a", "provider": "stub", "ok": true, "reason": null },
+      { "id": "stub-b", "provider": "stub", "ok": true, "reason": null },
+      { "id": "unready", "provider": "stub", "ok": false, "reason": "a lane cannot register this model" }
+    ]
+  },
+  "warnings": []
+}

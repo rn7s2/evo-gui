@@ -2,20 +2,20 @@
 //! the worker-count chooser, the launch plan they produce, and the history list — so the
 //! gpui empty tab is a thin renderer over this.
 //!
-//! Inputs are plain data and raw JSON: a `/registry` body (from the model cache, or from
-//! the `--no-userspace` probe that tells the lanes chooser which APIs exist in a lane), the
-//! configured `:swarm-workers` value, and one plain entry per resumable session. Nothing
-//! here does I/O and nothing here depends on another crate.
+//! Inputs are plain data and raw JSON: a `/catalog` body (`evo-swarm catalog --json`, or
+//! the running server's `GET /catalog` — CONTRACT §5.6), the configured worker count, and
+//! one plain entry per resumable session. Nothing here does I/O and nothing here depends on
+//! another crate.
 //!
 //! # The three choosers
 //!
 //! Every chooser's first option is **Default** — the state the tab starts in, and the one
 //! that passes nothing to the swarm (§7.2). The coordinator's chooser lists every model in
-//! the registry; the lanes' chooser lists the same models but marks one **unavailable**
-//! when a lane could not register it, which is the case exactly when its API is not in the
-//! kernel's own set (§9.4 — a `--no-userspace` probe's `/registry.apis`). Until a probe
-//! says what that set is, the lanes chooser carries [`Chooser::uncertain`] rather than
-//! claiming a model works.
+//! the catalog and marks one unavailable when the catalog says it is not ready
+//! (`ready`/`reason`); the lanes' chooser lists the same models and marks one unavailable
+//! when `catalog.lanes.models` says a lane cannot register it (`ok`/`reason`). Neither
+//! chooser probes anything: `evo-swarm check --json` and the catalog's own `lanes.models`
+//! are where that answer comes from now (Appendix B, F1).
 //!
 //! # History (§9.5)
 //!
@@ -32,10 +32,6 @@ pub const DEFAULT_KEY: &str = "default";
 
 /// The largest worker count the chooser offers (§14.2 allows 1–64).
 pub const WORKERS_MAX: u16 = 64;
-
-/// Why a lane cannot use a model: the API it needs is not in the lane, and only the
-/// project's `swarm.lisp` can put it there (`swarm/init.lisp`'s model check).
-pub const NEEDS_EXTENSION_API: &str = "needs an extension API — set it in swarm.lisp";
 
 /// The detail line under the coordinator chooser's Default option.
 const COORDINATOR_DEFAULT: &str = "evo's own default";
@@ -83,17 +79,12 @@ impl ChooserOption {
     }
 }
 
-/// One chooser: the options, and whether the availability of the lane options is actually
-/// known.
+/// One chooser: the options, and which of them can be launched.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Chooser {
     /// The Default option first, then the rest — models sorted by provider then id,
     /// worker counts ascending.
     pub options: Vec<ChooserOption>,
-    /// True for a lanes chooser built without knowing the kernel's API set: every option
-    /// reads available, but that has not been verified against a `--no-userspace` probe
-    /// (§9.4), so the UI should say so rather than trust it.
-    pub uncertain: bool,
 }
 
 impl Chooser {
@@ -222,9 +213,9 @@ pub struct HistoryRow {
     pub open_at_quit: bool,
 }
 
-// --- choosers from /registry -------------------------------------------------------
+// --- the choosers ----------------------------------------------------------------
 
-/// The coordinator's model chooser: every model the registry knows, sorted by provider then
+/// The coordinator's model chooser: every model the catalog knows, sorted by provider then
 /// id, with the ambiguity rule of §7.3 for the label.
 ///
 /// An id registered under more than one provider can only be reached as
@@ -232,27 +223,27 @@ pub struct HistoryRow {
 /// `src/provider/registry.lisp`: "A bare id resolves to the FIRST registration of that id"),
 /// so exactly one of those registrations is offered and the others are listed disabled,
 /// saying which one the flag would pick. See [`Reach::ById`].
-pub fn coordinator_chooser(registry: &Value) -> Chooser {
+pub fn coordinator_chooser(catalog: &Value) -> Chooser {
     Chooser {
-        options: model_options(registry, None, COORDINATOR_DEFAULT, Reach::ById),
-        uncertain: false,
+        options: model_options(
+            catalog,
+            COORDINATOR_DEFAULT,
+            Reach::ById,
+            Availability::Model,
+        ),
     }
 }
 
-/// The lanes' model chooser: the same models, but a model is available only when a lane
-/// could register it — its `api` has to be in the kernel's own set, which a `--no-userspace`
-/// probe's `/registry.apis` reports (§9.4). `kernel_apis` is that array; `None` means no
-/// probe has said yet, and the chooser is then [`Chooser::uncertain`].
-pub fn lanes_chooser(registry: &Value, kernel_apis: Option<&Value>) -> Chooser {
-    match kernel_apis.filter(|apis| apis.is_array()) {
-        Some(apis) => Chooser {
-            options: model_options(registry, Some(apis), LANES_DEFAULT, Reach::ByProvider),
-            uncertain: false,
-        },
-        None => Chooser {
-            options: model_options(registry, None, LANES_DEFAULT, Reach::ByProvider),
-            uncertain: true,
-        },
+/// The lanes' model chooser: the same models, but a model is available only when the
+/// catalog's own `lanes.models` says a lane can register it (CONTRACT §5.6).
+pub fn lanes_chooser(catalog: &Value) -> Chooser {
+    Chooser {
+        options: model_options(
+            catalog,
+            LANES_DEFAULT,
+            Reach::ByProvider,
+            Availability::Lane,
+        ),
     }
 }
 
@@ -261,15 +252,23 @@ pub fn lanes_chooser(registry: &Value, kernel_apis: Option<&Value>) -> Chooser {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Reach {
     /// The coordinator's `--model <id>`: the model is named by its bare id, so only the
-    /// registration a bare id resolves to can be reached. evo's registries keep
-    /// registration order (`*models*` is documented "in registration order",
-    /// `src/provider/registry.lisp`, and `/registry.models` is that list walked in order,
-    /// `src/serve/routes.lisp`), and `find-model` takes the **first** entry for a bare id —
-    /// so the first registration in the registry is the one `--model` runs.
+    /// registration a bare id resolves to can be reached. The catalog keeps registration
+    /// order (`/catalog.models` is the registry's own list walked in order), and
+    /// `find-model` takes the **first** entry for a bare id — so the first registration in
+    /// the catalog is the one `--model` runs.
     ById,
-    /// A lane's model, written into the project's `swarm.lisp` with its provider: every
-    /// registration of an id is its own choice, exactly as §9.6 writes it.
+    /// A lane's model, named with its provider: every registration of an id is its own
+    /// choice.
     ByProvider,
+}
+
+/// Where a model option's availability comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Availability {
+    /// The coordinator's own model: the catalog entry's `ready` and `reason`.
+    Model,
+    /// A lane's model: `catalog.lanes.models`, matched by id and provider.
+    Lane,
 }
 
 /// The worker-count chooser (§7.2 row 3): Default, then 1…64. `swarm_workers` is the
@@ -300,43 +299,22 @@ pub fn workers_chooser(swarm_workers: Option<u16>) -> Chooser {
         model_id: None,
         provider: None,
     }));
-    Chooser {
-        options,
-        uncertain: false,
-    }
+    Chooser { options }
 }
 
-/// The configured `:swarm-workers` from a `/registry` body's `settings` — evo's own default
-/// lane count (`docs/swarm.md`), which the workers chooser's Default means when it is set.
-/// A JSON key crosses the wire hyphen→underscore (`src/serve/json.lisp`), hence
-/// `swarm_workers`. Absent, null, non-numbers and zero read as "not configured"; a value the
-/// chooser's own 1–64 range does not hold is still reported, because it is what Default
-/// means.
-pub fn swarm_workers_setting(registry: &Value) -> Option<u16> {
-    registry
-        .get("settings")?
-        .get("swarm_workers")?
-        .as_u64()
-        .and_then(|n| u16::try_from(n).ok())
-        .filter(|n| *n > 0)
-}
-
-/// Every model of a `/registry` body as an option, Default first.
-///
-/// `kernel_apis` is `None` for "cannot tell": then nothing is marked unavailable.
+/// Every model of a `/catalog` body as an option, Default first.
 fn model_options(
-    registry: &Value,
-    kernel_apis: Option<&Value>,
+    catalog: &Value,
     default_detail: &str,
     reach: Reach,
+    availability: Availability,
 ) -> Vec<ChooserOption> {
-    let models = registry.get("models").and_then(Value::as_array);
-    let Some(models) = models else {
+    let Some(models) = catalog.get("models").and_then(Value::as_array) else {
         return vec![default_option(default_detail)];
     };
 
     // An id under more than one provider cannot be named by its id alone (§7.3), and the
-    // first registration of an id is the one a bare id means. Both are read in registry
+    // first registration of an id is the one a bare id means. Both are read in catalog
     // order, which is registration order.
     let mut by_id: Vec<(String, Vec<String>)> = Vec::new();
     for model in models {
@@ -362,17 +340,7 @@ fn model_options(
             .and_then(|(_, providers)| providers.first().cloned())
     };
 
-    let apis: Option<Vec<String>> = kernel_apis.map(|apis| {
-        apis.as_array()
-            .map(|apis| {
-                apis.iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_string)
-                    .collect()
-            })
-            .unwrap_or_default()
-    });
-
+    let lanes = catalog.get("lanes").and_then(|lanes| lanes.get("models"));
     let mut options: Vec<ChooserOption> = Vec::with_capacity(models.len());
     for model in models {
         let (Some(id), Some(provider)) =
@@ -395,31 +363,44 @@ fn model_options(
                 .map(|winner| format!("evo-swarm --model resolves this id to {}", winner)),
             Reach::ById => None,
         };
-        let (api_ok, api_reason) = match &apis {
-            // No probe: nothing is claimed to be unavailable, and the chooser says so.
-            None => (true, None),
-            Some(apis) => {
-                let api = string_field(model, "api");
-                if api.as_ref().is_some_and(|api| apis.contains(api)) {
-                    (true, None)
-                } else {
-                    (false, Some(NEEDS_EXTENSION_API.to_string()))
-                }
-            }
+        let (usable, reason) = match availability {
+            Availability::Model => match model.get("ready").and_then(Value::as_bool) {
+                Some(false) => (
+                    false,
+                    Some(
+                        string_field(model, "reason")
+                            .unwrap_or_else(|| "the model is not ready".to_string()),
+                    ),
+                ),
+                _ => (true, None),
+            },
+            Availability::Lane => match lane_entry(lanes, &id, &provider) {
+                Some(entry) => match entry.get("ok").and_then(Value::as_bool) {
+                    Some(false) => (
+                        false,
+                        Some(
+                            string_field(&entry, "reason")
+                                .unwrap_or_else(|| "a lane cannot register this model".to_string()),
+                        ),
+                    ),
+                    _ => (true, None),
+                },
+                // Nothing said about a model: nothing claimed either.
+                None => (true, None),
+            },
         };
-        let unavailable_reason = unreachable.clone().or(api_reason);
-        let available = api_ok && unreachable.is_none();
+        let unavailable_reason = unreachable.clone().or(reason);
         options.push(ChooserOption {
             key: format!("{}@{}", id, provider),
             label,
             detail: model_detail(model),
-            available,
+            available: usable && unreachable.is_none(),
             unavailable_reason,
             model_id: Some(id),
             provider: Some(provider),
         });
     }
-    // Stable, so two models with the same provider and id keep the registry's order.
+    // Stable, so two models with the same provider and id keep the catalog's order.
     options.sort_by(|a, b| {
         a.provider
             .cmp(&b.provider)
@@ -431,8 +412,8 @@ fn model_options(
     all
 }
 
-/// One model's detail line: the context window, then what else the registry says —
-/// `200k ctx · vision · effort low–max`.
+/// One model's detail line, from the catalog's own fields (CONTRACT §5.6):
+/// `200k ctx · vision · thinking`.
 fn model_detail(model: &Value) -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Some(window) = model.get("context_window").and_then(Value::as_u64) {
@@ -440,18 +421,11 @@ fn model_detail(model: &Value) -> String {
             parts.push(format!("{} ctx", window_size(window)));
         }
     }
-    if model.get("vision").and_then(Value::as_bool) == Some(true) {
+    if model.get("images").and_then(Value::as_bool) == Some(true) {
         parts.push("vision".to_string());
     }
-    let effort: Vec<&str> = model
-        .get("effort")
-        .and_then(Value::as_array)
-        .map(|levels| levels.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default();
-    match effort.as_slice() {
-        [] => {}
-        [only] => parts.push(format!("effort {}", only)),
-        [first, .., last] => parts.push(format!("effort {}–{}", first, last)),
+    if model.get("reasoning").and_then(Value::as_bool) == Some(true) {
+        parts.push("thinking".to_string());
     }
     parts.join(" · ")
 }
@@ -500,6 +474,31 @@ fn round_tenths(m: f64) -> u64 {
     // Nearest with ties away from zero is `floor(m * 10 + 1/2)`, and neither value is
     // negative here, so integer division truncating is that floor.
     ((2 * numerator + denominator) / (2 * denominator)) as u64
+}
+
+/// The `catalog.lanes.models` entry for one `(id, provider)`, from either shape the list
+/// may take: an array of `{id, provider, ok, reason}`, or an object keyed by model id and
+/// then by provider. `None` when the catalog says nothing about that model.
+fn lane_entry(lanes: Option<&Value>, id: &str, provider: &str) -> Option<Value> {
+    let lanes = lanes?;
+    if let Some(entries) = lanes.as_array() {
+        return entries
+            .iter()
+            .find(|entry| {
+                string_field(entry, "id").as_deref() == Some(id)
+                    && string_field(entry, "provider")
+                        .map(|entry| entry.to_lowercase())
+                        .as_deref()
+                        == Some(provider)
+            })
+            .cloned();
+    }
+    lanes
+        .as_object()?
+        .get(id)?
+        .as_object()?
+        .get(provider)
+        .cloned()
 }
 
 /// The first option of every chooser.
@@ -900,11 +899,10 @@ fn days_in_month(year: i64, month: u32) -> u32 {
 /// The empty tab (§7.2): the three choosers, what is chosen in each, and the history list.
 #[derive(Clone, Debug)]
 pub struct Launcher {
-    /// The catalog the choosers were built from: the model cache, or a probe's reply.
-    registry: Value,
-    /// The kernel's API set from a `--no-userspace` probe, or `None` while none has said.
-    kernel_apis: Option<Value>,
-    /// The configured `:swarm-workers`, which is what the workers chooser's Default means.
+    /// The catalog the choosers were built from: `evo-swarm catalog --json`, or the
+    /// running server's `GET /catalog` (CONTRACT §5.6).
+    catalog: Value,
+    /// The configured worker count, which is what the workers chooser's Default means.
     swarm_workers: Option<u16>,
     coordinator: Chooser,
     lanes: Chooser,
@@ -922,12 +920,11 @@ impl Default for Launcher {
 }
 
 impl Launcher {
-    /// An empty tab before any registry has arrived: the Default option in every chooser,
+    /// An empty tab before any catalog has arrived: the Default option in every chooser,
     /// the worker counts, and no history.
     pub fn new() -> Launcher {
         let mut launcher = Launcher {
-            registry: Value::Null,
-            kernel_apis: None,
+            catalog: Value::Null,
             swarm_workers: None,
             coordinator: Chooser::default(),
             lanes: Chooser::default(),
@@ -941,51 +938,21 @@ impl Launcher {
         launcher
     }
 
-    /// The model catalog: the coordinator's chooser gets every model, the lanes' chooser
-    /// the same models — but **not** measured against this registry's `apis`. A live
-    /// coordinator's registry carries the APIs its extensions added, while a lane only has
-    /// what a `--no-userspace` probe would report, so pass that with
-    /// [`Launcher::set_kernel_apis`] — or hand the probe's reply to
-    /// [`Launcher::set_probe_registry`], which is both. The registry's own
-    /// `:swarm-workers` setting, when it has one, becomes the workers default.
+    /// The model catalog (CONTRACT §5.6): every model, with the coordinator's own
+    /// `ready`/`reason` and `lanes.models`' `ok`/`reason` deciding what each chooser
+    /// offers as usable. Nothing is probed here — one body says it all.
     ///
     /// Returns whether anything the UI renders changed.
-    pub fn set_registry(&mut self, registry: &Value) -> bool {
+    pub fn set_catalog(&mut self, catalog: &Value) -> bool {
         let before = self.clone();
-        self.registry = registry.clone();
-        if let Some(workers) = swarm_workers_setting(registry) {
-            self.swarm_workers = Some(workers);
-        }
-        self.rebuild_choosers();
-        self.differs(&before)
-    }
-
-    /// A `--no-userspace` probe's registry: its models *and* its `apis` — the kernel's own
-    /// set, which is what the lanes chooser measures availability against (§9.4).
-    pub fn set_probe_registry(&mut self, registry: &Value) -> bool {
-        let before = self.clone();
-        self.registry = registry.clone();
-        self.kernel_apis = normalize_apis(registry.get("apis"));
-        if let Some(workers) = swarm_workers_setting(registry) {
-            self.swarm_workers = Some(workers);
-        }
-        self.rebuild_choosers();
-        self.differs(&before)
-    }
-
-    /// The kernel's API set — a probe's `/registry.apis` array, or `None` for "no probe has
-    /// said". Without it the lanes chooser marks nothing unavailable and reports
-    /// [`Chooser::uncertain`] instead of claiming models work in a lane.
-    pub fn set_kernel_apis(&mut self, apis: Option<&Value>) -> bool {
-        let before = self.clone();
-        self.kernel_apis = normalize_apis(apis);
+        self.catalog = catalog.clone();
         self.rebuild_choosers();
         self.differs(&before)
     }
 
     /// The configured `:swarm-workers`, which is what the workers chooser's Default means
     /// (`docs/swarm.md`: the default lane count, `--workers` wins). Passed separately from
-    /// the registry because it can also come from the project's own `swarm.lisp`.
+    /// the catalog because it can also come from the project's own `swarm.lisp`.
     pub fn set_swarm_workers(&mut self, workers: Option<u16>) -> bool {
         let before = self.clone();
         self.swarm_workers = workers.filter(|n| *n > 0);
@@ -1054,7 +1021,7 @@ impl Launcher {
     }
 
     /// Choose one option by key. An unknown key is ignored — the choosers are rebuilt from
-    /// `GET /registry`, and a selection cannot outlive the option it named. Returns whether
+    /// `GET /catalog`, and a selection cannot outlive the option it named. Returns whether
     /// the choice changed.
     pub fn select(&mut self, which: Choice, key: &str) -> bool {
         if self.chooser(which).option(key).is_none() || self.selected_key(which) == key {
@@ -1089,14 +1056,14 @@ impl Launcher {
     }
 
     fn rebuild_choosers(&mut self) {
-        self.coordinator = coordinator_chooser(&self.registry);
-        self.lanes = lanes_chooser(&self.registry, self.kernel_apis.as_ref());
+        self.coordinator = coordinator_chooser(&self.catalog);
+        self.lanes = lanes_chooser(&self.catalog);
         self.workers = workers_chooser(self.swarm_workers);
         self.keep_selections_valid();
     }
 
     /// A chosen key that is no longer in its chooser falls back to Default: a model can
-    /// leave the registry between one refresh and the next.
+    /// leave the catalog between one refresh and the next.
     fn keep_selections_valid(&mut self) {
         if self.coordinator.option(&self.coordinator_key).is_none() {
             self.coordinator_key = DEFAULT_KEY.to_string();
@@ -1126,12 +1093,6 @@ fn selected_model(chooser: &Chooser, key: &str) -> Option<(String, String)> {
         return None;
     }
     chooser.option(key)?.model()
-}
-
-/// An `apis` array, or `None` for anything else — a null or a missing field means no probe
-/// has reported the kernel's set, not that the set is empty.
-fn normalize_apis(apis: Option<&Value>) -> Option<Value> {
-    apis.filter(|apis| apis.is_array()).cloned()
 }
 
 /// A JSON field as a string; null, a missing key and a non-string all read as `None`.
