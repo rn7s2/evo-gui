@@ -15,12 +15,12 @@
 //!   quit that must not wait for the ladder still stops the server at once.
 //! * **Readiness is one file.** The child writes `<tabdir>/ready.json`
 //!   atomically once it is listening, and rewrites it after every supervisor
-//!   restart: the port, the token and the epoch all come from there, so nothing
-//!   polls `/health`, nothing picks a free port, and nothing compares pids.
-//! * **Readiness is one file.** The child writes `<tabdir>/ready.json`
-//!   atomically once it is listening, and rewrites it after every supervisor
-//!   restart: the port, the token and the epoch all come from there, so nothing
-//!   polls `/health`, nothing picks a free port, and nothing compares pids.
+//!   restart. What a restart changes is the epoch; what it keeps is the port it
+//!   bound and the token it minted at launch, so a client built from the first
+//!   file is still the right client after the tenth restart. Nothing polls
+//!   `/health`, nothing picks a free port, nothing compares pids, and nothing is
+//!   rebuilt when the epoch moves: a stream reconnects where it was and is
+//!   answered with `stream.reset` (§3).
 
 use std::collections::BTreeSet;
 use std::fs::{File, OpenOptions};
@@ -321,8 +321,6 @@ pub struct Server {
     proc: Proc,
     ready: ReadyFile,
     client: Client,
-    /// Kept for [`Server::follow_ready`]: the new client gets the same patience.
-    config: ServerConfig,
 }
 
 impl std::fmt::Debug for Server {
@@ -395,7 +393,6 @@ impl Server {
                     proc: Proc::new(child, stdin, cfg),
                     ready,
                     client,
-                    config: cfg.clone(),
                 });
             }
             if Instant::now() >= deadline {
@@ -416,34 +413,12 @@ impl Server {
         }
     }
 
-    /// The ready file this server last wrote — and rewrites on every restart.
+    /// The ready file this server was started from. A restart rewrites it, but
+    /// changes none of what a client needs: §1 keeps the port and the token, so a
+    /// new lifetime is a `stream.reset` on the connection that already exists —
+    /// see [`read_ready`] for a fresh read of the file.
     pub fn ready(&self) -> &ReadyFile {
         &self.ready
-    }
-
-    /// Re-read the ready file, and follow the server if it says it is a different
-    /// process lifetime. `Some(ready)` when the file moved on.
-    ///
-    /// The client this leaves behind talks to the server the file now names; the
-    /// caller's old connections are dead and must be replaced. It is needed
-    /// because a lifetime is more than the epoch: the token is minted per process
-    /// (verified against the real server), so a client that kept the one it first
-    /// read gets 401 for ever after a restart — and this build also moved the port
-    /// before the supervisor pinned it.
-    pub fn follow_ready(&mut self) -> Option<ReadyFile> {
-        let ready = read_ready(&self.proc.ready_file)?;
-        if ready.epoch == self.ready.epoch {
-            return None;
-        }
-        let client = client_of(&ready, self.client_config())?;
-        self.client = client;
-        self.ready = ready;
-        Some(self.ready.clone())
-    }
-
-    /// The patience this server's client was built with.
-    fn client_config(&self) -> &ServerConfig {
-        &self.config
     }
 
     pub fn pid(&self) -> u32 {
@@ -560,7 +535,10 @@ fn client_of(ready: &ReadyFile, cfg: &ServerConfig) -> Option<Client> {
 /// The child writes it atomically (tmp + rename), so a reader either sees the
 /// whole document or no file at all; a torn read would be a server bug, and it
 /// is treated as "not ready yet".
-fn read_ready(path: &Path) -> Option<ReadyFile> {
+/// Read a ready file, freshly: what a caller gets by polling one while a server
+/// restarts. Written by the process that is serving, and rewritten by the
+/// supervisor on every restart with a new epoch (§1).
+pub fn read_ready(path: &Path) -> Option<ReadyFile> {
     let text = std::fs::read_to_string(path).ok()?;
     serde_json::from_str::<ReadyFile>(&text).ok()
 }

@@ -417,22 +417,21 @@ fn the_sink_is_the_fire_and_forget_form_of_the_same_request() {
 }
 
 #[test]
-fn a_supervisor_restart_is_followed_into_the_new_lifetime() {
+fn a_supervisor_restart_is_a_reset_on_the_same_connection() {
     let (dir, handle, updates) = tab("restart", &[]);
     let mut feed = Feed::new(updates);
-    let (epoch, pid) = serving(&mut feed);
-    let _ = pid;
+    let (epoch, _pid) = serving(&mut feed);
     let control = Control::attach(dir.path()).unwrap();
     let port = control.client().port();
 
-    // The server re-execs itself: a new epoch and a new token, on the port it
-    // bound, with the ready file rewritten — a supervisor restart.
+    // The server re-execs itself: a new epoch, on the port it bound and with the
+    // token it minted at launch — a supervisor restart (§1).
     control.restart().unwrap();
 
-    // The tab follows the file rather than waiting for a stream that cannot come
-    // back: everything is read again from the new server, and what the new
-    // process publishes reaches the UI — which only works if the client was
-    // rebuilt with the token the file now holds.
+    // So there is nothing for the tab to be told and nothing to rebuild: the
+    // stream reconnects where it was, the server answers a cursor from another
+    // epoch with `stream.reset{restarted}`, and the tab reads itself again —
+    // snapshot first, then the new lifetime's frames, on a stream that is live.
     feed.forget();
     let snapshot = feed.expect(
         "the new lifetime's session snapshot",
@@ -463,7 +462,6 @@ fn a_supervisor_restart_is_followed_into_the_new_lifetime() {
             }
         )
     });
-    assert_ne!(Control::attach(dir.path()).unwrap().client().port(), 0);
     assert!(!epoch.is_empty());
     drop(handle);
 }
