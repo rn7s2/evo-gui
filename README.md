@@ -9,17 +9,13 @@ it.
 
 ![evo-desktop icon](assets/icon/icon-1024.png)
 
-Ten states of the real window — the empty tab, six lanes with one of them working,
-a lane's transcript, a tool row opened, a prompt queued, a lane's report, the
-history, the two ways a swarm fails to start, and the tab strip itself — are
-captured in both themes by `crates/app/examples/screens.rs` and described in
-[`docs/screens.md`](docs/screens.md), which is also the recipe for taking them.
-The pictures are not kept in the repository: every branch regenerates them, and
-they only conflict. Take them into a directory of your own:
+![The empty tab as the app opens it: the choosers on Default, the folder card, and the history](docs/screens/01-empty-light.png)
+![Six lanes, one of them working: the agents column, the delegate call, and the Stop swarm button](docs/screens/02-lanes-working-light.png)
+![The tab strip with four tabs, one of them working and one under the pointer](docs/screens/10-tabs-light.png)
 
-```sh
-cargo run -p evo-desktop --example screens -- --capture /tmp/screens
-```
+Those are three of the twenty captures in [`docs/screens.md`](docs/screens.md) — ten
+states, each in both themes — which is also the recipe for taking them again, and
+`crates/app/examples/screens.rs` is what takes them.
 
 ## Requirements
 
@@ -107,8 +103,8 @@ wearing an `open at last quit` badge.
 - [`docs/usage.md`](docs/usage.md) — how to drive the app: tabs and their
   shortcuts, the model choosers, history, the tab page's three columns, Settings,
   failures, and where the logs are.
-- [`docs/screens.md`](docs/screens.md) — the twenty states the capture run takes
-  (it does not keep the pictures), and what is real versus scripted in them.
+- [`docs/screens.md`](docs/screens.md) — the twenty captures, and what is real
+  versus scripted in them.
 
 ## Status
 

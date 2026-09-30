@@ -6,12 +6,8 @@ by hand, nothing mocked.
 
 ```sh
 EVO_SWARM_BIN=…/evo-swarm EVO_AGENT_BIN=…/evo-agent \
-  cargo run -p evo-desktop --example screens -- --capture /tmp/screens
+  cargo run -p evo-desktop --example screens -- --capture docs/screens
 ```
-
-They are not kept in the repository: every branch regenerates them, and a merge of
-two branches that have both captured is a merge of twenty binary conflicts. The
-names below are the files a run leaves in its directory.
 
 `crates/app/examples/screens.rs` drives the app the way a person does: it opens
 the window the app opens, calls the app's own launch-time loads, launches a tab
@@ -39,11 +35,11 @@ call one tool, `SLOW …` makes it answer in sixty deltas over six seconds.
 | `03-lane-transcript-*` | Lane 1 selected: the conversation column is *that lane's* transcript — the `todo` call it was told to make, its result, and the lane's own todos in the composer's todo strip at the foot of the column. Input still goes to the coordinator. |
 | `04-tool-*` | A tool row, opened: `bash`'s arguments and its result as rows, with the exit status. The row is opened by clicking its own header, and a truncated result is fetched whole with `GET /items/<id>`. |
 | `05-queued-*` | A prompt typed while the coordinator works: the card says `queued · sent at the next step` and carries a **Cancel**, the answer above it is still being written, and the button is still **Stop swarm** — the face follows the swarm being busy, not the composer's draft. |
-| `06-report-*` | What a lane's report looks like when it arrives: the `Lane 1 report` card with the fields the lane sent (`done`, `evidence`, `next`), which is the item a client renders instead of reading `[lane 1 report]` out of a sentence. The report arrives once, as this item — the swarm does not also publish it as a notice. |
+| `06-report-*` | What a lane's report looks like when it arrives: the `lane 1 report` card with the fields the lane sent (`done`, `evidence`, `next`), which is the item a client renders instead of reading `[lane 1 report]` out of a sentence. The line under it — `ok: [lane 1 report] done: …` — is that same report published a second time on the swarm's notice channel, which is the open item in `docs/usage.md`; the picture is here to show the card, not the line. |
 | `07-history-*` | A second tab in the same window, after that session: the New Swarm page again, with the resumable swarm in the history list under the cards — its glyph, its title, its `~`-shortened folder, how long ago, and the `›` that says a click resumes it. |
 | `08-check-problem-*` | The New Swarm page when the binary `app.json` names cannot be run: both model fields say `No models are registered` in evo's own words, and under the cards are the check's own two lines — `/nonexistent/evo-swarm could not be run — fix it in Settings…` and the catalog's — each one line, calm, and a click on the first opens Settings. This is also the window that shows a history row with a real title. |
+| `09-boot-failure-*` | The same binary, launched in a folder: *Could not start a swarm*, the folder it could not start in, the engine's own reason (`config: cannot run /nonexistent/evo-swarm: …`), and **Retry** / **Close** (§9.7). The log box under the reason only appears when the server left a log tail the reason does not already say — this failure is refused before a server runs, so there is none. |
 | `10-tabs-*` | The tab strip with four tabs, the first of them working and the second under the pointer: the design's own subject (`design/doc28/TabStrip.tsx`). The shown tab carries the page's surface and the outward corner at each end, the pointed-at one its own fill, the last two keep the strip's own colour — and the divider rule is visible: none beside the shown tab or the pointed-at one, one between the last two. Taken where the swarm is at work, so the working tab's dot is mid-breath. |
-| `09-boot-failure-*` | The same binary, launched in a folder: *Could not start a swarm*, the folder it could not start in, the engine's one-line reason, the empty log box, and **Retry** / **Close** (§9.7). |
 
 ## What is not here yet
 
