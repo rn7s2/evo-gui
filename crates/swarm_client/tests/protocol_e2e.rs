@@ -4,6 +4,19 @@
 //! Every test here is about the wire — the ready file, the snapshot, the stream's
 //! cursors and resets, and `POST /ops` — and nothing about what an item means,
 //! which is the `session` crate's business.
+//!
+//! `EVO_SWARM_BIN` points the same tests at the real `evo-swarm`, and then every
+//! assertion here holds of a server the test cannot script as well as of the
+//! fake; the four that cannot are marked where they stand. A real run needs a
+//! stub home and no tie to the session that started it:
+//!
+//! ```sh
+//! EVO_SWARM_BIN=…/build/evo-swarm EVO_AGENT_BIN=…/build/evo-agent \
+//! EVO_TEST_HOME=/tmp/evostub \
+//! env -u EVO_SESSIONS_DIR -u EVO_SERVE_TOKEN -u EVO_SUPERVISED_CHILD \
+//!     -u EVO_HEARTBEAT_FILE -u EVO_PID -u EVO_IDE_CONTEXT \
+//!   cargo test -p swarm_client --test protocol_e2e
+//! ```
 
 use std::time::Duration;
 
