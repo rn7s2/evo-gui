@@ -8,6 +8,12 @@
 use gpui_kit::{Hsla, Rgba};
 pub use store::design::Rgb;
 
+/// A token, or a colour already, as a colour gpui draws with: what a widget takes
+/// when a caller has either.
+pub fn ink(c: impl Into<Hsla>) -> Hsla {
+    c.into()
+}
+
 /// A token as a colour to draw with.
 pub fn color(c: Rgb) -> Hsla {
     Rgba {
@@ -39,6 +45,20 @@ pub fn mix(a: Rgb, pct: f32, b: Rgb) -> Rgb {
 /// every wash in the design's CSS takes.
 pub fn wash(c: Rgb, pct: f32) -> Hsla {
     faded(c, pct / 100.)
+}
+
+/// [`mix`], on two colours that are already drawn with: what a widget mixes when
+/// one of the two is an override rather than a token.
+pub fn mix_ink(a: Hsla, pct: f32, b: Hsla) -> Hsla {
+    let (a, b) = (gpui_kit::Rgba::from(a), gpui_kit::Rgba::from(b));
+    let t = (pct / 100.).clamp(0., 1.);
+    gpui_kit::Rgba {
+        r: a.r * t + b.r * (1. - t),
+        g: a.g * t + b.g * (1. - t),
+        b: a.b * t + b.b * (1. - t),
+        a: a.a * t + b.a * (1. - t),
+    }
+    .into()
 }
 
 #[cfg(test)]

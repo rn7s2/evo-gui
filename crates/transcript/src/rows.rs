@@ -21,9 +21,9 @@ use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{h_flex, Icon, IconName};
 use gpui_kit::TestSupportExt as _;
 use gpui_kit::{
-    div, px, Animation, AnimationExt as _, AnyElement, App, ClipboardItem, Context, Div, ElementId,
-    FontWeight, Hsla, InteractiveElement as _, IntoElement, ParentElement, Pixels, SharedString,
-    Stateful, StatefulInteractiveElement as _, Styled as _, WeakEntity,
+    div, point, px, Animation, AnimationExt as _, AnyElement, App, ClipboardItem, Context, Div,
+    ElementId, FontWeight, Hsla, InteractiveElement as _, IntoElement, ParentElement, Pixels,
+    Point, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, WeakEntity,
 };
 use serde_json::Value;
 use session::{
@@ -36,6 +36,7 @@ use crate::ImageState;
 
 use crate::style::{mix, text_style, Palette, BLOCK_GAP, GROUP_GAP, MEASURE, TIGHT_GAP, TURN_GAP};
 use crate::{link, markdown, TranscriptData, TranscriptView};
+use widgets::glyph;
 
 /// Fade window for text appended by a streaming delta (§2.8).
 const STREAM_FADE: Duration = Duration::from_millis(350);
@@ -61,7 +62,6 @@ pub(crate) const TOOL_ROW_HEIGHT: Pixels = px(24.);
 const DISCLOSURE_WIDTH: Pixels = px(14.);
 /// The disclosure chevron: a glyph with about ten pixels of ink, centred in its
 /// own column. The glyph box is larger than the ink a chevron actually draws.
-const CARET_SIZE: Pixels = px(14.);
 /// Width of the key column of an expanded argument list: enough for a nested
 /// key like `diff.removed` without eliding it.
 pub(crate) const KEY_WIDTH: Pixels = px(112.);
@@ -1241,7 +1241,12 @@ fn tool_row(
             .text_color(palette.muted_foreground)
             .child(summary),
     );
-    head = head.child(status_pill(status, pill, palette));
+    head = head.child(status_pill(
+        status,
+        pill,
+        palette,
+        tool.status == session::ToolStatus::Ok,
+    ));
 
     let mut card = div()
         .id(row_id("transcript-tool-row", &id))
@@ -1351,10 +1356,14 @@ pub(crate) fn tool_sentence(args: &Value) -> (String, String) {
 /// lets CSS cut it to the row; this keeps a head from measuring a novel.
 const TC_SUMMARY_LIMIT: usize = 120;
 
-/// The status pill a card's head carries: the success green most of the way to the
-/// ink, on a ground of the same green 12% over the surface, at a fixed 20px.
-fn status_pill(status: &str, _status_color: Hsla, palette: &Palette) -> AnyElement {
-    div()
+/// The status pill a card's head carries: the status colour most of the way to
+/// the ink, on a ground of the same colour 12% over the surface, at a fixed 20px
+/// — the design's rule for its green, applied to whatever state the card is in.
+///
+/// The design's pill carries a small tick; a state that is not a success has no
+/// tick to show, so one is drawn for the states that are done.
+fn status_pill(status: &str, colour: Hsla, palette: &Palette, tick: bool) -> AnyElement {
+    let mut pill = div()
         .flex_shrink_0()
         .h(px(20.))
         .flex()
@@ -1364,19 +1373,51 @@ fn status_pill(status: &str, _status_color: Hsla, palette: &Palette) -> AnyEleme
         .pr(px(7.))
         .rounded_full()
         .text_size(px(11.5))
-        .text_color(palette.pill_ink)
-        .bg(palette.pill_ground(palette.sidebar))
-        .child(status.to_string())
-        .into_any_element()
+        .text_color(mix(colour, 85., palette.foreground))
+        .bg(mix(colour, 12., palette.sidebar));
+    if tick {
+        // `<Tick/>` in the design: `m5 12 5 5L20 7` of a 24-unit box, 3 units of
+        // stroke, round caps — the same painter as the strip's glyphs.
+        pill = pill.child(glyph::stroked(
+            TICK_GLYPH,
+            TICK_STROKE,
+            &tick_lines(),
+            pill_ink(colour, palette),
+        ));
+    }
+    pill.child(status.to_string()).into_any_element()
 }
 
-/// The disclosure of a tool row.
+/// The tick's own size, from the design's 11px glyph at a 3-in-24 stroke.
+const TICK_GLYPH: f32 = 11.;
+const TICK_STROKE: f32 = 1.4;
+
+/// The tick `m5 12 5 5L20 7`, scaled to [`TICK_GLYPH`].
+fn tick_lines() -> Vec<(Point<Pixels>, Point<Pixels>)> {
+    let size = TICK_GLYPH;
+    let at = |x: f32, y: f32| point(px(x / 24. * size), px(y / 24. * size));
+    vec![(at(5., 12.), at(10., 17.)), (at(10., 17.), at(20., 7.))]
+}
+
+/// The pill's ink: the status colour most of the way to the foreground.
+fn pill_ink(colour: Hsla, palette: &Palette) -> Hsla {
+    mix(colour, 85., palette.foreground)
+}
+
+/// The disclosure of a tool row: the design's chevron, turning a quarter in
+/// 120ms as the card opens (`transition: transform .12s ease`).
+///
+/// gpui has no `transform` on an element — no rotation, no scale — so the chevron
+/// is *painted* rather than transformed: its three points are turned about the
+/// caret's own centre on every frame of the animation, and stroked. `ease` is
+/// `cubic-bezier(.25,.1,.25,1)`, the curve the design names.
 fn caret(expanded: bool, palette: &Palette) -> AnyElement {
-    let chevron = if expanded {
-        IconName::ChevronDown
-    } else {
-        IconName::ChevronRight
-    };
+    let colour = palette.muted_foreground;
+    // The two ends are the two states, so a fresh animation on a toggle runs from
+    // the angle the caret is at to the angle it is going to — and the ids make the
+    // toggle a fresh animation.
+    let (from, to) = if expanded { (0., 1.) } else { (1., 0.) };
+    let easing = widgets::effort::cubic_bezier(0.25, 0.1, 0.25, 1.0);
 
     div()
         .w(DISCLOSURE_WIDTH)
@@ -1385,12 +1426,53 @@ fn caret(expanded: bool, palette: &Palette) -> AnyElement {
         .items_center()
         .justify_center()
         .child(
-            Icon::new(chevron)
-                .size(CARET_SIZE)
-                .text_color(palette.muted_foreground),
+            div()
+                .id(ElementId::from((
+                    "transcript-tool-caret",
+                    expanded as usize,
+                )))
+                .flex_none()
+                .size(px(CARET_GLYPH))
+                .with_animation(
+                    ElementId::from(("transcript-tool-caret-motion", expanded as usize)),
+                    Animation::new(CARET_TURN).with_easing(easing),
+                    move |el, delta| {
+                        let angle = (from + (to - from) * delta) * std::f32::consts::FRAC_PI_2;
+                        el.child(glyph::stroked(
+                            CARET_GLYPH,
+                            CARET_STROKE,
+                            &chevron_lines(angle),
+                            colour,
+                        ))
+                    },
+                ),
         )
         .into_any_element()
 }
+
+/// The chevron `m9 6 6 6-6 6` of the design's 24-unit box, at `size`, turned by
+/// `angle` about its own centre — two strokes through its three points.
+fn chevron_lines(angle: f32) -> Vec<(Point<Pixels>, Point<Pixels>)> {
+    let size = CARET_GLYPH;
+    let (sin, cos) = angle.sin_cos();
+    let turn = |x: f32, y: f32| {
+        let (x, y) = (x * size, y * size);
+        let (dx, dy) = (x - size / 2., y - size / 2.);
+        point(
+            px(size / 2. + dx * cos - dy * sin),
+            px(size / 2. + dx * sin + dy * cos),
+        )
+    };
+    // 9,6 → 15,12 → 9,18 of 24.
+    let (a, b, c) = (turn(0.375, 0.25), turn(0.625, 0.5), turn(0.375, 0.75));
+    vec![(a, b), (b, c)]
+}
+
+/// The caret's own numbers: the design's 12px glyph with a 2.2px stroke drawn at
+/// half scale, turning in 120ms.
+const CARET_GLYPH: f32 = 12.;
+const CARET_STROKE: f32 = 1.1;
+const CARET_TURN: Duration = Duration::from_millis(120);
 
 /// The arguments of an open tool row: the call's own object as a key/value list, or the
 /// text exactly as it came when it is not one.
@@ -1603,7 +1685,7 @@ fn report_row(id: ItemId, report: &LaneReport, palette: &Palette) -> AnyElement 
                 .child(
                     div()
                         .ml_auto()
-                        .child(status_pill("done", palette.success, palette)),
+                        .child(status_pill("done", palette.success, palette, true)),
                 )
                 .test_support(),
         );
@@ -2160,6 +2242,8 @@ fn text_block(
 ) -> AnyElement {
     let id = id.into();
     let (body, hidden) = cap_text(text, total_chars, limit);
+    // `Rows.css`'s `.tc-result`: the payload as plain text under its caption, on
+    // the card's own body — the frame is the card's, not a box of its own.
     let mut block = div()
         .id(id.clone())
         .flex()
@@ -2167,11 +2251,6 @@ fn text_block(
         .gap_1()
         .w_full()
         .min_w_0()
-        .rounded(palette.radius)
-        .border_1()
-        .border_color(palette.border)
-        .px_2()
-        .py_1()
         .child(caption(&id, label, palette))
         // A body with no keys of its own starts at the panel's own edge, under
         // its caption: a text result is the whole width of the panel, not a
@@ -2182,8 +2261,8 @@ fn text_block(
                 .w_full()
                 .min_w_0()
                 .font_family(palette.mono.clone())
-                .text_size(palette.payload_size)
-                .line_height(palette.payload_size * PAYLOAD_LINE_HEIGHT)
+                .text_size(px(13.))
+                .line_height(px(19.))
                 .text_color(palette.foreground)
                 .child(SelectableText::new((id.clone(), "body"), body))
                 .test_support(),
