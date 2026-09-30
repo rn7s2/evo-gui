@@ -41,8 +41,8 @@ use gpui_kit::component::{
 use gpui_kit::prelude::*;
 use gpui_kit::{
     div, px, AnyElement, App, BoxShadow, Context, ElementId, Entity, FocusHandle, Focusable as _,
-    Hsla, IntoElement, MouseButton, MouseDownEvent, Pixels, SharedString, Subscription,
-    TestSupportExt as _, TextAlign, WeakEntity, Window,
+    Hsla, IntoElement, Pixels, SharedString, Subscription, TestSupportExt as _, TextAlign,
+    WeakEntity, Window,
 };
 use serde_json::Value;
 use session::{HistoryEntry, LaunchPlan, Launcher, ModelOption, Role as Card};
@@ -410,8 +410,6 @@ struct EmptyTabState {
     check_probe: CheckProbe,
     /// Where a folder pick answers from.
     picker: FolderPicker,
-    /// The count box's own steppers are being held: `:active`.
-    stepping: [bool; 2],
     /// The history list's two states (§2): still being fetched, or it could not be read.
     history_loading: bool,
     history_error: Option<String>,
@@ -475,7 +473,6 @@ impl EmptyTabState {
             check_revision: 0,
             check_probe: CheckProbe::default(),
             picker: FolderPicker::Dialog,
-            stepping: [false; 2],
             history_loading: false,
             history_error: None,
             folder_focus: cx.focus_handle(),
@@ -987,23 +984,9 @@ impl EmptyTabState {
                 .flex_none()
                 .text_size(SMALL)
                 .child(label)
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _: &MouseDownEvent, window, cx| {
-                        this.stepping[usize::from(up)] = true;
-                        this.step_count(up, window, cx);
-                        cx.notify();
-                    }),
-                )
-                .on_mouse_up(
-                    MouseButton::Left,
-                    cx.listener(move |this, _: &gpui_kit::MouseUpEvent, _, cx| {
-                        if this.stepping[usize::from(up)] {
-                            this.stepping[usize::from(up)] = false;
-                            cx.notify();
-                        }
-                    }),
-                )
+                // The design's own `onClick`: a click steps, and a focused button's
+                // `Enter` or `Space` is a click too.
+                .on_click(cx.listener(move |this, _, window, cx| this.step_count(up, window, cx)))
         };
         h_flex()
             .id(COUNT_ID)
