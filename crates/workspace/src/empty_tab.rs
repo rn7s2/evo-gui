@@ -928,10 +928,6 @@ impl EmptyTabState {
             Card::Coordinator => COORDINATOR_EFFORT_ID,
             Card::Lanes => WORKERS_EFFORT_ID,
         };
-        // The widget's own elements are not observed, so the slot a test (or a click
-        // measured against it) names is this box around it. Hit testing still lands on the
-        // rail inside: the child is what is under the pointer.
-        let wrapper = div().id(id).test_support().w_full();
         let levels: Vec<SharedString> = self
             .launcher
             .levels()
@@ -939,28 +935,25 @@ impl EmptyTabState {
             .map(|level| SharedString::from(level.clone()))
             .collect();
         let weak = cx.entity().downgrade();
-        let slider = widgets::EffortSlider::with_levels(
-            format!("{id}-rail-y"),
-            levels,
-            self.launcher.effort(role),
-        )
-        .palette(design::palette(cx.theme().is_dark()))
-        .focus(self.effort_focus[slot(role)].clone())
-        .notify({
-            let weak = weak.clone();
-            move |cx: &mut App| {
-                let _ = weak.update(cx, |_, cx| cx.notify());
-            }
-        })
-        .on_change(move |level, _window, cx| {
-            let _ = weak.update(cx, |state, cx| {
-                if state.launcher.set_effort(role, level) {
-                    cx.notify();
+        // The slider is named with the page's own id: it registers `<id>`, `<id>-rail`,
+        // `<id>-thumb` and `<id>-fill` itself, which is what a test finds them by.
+        widgets::EffortSlider::with_levels(id, levels, self.launcher.effort(role))
+            .palette(design::palette(cx.theme().is_dark()))
+            .focus(self.effort_focus[slot(role)].clone())
+            .notify({
+                let weak = weak.clone();
+                move |cx: &mut App| {
+                    let _ = weak.update(cx, |_, cx| cx.notify());
                 }
-            });
-        })
-        .render(window);
-        wrapper.child(slider).into_any_element()
+            })
+            .on_change(move |level, _window, cx| {
+                let _ = weak.update(cx, |state, cx| {
+                    if state.launcher.set_effort(role, level) {
+                        cx.notify();
+                    }
+                });
+            })
+            .render(window)
     }
 
     /// The count control: `.worker-count` — a label, then the box the `−`/`+` steppers and
@@ -2248,6 +2241,44 @@ mod tests {
                 effort.origin.x,
                 coordinator.origin.x + coordinator.size.width + FIELD_GAP
             );
+        });
+    }
+
+    /// The sliders are the shared widget, named with this page's own ids, so a test — or a
+    /// click — finds the rail and the thumb by them; and a click on the rail snaps to the
+    /// level under the pointer, which is what the launch then passes as `--thinking`.
+    #[gpui_kit::test]
+    fn the_effort_slider_snaps_to_the_level_under_the_pointer(cx: &mut TestAppContext) {
+        let f = open(cx);
+        // The catalog's ladder, without its retired rung: low, medium, high, xhigh, max.
+        f.set_catalog(cx, &catalog_body());
+        f.render(cx);
+        let state = f.state(cx);
+        let tab = f.tab.clone();
+        let rail = ElementId::Name(format!("{COORDINATOR_EFFORT_ID}-rail").into());
+        let thumb = ElementId::Name(format!("{COORDINATOR_EFFORT_ID}-thumb").into());
+        f.act(cx, |window, cx| {
+            assert!(window.find(COORDINATOR_EFFORT_ID).visible(), "the slider");
+            assert!(window.find(thumb.clone()).visible(), "its thumb");
+            // The rail is a zero-height line, so it is observed but not "visible"; what it
+            // is for is the geometry a click is measured against.
+            let rail = window.try_find(rail.clone()).expect("its rail");
+            assert_eq!(rail.bounds().size.height, px(0.));
+            // The middle of the slider is the middle of the rail — the rails are inset 8
+            // from each end — and that is the middle rung.
+            window.click(COORDINATOR_EFFORT_ID, cx);
+        });
+        f.act(cx, |_, cx| {
+            assert_eq!(
+                state.read(cx).launcher.level(Card::Coordinator),
+                Some("high")
+            );
+            assert_eq!(
+                tab.read(cx).launch_plan(cx).thinking.as_deref(),
+                Some("high")
+            );
+            // The lanes' slider is its own: it did not move with the other one.
+            assert_eq!(state.read(cx).launcher.level(Card::Lanes), Some("medium"));
         });
     }
 
