@@ -31,11 +31,11 @@ use serde_json::Value;
 
 use session::{Op, OpRequest, OpSink};
 use swarm_client::{
-    Client, ErrorCode, EventStream, OpError, OpReply, Server, ShutdownOutcome, Snapshot,
-    StreamConfig, StreamFrame, StreamMsg,
+    BootCancel, Client, ErrorCode, EventStream, OpError, OpReply, Server, ServerConfig,
+    ShutdownOutcome, Snapshot, StdinClose, StreamConfig, StreamFrame, StreamMsg,
 };
 
-use crate::types::{tab_topics, TabSpec, Update};
+use crate::types::{tab_topics, Update};
 
 /// What the engine thread reads: a command from the UI, or something the stream
 /// saw. One channel for both, so the loop never blocks on two things at once.
@@ -53,19 +53,30 @@ enum Inbound {
 pub struct TabEngine;
 
 impl TabEngine {
-    /// Start a tab. The handle takes commands; the receiver carries updates.
-    pub fn start(spec: TabSpec) -> (EngineHandle, Receiver<Update>) {
+    /// Start a tab from the config its launcher built. The handle takes ops; the
+    /// receiver carries updates.
+    pub fn start(config: ServerConfig) -> (EngineHandle, Receiver<Update>) {
         let (inbox, mailbox) = async_channel::bounded(1024);
         let (updates, receiver) = async_channel::bounded(4096);
-        let folder = spec.folder.clone();
+        let folder = config.cwd.clone();
         let commands = inbox.clone();
+        // Both are shared with the handle: a quit closes the child's stdin and
+        // cancels a boot still in progress, without waiting for the thread.
+        let stdin = StdinClose::new();
+        let cancel = BootCancel::new();
         let thread = thread::Builder::new()
             .name("evo-tab-engine".into())
-            .spawn(move || run(spec, mailbox, commands, updates))
+            .spawn({
+                let stdin = stdin.clone();
+                let cancel = cancel.clone();
+                move || run(config, mailbox, commands, updates, stdin, cancel)
+            })
             .expect("the engine thread starts");
         (
             EngineHandle {
                 inbox,
+                stdin,
+                cancel,
                 thread: Some(thread),
                 folder,
             },
@@ -77,6 +88,11 @@ impl TabEngine {
 /// A tab's handle: ops in, and the thread's end of the story.
 pub struct EngineHandle {
     inbox: Sender<Inbound>,
+    /// The child's stdin: closing it is the server's own signal to stop, and it
+    /// needs neither the engine thread nor a ladder.
+    stdin: StdinClose,
+    /// Raised when the tab is dropped during a boot that has not finished.
+    cancel: BootCancel,
     thread: Option<JoinHandle<()>>,
     folder: PathBuf,
 }
@@ -100,17 +116,20 @@ impl EngineHandle {
         self.inbox.send_blocking(Inbound::Snapshot).is_ok()
     }
 
-    /// Stop the server the ladder's way and end the engine.
-    pub fn shutdown(&mut self) -> bool {
-        self.inbox.send_blocking(Inbound::Shutdown).is_ok()
+    /// Stop the server and end the engine. Returns at once: the child is told by
+    /// its stdin closing, and the ladder runs on the engine's thread.
+    pub fn shutdown(&mut self) {
+        self.cancel.cancel();
+        self.stdin.close();
+        let _ = self.inbox.send_blocking(Inbound::Shutdown);
     }
 
     pub fn is_running(&self) -> bool {
         !self.inbox.is_closed()
     }
 
-    /// Wait for the engine to stop. Stops it first: a handle that is joined is a
-    /// handle that no longer wants a server.
+    /// Stop the server and wait for the engine thread to end — for a test, or a
+    /// caller that wants to be sure nothing is left.
     pub fn join(mut self) {
         self.shutdown();
         self.wait();
@@ -138,49 +157,20 @@ impl OpSink for EngineHandle {
 
 impl Drop for EngineHandle {
     fn drop(&mut self) {
-        if self.thread.is_none() {
-            return;
-        }
+        // A quit must not block the UI thread: the server is told to stop (stdin
+        // EOF, at once), and the engine thread finishes in its own time.
         self.shutdown();
-        self.wait();
     }
-}
-
-/// What a quit did, tab by tab.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct ShutdownReport {
-    pub tabs: usize,
-    pub exited: usize,
-}
-
-impl ShutdownReport {
-    pub fn all_exited(&self) -> bool {
-        self.tabs > 0 && self.tabs == self.exited
-    }
-}
-
-/// Stop every tab at once: ask them all first, then wait. Asking one at a time
-/// would serialize the ladders, and a slow one would hold up the rest.
-pub fn shutdown_all(mut handles: Vec<EngineHandle>) -> ShutdownReport {
-    let tabs = handles.len();
-    for handle in handles.iter_mut() {
-        handle.shutdown();
-    }
-    let mut exited = 0;
-    for mut handle in handles.drain(..) {
-        if handle.thread.take().map(|t| t.join().is_ok()).unwrap_or(false) {
-            exited += 1;
-        }
-    }
-    ShutdownReport { tabs, exited }
 }
 
 /// The engine thread.
 fn run(
-    spec: TabSpec,
+    config: ServerConfig,
     mailbox: Receiver<Inbound>,
     commands: Sender<Inbound>,
     updates: Sender<Update>,
+    stdin: StdinClose,
+    cancel: BootCancel,
 ) {
     let mut engine = Engine {
         updates,
@@ -188,7 +178,7 @@ fn run(
     };
     engine.send(Update::Booting);
 
-    let mut server = match Server::start(&spec.server_config()) {
+    let mut server = match Server::start_with(&config, &cancel, stdin) {
         Ok(server) => server,
         Err(error) => {
             engine.send(Update::BootFailed {
@@ -352,8 +342,9 @@ fn post(engine: &Engine, client: &Client, request: OpRequest) {
     let _ = thread::Builder::new()
         .name("evo-tab-op".into())
         .spawn(move || {
-            let reply = client.op(&request.op, request.args).unwrap_or_else(|error| {
-                OpReply {
+            let reply = client
+                .op(&request.op, request.args)
+                .unwrap_or_else(|error| OpReply {
                     rid: String::new(),
                     ok: false,
                     seq: 0,
@@ -363,8 +354,7 @@ fn post(engine: &Engine, client: &Client, request: OpRequest) {
                         message: error.to_string(),
                         detail: Value::Null,
                     }),
-                }
-            });
+                });
             let _ = updates.send_blocking(Update::OpReply(Box::new(reply)));
         });
 }

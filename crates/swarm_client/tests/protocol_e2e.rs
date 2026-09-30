@@ -64,6 +64,7 @@ fn the_ready_file_is_the_whole_handshake() {
 fn a_snapshot_is_atomic_and_names_its_epoch() {
     let (_dir, swarm) = swarm("snapshot");
     swarm
+        .control()
         .snapshot_body(json!({
             "session": {"state": {"status": "idle"}, "items": [{"id": "e_1", "kind": "user", "ts": 1}]}
         }))
@@ -109,6 +110,7 @@ fn a_stream_starts_with_hello_and_carries_ops_verbatim() {
     assert_eq!(cursor.epoch, swarm.epoch());
 
     swarm
+        .control()
         .emit(json!({
             "op": "item.add", "topic": "session",
             "item": {"id": "e_1", "kind": "user", "ts": 1, "text": "hi"}, "after": null
@@ -128,7 +130,7 @@ fn a_stream_starts_with_hello_and_carries_ops_verbatim() {
 
     // The snapshot the stream was resumed from is what the tab had read: the
     // client asked for `since` only when it had one, and the fake saw the topics.
-    let asked = swarm.requests_on("/stream");
+    let asked = swarm.control().requests_on("/stream");
     assert_eq!(asked.len(), 1, "{asked:?}");
     assert!(asked[0]["path"]
         .as_str()
@@ -147,11 +149,12 @@ fn a_dropped_stream_reconnects_from_the_last_cursor() {
         matches!(m, StreamMsg::Connected { .. })
     });
     swarm
+        .control()
         .emit(json!({"op": "state.patch", "topic": "session", "patch": {"status": "running"}}))
         .unwrap();
     expect(&stream, "a frame", |m| matches!(m, StreamMsg::Frame(_)));
 
-    swarm.drop_streams().unwrap();
+    swarm.control().drop_streams().unwrap();
     expect(&stream, "a reconnect", |m| {
         matches!(m, StreamMsg::Reconnecting { .. })
     });
@@ -160,7 +163,7 @@ fn a_dropped_stream_reconnects_from_the_last_cursor() {
     });
 
     // The second connection resumed from where the first had read.
-    let asked = swarm.requests_on("/stream");
+    let asked = swarm.control().requests_on("/stream");
     assert_eq!(asked.len(), 2, "{asked:?}");
     assert!(asked[1]["path"].as_str().unwrap().contains("since="));
 }
@@ -176,7 +179,7 @@ fn a_stream_reset_parks_the_stream_until_it_is_told_where_to_resume() {
         matches!(m, StreamMsg::Connected { .. })
     });
 
-    swarm.stream_reset("restarted").unwrap();
+    swarm.control().stream_reset("restarted").unwrap();
     let reset = expect(&stream, "a stream reset", |m| {
         matches!(m, StreamMsg::Reset { .. })
     });
@@ -198,7 +201,7 @@ fn a_stream_reset_parks_the_stream_until_it_is_told_where_to_resume() {
     expect(&stream, "hello after the resume", |m| {
         matches!(m, StreamMsg::Connected { .. })
     });
-    let asked = swarm.requests_on("/stream");
+    let asked = swarm.control().requests_on("/stream");
     assert_eq!(asked.len(), 2, "{asked:?}");
     assert!(
         asked[1]["path"]
@@ -238,6 +241,7 @@ fn a_retried_rid_is_answered_again_and_acts_once() {
 fn a_refused_op_is_a_code_not_a_status() {
     let (_dir, swarm) = swarm("refused");
     swarm
+        .control()
         .reply_for(
             "input.send",
             json!({"ok": false, "error": {"code": "busy", "message": "a run is in flight", "detail": {}}}),
@@ -268,6 +272,7 @@ fn older_items_and_media_come_from_the_server() {
         .map(|n| json!({"id": format!("e_{n}"), "kind": "user", "ts": n}))
         .collect();
     swarm
+        .control()
         .snapshot_body(json!({
             "session": {"state": {}, "items": items}
         }))

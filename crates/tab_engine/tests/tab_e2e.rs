@@ -1,41 +1,79 @@
 //! One tab, against a real fake `serve`: the ready file, the snapshot, the one
-//! stream, the resets, and the ops. The updates that come out are what the
+//! stream, the resets and the ops. The updates that come out are what the
 //! `session` crate is fed, so the assertions are about frames and bodies rather
 //! than rows.
+//!
+//! The tab spawns its own server, so these tests drive the server the tab is
+//! really talking to through [`Control::attach`] — one of the fake's endpoints,
+//! reached through the ready file in the tab directory.
 
 use std::time::{Duration, Instant};
 
 use async_channel::Receiver;
 use serde_json::json;
 use session::{AgentKey, Op, TabModel};
-use swarm_client::harness::{FakeSwarm, TempDir};
-use tab_engine::{EngineHandle, TabEngine, TabSpec, Update};
+use swarm_client::harness::{Control, FakeSwarm, TempDir};
+use swarm_client::ServerConfig;
+use tab_engine::{EngineHandle, TabEngine, Update};
+
+/// The config a tab is started from: the fake server in `dir`, with extra argv.
+fn config(dir: &std::path::Path, extra: &[&str]) -> ServerConfig {
+    swarm_client::harness::fake_config(dir, extra).expect("a fake server's config")
+}
 
 /// A tab in its own directory, with the fake swarm's binary, stopped when the
 /// test ends.
-fn tab(tag: &str, workers: Option<u16>) -> (TempDir, EngineHandle, Receiver<Update>) {
+fn tab(tag: &str, extra: &[&str]) -> (TempDir, EngineHandle, Receiver<Update>) {
     let dir = TempDir::new(tag).expect("a temp dir");
-    let bin = swarm_client::harness::fake_swarm_bin(dir.path()).expect("the fake binary");
-    let mut spec = TabSpec::new(bin, dir.path(), dir.path());
-    if let Some(workers) = workers {
-        spec = spec.with_workers(workers);
-    }
-    let (handle, updates) = TabEngine::start(spec);
+    let (handle, updates) = TabEngine::start(config(dir.path(), extra));
     (dir, handle, updates)
 }
 
-/// The next update of a kind, or a panic naming what was being waited for.
-fn expect(updates: &Receiver<Update>, what: &str, wanted: impl Fn(&Update) -> bool) -> Update {
-    let deadline = Instant::now() + Duration::from_secs(20);
-    loop {
-        if let Ok(update) = updates.try_recv() {
-            if wanted(&update) {
-                return update;
-            }
-            continue;
+/// The updates a tab has sent, kept rather than skipped: a test that waits for
+/// one topic must not throw the other topics away (the server answers topics in
+/// its own order).
+struct Feed {
+    updates: Receiver<Update>,
+    seen: Vec<Update>,
+}
+
+impl Feed {
+    /// The next update of a kind, from what has arrived or from what comes next.
+    fn expect(&mut self, what: &str, wanted: impl Fn(&Update) -> bool) -> Update {
+        if let Some(index) = self.seen.iter().position(&wanted) {
+            return self.seen.remove(index);
         }
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
-        std::thread::sleep(Duration::from_millis(10));
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            match self.updates.try_recv() {
+                Ok(update) => {
+                    if wanted(&update) {
+                        return update;
+                    }
+                    self.seen.push(update);
+                }
+                Err(_) => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "timed out waiting for {what}, saw {:?}",
+                        self.seen
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        }
+    }
+
+    /// Blocks until the model is in the state the caller describes, feeding it
+    /// every update on the way.
+    fn feed_model(&mut self, model: &mut TabModel, done: impl Fn(&TabModel) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !done(model) {
+            assert!(Instant::now() < deadline, "the model never caught up");
+            if let Ok(update) = self.updates.recv_blocking() {
+                apply(model, update);
+            }
+        }
     }
 }
 
@@ -44,226 +82,13 @@ fn snapshot_of(topic: &str) -> impl Fn(&Update) -> bool + '_ {
     move |update| matches!(update, Update::Snapshot { topic: name, .. } if name == topic)
 }
 
-/// The ready update's epoch.
-fn ready(updates: &Receiver<Update>) -> (String, u32) {
-    let update = expect(updates, "Ready", |update| {
-        matches!(update, Update::Ready { .. })
-    });
+/// The epoch and process id the tab's server announced.
+fn ready(feed: &mut Feed) -> (String, u32) {
+    let update = feed.expect("Ready", |update| matches!(update, Update::Ready { .. }));
     let Update::Ready { epoch, pid, .. } = update else {
         unreachable!()
     };
     (epoch, pid)
-}
-
-#[test]
-fn a_tab_boots_snapshots_every_topic_and_streams() {
-    let (_dir, handle, updates) = tab("boot", Some(2));
-    assert!(matches!(updates.try_recv(), Ok(Update::Booting)));
-    let (epoch, pid) = ready(&updates);
-    assert!(!epoch.is_empty());
-    assert!(pid > 0);
-
-    // One snapshot update per topic the server answered with: the coordinator's,
-    // the swarm's and each lane's.
-    for topic in ["session", "swarm", "lane:1", "lane:2"] {
-        let update = expect(&updates, topic, snapshot_of(topic));
-        let Update::Snapshot { body, .. } = update else {
-            unreachable!()
-        };
-        assert!(body.get("state").is_some(), "{topic}: {body}");
-    }
-
-    // And the stream is live, which the engine says once.
-    expect(&updates, "the stream badge", |update| {
-        matches!(update, Update::Stream { status } if !status.is_reconnecting())
-    });
-    drop(handle);
-}
-
-#[test]
-fn a_frame_reaches_the_model_as_an_op() {
-    let dir = TempDir::new("frames").unwrap();
-    let bin = swarm_client::harness::fake_swarm_bin(dir.path()).unwrap();
-    let swarm = FakeSwarm::start(dir.path()).unwrap();
-    let (handle, updates) = TabEngine::start(TabSpec::new(bin, dir.path(), dir.path()));
-    ready(&updates);
-
-    swarm
-        .emit(json!({
-            "op": "item.add", "topic": "session", "after": null,
-            "item": {"id": "e_1", "kind": "user", "ts": 1, "text": "hi", "status": "sent"}
-        }))
-        .unwrap();
-    let update = expect(&updates, "the item.add", |update| {
-        matches!(update, Update::Op { op: Op::ItemAdd { .. }, .. })
-    });
-    let Update::Op { topic, op } = update else {
-        unreachable!()
-    };
-    assert_eq!(topic, "session");
-
-    // It is the session crate's op, and the session crate draws it.
-    let mut model = TabModel::new();
-    model.on_op(&topic, &op);
-    assert_eq!(model.selected_items().len(), 1);
-    assert_eq!(model.selected_items()[0].id, "e_1");
-    drop(handle);
-}
-
-#[test]
-fn a_topic_reset_re_reads_that_one_topic() {
-    let dir = TempDir::new("topic-reset").unwrap();
-    let bin = swarm_client::harness::fake_swarm_bin(dir.path()).unwrap();
-    let swarm = FakeSwarm::start(dir.path()).unwrap();
-    let (handle, updates) = TabEngine::start(TabSpec::new(bin, dir.path(), dir.path()));
-    ready(&updates);
-
-    swarm
-        .snapshot_body(json!({
-            "session": {"state": {"status": "running"}, "items": [{"id": "e_9", "kind": "user", "ts": 9}]}
-        }))
-        .unwrap();
-    swarm
-        .emit(json!({"op": "topic.reset", "topic": "session", "reason": "leaf_moved"}))
-        .unwrap();
-
-    expect(&updates, "the topic.reset frame", |update| {
-        matches!(update, Update::Op { op: Op::TopicReset { .. }, .. })
-    });
-    let update = expect(&updates, "the re-read topic", snapshot_of("session"));
-    let Update::Snapshot { body, .. } = update else {
-        unreachable!()
-    };
-    assert_eq!(body["items"][0]["id"], "e_9");
-    assert_eq!(body["state"]["status"], "running");
-    drop(handle);
-}
-
-#[test]
-fn a_stream_reset_re_snapshots_everything_and_resumes_the_stream() {
-    let dir = TempDir::new("stream-reset").unwrap();
-    let bin = swarm_client::harness::fake_swarm_bin(dir.path()).unwrap();
-    let swarm = FakeSwarm::start(dir.path()).unwrap();
-    let (handle, updates) = TabEngine::start(TabSpec::new(bin, dir.path(), dir.path()));
-    ready(&updates);
-    expect(&updates, "the first snapshot", snapshot_of("session"));
-    swarm.requests(); // forget the boot's requests
-
-    swarm.stream_reset("restarted").unwrap();
-    let update = expect(&updates, "the stream reset", |update| {
-        matches!(update, Update::Op { op: Op::StreamReset { .. }, .. })
-    });
-    let Update::Op { op, .. } = update else {
-        unreachable!()
-    };
-    assert_eq!(
-        op,
-        Op::StreamReset {
-            reason: "restarted".into()
-        }
-    );
-    // Everything is re-read, from the snapshot's cursor.
-    expect(&updates, "the re-read session", snapshot_of("session"));
-    let streams = swarm.requests_on("/stream");
-    let resumed = streams.last().expect("a second stream").clone();
-    let path = resumed["path"].as_str().unwrap();
-    assert!(path.contains("since="), "{path}");
-    assert!(path.contains("lane%3A%2A"), "{path}");
-    drop(handle);
-}
-
-#[test]
-fn a_refetch_asks_for_every_topic_again() {
-    let dir = TempDir::new("refetch").unwrap();
-    let bin = swarm_client::harness::fake_swarm_bin(dir.path()).unwrap();
-    let _swarm = FakeSwarm::start(dir.path()).unwrap();
-    let (handle, updates) = TabEngine::start(TabSpec::new(bin, dir.path(), dir.path()));
-    ready(&updates);
-    expect(&updates, "the first snapshot", snapshot_of("session"));
-
-    assert!(handle.refetch());
-    expect(&updates, "the second snapshot", snapshot_of("session"));
-    drop(handle);
-}
-
-#[test]
-fn a_request_from_the_model_becomes_a_post() {
-    let dir = TempDir::new("ops").unwrap();
-    let bin = swarm_client::harness::fake_swarm_bin(dir.path()).unwrap();
-    let swarm = FakeSwarm::start(dir.path()).unwrap();
-    let (handle, updates) = TabEngine::start(TabSpec::new(bin, dir.path(), dir.path()));
-    ready(&updates);
-    swarm.requests();
-
-    // The model builds the op; the handle is its sink.
-    let model = TabModel::new();
-    let request = model.send_input("hello there", session::Queue::Now);
-    assert!(handle.request(request));
-
-    let update = expect(&updates, "the reply", |update| {
-        matches!(update, Update::OpReply(_))
-    });
-    let Update::OpReply(reply) = update else {
-        unreachable!()
-    };
-    assert!(reply.ok, "{reply:?}");
-    assert!(!reply.rid.is_empty());
-
-    let posted = swarm.requests_on("/ops");
-    assert_eq!(posted.len(), 1, "{posted:?}");
-    let body = &posted[0]["body"];
-    assert_eq!(body["op"], "input.send");
-    assert_eq!(body["args"]["text"], "hello there");
-    assert_eq!(body["args"]["queue"], "now");
-    assert_eq!(body["rid"], json!(reply.rid));
-    drop(handle);
-}
-
-#[test]
-fn the_model_can_be_driven_entirely_from_the_updates() {
-    // The contract's bound: a tab's whole job is to feed the model. This is that
-    // path, end to end, with the fake server on the other side.
-    let dir = TempDir::new("model").unwrap();
-    let bin = swarm_client::harness::fake_swarm_bin(dir.path()).unwrap();
-    let swarm = FakeSwarm::start(dir.path()).unwrap();
-    let (handle, updates) = TabEngine::start(TabSpec::new(bin, dir.path(), dir.path()));
-
-    let mut model = TabModel::new();
-    swarm
-        .snapshot_body(json!({
-            "session": {"state": {"status": "idle", "thinking": "high", "language": "en"},
-                        "items": [{"id": "e_1", "kind": "user", "ts": 1, "text": "hi"}]},
-            "swarm": {"state": {"id": "s1", "workers": 0, "lanes": []}}
-        }))
-        .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while model.selected_items().is_empty() {
-        assert!(Instant::now() < deadline, "the model never saw the snapshot");
-        if let Ok(update) = updates.recv_blocking() {
-            apply(&mut model, update);
-        }
-    }
-    assert_eq!(model.selected(), AgentKey::Coordinator);
-    assert_eq!(model.selected_items().len(), 1);
-
-    swarm
-        .emit(json!({
-            "op": "item.append", "topic": "session", "id": "e_1", "field": "text", "text": " there"
-        }))
-        .unwrap();
-    while model.selected_items()[0].text != "hi" {
-        // The first item is the reader's own words: the append is for another one.
-        break;
-    }
-    let update = expect(&updates, "the append", |update| {
-        matches!(update, Update::Op { op: Op::ItemAppend { .. }, .. })
-    });
-    let Update::Op { topic, op } = update else {
-        unreachable!()
-    };
-    model.on_op(&topic, &op);
-    assert_eq!(topic, "session");
-    drop(handle);
 }
 
 /// Feed one update into the model, the way the workspace does.
@@ -283,31 +108,305 @@ fn apply(model: &mut TabModel, update: Update) {
 }
 
 #[test]
+fn a_tab_boots_snapshots_every_topic_and_streams() {
+    let (dir, handle, updates) = tab("boot", &["--workers", "2"]);
+    let mut feed = Feed {
+        updates,
+        seen: Vec::new(),
+    };
+    feed.expect("Booting", |update| matches!(update, Update::Booting));
+    let (epoch, pid) = ready(&mut feed);
+    assert!(!epoch.is_empty());
+    assert!(pid > 0);
+
+    // One snapshot update per topic the server answered with: the coordinator's,
+    // the swarm record's and each lane's.
+    for topic in ["session", "swarm", "lane:1", "lane:2"] {
+        let update = feed.expect(topic, snapshot_of(topic));
+        let Update::Snapshot { body, .. } = update else {
+            unreachable!()
+        };
+        assert!(body.get("state").is_some(), "{topic}: {body}");
+    }
+
+    // The stream is live, and the tab said so once.
+    feed.expect(
+        "the stream badge",
+        |update| matches!(update, Update::Stream { status } if !status.is_reconnecting()),
+    );
+    assert!(Control::attach(dir.path()).is_ok());
+    drop(handle);
+}
+
+#[test]
+fn a_frame_reaches_the_model_as_an_op() {
+    let (dir, handle, updates) = tab("frames", &[]);
+    let mut feed = Feed {
+        updates,
+        seen: Vec::new(),
+    };
+    ready(&mut feed);
+    let control = Control::attach(dir.path()).unwrap();
+    control
+        .emit(json!({
+            "op": "item.add", "topic": "session", "after": null,
+            "item": {"id": "e_1", "kind": "user", "ts": 1, "text": "hi", "status": "sent"}
+        }))
+        .unwrap();
+    let update = feed.expect("the item.add", |update| {
+        matches!(
+            update,
+            Update::Op {
+                op: Op::ItemAdd { .. },
+                ..
+            }
+        )
+    });
+    let Update::Op { topic, op } = update else {
+        unreachable!()
+    };
+    assert_eq!(topic, "session");
+
+    // It is the session crate's own op, and the session crate draws it.
+    let mut model = TabModel::new();
+    model.on_op(&topic, &op);
+    assert_eq!(model.selected_items().len(), 1);
+    assert_eq!(model.selected_items()[0].id, "e_1");
+    drop(handle);
+}
+
+#[test]
+fn a_topic_reset_re_reads_that_one_topic() {
+    let (dir, handle, updates) = tab("topic-reset", &[]);
+    let mut feed = Feed {
+        updates,
+        seen: Vec::new(),
+    };
+    ready(&mut feed);
+    let control = Control::attach(dir.path()).unwrap();
+    feed.expect("the first snapshot", snapshot_of("session"));
+
+    control
+        .snapshot_body(json!({
+            "session": {"state": {"status": "running"}, "items": [{"id": "e_9", "kind": "user", "ts": 9}]}
+        }))
+        .unwrap();
+    control
+        .emit(json!({"op": "topic.reset", "topic": "session", "reason": "leaf_moved"}))
+        .unwrap();
+
+    feed.expect("the topic.reset frame", |update| {
+        matches!(
+            update,
+            Update::Op {
+                op: Op::TopicReset { .. },
+                ..
+            }
+        )
+    });
+    let update = feed.expect("the re-read topic", snapshot_of("session"));
+    let Update::Snapshot { body, .. } = update else {
+        unreachable!()
+    };
+    assert_eq!(body["items"][0]["id"], "e_9");
+    assert_eq!(body["state"]["status"], "running");
+    drop(handle);
+}
+
+#[test]
+fn a_stream_reset_re_snapshots_everything_and_resumes_the_stream() {
+    let (dir, handle, updates) = tab("stream-reset", &[]);
+    let mut feed = Feed {
+        updates,
+        seen: Vec::new(),
+    };
+    ready(&mut feed);
+    let control = Control::attach(dir.path()).unwrap();
+    feed.expect("the first snapshot", snapshot_of("session"));
+    control.requests(); // forget the boot's requests
+
+    control.stream_reset("restarted").unwrap();
+    let update = feed.expect("the stream reset", |update| {
+        matches!(
+            update,
+            Update::Op {
+                op: Op::StreamReset { .. },
+                ..
+            }
+        )
+    });
+    let Update::Op { op, .. } = update else {
+        unreachable!()
+    };
+    assert_eq!(
+        op,
+        Op::StreamReset {
+            reason: "restarted".into()
+        }
+    );
+    // Everything is re-read, and the stream resumes from the snapshot's cursor —
+    // not from the beginning, and not from nothing.
+    feed.expect("the re-read session", snapshot_of("session"));
+    let streams = control.requests_on("/stream");
+    assert_eq!(
+        streams.len(),
+        1,
+        "one resumed stream, not a second boot: {streams:?}"
+    );
+    let path = streams[0]["path"].as_str().unwrap();
+    assert!(path.contains("since="), "{path}");
+    assert!(path.contains("lane%3A%2A"), "{path}");
+    drop(handle);
+}
+
+#[test]
+fn a_refetch_asks_for_every_topic_again() {
+    let (_dir, handle, updates) = tab("refetch", &[]);
+    let mut feed = Feed {
+        updates,
+        seen: Vec::new(),
+    };
+    ready(&mut feed);
+    feed.expect("the first snapshot", snapshot_of("session"));
+
+    assert!(handle.refetch());
+    feed.expect("the second snapshot", snapshot_of("session"));
+    drop(handle);
+}
+
+#[test]
+fn a_request_from_the_model_becomes_a_post() {
+    let (dir, handle, updates) = tab("ops", &[]);
+    let mut feed = Feed {
+        updates,
+        seen: Vec::new(),
+    };
+    ready(&mut feed);
+    let control = Control::attach(dir.path()).unwrap();
+    control.requests();
+
+    // The model builds the op; the handle is its sink.
+    let model = TabModel::new();
+    assert!(handle.request(model.send_input("hello there", session::Queue::Now)));
+
+    let update = feed.expect("the reply", |update| matches!(update, Update::OpReply(_)));
+    let Update::OpReply(reply) = update else {
+        unreachable!()
+    };
+    assert!(reply.ok, "{reply:?}");
+    assert!(!reply.rid.is_empty());
+
+    let posted = control.requests_on("/ops");
+    assert_eq!(posted.len(), 1, "{posted:?}");
+    let body = &posted[0]["body"];
+    assert_eq!(body["op"], "input.send");
+    assert_eq!(body["args"]["text"], "hello there");
+    assert_eq!(body["args"]["queue"], "now");
+    assert_eq!(body["rid"], json!(reply.rid));
+    drop(handle);
+}
+
+#[test]
+fn the_model_can_be_driven_entirely_from_the_updates() {
+    // The contract's bound: a tab's whole job is to feed the model. This is that
+    // path, end to end, with the fake server on the other side.
+    let (dir, handle, updates) = tab("model", &[]);
+    let mut feed = Feed {
+        updates,
+        seen: Vec::new(),
+    };
+    ready(&mut feed);
+    let control = Control::attach(dir.path()).unwrap();
+    let mut model = TabModel::new();
+
+    control
+        .emit(json!({
+            "op": "item.add", "topic": "session", "after": null,
+            "item": {"id": "e_1", "kind": "user", "ts": 1, "text": "hi", "status": "sent"}
+        }))
+        .unwrap();
+    control
+        .emit(json!({
+            "op": "item.append", "topic": "session", "id": "e_1", "field": "text", "text": " there"
+        }))
+        .unwrap();
+
+    feed.feed_model(&mut model, |model| {
+        model
+            .selected_items()
+            .first()
+            .map(|item| item.raw().clone())
+            == Some(json!({
+                "id": "e_1", "kind": "user", "ts": 1, "text": "hi there", "status": "sent"
+            }))
+    });
+    assert_eq!(model.selected(), AgentKey::Coordinator);
+    assert_eq!(model.selected_items().len(), 1);
+    drop(handle);
+}
+
+#[test]
+fn an_append_carries_its_id_field_and_text() {
+    let (dir, handle, updates) = tab("append", &[]);
+    let mut feed = Feed {
+        updates,
+        seen: Vec::new(),
+    };
+    ready(&mut feed);
+    let control = Control::attach(dir.path()).unwrap();
+    control
+        .emit(json!({
+            "op": "item.append", "topic": "session", "id": "e_gone", "field": "text", "text": "x"
+        }))
+        .unwrap();
+    let update = feed.expect("the append", |update| {
+        matches!(
+            update,
+            Update::Op {
+                op: Op::ItemAppend { .. },
+                ..
+            }
+        )
+    });
+    let Update::Op { topic: _, op } = update else {
+        unreachable!()
+    };
+    assert_eq!(
+        op,
+        Op::ItemAppend {
+            id: "e_gone".to_string(),
+            field: session::AppendField::Text,
+            text: "x".to_string(),
+        }
+    );
+    drop(handle);
+}
+
+#[test]
 fn a_server_that_dies_is_reported_and_the_tab_stops() {
-    let dir = TempDir::new("dies").unwrap();
-    let bin = swarm_client::harness::fake_swarm_bin(dir.path()).unwrap();
-    let mut swarm = FakeSwarm::start(dir.path()).unwrap();
-    let (handle, updates) = TabEngine::start(TabSpec::new(bin, dir.path(), dir.path()));
-    ready(&updates);
+    let (_dir, mut handle, updates) = tab("dies", &[]);
+    let mut feed = Feed {
+        updates,
+        seen: Vec::new(),
+    };
+    let (_, pid) = ready(&mut feed);
 
     // Kill the process behind the tab: the stream cannot come back, and the tab
     // says so rather than reconnecting for ever.
-    swarm.server_mut().kill();
-    expect(&updates, "ServerGone", |update| {
-        matches!(update, Update::ServerGone)
-    });
-    expect(&updates, "Exited", |update| {
-        matches!(update, Update::Exited { .. })
-    });
-    assert!(!handle.is_running() || handle.shutdown());
+    assert!(swarm_client::harness::kill_process(pid));
+    feed.expect("ServerGone", |update| matches!(update, Update::ServerGone));
+    feed.expect("Exited", |update| matches!(update, Update::Exited { .. }));
+    handle.shutdown();
 }
 
 #[test]
 fn dropping_the_handle_stops_the_server() {
-    let dir = TempDir::new("drop").unwrap();
-    let bin = swarm_client::harness::fake_swarm_bin(dir.path()).unwrap();
-    let (handle, updates) = TabEngine::start(TabSpec::new(bin, dir.path(), dir.path()));
-    let (_, pid) = ready(&updates);
+    let (_dir, handle, updates) = tab("drop", &[]);
+    let mut feed = Feed {
+        updates,
+        seen: Vec::new(),
+    };
+    let (_, pid) = ready(&mut feed);
     assert!(swarm_client::process_alive(pid));
 
     drop(handle);
@@ -319,11 +418,30 @@ fn dropping_the_handle_stops_the_server() {
 }
 
 #[test]
+fn joining_waits_for_the_server_to_be_gone() {
+    let (_dir, handle, updates) = tab("join", &[]);
+    let mut feed = Feed {
+        updates,
+        seen: Vec::new(),
+    };
+    let (_, pid) = ready(&mut feed);
+    handle.join();
+    assert!(!swarm_client::process_alive(pid));
+}
+
+#[test]
 fn a_boot_that_fails_says_so_with_the_log_tail() {
     let dir = TempDir::new("boot-fail").unwrap();
-    let bin = swarm_client::harness::script_that(dir.path(), "nope", "echo boom >&2; exit 3").unwrap();
-    let (handle, updates) = TabEngine::start(TabSpec::new(bin, dir.path(), dir.path()));
-    let update = expect(&updates, "BootFailed", |update| {
+    let bin =
+        swarm_client::harness::script_that(dir.path(), "nope", "echo boom >&2; exit 3").unwrap();
+    let config = ServerConfig::swarm(bin, dir.path(), dir.path());
+    let argv = swarm_client::harness::serving_argv(&config.ready_file, &[]);
+    let (handle, updates) = TabEngine::start(config.with_argv(argv));
+    let mut feed = Feed {
+        updates,
+        seen: Vec::new(),
+    };
+    let update = feed.expect("BootFailed", |update| {
         matches!(update, Update::BootFailed { .. })
     });
     let Update::BootFailed { message, log_tail } = update else {
@@ -332,4 +450,18 @@ fn a_boot_that_fails_says_so_with_the_log_tail() {
     assert!(message.contains("exited during startup"), "{message}");
     assert!(log_tail.contains("boom"), "{log_tail}");
     drop(handle);
+}
+
+/// A compilation check on the shape the app uses: a `FakeSwarm` and a tab in the
+/// same directory are two servers, so a test must attach to the tab's own.
+#[test]
+fn a_fake_swarm_can_still_be_driven_directly() {
+    let dir = TempDir::new("direct").unwrap();
+    let swarm = FakeSwarm::start(dir.path()).unwrap();
+    swarm
+        .control()
+        .emit(json!({"op": "hello", "epoch": "e", "seq": 1}))
+        .unwrap();
+    assert!(swarm.control().requests_on("/_emit").is_empty());
+    assert_eq!(swarm.server().port(), swarm.client().port());
 }

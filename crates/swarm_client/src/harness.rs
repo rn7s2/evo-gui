@@ -92,6 +92,11 @@ fn set_executable(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Kill a process by pid, for a test that wants a server to die under a tab.
+pub fn kill_process(pid: u32) -> bool {
+    unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) == 0 }
+}
+
 /// A directory of one's own, removed when it goes out of scope.
 pub struct TempDir {
     path: PathBuf,
@@ -187,6 +192,42 @@ impl FakeSwarm {
         self.bin.clone()
     }
 
+    /// A control handle on this server's fake endpoints.
+    pub fn control(&self) -> Control {
+        Control {
+            client: self.server.client().clone(),
+            is_fake: self.is_fake,
+        }
+    }
+}
+
+/// The fake server's control endpoints (`/_…`), which a real server does not have.
+///
+/// [`Control::attach`] finds whatever server is serving a tab directory — the
+/// engine's own child, for a test that started a tab rather than a [`FakeSwarm`]
+/// — so a test can drive the server the tab is really talking to.
+pub struct Control {
+    client: Client,
+    is_fake: bool,
+}
+
+impl Control {
+    /// Attach to the server whose ready file is in `dir` (the tab directory).
+    pub fn attach(dir: &Path) -> Result<Control> {
+        let text = std::fs::read_to_string(dir.join("ready.json"))
+            .map_err(|e| Error::Config(format!("no ready file in {}: {e}", dir.display())))?;
+        let ready: crate::protocol::ReadyFile = serde_json::from_str(&text)?;
+        Ok(Control {
+            client: Client::loopback(ready.port, ready.token.as_str())?,
+            is_fake: std::env::var_os("EVO_SWARM_BIN").is_none(),
+        })
+    }
+
+    /// The client the control endpoints answer on.
+    pub fn client(&self) -> &Client {
+        &self.client
+    }
+
     /// Replace what `/snapshot` answers for these topics.
     pub fn snapshot_body(&self, topics: Value) -> Result<()> {
         self.control("/_snapshot", json!({"topics": topics}))?;
@@ -257,7 +298,7 @@ impl FakeSwarm {
                 "the control endpoints exist only on the fake server".into(),
             ));
         }
-        let reply = self.server.client().http().post(path, &body)?;
+        let reply = self.client.http().post(path, &body)?;
         if !reply.is_success() {
             return Err(Error::Status(reply.error()));
         }

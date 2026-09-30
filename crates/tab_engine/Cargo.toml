@@ -13,7 +13,3 @@ async-channel = "2"
 # The fake serve this crate's tests drive a real tab against; a plain dependent
 # of tab_engine never compiles it.
 swarm_client = { path = "../swarm_client", features = ["test-harness"] }
-
-[[test]]
-name = "tab_e2e"
-required-features = ["test-harness"]

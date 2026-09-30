@@ -6,28 +6,28 @@
 //! interprets a frame, and nothing here blocks the UI thread:
 //!
 //! ```text
-//!   UI thread ──Command──▶ [ tab-engine thread ] ──snapshot, stream, ops──▶ evo-swarm serve
+//!   UI thread ──OpRequest─▶ [ tab-engine thread ] ──snapshot, stream, ops──▶ evo-swarm serve
 //!   UI thread ◀──Update─── [ tab-engine thread ] ◀──frames────────────────  (coordinator, lanes)
 //! ```
 //!
-//! [`TabEngine::start`] returns an [`EngineHandle`] (commands in) and a
-//! `Receiver<Update>` (updates out). The handle's `Drop` runs the shutdown
-//! ladder through the engine thread and joins it, so no thread is leaked and no
-//! server is left behind.
+//! [`TabEngine::start`] returns an [`EngineHandle`] (ops in) and a
+//! `Receiver<Update>` (updates out). The handle's `Drop` closes the child's
+//! stdin — EOF, which is the server's own signal to stop — and returns, so a quit
+//! never blocks the UI thread; the ladder itself runs on the engine thread.
 
 pub mod engine;
 mod types;
 
-pub use engine::{shutdown_all, EngineHandle, ShutdownReport, TabEngine};
+pub use engine::{EngineHandle, TabEngine};
 
 // The UI builds an op from its own model and hands it to the handle; these are
 // the pieces it needs to do that without depending on `session` directly.
 pub use session::{AgentKey, Queue, Scope, TabModel};
-pub use types::{tab_topics, StreamStatus, TabSpec, Update};
+pub use types::{tab_topics, StreamStatus, Update};
 
 // Re-exported so the UI can read what an [`Update`] carries without depending on
 // `swarm_client` directly.
 pub use swarm_client::{
-    Cursor, ErrorCode, OpError, OpReply, SessionRef, ShutdownOutcome, Snapshot, StreamFrame,
-    StreamResetReason, TopicResetReason,
+    Cursor, ErrorCode, OpError, OpReply, ServerConfig, SessionRef, ShutdownOutcome, Snapshot,
+    StdinClose, StreamFrame, StreamResetReason, TopicResetReason,
 };
