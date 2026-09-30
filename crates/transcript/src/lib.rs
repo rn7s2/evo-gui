@@ -11,8 +11,7 @@
 //!   its latest item and stays there while the pane changes height, and only the reader's
 //!   own scroll unpins it (the design's `Transcript.tsx`, to the pixel and the
 //!   millisecond);
-//! * the tools the reader opened, and the untruncated results fetched for them;
-//! * the todos of the agent the view shows.
+//! * the tools the reader opened, and the untruncated results fetched for them.
 //!
 //! A caller seeds the whole list with [`TranscriptView::replace`] (a snapshot, a
 //! `topic.reset`), pages older items in with [`TranscriptView::prepend`] (the scrollback
@@ -33,13 +32,11 @@ mod markdown;
 pub mod pin;
 mod rows;
 mod style;
-mod todo;
 
 #[cfg(test)]
 mod tests;
 
 pub use imgcheck::decode_image;
-pub use todo::TodoPanel;
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -54,7 +51,7 @@ use gpui_kit::{
     IntoElement, MouseButton, ParentElement as _, Pixels, Render, ScrollHandle,
     StatefulInteractiveElement as _, Styled as _, Task, TestSupportExt as _, WeakEntity, Window,
 };
-use session::{AgentKey, Item, ItemId, ItemKind, Todo};
+use session::{AgentKey, Item, ItemId, ItemKind};
 use std::time::Duration;
 
 use crate::pin::{Action, Pin};
@@ -187,7 +184,6 @@ pub struct TranscriptView {
     pin: Pin,
     /// The step-by-step return to the latest, while one is running.
     jump: Option<Task<()>>,
-    todos: Vec<Todo>,
     /// Whether the agent's topic has items older than the ones held.
     has_older: bool,
     /// Whether the page the reader asked for is still in flight.
@@ -220,7 +216,6 @@ impl TranscriptView {
             scroll: ScrollHandle::new(),
             pin: Pin::new(),
             jump: None,
-            todos: Vec::new(),
             has_older: false,
             loading_older: false,
             agent: AgentKey::Coordinator,
@@ -248,10 +243,6 @@ impl TranscriptView {
     /// The items currently shown, in order.
     pub fn items<'a>(&'a self, cx: &'a App) -> &'a [Item] {
         &self.data.read(cx).items
-    }
-
-    pub fn todos(&self) -> &[Todo] {
-        &self.todos
     }
 
     /// Whether there is history behind the oldest item, and whether a page is in flight.
@@ -450,14 +441,6 @@ impl TranscriptView {
         }
         cx.notify();
         true
-    }
-
-    pub fn set_todos(&mut self, todos: Vec<Todo>, cx: &mut Context<Self>) {
-        if self.todos == todos {
-            return;
-        }
-        self.todos = todos;
-        cx.notify();
     }
 
     /// Drop every item (a session switch, before the new snapshot lands).
