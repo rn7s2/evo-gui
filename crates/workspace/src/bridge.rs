@@ -197,7 +197,6 @@ mod tests {
     use std::sync::mpsc;
     use std::sync::{Arc, Mutex};
     use std::thread::ThreadId;
-    use std::time::Duration;
 
     use gpui_kit::{AppContext as _, Entity, TestAppContext};
 
@@ -306,8 +305,14 @@ mod tests {
         // to real I/O.
         cx.dispatcher.allow_parking();
 
-        let (bridge, worker) = Bridge::spawn(Revision::new(1), |tx| {
-            thread::sleep(Duration::from_millis(50));
+        // "The worker is still working" is a condition this test owns rather than a
+        // race against a sleep: the worker blocks on this channel until the test has
+        // read everything it wants to read while the worker is mid-flight. A sleep
+        // here would be a coin toss on a loaded machine — it can elapse before the
+        // assertions below run, and then the worker is finished after all.
+        let (release, released) = mpsc::channel::<()>();
+        let (bridge, worker) = Bridge::spawn(Revision::new(1), move |tx| {
+            released.recv().unwrap();
             assert!(tx.send(1).is_ok());
         });
         let sink = cx.update(|cx| {
@@ -319,12 +324,14 @@ mod tests {
         let task = drive(&sink, bridge, cx, Arc::new(Mutex::new(None)));
 
         // The UI side drains every ready task and returns while the worker is
-        // still sleeping: awaiting the bridge blocked nobody.
+        // still held: awaiting the bridge blocked nobody.
         cx.run_until_parked();
         assert!(!worker.is_finished(), "the worker is still working");
         assert!(!task.is_ready());
         cx.update(|cx| assert!(sink.read(cx).applied.is_empty()));
 
+        // Let the worker send, and only then is the task runnable again.
+        release.send(()).unwrap();
         worker.join();
         cx.run_until_parked();
 
