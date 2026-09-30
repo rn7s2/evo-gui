@@ -6,8 +6,6 @@
 //! and Settings re-reads the binaries, so pointing the path at a real one clears
 //! the line.
 
-mod common;
-
 use std::path::PathBuf;
 use std::time::Instant;
 

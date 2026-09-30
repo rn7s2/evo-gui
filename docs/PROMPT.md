@@ -7,11 +7,13 @@ exactly this, and the app must use it rather than re-implement anything.
 
 **Architecture in one paragraph.** One window; its title bar is a browser-like tab strip. Each tab
 is one `evo-swarm serve` process (a coordinator agent plus a pool of worker lanes) that this app
-spawns in a chosen folder and drives over HTTP. The app talks **only to the coordinator**: the
-coordinator's own endpoints (`/state`, `/transcript`, `/registry`, `/events`, `/prompt`, `/command`,
-`/shutdown`) plus the swarm's read-only lane endpoints (`/lanes`, `/lanes/N/transcript`,
-`/lanes/N/events`). Lanes are never addressed directly — their tokens and URLs never leave the
-coordinator, by design. The app keeps its own data under `~/.evo/desktop/`.
+spawns in a chosen folder and drives over one loopback protocol: the child writes a **ready file**
+(port, token, epoch) once it is listening, and the app reads a **snapshot**, follows one **stream**
+of ops, and posts every action as an **op** — the whole of it is in `../evo-agent/docs/serve.md`,
+and the binding contract between the two sides is `CONTRACT.md` in the workspace root (with the
+design rationale in `evo-serve-redesign.html` beside it). Lanes are never addressed directly: they
+are private children of the coordinator, and their topics arrive mirrored in the coordinator's own
+stream. The app keeps its own data under `~/.evo/desktop/`.
 
 ---
 

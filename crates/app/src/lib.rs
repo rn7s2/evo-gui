@@ -14,7 +14,7 @@
 //!             ├── single instance: lock, or knock and exit 0
 //!             ├── window (bounds from app.json, clamped to the display)
 //!             ├── activation watcher: a second launch raises this window
-//!             ├── startup: cache → scan → catalog, pushed to the empty tabs
+//!             ├── startup: cache → sessions → catalog, pushed to the empty tabs
 //!             └── quit: app.json, the tabs' pipes closed, then exit
 //! ```
 
@@ -40,7 +40,7 @@ pub use quit::{
     begin as begin_quit, is_quitting, open_tabs, remember_tab_set, take_engines, TabRecord,
 };
 pub use settings::{apply as apply_settings, open as open_settings_panel, DIALOG_CONTENT_ID};
-pub use startup::{cache_is_stale, start as start_background_loads, CACHE_MAX_AGE};
+pub use startup::{refresh_catalog, start as start_background_loads};
 pub use theme::{follow_appearance, mode_for};
 
 use gpui_kit::prelude::*;

@@ -122,6 +122,10 @@ pub fn apply(values: &SettingsValues, cx: &mut App) {
     // empty tab's "evo-swarm not found" line both follow what was just saved (§9.4).
     crate::about::start(cx);
 
+    // A different `evo-swarm` has a different catalog (§9.4): read it again in the
+    // background, exactly as a launch does.
+    crate::startup::refresh_catalog(cx);
+
     // The next tab this window opens starts with them. A running tab keeps the
     // binaries it started with, and the panel says so in its own note.
     if let Some(view) = crate::quit::view(cx) {
