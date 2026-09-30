@@ -13,38 +13,39 @@
 //!
 //! * the coordinator's model — `check`'s own `model`, else `/catalog.default_model`,
 //!   else the first registration the catalog says is `ready`;
-//! * the coordinator's effort — the middle rung of `/catalog.thinking_levels`;
+//! * the coordinator's effort — `check`'s own `thinking`;
 //! * the lanes' model — `check`'s `lane_model`, else the default when a lane can
 //!   register it, else the first registration a lane can;
-//! * the lanes' effort — the same middle rung;
-//! * the worker count — [`DEFAULT_WORKERS`], the count `evo-swarm` itself starts with
-//!   when neither `--workers` nor the `swarm-workers` setting says otherwise.
+//! * the lanes' effort — `check`'s `lane_thinking`;
+//! * the worker count — `check`'s own `workers`;
 //!
 //! A model is chosen by its **`ID@PROVIDER` pair**: `--model id@provider` selects
 //! exactly that registration (§1), so two registrations of one id are two options, each
 //! named with its provider. An option a lane cannot register is greyed out and says why
 //! — the catalog's own `lanes.models[].ok`/`reason`, not a guess from an api set.
 //!
-//! # What evo's own surfaces do not answer
+//! # When `check` has not answered
 //!
-//! Two of the five resolved values are not on any offline surface, so this module
-//! resolves them the way evo does when no flag is given and then says so openly:
+//! `check --json` resolves all five, by evo's own chains: the coordinator's effort from
+//! its journal, then the agent's override, then the `thinking` setting, then `medium`
+//! (and each model clamps what it is handed); a lane's from `--lane-thinking`, then what
+//! a resumed swarm's record restored, then the coordinator's; the count from `--workers`,
+//! then the `swarm-workers` setting, then 6.
 //!
-//! * the effort: evo resolves a session's level from its journal, then the agent's
-//!   override, then the `thinking` setting, and each model clamps what it is handed.
-//!   None of those is in `catalog --json` or `check --json`, so the controls open on
-//!   evo's middle rung and the launch passes it explicitly.
-//! * the worker count: `evo-swarm` reads `--workers`, then the `swarm-workers`
-//!   setting, then 6. A `setting` lives in evo's own lisp, which no offline surface
-//!   prints, so the count opens on evo's own last fallback.
+//! Before an answer is in hand — the first frame of a tab, or a check that failed — the
+//! controls still have to show something, and it is evo's own last fallback: the middle
+//! rung of the ladder and [`DEFAULT_WORKERS`]. Both are marked as such: the moment a
+//! check answers, a control the launcher opened (nobody has touched it) is moved onto
+//! what the check resolved, and a control the person moved is left alone.
 //!
 //! # The effort ladder
 //!
-//! `/catalog.thinking_levels` is what a **session** accepts; it leads with `off`, the
-//! rung evo retired (`+effort-levels+` is `low medium high xhigh max`, and both
-//! `--thinking` and `/thinking` refuse anything else). A launch flag cannot carry it —
-//! `--thinking off` is a usage error — so the ladder the slider offers is that list
-//! without the retired rung.
+//! `/catalog.thinking_levels` is what a **session** accepts. `off` is the rung evo
+//! retired (`+effort-levels+` is `low medium high xhigh max`, and both `--thinking` and
+//! `/thinking` refuse anything else), and the catalog no longer lists it — but a body
+//! out of the app's disk cache can predate that, and a launch flag cannot carry it
+//! (`--thinking off` is a usage error), so the ladder the slider offers is whatever the
+//! catalog listed without that rung.
 //!
 //! # History (§2)
 //!
@@ -69,8 +70,9 @@ pub const DEFAULT_WORKERS: u16 = 6;
 /// another order still opens on `medium`.
 const MIDDLE_LEVEL: &str = "medium";
 
-/// The rung evo retired. `/catalog.thinking_levels` still leads with it — a session
-/// folds it onto the weakest live rung — but a launch flag refuses it.
+/// The rung evo retired. The catalog no longer lists it — a session folds it onto the
+/// weakest live rung — but a body from the disk cache may predate that, and a launch flag
+/// refuses it.
 const RETIRED_LEVEL: &str = "off";
 
 /// The thinking levels of §5.6, for a catalog that printed none: evo's own ladder.
@@ -296,12 +298,12 @@ fn model_detail(model: &Value) -> String {
 /// The empty tab's controls: the two model fields, the two effort sliders, the worker
 /// count and the history list.
 ///
-/// Every control opens on a **resolved** value (§7.2): the two model fields from what
-/// `check --json` or the catalog resolved, the sliders from the ladder's middle rung, the
-/// count from [`DEFAULT_WORKERS`]. A value the launcher resolved is re-resolved whenever a
-/// document arrives — the check is newer than the catalog, and the catalog newer than
-/// nothing — while a field the person set themselves stays where they put it until the
-/// registration leaves the catalog.
+/// Every control opens on a **resolved** value (§7.2): all five from `check --json`, or
+/// from the catalog where the check has nothing to say (the two models), or — before a
+/// check has answered — from evo's own last fallback (the ladder's middle rung and
+/// [`DEFAULT_WORKERS`]). A value the launcher resolved is re-resolved whenever a document
+/// arrives — the check is newer than the catalog, and the catalog newer than nothing —
+/// while a control the person set themselves stays where they put it.
 #[derive(Clone, Debug, Default)]
 pub struct Launcher {
     /// The last `/catalog` body, and what `check --json` resolved the launch to: the
@@ -314,10 +316,13 @@ pub struct Launcher {
     levels: Vec<String>,
     /// The two cards' model fields, the coordinator's first.
     fields: [Field; 2],
-    /// Where each slider sits, as an index into [`Launcher::levels`].
+    /// Where each slider sits, as an index into [`Launcher::levels`], and whether a person
+    /// moved it there — a moved slider is not re-resolved.
     efforts: [usize; 2],
-    /// The worker count.
+    effort_by_hand: [bool; 2],
+    /// The worker count, and whether a person typed it.
     workers: u16,
+    count_by_hand: bool,
     history: Vec<HistoryRow>,
 }
 
@@ -462,11 +467,11 @@ impl Launcher {
         }
         let index = index.min(self.levels.len() - 1);
         let effort = &mut self.efforts[role.slot()];
-        if *effort == index {
-            return false;
-        }
+        let moved = *effort != index;
         *effort = index;
-        true
+        // A person's own rung, which a later check leaves alone.
+        self.effort_by_hand[role.slot()] = true;
+        moved
     }
 
     /// The worker count.
@@ -479,11 +484,11 @@ impl Launcher {
     /// whether it changed.
     pub fn set_workers(&mut self, count: u16) -> bool {
         let count = count.clamp(WORKERS_MIN, WORKERS_MAX);
-        if self.workers == count {
-            return false;
-        }
+        let typed = self.workers != count;
         self.workers = count;
-        true
+        // As above: whoever typed a count keeps it.
+        self.count_by_hand = true;
+        typed
     }
 
     /// What the controls add up to (§7.2): the coordinator's `--model` and `--thinking`,
@@ -498,9 +503,11 @@ impl Launcher {
         }
     }
 
-    /// Fill in the two model fields from what evo resolved — and leave a person's own
-    /// pick alone: only a field the launcher set itself is re-resolved.
+    /// Fill in every control from what evo resolved — and leave a person's own pick alone:
+    /// only a control the launcher set itself is re-resolved.
     fn resolve(&mut self) {
+        self.resolve_efforts();
+        self.resolve_workers();
         for role in Role::ALL {
             let field = &self.fields[role.slot()];
             let stands = field.by_hand
@@ -517,6 +524,44 @@ impl Launcher {
                 by_hand: false,
             };
         }
+    }
+
+    /// Where the two sliders sit: the effort `check` resolved for each card, or the middle
+    /// rung while it has not answered.
+    fn resolve_efforts(&mut self) {
+        for role in Role::ALL {
+            if self.effort_by_hand[role.slot()] {
+                continue;
+            }
+            let resolved = self.check.as_ref().and_then(|check| {
+                string(
+                    check,
+                    match role {
+                        Role::Coordinator => "thinking",
+                        Role::Lanes => "lane_thinking",
+                    },
+                )
+            });
+            self.efforts[role.slot()] = resolved
+                .and_then(|level| self.levels.iter().position(|rung| *rung == level))
+                .unwrap_or_else(|| middle(&self.levels));
+        }
+    }
+
+    /// The count `check` resolved, or evo's own until it answers. A count off the wire is
+    /// clamped to what a flag may carry, like the field's own typing.
+    fn resolve_workers(&mut self) {
+        if self.count_by_hand {
+            return;
+        }
+        self.workers = self
+            .check
+            .as_ref()
+            .and_then(|check| check.get("workers"))
+            .and_then(Value::as_u64)
+            .map(|count| u16::try_from(count).unwrap_or(WORKERS_MAX))
+            .unwrap_or(DEFAULT_WORKERS)
+            .clamp(WORKERS_MIN, WORKERS_MAX);
     }
 
     /// What evo resolves one card's model to, in the order §7.2 reads it.
@@ -557,6 +602,7 @@ impl Launcher {
             || self.levels != before.levels
             || self.fields != before.fields
             || self.efforts != before.efforts
+            || self.workers != before.workers
             || self.check != before.check
             || self.default_model != before.default_model
     }
