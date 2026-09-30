@@ -638,9 +638,9 @@ fn the_window_is_named_after_the_folder_of_the_tab_being_shown(cx: &mut TestAppC
 /// the last thing on the strip's row and the tabs are clipped where it begins, so
 /// no tab's name is ever drawn beneath it.
 ///
-/// The bug this pins down is in `docs/screens/09-bad-run-dark.png`: the button was
-/// the tab bar's own suffix, laid over the tabs as they scrolled by, and the last
-/// visible tab read `● evo-desktoj +` — the `+` sitting on the `p`.
+/// The bug this pins down: the button used to be the tab bar's own suffix, laid
+/// over the tabs as they scrolled by, so the last visible tab read
+/// `● evo-desktoj +` — the `+` sitting on the `p`.
 #[gpui_kit::test]
 fn the_add_button_never_sits_on_a_tab(cx: &mut TestAppContext) {
     let home = std::env::temp_dir().join(format!("workspace-ui-strip-{}", std::process::id()));

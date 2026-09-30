@@ -9,7 +9,8 @@ exactly this, and the app must use it rather than re-implement anything.
 is one `evo-swarm serve` process (a coordinator agent plus a pool of worker lanes) that this app
 spawns in a chosen folder and drives over one loopback protocol: the child writes a **ready file**
 (port, token, epoch) once it is listening, and the app reads a **snapshot**, follows one **stream**
-of ops, and posts every action as an **op** — the whole of it is in `../evo-agent/docs/serve.md`,
+of ops, and posts every action as an **op** — the whole of it is in the agent's own
+`docs/serve.md`,
 and the binding contract between the two sides is `CONTRACT.md` in the workspace root (with the
 design rationale in `evo-serve-redesign.html` beside it). Lanes are never addressed directly: they
 are private children of the coordinator, and their topics arrive mirrored in the coordinator's own
@@ -23,8 +24,8 @@ stream. The app keeps its own data under `~/.evo/desktop/`.
 |---|---|
 | `CONTRACT.md` (workspace root) | the binding contract: launch, the protocol, the view model, the swarm |
 | `evo-serve-redesign.html` | why it is shaped that way (root causes, the removed surfaces, the plan) |
-| `../evo-agent/docs/serve.md` | the protocol as the server side documents it |
-| `../evo-agent/docs/swarm.md` | what a swarm is, and how its lanes are mirrored into topic `lane:N` |
+| `evo-agent/docs/serve.md` | the protocol as the server side documents it (evo's own checkout, beside this repo) |
+| `evo-agent/docs/swarm.md` | what a swarm is, and how its lanes are mirrored into topic `lane:N` |
 
 gpui-kit docs are markdown: `curl -s https://gpui-kit.com/llms.txt` is the index, and every page is
 `https://gpui-kit.com/<path>.md` (e.g. `/component/tabs.md`). Read at least `docs/installation`,
@@ -68,7 +69,7 @@ spawns it through `swarm_client` with stdin a pipe it holds, and **readiness is
 the ready file the child writes** — port, token, epoch — not a poll. There is no
 port picking, no token file, no `EVO_SERVE_WATCH_PID` and no kill ladder:
 dropping the pipe is what stops the child, and EOF is what tells it the tab is
-gone. `CONTRACT.md` §1/§8 and `../evo-agent/docs/serve.md` are the whole of it,
+gone. `CONTRACT.md` §1/§8 and the agent's own `docs/serve.md` are the whole of it,
 and nothing here repeats them.
 
 Two rules that stay: `--workers` only when the user asks, and never
@@ -77,7 +78,7 @@ Two rules that stay: `--workers` only when the user asks, and never
 ## 4. Endpoints you use
 
 Three reads and one write, all of them CONTRACT.md §5 and
-`../evo-agent/docs/serve.md`: `GET /snapshot` (one atomic read of every topic the
+the agent's `docs/serve.md`: `GET /snapshot` (one atomic read of every topic the
 tab shows), `GET /stream` (one SSE stream carrying every topic's ops),
 `GET /items` / `/items/<id>` / `/media/<id>/<n>` (paging back, one item whole,
 image bytes) and `GET /catalog`. Every action is `POST /ops` with the envelope of
@@ -298,8 +299,8 @@ than patching evo — a local patch would silently diverge the GUI from the bina
 
 - Rust, `gpui-kit` (pin 0.7.x), `serde`/`serde_json`, `rfd` for the folder dialog, an
   HTTP/SSE stack of your choice (`reqwest` + `tokio` in a runtime you own, or a blocking client on
-  a dedicated thread), a lock-file single-instance guard. Verify in M0 that the streaming path
-  keeps the UI responsive — GPUI's executor is not tokio's, so bridge explicitly and prove it with
+  a dedicated thread), a lock-file single-instance guard. The streaming path has to keep the
+  UI responsive — GPUI's executor is not tokio's, so bridge explicitly, and the case to check is
   two tabs streaming at once.
 - **Verify before building on it**: whether this `gpui-pre` snapshot exposes `cx.http_client()`; if
   it does not (it is feature-gated upstream), say so and use your own client. Do not build on an
@@ -315,23 +316,23 @@ than patching evo — a local patch would silently diverge the GUI from the bina
   `crates/proofs`; the UI crates keep gpui-kit `TestAppContext` tests for the tab strip, the empty
   tab, transcript row building, and the todo panel.
 
-## 12. Milestones (each ends with proof, not with intent)
+## 12. Where the work is
 
-- **M0 — spike.** Window with a custom title bar; spawn `evo-swarm serve` in a folder; one snapshot
-  and one stream into a plain view; `input.send` sends and the item grows. *Proof: screenshot +
-  a transcript of a real run against the installed `/usr/local/bin/evo-swarm`.*
-- **M1 — one tab, real.** Tab page layout (list / transcript / todos / input), markdown rendered
-  live while streaming (§2.8), tail following, the Send/Stop button, re-read on `topic.reset`. *Proof: a run where a lane is
-  delegated work and the coordinator's transcript renders it.*
-- **M2 — tabs and the empty page.** Tab strip with Add/Close/Select, tab persistence, empty tab with
-  the choosers + folder button + history list, resume a swarm from history. *Proof: close the
-  app with three tabs, relaunch, resume one from history, everything still renders.*
-- **M3 — lanes.** Lane list with status icons, lane items, lane todos, the `swarm` topic's live
-  lane updates, lane failure states. *Proof: kill a lane's process and watch the app report it down and
-  then up (the swarm restarts it).*
-- **M4 — hardening.** Single instance + activation, crash/restart of the coordinator, log tails on
-  boot failure, `~/.evo/desktop` state, quit shutting everything down, `cargo test` green,
-  `cargo build --release` and a bundle you can launch from Finder.
+The app is built. What each crate owns is `docs/architecture.md`; what it does, a
+surface at a time, is `docs/usage.md`; what is proven against real binaries —
+`evo-swarm` / `evo-agent`, never a mock — is `docs/proofs.md`; the pictures are
+`docs/screens.md`. `CONTRACT.md` in the workspace root is the binding half of all
+four, and where they and the code disagree, the code and the contract are what is
+true.
+
+Roughly: `crates/app` is the shell (single instance, the window and its bounds, the
+launch-time loads, Settings, About, the quit sequence), `crates/workspace` is the
+tab strip, the empty tab and the tab page, `crates/transcript` and
+`crates/composer` are the two surfaces a person types into and reads,
+`crates/agent_list` is the left column, `crates/settings` the panel, and
+`crates/tab_engine` + `crates/swarm_client` are one tab's I/O over
+`crates/session` (the topic mirrors and the view model) and `crates/store` (the
+on-disk layout, the offline CLI reads, the launch argv).
 
 ## 13. Non-goals (v1)
 

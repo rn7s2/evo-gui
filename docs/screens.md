@@ -1,129 +1,59 @@
 # Screens
 
-Twenty headless captures of the **assembled app window** — `Shell` + `WorkspaceView`
-+ real `tab_engine` + real `evo-swarm` — taken by
+Fourteen pictures of the real window, taken by a real run: the app's own `Shell`,
+the binaries the environment names, and the scripted model — nothing drawn by
+hand, nothing mocked.
 
 ```sh
-cargo run -p evo-desktop --example app_snapshot -- --capture docs/screens --scale 1
+EVO_SWARM_BIN=…/evo-swarm EVO_AGENT_BIN=…/evo-agent \
+  cargo run -p evo-desktop --example screens -- --capture docs/screens \
+    [--via-agent …/evo-agent]
 ```
 
-Every state is captured twice, light and dark. The pictures are 1600×1000 *points*
-(§7.1's window size); `--scale 1` renders them at 1×, so a file is 1600×1000
-pixels and the twenty files in this directory are 1.0 MB together. The example's
-default is 2× (3200×2000 pixels, ~9 MB for the set), which is what to use when
-reading small type; `--scale 1` is what is committed, then quantised to at most
-192 colours:
+`crates/app/examples/screens.rs` drives the app the way a person does: it opens
+the window the app opens, calls the app's own launch-time loads, launches a tab
+through `TabContentEvent::Launch`, types with `window.input` / `window.press`, and
+clicks the composer's own button and a transcript row's own header. Each picture
+is taken twice, in the light theme and the dark one, at the window's own
+1440 × 900 (the file is 2× and is resized on the way in, which is why the
+screenshots in this directory are shared between the two themes: same window,
+same state, two themes).
 
-```sh
-magick <shot>.png -background white -alpha remove -alpha off +dither -colors 192 PNG8:<shot>.png
-```
+The world is `crates/proofs`' fixture: a throwaway `HOME` whose `init.lisp`
+registers the scripted model, a folder for the swarm to run in, and a tab
+directory for the server's ready file. The real `~/.evo` is never touched.
 
-`+dither` is the point of that line: error diffusion turns the flat chrome
-noisy, and measurably wrong — `compare -metric RMSE` against the 1× render is
-0.019 with the default dither and 0.0008–0.0017 with `+dither`, which is what
-these files come out of (110–172 colours, not a full 192).
+## What each picture is
 
-The pictures are a *golden* set — nothing re-checks them — so take them again
-after a change to the chrome, the tab page or the transcript and compare by eye.
-`--only 08-narrow-1000x700,09-bad-run` saves those states and no others — the
-ids are the whole names in the table above, and a bare `08` matches nothing —
-while every state before them is still taken, which is the cheap way to re-take
-the last few.
-
-| capture | what it shows |
+| | |
 |---|---|
-| `01-launch-light.png`, `01-launch-dark.png` | The app at launch (§7.2): one empty tab whose three choosers stand on `Default` — the first of them, `Coordinator model`, wearing the focus ring, because a tab puts the keyboard where its work starts — and the six resumable swarms the scan found, the newest of them `~/coding/evo-gui`, `6 lanes`, `11m ago`, `coordinator: claude-opus-5-5`. |
-| `01b-lanes-chooser-light.png`, `01b-lanes-chooser-dark.png` | The lanes chooser open (§9.4), its menu filled from the catalog: five models a quarantined lane may be given, and `claude-opus-5-5` greyed with *needs an extension API — set it in swarm.lisp*. The menu holds six rows and shows five and a half — `kimi-k2-0905` is cut at the fold, with no bar to say the menu scrolls. |
-| `02-three-tabs-light.png`, `02-three-tabs-dark.png` | Three tabs — two running swarms and an empty one — with the first mid-stream: a heading, a list, a table and a code fence, all rendered by the transcript's markdown (§2.8). The shown tab wears the activity dot the strip puts before a running coordinator's label, its two lanes are `idle` in the lane list (the capture waits for the swarm's rows to settle before it draws), and §7.3's readout sits under the transcript as the tab page's status line — `stub-a-preview-2026-09 · medium · ctx 0k/200k (0%)`. |
-| `03-lane-todos-light.png`, `03-lane-todos-dark.png` | Lane 1 selected (§7.3, §9.3): the task it was delegated, the `todo` call it made, the write-up it streamed, and the checklist panel — `Todos 1/3`, one item in each state. |
-| `04-tool-expanded-light.png`, `04-tool-expanded-dark.png` | The coordinator's `delegate` call opened onto its `arguments` (the lane, the task) and its `result` (§2.8), the captions lower-case as a tool panel draws them. |
-| `05-boot-failure-light.png`, `05-boot-failure-dark.png` | A swarm that could not start (§9.7): *Could not start a swarm*, the folder, the server's log tail, `Retry` and `Close`. |
-| `06-reconnecting-light.png`, `06-reconnecting-dark.png` | The coordinator's stream gone quiet (§9.7): the amber `reconnecting` badge on the `main` row, the spinner row in the centre, a disabled `Send`, and the swarm's `Lane 1 · run ended (stop) — task: …` drawn as a quiet row and answered in one line. |
-| `07-tab-strip-light.png`, `07-tab-strip-dark.png` | The tab strip past its width (§7.1): fourteen tabs, ten of them folders whose names the strip truncates, and the last one a live swarm. The strip is scrolled to the tab being shown — the last one, with its `×` — so the seven tabs on screen are the seven newest, the first of them clipped at the window's left edge, and the `+` sits outside the strip, past a divider, still inside the window. |
-| `08-narrow-1000x700-light.png`, `08-narrow-1000x700-dark.png` | The tab page at §7.1's smallest window, 1000×700: three columns side by side, lane 1 selected and its task ellipsized to `SLOW: walk the narrow l…` in the lane list with its step clock beside it, lane 1's own transcript mid-stream in the centre, the status line under it (a lane's own, `no metrics yet`, until the swarm reports any), the composer's card, and nothing overlapping. |
-| `09-bad-run-light.png`, `09-bad-run-dark.png` | A run that ended badly (§5, §9.5): the compaction a full context forced (`Compacting context…`, `Context compacted`), the provider dying mid-stream four times (`Retrying provider (n/4)`), and the failure itself, once per failed run — the failing message's own `error: Provider request failed after 4 attempts: Stream ended without a terminal event (truncated response)`. |
+| `01-empty-*` | The window as the app opens it: one empty tab, the four choosers, the folder card, and the history — empty, and saying so. The caption is the catalog read of this build, in evo's own words (`evo-swarm catalog --json` is not in it yet, so the choosers stay on Default). |
+| `02-live-*` | A tab driving a swarm: the coordinator streaming an answer as it arrives, its step clock running, the tab's own green activity dot, and the button reading **■ Stop swarm** — the whole point of the face: what is going on is what the button will stop. |
+| `03-tool-*` | A tool row, opened: the call's arguments and its result as rows, including the exit code. The row is opened by clicking its own header, and the full result was fetched with `GET /items/<id>`. |
+| `04-queued-*` | A prompt typed while the coordinator works: the card says `queued · sent at the next step` and carries a **Cancel**. This is the same picture as `02` two seconds later, minus the streaming text and plus the queue — which is what a person looking at the screen sees. |
+| `05-after-stop-*` | After `Esc`: the interrupt is evo's to take at a step boundary, so the picture is the state it left — nothing streaming, nothing queued, the queued prompt taken, the button back to **Send**. |
+| `06-history-*` | A second tab, opened after that session: the empty tab again, with the app's history list under the choosers. |
+| `07-boot-failure-*` | A swarm that cannot come up: the folder, the engine's own one-line reason, the server's log tail in a monospace box, and **Retry** / **Close**. This one is the real thing — the `evo-swarm` of this build exits 64 on the flags a tab passes it. |
 
-## What is real, and what is scripted
+## What is not here yet
 
-Real: the window and its chrome, the tab strip (its activity dot, its `×`, and
-the `+` past the last tab), the empty tab and its choosers, the tab page's three
-columns and their draggable splits (`crates/workspace/src/panes.rs`), the
-transcript (markdown, tool rows, reports, dim rows, and the quiet rows a lane
-notice or a piece of context becomes), the composer, the status line under the
-transcript — §7.3's readout, drawn for the agent being shown rather than for the
-coordinator alone — the lane list with its glyphs, step clock and badge,
-`tab_engine` driving everything, and `evo-swarm`/`evo-agent` spawned as real
-processes with real SSE streams, journals and shutdown ladders.
+These are states of a *swarm*, and the `evo-swarm` the app drives is not in the
+build these pictures come from (`--via-agent` runs the agent's own `serve` in a
+tab's place, which is the same server a swarm's coordinator is, so everything
+above is real — it is the lanes that are missing):
 
-Scripted, because a picture is not worth a model call:
+- the agents column with lanes: their rows, a lane's own **Stop**, a lane down
+  with its reason, and the `✗`/`◐`/`○` glyphs;
+- a lane's report card, and a lane event (`restarted`, `is down`) in the
+  coordinator's transcript;
+- the `Lane 1` transcript a person gets by selecting a lane;
+- a check's problem line under the choosers (the same missing CLI as `01`'s
+  caption);
+- the history list with rows in it: the app lists `--program evo-swarm` sessions,
+  so a session run by a tab is in that list only when a swarm ran it;
+- a refusal or a lane going down: the notice line above the composer needs a
+  server that refuses, and a compaction divider needs a context long enough to
+  compact.
 
-* **the catalog** — a `ModelCache` written into the example (`CATALOG`), with the
-  models this machine's evo really registers, one of them speaking an API the
-  kernel does not have, which is what makes the lanes chooser mark it
-  unavailable;
-* **the history** — six journals the example writes into its temp home, in the
-  shape evo writes them, then a real `store::history::scan` over them;
-* **the model** — `scripted-model.py`, written into the temp directory by the
-  example and started on a free port, with a temp `EVO_HOME` whose `init.lisp`
-  registers it as provider `:stub` and model `stub-a-preview-2026-09`. It speaks
-  the same minimal Anthropic SSE as `evo-agent/tests/stub-messages.py`, reports
-  usage in the same measure the kernel estimates context in (chars/4, which is
-  what makes `09`'s compaction happen at all), and adds the rules the pictures
-  need: `CALL <tool> {json}` for a tool call, `TODOS` for the checklist,
-  `SHOW`/`SLOW` for the markdown document (streamed, with a pause before the
-  message ends so a capture can catch it whole while the row is still
-  streaming), `BIG` for the same document eight times over, to cross a context
-  window on purpose, and `FAIL` for a provider that dies mid-stream without a
-  terminal event;
-* **the second registration** — the same `init.lisp` registers
-  `stub-small-window`, whose 3000-token window (with `:compact-reserve 2000`
-  and `:compact-keep-recent 200`) is small enough that one streamed document
-  crosses the compaction line. `09` launches its tab with `--model
-  stub-small-window`; the others stay on the 200000-token registration;
-* **the bad binary** of `05-boot-failure` — a shell script that prints three
-  lines and exits 1, so the failure is a real boot failure with a real log tail;
-* **the dropped stream** of `06-reconnecting` — the two swarm processes are
-  `SIGSTOP`ped, not killed (a killed one fails its tab instead), the stream
-  times out, and `SIGCONT` starts them again after the pictures.
-
-## What the run leaves behind
-
-Nothing: the fixture, the journals and the scripted model live under one temp
-directory, which the example removes. The tabs' engines are stopped through
-`workspace::stop_in_background` — the same path the quit sequence uses — and the
-last lines of the run say how many swarm processes were still alive (none) and
-where the pictures went. `EVO_DESKTOP_KEEP_SCREENS_TMP=1` keeps the temp
-directory, for reading a journal after a failed run.
-
-The tabs `07` opens for the strip are waited for — `/health` first, then stopped.
-A swarm handed to the shutdown ladder while it is still booting is not reaped:
-there is no port to post `/shutdown` to yet, and the processes the server had
-already started outlive the engine and the tab (ten of them, when `07` opened its
-tabs and stopped them at once).
-
-## The real run's pictures
-
-`docs/screens/real/` holds pictures taken against the **installed** evo rather
-than a fixture: the M4 bundle proof's `bundle-launch.png` (docs/proofs.md) and
-four frames of **one real run** — the installed `evo-swarm` and `evo-agent`, the
-real `HOME`, the user's own models, no scripted provider — taken by
-
-```sh
-cargo run -p evo-desktop --example real_gui_run -- --capture docs/screens/real --scale 1
-```
-
-| capture | what it shows |
-|---|---|
-| `real-01-mid-stream.png` | the coordinator's first reply, mid-stream (§2.8) |
-| `real-02-lane-working.png` | the delegation out and lane 1 working — the left column's `●` |
-| `real-03-lane-transcript.png` | lane 1 selected, its own transcript (§7.3) |
-| `real-04-follow-up.png` | the final state: the report relayed back and answered |
-
-They are 1× (1600×1000 pixels each, 0.14 MB together) and quantised the way the
-set above was before `+dither` replaced error diffusion — 192 colours, no
-`+dither`. Their raw renders are gone, so only a re-run of the proof could bring
-them onto the recipe above. The session's injected context shows as one collapsed
-`Context · global memory` line in each of them, which is what makes them safe to
-commit at all — the run that produced the first set drew the user's own memory
-snapshot into every frame. `docs/proofs-real.md` §4 is their proof: the command,
-the UTC timeline, the two journals, the §7.3 readout, and what each frame is of.
+`06-history-*` and `01-empty-*` are the same picture for the same reason; they
+part company as soon as a tab's server is the swarm itself.
