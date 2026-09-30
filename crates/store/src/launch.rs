@@ -304,7 +304,13 @@ mod tests {
         assert_eq!(
             launch.check_argv(),
             vec![
-                "check", "--json", "--workers", "2", "--model", "m@aiden", "--lane-model",
+                "check",
+                "--json",
+                "--workers",
+                "2",
+                "--model",
+                "m@aiden",
+                "--lane-model",
                 "l@aiden"
             ]
         );

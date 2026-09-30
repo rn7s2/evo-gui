@@ -83,11 +83,6 @@ impl Session {
     pub fn is_resumable(&self) -> bool {
         self.path.is_file()
     }
-
-    /// Whether this row is a swarm's coordinator.
-    pub fn is_swarm(&self) -> bool {
-        self.swarm_id.is_some() || self.program == "evo-swarm"
-    }
 }
 
 /// What to ask `evo-agent sessions --json` for (§2).
@@ -203,11 +198,6 @@ impl HistoryEntry {
         } else {
             self.title.clone()
         }
-    }
-
-    /// How long ago this swarm was last written, in seconds.
-    pub fn age_secs(&self, now_epoch: u64) -> Option<u64> {
-        now_epoch.checked_sub(self.mtime())
     }
 
     /// The recency key, in epoch seconds.
@@ -412,10 +402,10 @@ mod tests {
         assert_eq!(first.title, "make the history list read the index");
         assert_eq!(first.updated_epoch(), 1_756_000_300);
         assert_eq!(first.updated_text(), "2025-08-24T01:51:40Z");
-        assert!(first.is_swarm() && first.is_resumable());
+        assert!(first.is_resumable());
         // A session with no swarm id is still a session, just not a named swarm.
         assert_eq!(sessions[1].swarm_id, None);
-        assert!(sessions[1].is_swarm(), "its program says so");
+        assert_eq!(sessions[1].program, "evo-swarm");
     }
 
     #[test]
@@ -432,7 +422,10 @@ mod tests {
 
     #[test]
     fn the_query_becomes_the_cli_arguments() {
-        assert_eq!(SessionsQuery::swarms().argv(), ["sessions", "--json", "--all", "--program", "evo-swarm"]);
+        assert_eq!(
+            SessionsQuery::swarms().argv(),
+            ["sessions", "--json", "--all", "--program", "evo-swarm"]
+        );
         assert_eq!(
             SessionsQuery {
                 all: false,
@@ -465,11 +458,11 @@ mod tests {
         assert_eq!(merged.session_id, "bbbb2222");
         assert_eq!(merged.lanes, 4);
         assert_eq!(merged.workers, 4);
+        assert_eq!(merged.models.coordinator.as_deref(), Some("claude-opus-5"));
         assert_eq!(
-            merged.models.coordinator.as_deref(),
-            Some("claude-opus-5")
+            merged.models.lanes.as_deref(),
+            Some("ark-deepseek-v4.1-flash")
         );
-        assert_eq!(merged.models.lanes.as_deref(), Some("ark-deepseek-v4.1-flash"));
         assert_eq!(merged.source, HistorySource::Index);
         assert!(merged.open_at_quit, "the app is the only side that knows");
         // The app's newer timestamp wins as the row's recency.
@@ -486,20 +479,12 @@ mod tests {
     fn a_recent_whose_journal_is_gone_is_not_a_row() {
         let entries = merge(
             Vec::new(),
-            &[Recent::new(
-                "/nonexistent/gone.sexp",
-                "/Users/x/gone",
-                2,
-            )],
+            &[Recent::new("/nonexistent/gone.sexp", "/Users/x/gone", 2)],
         );
         assert!(entries.is_empty());
         let entries = merge(
             Vec::new(),
-            &[Recent::new(
-                journal("recent"),
-                "/Users/x/gone",
-                2,
-            )],
+            &[Recent::new(journal("recent"), "/Users/x/gone", 2)],
         );
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].source, HistorySource::Recent);
@@ -524,12 +509,15 @@ mod tests {
             ..Recent::new(sessions[1].path.clone(), PathBuf::from("/Users/x/bar"), 3)
         }];
         let entries = merge(sessions, &recents);
-        assert_eq!(entries.len(), 2, "the recent is the same session, not a third");
+        assert_eq!(
+            entries.len(),
+            2,
+            "the recent is the same session, not a third"
+        );
         assert!(entries[0].mtime() >= entries[1].mtime());
         assert_eq!(entries[1].session_id, "aaaa1111");
         assert_eq!(entries[1].lanes, 3, "the app remembered the lane count");
         assert_eq!(entries[1].resume_args().1, entries[1].session);
-        assert!(entries[1].age_secs(entries[1].mtime() + 90) == Some(90));
     }
 
     #[test]

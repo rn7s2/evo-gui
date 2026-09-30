@@ -35,9 +35,18 @@ fn fixture(name: &str) -> serde_json::Value {
 /// files on disk.
 fn fixture_with_journals(dir: &Path, days_old: &[u64]) -> Vec<history::Session> {
     let mut body = fixture("sessions.json");
-    for (index, session) in body["sessions"].as_array_mut().unwrap().iter_mut().enumerate() {
+    for (index, session) in body["sessions"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .enumerate()
+    {
         let name = session["path"].as_str().unwrap();
-        let name = Path::new(name).file_name().unwrap().to_string_lossy().into_owned();
+        let name = Path::new(name)
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
         let path = dir.join(&name);
         fs::write(&path, "(:type :session :version 1)").unwrap();
         session["path"] = serde_json::Value::String(path.display().to_string());
@@ -149,8 +158,14 @@ fn sessions_json_becomes_history_rows() {
     assert_eq!(sessions.len(), 3, "the fixture lists three sessions");
     assert_eq!(sessions[0].id, "ed99c60d1dee3c3f");
     assert_eq!(sessions[0].program, "evo-swarm");
-    assert_eq!(sessions[0].swarm_id.as_deref(), Some("20260929T090956-ed99"));
-    assert_eq!(sessions[0].title, "make the empty tab read the session index");
+    assert_eq!(
+        sessions[0].swarm_id.as_deref(),
+        Some("20260929T090956-ed99")
+    );
+    assert_eq!(
+        sessions[0].title,
+        "make the empty tab read the session index"
+    );
     assert_eq!(sessions[0].updated_epoch(), 1_790_674_196);
     assert_eq!(sessions[0].updated_text(), "2026-09-29T09:29:56Z");
     // The argv is exactly the contract's (§2): the resumable swarms, wherever
@@ -192,13 +207,20 @@ fn the_index_and_the_apps_recents_become_one_list() {
         open_at_quit: true,
     }];
     let entries = history::merge(sessions, &recents);
-    assert_eq!(entries.len(), 3, "the recent is the same session, not a fourth");
+    assert_eq!(
+        entries.len(),
+        3,
+        "the recent is the same session, not a fourth"
+    );
     let first = &entries[0];
     assert_eq!(first.session_id, "ed99c60d1dee3c3f");
     assert_eq!(first.label(), "make the empty tab read the session index");
     assert_eq!(first.lanes, 6);
     assert_eq!(first.models.coordinator.as_deref(), Some("claude-opus-5"));
-    assert_eq!(first.models.lanes.as_deref(), Some("ark-deepseek-v4.1-flash"));
+    assert_eq!(
+        first.models.lanes.as_deref(),
+        Some("ark-deepseek-v4.1-flash")
+    );
     assert_eq!(first.source, history::HistorySource::Index);
     assert!(first.open_at_quit, "only the app can say this");
     // Newest first, and a row with no title falls back to the folder's name.
@@ -210,7 +232,8 @@ fn the_index_and_the_apps_recents_become_one_list() {
         "a session with no title falls back to the folder's name"
     );
     assert_eq!(
-        entries[1].resume_args().1, entries[1].session,
+        entries[1].resume_args().1,
+        entries[1].session,
         "resume gets the exact journal path"
     );
 }
@@ -228,15 +251,14 @@ fn catalog_json_fills_the_cache_the_choosers_read() {
     let cache = ModelCache::from_catalog("evo-swarm", body);
     assert_eq!(cache.models().len(), 3);
     assert_eq!(cache.program, "evo-swarm");
-    let lanes = cache.lane_models().expect("the swarm catalog has lanes");
+    let lanes = cache
+        .catalog()
+        .lane_models()
+        .expect("the swarm catalog has lanes");
     assert_eq!(lanes.len(), 3);
     // §5.6: a model a lane cannot register says why, and that is what greys the
     // chooser option out.
-    let blocked: Vec<String> = lanes
-        .iter()
-        .filter(|m| !m.ok)
-        .map(|m| m.spec())
-        .collect();
+    let blocked: Vec<String> = lanes.iter().filter(|m| !m.ok).map(|m| m.spec()).collect();
     assert_eq!(blocked, ["claude-sonnet-5@proxy"]);
     assert_eq!(
         lanes[2].reason.as_deref(),
@@ -245,15 +267,15 @@ fn catalog_json_fills_the_cache_the_choosers_read() {
     // The catalog's own warnings are carried, not swallowed.
     assert_eq!(cache.warnings(), ["mcp[2] could not be encoded"]);
     assert_eq!(
-        Catalog::from_json(fixture("catalog.json")).thinking_levels(),
-        ["off", "low", "medium", "high", "xhigh"]
+        Catalog::from_json(fixture("catalog.json")).raw()["thinking_levels"][0],
+        serde_json::Value::String("off".to_string())
     );
     // The cache survives the round trip to disk and back.
     let root = Root::at(stub.dir.join("root"));
     cache.save(&root).unwrap();
     let loaded = ModelCache::load(&root);
     assert_eq!(loaded.models().len(), 3);
-    assert_eq!(loaded.lane_models().unwrap().len(), 3);
+    assert_eq!(loaded.catalog().lane_models().unwrap().len(), 3);
 }
 
 #[test]

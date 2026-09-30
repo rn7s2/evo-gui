@@ -41,22 +41,6 @@ pub struct Model {
     pub reason: Option<String>,
 }
 
-impl Model {
-    /// The `id@provider` pair evo identifies a registration by.
-    pub fn spec(&self) -> String {
-        spec_of(&self.id, self.provider.as_deref())
-    }
-
-    /// The label a chooser shows: `id (provider)` when the id alone would be
-    /// ambiguous, else the id.
-    pub fn label(&self) -> String {
-        match &self.provider {
-            Some(provider) => format!("{} ({provider})", self.id),
-            None => self.id.clone(),
-        }
-    }
-}
-
 /// One model a lane may run, as `/catalog.lanes.models` reports it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LaneModel {
@@ -69,6 +53,7 @@ pub struct LaneModel {
 }
 
 impl LaneModel {
+    /// The `ID@PROVIDER` pair, as above.
     pub fn spec(&self) -> String {
         spec_of(&self.id, self.provider.as_deref())
     }
@@ -79,6 +64,14 @@ impl LaneModel {
 pub struct ModelRef {
     pub id: String,
     pub provider: Option<String>,
+}
+
+impl Model {
+    /// The `ID@PROVIDER` pair evo identifies this registration by — what a
+    /// `--model` / `--lane-model` flag takes (§1).
+    pub fn spec(&self) -> String {
+        spec_of(&self.id, self.provider.as_deref())
+    }
 }
 
 impl ModelRef {
@@ -102,17 +95,6 @@ impl std::fmt::Display for ModelRef {
     }
 }
 
-/// One provider, as `/catalog.providers` describes it. Never a key.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Provider {
-    pub name: String,
-    pub api: Option<String>,
-    /// Whether this process holds a credential for it.
-    pub has_key: bool,
-    /// The environment variable the key came from, when it came from one.
-    pub key_env: Option<String>,
-}
-
 /// One model `evo-swarm check --json` judged: the coordinator's or the lanes'.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ModelCheck {
@@ -125,10 +107,59 @@ pub struct ModelCheck {
 /// One problem `evo-swarm check --json` found with a launch (§9).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Problem {
-    /// evo's own code for it (`model_not_found`, `no_key`, …).
+    /// evo's own code for it (`model_not_found`, `no_key`, …), which is also what
+    /// decides where a click on the line goes.
     pub code: String,
     /// One line, already worded for a person.
     pub message: String,
+}
+
+impl Problem {
+    /// The line a client shows: the message, folded onto one line — something a
+    /// reader can act on, never a paragraph.
+    pub fn line(&self) -> String {
+        let text = one_line(&self.message);
+        if text.is_empty() {
+            self.code.clone()
+        } else {
+            text
+        }
+    }
+
+    /// What this problem is about, which is what a click on its line opens.
+    pub fn target(&self) -> ProblemTarget {
+        let code = self.code.to_ascii_lowercase();
+        if code.contains("lane_model") {
+            ProblemTarget::LaneModel
+        } else if code.contains("lane_thinking") || code.contains("thinking") {
+            ProblemTarget::Thinking
+        } else if code.contains("worker") {
+            ProblemTarget::Workers
+        } else if code.contains("model") {
+            ProblemTarget::Model
+        } else {
+            // Everything else is about the machine rather than the launch — a binary
+            // that is not there, a folder that cannot be written — which is the
+            // application's own settings' business.
+            ProblemTarget::Other
+        }
+    }
+}
+
+/// What one problem is about (§9): the chooser (or the setting) a click on its line
+/// belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProblemTarget {
+    /// The coordinator's model.
+    Model,
+    /// The lanes' model.
+    LaneModel,
+    /// The lanes' thinking level.
+    Thinking,
+    /// The worker count.
+    Workers,
+    /// Something outside the launch's choices.
+    Other,
 }
 
 /// The answer to `evo-swarm check --json`: whether the launch would work, and
@@ -154,10 +185,6 @@ impl Catalog {
 
     pub fn raw(&self) -> &Value {
         &self.body
-    }
-
-    pub fn into_raw(self) -> Value {
-        self.body
     }
 
     /// True when the body names no model at all — the same as no catalog.
@@ -189,27 +216,11 @@ impl Catalog {
     }
 
     /// One registration, by the pair evo identifies it with.
+    #[allow(dead_code)]
     pub fn model(&self, id: &str, provider: Option<&str>) -> Option<Model> {
         self.models()
             .into_iter()
             .find(|m| m.id == id && m.provider.as_deref() == provider)
-    }
-
-    /// The providers, each with whether a key is held (never the key itself).
-    pub fn providers(&self) -> Vec<Provider> {
-        let Some(list) = self.body.get("providers").and_then(Value::as_array) else {
-            return Vec::new();
-        };
-        list.iter()
-            .filter_map(|p| {
-                Some(Provider {
-                    name: string(p, "name").or_else(|| string(p, "key"))?,
-                    api: string(p, "api"),
-                    has_key: p.get("has_key").and_then(Value::as_bool).unwrap_or(false),
-                    key_env: string(p, "key_env"),
-                })
-            })
-            .collect()
     }
 
     /// The models a lane can register — `/catalog.lanes.models`, which only
@@ -242,24 +253,8 @@ impl Catalog {
                 .iter()
                 .find(|m| m.id == id && m.provider.as_deref() == provider)
                 .is_some_and(|m| m.ok),
-            None => self
-                .model(id, provider)
-                .is_some_and(|m| m.ready),
+            None => self.model(id, provider).is_some_and(|m| m.ready),
         }
-    }
-
-    /// The thinking levels evo accepts, weakest first.
-    pub fn thinking_levels(&self) -> Vec<String> {
-        string_array(self.body.get("thinking_levels"))
-    }
-
-    /// evo's own default model, when it named one.
-    pub fn default_model(&self) -> Option<ModelRef> {
-        let m = self.body.get("default_model")?;
-        Some(ModelRef {
-            id: m.get("id")?.as_str()?.to_owned(),
-            provider: string(m, "provider"),
-        })
     }
 
     /// Entries evo could not encode, named rather than dropped silently (§5.6).
@@ -296,11 +291,13 @@ impl CheckReport {
     pub fn lines(&self) -> Vec<String> {
         self.problems
             .iter()
-            .map(|problem| match (problem.message.is_empty(), problem.code.is_empty()) {
-                (false, _) => one_line(&problem.message),
-                (true, false) => problem.code.clone(),
-                (true, true) => String::new(),
-            })
+            .map(
+                |problem| match (problem.message.is_empty(), problem.code.is_empty()) {
+                    (false, _) => one_line(&problem.message),
+                    (true, false) => problem.code.clone(),
+                    (true, true) => String::new(),
+                },
+            )
             .filter(|line| !line.is_empty())
             .collect()
     }
@@ -411,8 +408,6 @@ mod tests {
         assert_eq!(models[0].name.as_deref(), Some("Claude Opus 5"));
         assert_eq!(models[0].context_window, Some(200_000));
         assert!(models[0].reasoning && models[0].images && models[0].ready);
-        assert_eq!(models[0].spec(), "claude-opus-5@anthropic");
-        assert_eq!(models[0].label(), "claude-opus-5 (anthropic)");
         // An unreachable registration says so.
         assert!(!models[2].ready);
         assert_eq!(models[2].reason.as_deref(), Some("no credential"));
@@ -429,7 +424,6 @@ mod tests {
             lanes[2].reason.as_deref(),
             Some("api anthropic-oauth-messages is not in a lane")
         );
-        assert_eq!(lanes[2].spec(), "claude-sonnet-5@proxy");
         assert!(catalog.lane_model_ok("claude-opus-5", Some("anthropic")));
         assert!(!catalog.lane_model_ok("claude-sonnet-5", Some("proxy")));
         // The provider matters: the same id under another provider is not the
@@ -448,39 +442,15 @@ mod tests {
     }
 
     #[test]
-    fn providers_never_carry_a_key() {
-        let catalog = Catalog::from_json(body());
-        let providers = catalog.providers();
-        assert_eq!(providers.len(), 2);
-        assert!(providers[0].has_key);
-        assert_eq!(providers[0].key_env.as_deref(), Some("ANTHROPIC_API_KEY"));
-        assert!(!providers[1].has_key);
-        assert_eq!(providers[1].key_env, None);
-    }
-
-    #[test]
     fn the_rest_of_the_body_is_read_not_required() {
         let catalog = Catalog::from_json(body());
-        assert_eq!(
-            catalog.thinking_levels(),
-            ["off", "low", "medium", "high", "xhigh"]
-        );
-        assert_eq!(
-            catalog.default_model(),
-            Some(ModelRef::new(
-                "ark-deepseek-v4.1-flash",
-                Some("aiden")
-            ))
-        );
         assert_eq!(catalog.warnings(), ["mcp[2] could not be encoded"]);
         assert!(!catalog.is_empty());
 
         // A body missing every optional part is empty, not a crash.
         let bare = Catalog::from_json(json!({"models": []}));
         assert!(bare.is_empty());
-        assert_eq!(bare.thinking_levels(), Vec::<String>::new());
-        assert_eq!(bare.default_model(), None);
-        assert_eq!(bare.providers().len(), 0);
+        assert_eq!(bare.warnings(), Vec::<String>::new());
         assert!(Catalog::empty().is_empty());
     }
 
@@ -492,7 +462,7 @@ mod tests {
         ]}));
         let models = catalog.models();
         assert_eq!(models.len(), 1);
-        assert_eq!(models[0].spec(), "bare");
+        assert_eq!(models[0].id, "bare");
         assert!(catalog.lane_model_ok("bare", None));
     }
 
@@ -515,10 +485,34 @@ mod tests {
             Some("a lane cannot register ark-chat")
         );
         assert_eq!(report.problems.len(), 2);
-        assert_eq!(
-            report.lines(),
-            vec!["no model named nope".to_string(), "line one line two".to_string()]
-        );
+        assert_eq!(report.problems[0].line(), "no model named nope");
+        assert_eq!(report.problems[1].line(), "line one line two");
+    }
+
+    /// §9: a problem knows which chooser its line belongs to, so a click can open
+    /// the right one — and anything that is not about a choice opens the settings.
+    #[test]
+    fn a_problem_knows_what_it_is_about() {
+        let cases = [
+            ("model_not_ready", ProblemTarget::Model),
+            ("model_not_found", ProblemTarget::Model),
+            ("lane_model_not_ready", ProblemTarget::LaneModel),
+            ("lane_thinking_unknown", ProblemTarget::Thinking),
+            ("workers_out_of_range", ProblemTarget::Workers),
+            ("swarm_binary_missing", ProblemTarget::Other),
+            ("folder_not_writable", ProblemTarget::Other),
+        ];
+        for (code, target) in cases {
+            assert_eq!(
+                Problem {
+                    code: code.to_string(),
+                    message: "…".to_string()
+                }
+                .target(),
+                target,
+                "{code}"
+            );
+        }
     }
 
     #[test]
@@ -528,6 +522,6 @@ mod tests {
         assert!(report.lines().is_empty());
         // A problem with an empty code and message is not a line.
         let blank = CheckReport::from_json(&json!({"problems": [{"code": "", "message": " "}]}));
-        assert!(blank.lines().is_empty());
+        assert_eq!(blank.problems[0].line(), "");
     }
 }

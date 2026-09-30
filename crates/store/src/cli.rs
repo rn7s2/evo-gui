@@ -103,12 +103,13 @@ impl std::error::Error for CliError {}
 
 /// Run `bin args…`, and read stdout as one JSON document.
 pub fn run_json(bin: &Path, args: &[String]) -> Result<Value, CliError> {
-    let output = Command::new(bin).args(args).output().map_err(|source| {
-        CliError::NotFound {
+    let output = Command::new(bin)
+        .args(args)
+        .output()
+        .map_err(|source| CliError::NotFound {
             bin: bin.to_path_buf(),
             source,
-        }
-    })?;
+        })?;
     if !output.status.success() {
         return Err(CliError::Failed {
             bin: bin.to_path_buf(),
@@ -167,7 +168,13 @@ mod tests {
     fn exit_one_is_a_failure_that_keeps_the_childs_words() {
         let bin = temp_script("fail", "#!/bin/sh\necho 'no such model' >&2\nexit 1\n");
         let error = run_json(&bin, &[]).unwrap_err();
-        assert!(matches!(error, CliError::Failed { status: Some(1), .. }));
+        assert!(matches!(
+            error,
+            CliError::Failed {
+                status: Some(1),
+                ..
+            }
+        ));
         assert_eq!(error.detail().as_deref(), Some("no such model"));
         assert!(error.summary().contains("exited 1"));
         std::fs::remove_file(&bin).unwrap();
@@ -194,7 +201,10 @@ mod tests {
             "args",
             "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done\n",
         );
-        let output = Command::new(&bin).args(["a", "b c", "--x"]).output().unwrap();
+        let output = Command::new(&bin)
+            .args(["a", "b c", "--x"])
+            .output()
+            .unwrap();
         assert_eq!(String::from_utf8_lossy(&output.stdout), "a\nb c\n--x\n");
         assert_eq!(args(&["a", "b"]), vec!["a".to_string(), "b".to_string()]);
         std::fs::remove_file(&bin).unwrap();

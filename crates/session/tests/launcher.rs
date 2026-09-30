@@ -12,9 +12,9 @@ mod common;
 use common::fixture;
 use serde_json::json;
 use session::{
-    coordinator_chooser, history_rows, home_short, lanes_chooser, relative_time,
-    thinking_chooser, workers_chooser, Choice, Chooser, HistoryEntry, HistorySource, LaunchPlan,
-    Launcher, Problem, ProblemTarget, DEFAULT_KEY, WORKERS_MAX,
+    coordinator_chooser, history_rows, home_short, lanes_chooser, relative_time, thinking_chooser,
+    workers_chooser, Choice, Chooser, HistoryEntry, HistorySource, LaunchPlan, Launcher,
+    DEFAULT_KEY, WORKERS_MAX,
 };
 
 fn labels(chooser: &Chooser) -> Vec<&str> {
@@ -124,10 +124,12 @@ fn the_lanes_chooser_greys_out_what_a_lane_cannot_register() {
     let chooser = lanes_chooser(&fixture("catalog.json"));
     assert_eq!(chooser.options[0].detail, "follows the coordinator");
     assert!(chooser.option("claude-opus-5@anthropic").unwrap().available);
-    assert!(chooser
-        .option("ark-deepseek-v4.1-flash@aiden")
-        .unwrap()
-        .available);
+    assert!(
+        chooser
+            .option("ark-deepseek-v4.1-flash@aiden")
+            .unwrap()
+            .available
+    );
     let blocked = chooser.option("claude-sonnet-5@proxy").unwrap();
     assert!(!blocked.available);
     assert_eq!(
@@ -185,7 +187,10 @@ fn the_workers_chooser_runs_to_the_caps_own_limit() {
 #[test]
 fn the_plan_names_the_flags_a_launch_passes() {
     let mut launcher = Launcher::new();
-    assert!(launcher.plan().is_default(), "Default passes no flag at all");
+    assert!(
+        launcher.plan().is_default(),
+        "Default passes no flag at all"
+    );
 
     assert!(launcher.set_catalog(&fixture("catalog.json")));
     assert!(launcher.select(Choice::Coordinator, "claude-opus-5@anthropic"));
@@ -225,7 +230,10 @@ fn choosing_nothing_leaves_each_field_at_default() {
     assert_eq!(launcher.selected_key(Choice::Coordinator), DEFAULT_KEY);
     assert!(launcher.plan().is_default());
     assert!(launcher.selected(Choice::Coordinator).is_some());
-    assert_eq!(launcher.selected(Choice::Coordinator).unwrap().model(), None);
+    assert_eq!(
+        launcher.selected(Choice::Coordinator).unwrap().model(),
+        None
+    );
 }
 
 #[test]
@@ -248,67 +256,6 @@ fn setting_the_same_catalog_twice_changes_nothing() {
     let catalog = fixture("catalog.json");
     assert!(launcher.set_catalog(&catalog), "from nothing to a catalog");
     assert!(!launcher.set_catalog(&catalog), "the same body again");
-}
-
-// --- the check's problems (§9) -------------------------------------------------------
-
-#[test]
-fn a_problem_is_one_line_and_knows_where_a_click_goes() {
-    let problem = Problem {
-        code: "lane_model_not_ready".to_string(),
-        message: "a lane cannot register claude-sonnet-5\nit needs another api".to_string(),
-    };
-    assert_eq!(
-        problem.line(),
-        "a lane cannot register claude-sonnet-5 it needs another api"
-    );
-    assert_eq!(problem.target(), ProblemTarget::Lanes);
-    assert_eq!(problem.target().choice(), Some(Choice::Lanes));
-
-    let cases = [
-        ("model_not_ready", ProblemTarget::Coordinator),
-        ("lane_model_not_ready", ProblemTarget::Lanes),
-        ("lane_thinking_unknown", ProblemTarget::LaneThinking),
-        ("workers_out_of_range", ProblemTarget::Workers),
-        ("swarm_binary_missing", ProblemTarget::Settings),
-    ];
-    for (code, target) in cases {
-        let problem = Problem {
-            code: code.to_string(),
-            message: "…".to_string(),
-        };
-        assert_eq!(problem.target(), target, "{code}");
-    }
-    assert_eq!(ProblemTarget::Settings.choice(), None);
-    // A problem with no message still says something: its code.
-    assert_eq!(
-        Problem {
-            code: "op_failed".to_string(),
-            message: String::new()
-        }
-        .line(),
-        "op_failed"
-    );
-}
-
-#[test]
-fn the_launcher_carries_the_problems_and_clears_them() {
-    let mut launcher = Launcher::new();
-    assert!(launcher.problems().is_empty(), "nothing has been checked");
-    let problems = vec![Problem {
-        code: "model_not_ready".to_string(),
-        message: "claude-sonnet-5 has no credential".to_string(),
-    }];
-    assert!(launcher.set_problems(&problems));
-    assert_eq!(launcher.problems().len(), 1);
-    assert_eq!(
-        launcher.problems()[0].line(),
-        "claude-sonnet-5 has no credential"
-    );
-    // The same answer again is not a redraw; a clean check clears the lines.
-    assert!(!launcher.set_problems(&problems));
-    assert!(launcher.set_problems(&[]));
-    assert!(launcher.problems().is_empty());
 }
 
 // --- history (§2) -------------------------------------------------------------------
@@ -412,7 +359,10 @@ fn relative_times_are_phrased_against_the_callers_clock() {
 
 #[test]
 fn home_shortening_keeps_a_path_that_is_not_under_home() {
-    assert_eq!(home_short("/Users/you/coding/foo", Some("/Users/you")), "~/coding/foo");
+    assert_eq!(
+        home_short("/Users/you/coding/foo", Some("/Users/you")),
+        "~/coding/foo"
+    );
     assert_eq!(home_short("/Users/you", Some("/Users/you/")), "~");
     assert_eq!(home_short("/opt/x", Some("/Users/you")), "/opt/x");
     assert_eq!(home_short("/opt/x", None), "/opt/x");
