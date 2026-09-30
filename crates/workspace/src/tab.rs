@@ -28,7 +28,7 @@ use gpui_kit::{
 use async_channel::Receiver;
 use composer::{Composer, ComposerEvent};
 use session::{
-    AgentKey, Changes, ItemChange, LaunchPlan, Op, Queue, Status, StreamStatus, TabModel,
+    AgentKey, Changes, Item, ItemChange, LaunchPlan, Op, Queue, Status, StreamStatus, TabModel,
 };
 use swarm_client::{ErrorCode, OpError, OpReply};
 use tab_engine::{EngineHandle, Update};
@@ -1683,6 +1683,16 @@ mod tests {
         })
     }
 
+    /// One assistant answer, with or without the thinking behind it, as a fixture
+    /// item (`GET /items`, §5.4).
+    fn assistant(id: &str, text: &str, thinking: &str) -> Item {
+        Item::from_json(&serde_json::json!({
+            "id": id, "ts": 1, "kind": "assistant", "text": text,
+            "thinking": thinking, "status": "final",
+        }))
+        .expect("a fixture item has an id")
+    }
+
     fn error(code: ErrorCode, message: &str) -> OpError {
         OpError {
             code,
@@ -1890,5 +1900,59 @@ mod tests {
             ] } }),
         );
         assert!(swarm_is_busy(&model), "a lane still working");
+    }
+
+    /// §7.3: the band over the transcript carries one quiet control — the reveal for
+    /// thinking — and only while the transcript it heads has thinking to reveal. The
+    /// state is the *view's* own, so the header asks the view rather than deciding.
+    #[gpui_kit::test]
+    fn the_thinking_reveal_is_offered_only_when_there_is_thinking(cx: &mut TestAppContext) {
+        let (window, tab) = running_tab(cx);
+        let view = cx.update(|cx| cx.new(TranscriptView::new));
+        cx.update(|cx| {
+            tab.update(cx, |tab, cx| {
+                tab.transcripts.insert(AgentKey::Coordinator, view.clone());
+            });
+        });
+
+        // An answer with thinking: the band offers to show it, and pressing the
+        // control is what flips it.
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.replace(vec![assistant("e_1", "the answer", "a thought")], cx);
+            });
+        });
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window.try_find("transcript-thinking").is_some(),
+                "a transcript with thinking carries the reveal"
+            );
+        })
+        .expect("the header's control");
+        cx.update_window(window, |_, window, cx| {
+            window.click("transcript-thinking", cx);
+        })
+        .expect("the press");
+        assert!(
+            cx.read(|cx| view.read(cx).is_showing_thinking(cx)),
+            "the press is the view's own state"
+        );
+
+        // An answer that carried none: nothing to reveal, and so no control.
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.replace(vec![assistant("e_2", "the answer", "")], cx);
+            });
+        });
+        assert!(!cx.read(|cx| view.read(cx).has_thinking(cx)));
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window.try_find("transcript-thinking").is_none(),
+                "no thinking, no control"
+            );
+        })
+        .expect("the header without it");
     }
 }
