@@ -869,8 +869,8 @@ impl WorkspaceView {
     /// edge while the tabs scroll under it, so a tab whose edge is past the
     /// window's overflows into the button's pixels — and since the button is
     /// drawn after them, what a reader sees is the last visible tab's label with
-    /// the `+` on top of it (§7.1, and `docs/screens/09-bad-run-dark.png`, where
-    /// it reads `● evo-desktoj +`).
+    /// the `+` on top of it — `● evo-desktoj +`, the button sitting on the `p`
+    /// (§7.1).
     ///
     /// So the scrolling part gets a box of its own, [clipped](Self::render_tab_scroll)
     /// and sized to end where the button begins: a tab is cut off at that edge

@@ -9,12 +9,13 @@ it.
 
 ![evo-desktop icon](assets/icon/icon-1024.png)
 
-![The empty tab at launch: three choosers on Default, the folder card, and the resumable swarms](docs/screens/01-launch-light.png)
-![A live swarm: the agent list, the transcript, the composer](docs/screens/02-three-tabs-light.png)
-![The lanes chooser, one model greyed out because no lane can register it](docs/screens/01b-lanes-chooser-dark.png)
+![The empty tab as the app opens it: the choosers on Default, the folder card, and the history](docs/screens/01-empty-light.png)
+![A tab driving a swarm: the agents column, an answer streaming, the Stop swarm button](docs/screens/02-live-dark.png)
+![A swarm that could not come up: the reason, the log tail, Retry and Close](docs/screens/07-boot-failure-light.png)
 
-Those are three of the twenty captures in [`docs/screens.md`](docs/screens.md), which is
-also the recipe for taking them again.
+Those are three of the fourteen captures in [`docs/screens.md`](docs/screens.md) — seven
+states, each in both themes — which is also the recipe for taking them again, and
+`crates/app/examples/screens.rs` is what takes them.
 
 ## Requirements
 

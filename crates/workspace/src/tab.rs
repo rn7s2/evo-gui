@@ -228,8 +228,9 @@ pub struct TabContent {
     pub(crate) history: Entity<ListState<HistoryList>>,
     /// One transcript view **per agent**, created when that agent is first
     /// shown, so its rows, its markdown documents, its scroll position and its
-    /// todo panel all belong to one agent and to one revision counter (see
-    /// docs/review-1.md F5).
+    /// todo panel all belong to one agent and to one revision counter: the
+    /// transcript's own state is per agent, so switching columns cannot leak one
+    /// agent's scroll position, documents or todos into another's.
     pub(crate) transcripts: BTreeMap<AgentKey, Entity<TranscriptView>>,
     pub(crate) composer: Entity<Composer>,
     /// What every tab of this window starts its swarms with: the two binaries, the
