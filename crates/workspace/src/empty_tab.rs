@@ -554,6 +554,12 @@ impl EmptyTabState {
                 state.set_selected_index(selected, window, cx);
             });
         }
+        self.sync_count(window, cx);
+    }
+
+    /// The count box reads what the launcher holds — the only count there is, so the box
+    /// cannot show one number while the launch passes another.
+    fn sync_count(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let workers = self.launcher.workers().to_string();
         if self.count.read(cx).value().as_ref() != workers {
             self.count
@@ -1381,6 +1387,9 @@ impl EmptyTabState {
 
 impl Render for EmptyTabState {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The count box shows what the launcher holds, whoever moved it: the catalog
+        // arrived, a check resolved another count, or the person typed one.
+        self.sync_count(window, cx);
         v_flex()
             .id("empty-tab")
             .test_support()
@@ -1480,6 +1489,11 @@ fn check_body(report: &CheckReport) -> Value {
         "ok": report.ok,
         "model": one(&report.model),
         "lane_model": one(&report.lane_model),
+        // What evo would resolve with no flags (§2): the two efforts and the count the
+        // controls open on.
+        "thinking": report.thinking,
+        "lane_thinking": report.lane_thinking,
+        "workers": report.workers,
         "problems": report
             .problems
             .iter()
@@ -1714,7 +1728,7 @@ mod tests {
                  "reasoning": true, "images": true, "ready": false, "reason": "no credential"}
             ],
             "default_model": {"id": "claude-opus-4.5", "provider": "anthropic"},
-            "thinking_levels": ["off", "low", "medium", "high", "xhigh", "max"],
+            "thinking_levels": ["low", "medium", "high", "xhigh", "max"],
             "lanes": {"models": [
                 {"id": "ark-deepseek-v4.1-flash", "provider": "aiden", "ok": false,
                  "reason": "ark-chat is not an api a lane has"},
@@ -1739,6 +1753,12 @@ mod tests {
             ok: problems.is_empty(),
             model: one(model),
             lane_model: one(lane),
+            // What a launch with no flags resolves to, which is what the controls open
+            // on. A test that wants another answer says so: `CheckReport { thinking:
+            // Some("high".into()), ..check(…) }`.
+            thinking: Some("medium".to_string()),
+            lane_thinking: Some("medium".to_string()),
+            workers: Some(6),
             problems,
         }
     }
@@ -1907,7 +1927,8 @@ mod tests {
                 state.launcher.chosen_key(Card::Lanes),
                 Some("claude-opus-4.5@anthropic")
             );
-            // The ladder's own middle rung, and evo's own count.
+            // A check has not answered yet, so the sliders sit on the ladder's middle
+            // rung and the count on evo's own — the values `check` will replace.
             assert_eq!(state.launcher.level(Card::Coordinator), Some("medium"));
             assert_eq!(state.launcher.level(Card::Lanes), Some("medium"));
             assert_eq!(state.count.read(cx).value().as_ref(), "6");
@@ -1919,6 +1940,156 @@ mod tests {
                 "claude-opus-4.5@anthropic"
             );
             assert_eq!(tab.read(cx).workers(cx).as_ref(), "6");
+        });
+    }
+
+    /// §2/§7.2: `check --json` resolves the two efforts and the count as a launch with no
+    /// flags would, and the controls open on those rather than on a rung the page picked.
+    #[gpui_kit::test]
+    fn the_controls_open_on_what_check_resolved(cx: &mut TestAppContext) {
+        let f = open(cx);
+        let folder = PathBuf::from("/Users/you/coding/from-check");
+        f.set_catalog(cx, &catalog_body());
+        f.set_check(
+            cx,
+            CheckReport {
+                thinking: Some("xhigh".to_string()),
+                lane_thinking: Some("low".to_string()),
+                workers: Some(12),
+                ..check(
+                    ("claude-opus-4.5", "anthropic"),
+                    ("claude-opus-4.5", "anthropic"),
+                    Vec::new(),
+                )
+            },
+        );
+        f.render(cx);
+
+        let state = f.state(cx);
+        f.act(cx, |window, cx| {
+            {
+                let state = state.read(cx);
+                assert_eq!(state.launcher.level(Card::Coordinator), Some("xhigh"));
+                assert_eq!(state.launcher.level(Card::Lanes), Some("low"));
+            }
+            // The box catches up on the frame the window paints.
+            window.render_frame(cx);
+            assert_eq!(state.read(cx).count.read(cx).value().as_ref(), "12");
+            // The sliders' own thumbs are where those levels put them.
+            let rail = window.find("coordinator-effort-rail").bounds();
+            let thumb = window.find("coordinator-effort-thumb").bounds();
+            let travelled: f32 = (thumb.origin.x - rail.origin.x).into();
+            let span: f32 = rail.size.width.into();
+            assert!(
+                (travelled / span - 0.75).abs() < 0.05,
+                "`xhigh` is the fourth of five rungs"
+            );
+        });
+
+        // A launch from here passes exactly what the controls show.
+        let tab = f.tab.clone();
+        f.act(cx, |_, cx| {
+            tab.update(cx, |tab, cx| {
+                tab.set_folder_picker(Some(folder.clone()), cx)
+            })
+        });
+        f.act(cx, |window, cx| window.click(FOLDER_ID, cx));
+        assert_eq!(
+            f.events(),
+            vec![TabContentEvent::Launch {
+                folder,
+                plan: LaunchPlan {
+                    model: Some(("claude-opus-4.5".to_string(), "anthropic".to_string())),
+                    thinking: Some("xhigh".to_string()),
+                    workers: Some(12),
+                    lanes_model: Some(("claude-opus-4.5".to_string(), "anthropic".to_string())),
+                    lane_thinking: Some("low".to_string()),
+                },
+            }]
+        );
+    }
+
+    /// §7.2: a control the launcher opened moves when `check` answers; a control the person
+    /// moved stays where they put it.
+    #[gpui_kit::test]
+    fn a_control_the_person_moved_is_left_alone(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.set_catalog(cx, &catalog_body());
+        f.set_check(
+            cx,
+            check(
+                ("claude-opus-4.5", "anthropic"),
+                ("claude-opus-4.5", "anthropic"),
+                Vec::new(),
+            ),
+        );
+        f.render(cx);
+        let state = f.state(cx);
+        // A person drags the coordinator's slider to the end and types a count.
+        f.act(cx, |window, cx| {
+            state.update(cx, |state, cx| {
+                state.launcher.set_effort(Card::Coordinator, 4);
+                for _ in 0..3 {
+                    state.step_count(true, window, cx);
+                }
+            });
+        });
+
+        // A newer check resolves other values.
+        f.set_check(
+            cx,
+            CheckReport {
+                thinking: Some("low".to_string()),
+                lane_thinking: Some("low".to_string()),
+                workers: Some(3),
+                ..check(
+                    ("claude-opus-4.5", "anthropic"),
+                    ("claude-opus-4.5", "anthropic"),
+                    Vec::new(),
+                )
+            },
+        );
+        f.act(cx, |window, cx| {
+            {
+                let state = state.read(cx);
+                // The moved ones stand; the one nobody touched follows the check.
+                assert_eq!(state.launcher.level(Card::Coordinator), Some("max"));
+                assert_eq!(state.launcher.workers(), 9);
+                assert_eq!(state.launcher.level(Card::Lanes), Some("low"));
+            }
+            window.render_frame(cx);
+            assert_eq!(state.read(cx).count.read(cx).value().as_ref(), "9");
+        });
+    }
+
+    /// A check from an evo that did not carry the resolved fields leaves the controls on
+    /// evo's own last values for that frame.
+    #[gpui_kit::test]
+    fn a_check_without_resolved_values_falls_back(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.set_catalog(cx, &catalog_body());
+        f.set_check(
+            cx,
+            CheckReport {
+                thinking: None,
+                lane_thinking: None,
+                workers: None,
+                ..check(
+                    ("claude-opus-4.5", "anthropic"),
+                    ("claude-opus-4.5", "anthropic"),
+                    Vec::new(),
+                )
+            },
+        );
+        f.render(cx);
+        let state = f.state(cx);
+        f.act(cx, |_, cx| {
+            assert_eq!(
+                state.read(cx).launcher.level(Card::Coordinator),
+                Some("medium")
+            );
+            let state = state.read(cx);
+            assert_eq!(state.launcher.workers(), 6);
         });
     }
 

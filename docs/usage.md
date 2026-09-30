@@ -114,13 +114,15 @@ a model is a launch that runs it:
   each with a detail line — `200k ctx · vision · reasons` — and a registration
   evo cannot reach is greyed with evo's own reason.
 - **Coordinator — Effort** is `--thinking`, and **Workers — Effort** is
-  `--lane-thinking`: the rungs `/catalog.thinking_levels` lists, without `off`
-  (evo retired that rung, and `--thinking` refuses it). Both open on the middle
-  rung; click, drag or use the arrows, and the level's name is beside the label.
-- **Workers — Count** is `--workers`, 1–64. Typing clamps to the range — `0`,
-  `99` or a word lands on the nearest count — and `−`/`+` step one at a time. It
-  opens on evo-swarm's own 6, which is what it starts with when neither
-  `--workers` nor the `swarm-workers` setting says otherwise.
+  `--lane-thinking`: the rungs `/catalog.thinking_levels` lists. Each opens on
+  the effort `check` resolved — evo's own chain, journal and settings included,
+  so a resumed swarm opens on the level it was running at; click, drag or use the
+  arrows, and the level's name is beside the label.
+- **Workers — Count** is `--workers`, 1–64, opening on the count `check`
+  resolved — `--workers`, then the `swarm-workers` setting, then 6. Typing clamps
+  to the range — `0`, `99` or a word lands on the nearest count — and `−`/`+`
+  step one at a time.
+
 - **Workers — Model** is `--lane-model`: what `check` resolved for a lane, else
   the default when a lane can register it, else the first registration a lane
   can. The list is the same catalog judged by `/catalog.lanes.models` — a model a
@@ -129,6 +131,11 @@ a model is a launch that runs it:
   `<folder>/.evo/swarm.lisp` stays yours.
 - **Select folder…** — the native folder dialog. Picking a folder starts the
   swarm there and turns the tab into a tab page; cancelling leaves the tab empty.
+
+A control the launcher resolved follows `check`: when the answer changes, the
+page moves the control onto it. A control **you** moved is yours, and stays where
+you put it. The one exception is the frame before the first `check` comes back,
+where the sliders sit on the middle rung and the count on evo-swarm's own 6.
 
 Under the cards, one calm line each: what `evo-swarm check --json` found wrong
 with the launch the controls describe — a model evo cannot reach, a lane that
