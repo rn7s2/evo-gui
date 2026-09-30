@@ -78,6 +78,13 @@ pub fn open(window: &mut Window, cx: &mut App) -> Entity<SettingsPanel> {
             // given. A dialog only `PANEL_SIZE.0` wide left the panel wider than its
             // box, and the right-hand controls were clipped by the edge.
             .close_button(false)
+            // A press beside the panel lands on the dialog's backdrop, which the
+            // kit draws invisible (and which closes the dialog by default). Every
+            // gesture *around* the panel — a stray click, a drag that ends there —
+            // would then throw away the paths somebody typed, without a word, and
+            // Save and Cancel are the two answers this panel offers (§13). The
+            // escape key still cancels, which is the deliberate way out.
+            .overlay_closable(false)
             .w(px(PANEL_SIZE.0 + 2. * DIALOG_PADDING))
             .content(move |content, _window, _cx| {
                 content.child(

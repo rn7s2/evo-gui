@@ -9,13 +9,17 @@ it.
 
 ![evo-desktop icon](assets/icon/icon-1024.png)
 
-![The empty tab as the app opens it: the choosers on Default, the folder card, and the history](docs/screens/01-empty-light.png)
-![Six lanes, one of them working: the agents column, the delegate call, and the Stop swarm button](docs/screens/02-lanes-working-light.png)
-![A lane's transcript: the work it was given, and the checklist it left](docs/screens/03-lane-transcript-dark.png)
+Ten states of the real window — the empty tab, six lanes with one of them working,
+a lane's transcript, a tool row opened, a prompt queued, a lane's report, the
+history, the two ways a swarm fails to start, and the tab strip itself — are
+captured in both themes by `crates/app/examples/screens.rs` and described in
+[`docs/screens.md`](docs/screens.md), which is also the recipe for taking them.
+The pictures are not kept in the repository: every branch regenerates them, and
+they only conflict. Take them into a directory of your own:
 
-Those are three of the twenty captures in [`docs/screens.md`](docs/screens.md) — ten
-states, each in both themes — which is also the recipe for taking them again, and
-`crates/app/examples/screens.rs` is what takes them.
+```sh
+cargo run -p evo-desktop --example screens -- --capture /tmp/screens
+```
 
 ## Requirements
 

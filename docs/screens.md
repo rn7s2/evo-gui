@@ -6,8 +6,12 @@ by hand, nothing mocked.
 
 ```sh
 EVO_SWARM_BIN=…/evo-swarm EVO_AGENT_BIN=…/evo-agent \
-  cargo run -p evo-desktop --example screens -- --capture docs/screens
+  cargo run -p evo-desktop --example screens -- --capture /tmp/screens
 ```
+
+They are not kept in the repository: every branch regenerates them, and a merge of
+two branches that have both captured is a merge of twenty binary conflicts. The
+names below are the files a run leaves in its directory.
 
 `crates/app/examples/screens.rs` drives the app the way a person does: it opens
 the window the app opens, calls the app's own launch-time loads, launches a tab
