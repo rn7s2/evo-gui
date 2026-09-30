@@ -7,7 +7,9 @@ edition.workspace = true
 gpui-kit = { workspace = true }
 serde_json = { workspace = true }
 session = { path = "../session" }
+# Decoding the bytes an image row fetched. The same major version gpui itself
+# links against, so `image::Frame` is the type `RenderImage::new` wants.
+image = "0.25"
 
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }
-image = "0.25"

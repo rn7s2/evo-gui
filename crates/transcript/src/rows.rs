@@ -31,6 +31,9 @@ use session::{
     Notice, NoticeSeverity, RunOutcome, ToolItem, UserItem, UserStatus,
 };
 
+use crate::imgcheck::picture;
+use crate::ImageState;
+
 use crate::style::{text_style, Palette, BLOCK_GAP, GROUP_GAP, MEASURE, TIGHT_GAP, TURN_GAP};
 use crate::{link, markdown, TranscriptData, TranscriptView};
 
@@ -331,7 +334,7 @@ pub(crate) fn render_row(
     }
 
     stack = stack.child(match &item.kind {
-        ItemKind::User(user) => user_row(item.id.clone(), user, &palette, view),
+        ItemKind::User(user) => user_row(item.id.clone(), user, data, view, &palette),
         ItemKind::Context(context) => context_row(
             item.id.clone(),
             &context.key,
@@ -463,8 +466,9 @@ fn turn_separator(turn: usize, palette: &Palette) -> AnyElement {
 fn user_row(
     id: ItemId,
     user: &UserItem,
-    palette: &Palette,
+    data: &TranscriptData,
     view: &WeakEntity<TranscriptView>,
+    palette: &Palette,
 ) -> AnyElement {
     let queued = user.status == UserStatus::Queued;
     let cancelled = user.status == UserStatus::Cancelled;
@@ -502,13 +506,7 @@ fn user_row(
         ));
 
     if !user.images.is_empty() {
-        card = card.child(
-            div()
-                .id(row_id("transcript-user-images", &id))
-                .text_xs()
-                .text_color(palette.muted_foreground)
-                .child(image_note(user)),
-        );
+        card = card.child(image_row(&id, user, data, view, palette));
     }
 
     if cancelled {
@@ -524,12 +522,92 @@ fn user_row(
     card.test_support().into_any_element()
 }
 
-/// `2 images` — what a turn carried, since the bytes are fetched, never inlined here.
-fn image_note(user: &UserItem) -> String {
-    match user.images.len() {
-        1 => "1 image".to_string(),
-        n => format!("{n} images"),
-    }
+/// The pictures a turn carried: a small thumbnail each, fetched only while the row is on
+/// screen, with the reader's click opening one at full size.
+///
+/// Nothing is inlined in a transcript, so nothing is drawn until the bytes arrive: a
+/// thumbnail that is still loading says so, and one that could not be read says that
+/// instead of leaving a hole.
+fn image_row(
+    id: &ItemId,
+    user: &UserItem,
+    data: &TranscriptData,
+    view: &WeakEntity<TranscriptView>,
+    palette: &Palette,
+) -> AnyElement {
+    let slots = user.images.iter().enumerate().map(|(n, image)| {
+        let n = n as u32;
+        let key = (id.clone(), n);
+        match data.images.get(&key) {
+            Some(ImageState::Ready(frame)) => {
+                let full = data.full_images.contains(&key);
+                let view = view.clone();
+                let click_id = id.clone();
+                let name = image.name.clone();
+                div()
+                    .id(row_id(format!("transcript-image-{n}"), id))
+                    .cursor_pointer()
+                    .rounded(palette.radius)
+                    .border_1()
+                    .border_color(palette.border)
+                    .overflow_hidden()
+                    .on_click(move |_, _, cx| {
+                        let _ =
+                            view.update(cx, |view, cx| view.toggle_image_size(&click_id, n, cx));
+                    })
+                    .aria_label(format!(
+                        "{name} — click to {}",
+                        if full { "shrink" } else { "open" }
+                    ))
+                    .child(picture(
+                        frame.clone(),
+                        if full { FULL_IMAGE } else { THUMBNAIL },
+                    ))
+                    .test_support()
+                    .into_any_element()
+            }
+            Some(ImageState::Failed) => placeholder(
+                row_id(format!("transcript-image-note-{n}"), id),
+                &format!("{} — could not be shown", image.name),
+                palette,
+            ),
+            _ => placeholder(
+                row_id(format!("transcript-image-note-{n}"), id),
+                &format!("{} — loading…", image.name),
+                palette,
+            ),
+        }
+    });
+    h_flex()
+        .id(row_id("transcript-user-images", id))
+        .flex_wrap()
+        .gap_2()
+        .pt_1()
+        .children(slots)
+        .test_support()
+        .into_any_element()
+}
+
+/// How tall a thumbnail is, and how tall the same picture is when it is opened: a row is a
+/// row until the reader asks for the whole picture.
+const THUMBNAIL: Pixels = px(120.);
+const FULL_IMAGE: Pixels = px(340.);
+
+/// One image the transcript is not showing: a muted line saying what it is and where it
+/// got to, in place of a hole.
+fn placeholder(id: ElementId, text: &str, palette: &Palette) -> AnyElement {
+    div()
+        .id(id)
+        .aria_label(text.to_string())
+        .px_2()
+        .py_1()
+        .rounded(palette.radius)
+        .bg(palette.muted)
+        .text_size(CAPTION_SIZE)
+        .text_color(palette.muted_foreground)
+        .child(text.to_string())
+        .test_support()
+        .into_any_element()
 }
 
 /// What a queued turn says under itself, and the one thing that can be done about it: the

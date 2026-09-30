@@ -25,6 +25,7 @@
 //! transcript.update(cx, |view, cx| view.upsert(item, cx));
 //! ```
 
+mod imgcheck;
 mod link;
 mod markdown;
 mod rows;
@@ -34,6 +35,7 @@ mod todo;
 #[cfg(test)]
 mod tests;
 
+pub use imgcheck::decode_image;
 pub use todo::TodoPanel;
 
 use std::cell::RefCell;
@@ -48,7 +50,8 @@ use gpui_kit::component::{v_flex, ActiveTheme as _, Icon, IconName, Sizable as _
 use gpui_kit::{
     div, px, AnyElement, App, AppContext as _, Context, Entity, FocusHandle,
     InteractiveElement as _, IntoElement, ParentElement as _, Render,
-    StatefulInteractiveElement as _, StyleRefinement, Styled as _, TestSupportExt as _, Window,
+    StatefulInteractiveElement as _, StyleRefinement, Styled as _, TestSupportExt as _, WeakEntity,
+    Window,
 };
 use session::{AgentKey, Item, ItemId, ItemKind, Todo};
 
@@ -62,6 +65,22 @@ const KEPT_DOCUMENTS: usize = 128;
 /// queued input to take back, or the oldest item the scrollback pages back from. Every one
 /// is a read or an op on the server, which the owner (the tab's transport) performs.
 pub type ItemHandler = Rc<dyn Fn(&str, &mut Window, &mut App)>;
+
+/// A handler that names one image: the item it belongs to, and which of that item's
+/// images. The bytes are fetched with `GET /media/<id>/<n>` and handed back through
+/// [`TranscriptView::set_image`].
+pub type ImageHandler = Rc<dyn Fn(&str, u32, &mut Window, &mut App)>;
+
+/// What is known about one image an item carries.
+#[derive(Clone)]
+pub(crate) enum ImageState {
+    /// Asked for, not here yet.
+    Loading,
+    /// Decoded, once.
+    Ready(Arc<gpui_kit::RenderImage>),
+    /// The fetch or the decode failed: the row says so calmly rather than showing nothing.
+    Failed,
+}
 
 /// The data the row renderer reads.
 ///
@@ -86,6 +105,12 @@ pub(crate) struct TranscriptData {
     pub(crate) on_load_older: RefCell<Option<ItemHandler>>,
     pub(crate) on_fetch_item: RefCell<Option<ItemHandler>>,
     pub(crate) on_cancel_input: RefCell<Option<ItemHandler>>,
+    pub(crate) on_fetch_image: RefCell<Option<ImageHandler>>,
+    /// What is known about each image, keyed by the item that carries it and the image's
+    /// own index. Decoded once, kept for the life of the view.
+    pub(crate) images: HashMap<(ItemId, u32), ImageState>,
+    /// The images the reader opened at full size.
+    pub(crate) full_images: HashSet<(ItemId, u32)>,
 }
 
 impl TranscriptData {
@@ -211,6 +236,9 @@ impl TranscriptView {
                 on_load_older: RefCell::new(None),
                 on_fetch_item: RefCell::new(None),
                 on_cancel_input: RefCell::new(None),
+                on_fetch_image: RefCell::new(None),
+                images: HashMap::new(),
+                full_images: HashSet::new(),
             }),
             scroller,
             todos: Vec::new(),
@@ -286,6 +314,55 @@ impl TranscriptView {
         });
     }
 
+    /// What the owner does when an image row is on screen for the first time: one media
+    /// fetch per image, and only for images somebody is looking at.
+    pub fn on_fetch_image(
+        &mut self,
+        handler: impl Fn(&str, u32, &mut Window, &mut App) + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        let handler: ImageHandler = Rc::new(handler);
+        self.data.update(cx, |data, _| {
+            *data.on_fetch_image.borrow_mut() = Some(handler)
+        });
+    }
+
+    /// The bytes of one image, decoded. The owner fetches them (`GET /media/<id>/<n>`)
+    /// and decodes off the UI thread; the view only caches what it is handed.
+    pub fn set_image(
+        &mut self,
+        id: &str,
+        n: u32,
+        image: Arc<gpui_kit::RenderImage>,
+        cx: &mut Context<Self>,
+    ) {
+        self.data.update(cx, |data, _| {
+            data.images
+                .insert((id.to_string(), n), ImageState::Ready(image));
+        });
+        cx.notify();
+    }
+
+    /// The image could not be fetched or decoded: the row says so, once.
+    pub fn set_image_failed(&mut self, id: &str, n: u32, cx: &mut Context<Self>) {
+        self.data.update(cx, |data, _| {
+            data.images.insert((id.to_string(), n), ImageState::Failed);
+        });
+        cx.notify();
+    }
+
+    /// Open one image at full size, or close it again. A thumbnail is a thumbnail: the
+    /// reader says when they want the whole picture, rather than a row taking the column.
+    pub(crate) fn toggle_image_size(&mut self, id: &str, n: u32, cx: &mut Context<Self>) {
+        let key = (id.to_string(), n);
+        self.data.update(cx, |data, _| {
+            if !data.full_images.remove(&key) {
+                data.full_images.insert(key);
+            }
+        });
+        cx.notify();
+    }
+
     /// The topic has more behind what the view holds (it came with the snapshot), and
     /// whether a page is in flight.
     pub fn set_history(&mut self, has_older: bool, loading: bool, cx: &mut Context<Self>) {
@@ -325,8 +402,7 @@ impl TranscriptView {
             next.append(&mut data.items);
             data.items = next;
             data.retain_documents();
-            let total = data.items.len();
-            (ListChange::Prepend(total), added)
+            (ListChange::Prepend(added), added)
         });
         if added > 0 {
             self.apply_list_change(change, cx);
@@ -504,9 +580,11 @@ impl TranscriptView {
                 ListChange::Append(count) => {
                     scroller.append(count, cx);
                 }
-                // Older items went in front: the list is a different one from the
-                // scroller's point of view, at a different length.
-                ListChange::Prepend(total) => scroller.reset(total, cx),
+                // Older items went in front: an insert at the head, so the reader's
+                // place in what they were reading is kept.
+                ListChange::Prepend(count) => {
+                    scroller.splice(0..0, count, cx);
+                }
                 ListChange::Remove(range) => {
                     scroller.splice(range, 0, cx);
                 }
@@ -579,10 +657,12 @@ fn history_header(
     oldest: Option<String>,
     palette: &Palette,
     data: &Entity<TranscriptData>,
+    view: &WeakEntity<TranscriptView>,
     cx: &App,
 ) -> Option<AnyElement> {
     let handler = data.read(cx).on_load_older.borrow().clone()?;
     let oldest = oldest?;
+    let view = view.clone();
     let label = if loading {
         "Loading earlier items…"
     } else {
@@ -608,7 +688,12 @@ fn history_header(
                     .cursor_pointer()
                     .hover(|style| style.text_color(palette.foreground))
                     .aria_label(label.to_string())
-                    .on_click(move |_, window, cx| handler(&oldest, window, cx))
+                    .on_click(move |_, window, cx| {
+                        // The page is in flight from here: the header says so until the
+                        // owner answers (which is a snapshot of the older items).
+                        let _ = view.update(cx, |view, cx| view.set_history(true, true, cx));
+                        handler(&oldest, window, cx)
+                    })
                     .child(label)
                     .test_support(),
             )
@@ -628,12 +713,52 @@ impl Render for TranscriptView {
 
         self.data.update(cx, |data, _| data.begin_frame());
 
+        // The images on screen, asked for once each: a media fetch per image, and only
+        // for a row somebody is looking at.
+        let wanted = {
+            let data = self.data.read(cx);
+            let handler = data.on_fetch_image.borrow().is_some();
+            if handler {
+                data.items
+                    .iter()
+                    .flat_map(|item| match &item.kind {
+                        ItemKind::User(user) => user
+                            .images
+                            .iter()
+                            .enumerate()
+                            .map(|(n, _)| (item.id.clone(), n as u32))
+                            .collect::<Vec<_>>(),
+                        _ => Vec::new(),
+                    })
+                    .filter(|key| !data.images.contains_key(key))
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            }
+        };
+        if !wanted.is_empty() {
+            let handler = self
+                .data
+                .read(cx)
+                .on_fetch_image
+                .borrow()
+                .clone()
+                .expect("checked above");
+            for (id, n) in wanted {
+                self.data.update(cx, |data, _| {
+                    data.images.insert((id.clone(), n), ImageState::Loading)
+                });
+                handler(&id, n, _window, cx);
+            }
+        }
+
         let mut column = v_flex().size_full().min_h_0();
         if self.has_older {
             let palette = Palette::from_app(cx);
             let oldest = self.data.read(cx).items.first().map(|item| item.id.clone());
+            let weak = cx.weak_entity();
             if let Some(header) =
-                history_header(self.loading_older, oldest, &palette, &self.data, cx)
+                history_header(self.loading_older, oldest, &palette, &self.data, &weak, cx)
             {
                 column = column.child(header);
             }
