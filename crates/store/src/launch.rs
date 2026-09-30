@@ -90,7 +90,8 @@ pub struct LaunchSpec {
 
 impl LaunchSpec {
     /// A launch in `folder`: `--watch-stdin` on, because the caller that spawns
-    /// this is the one that holds the child's stdin.
+    /// this is the one that holds the child's stdin. [`LaunchSpec::tab`] adds the
+    /// ready file, which is the other half of an attachable launch.
     pub fn new(program: Program, folder: impl Into<PathBuf>) -> LaunchSpec {
         LaunchSpec {
             program: Some(program),
@@ -178,6 +179,16 @@ impl LaunchSpec {
         root.tab_ready(id)
     }
 
+    /// A launch's spec for a tab's own directory: the ready file and the stdin
+    /// pipe are part of it, so neither can be forgotten by a caller that builds
+    /// a launch.
+    pub fn tab(program: Program, folder: impl Into<PathBuf>, tab_dir: &Path) -> LaunchSpec {
+        LaunchSpec {
+            ready_file: Some(tab_dir.join(crate::paths::READY_FILE)),
+            ..LaunchSpec::new(program, folder)
+        }
+    }
+
     /// The child's working directory.
     pub fn folder(&self) -> &Path {
         &self.folder
@@ -230,6 +241,26 @@ mod tests {
     #[test]
     fn the_two_constructors_agree() {
         assert_eq!(spec(Program::Swarm), spelled_out(Program::Swarm));
+    }
+
+    /// The constructor a tab uses cannot forget the two flags that make a launch
+    /// attachable and stoppable (§1).
+    #[test]
+    fn a_tabs_spec_carries_its_own_ready_file_and_the_stdin_pipe() {
+        let spec = LaunchSpec::tab(
+            Program::Swarm,
+            "/coding/foo",
+            Path::new("/Users/x/.evo/desktop/tabs/t1"),
+        );
+        assert_eq!(
+            spec.ready_file,
+            Some(PathBuf::from("/Users/x/.evo/desktop/tabs/t1/ready.json"))
+        );
+        let argv = spec.argv();
+        let at = argv.iter().position(|flag| flag == "--ready-file").unwrap();
+        assert_eq!(argv[at + 1], "/Users/x/.evo/desktop/tabs/t1/ready.json");
+        assert!(argv.iter().any(|flag| flag == "--watch-stdin"));
+        assert!(argv.contains(&"serve".to_string()));
     }
 
     #[test]
