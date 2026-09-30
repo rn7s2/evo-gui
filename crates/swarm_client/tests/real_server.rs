@@ -98,6 +98,12 @@ fn the_real_server_answers_the_reads_the_client_makes() {
     let session = snapshot.topic("session").expect("topic session");
     assert!(session["state"]["model"]["id"].is_string(), "{session}");
     assert!(session["items"].is_array(), "{session}");
+    // §4.1: `durable` is a bool on every notice — present even when false.
+    for item in session["items"].as_array().expect("items") {
+        if item["kind"] == json!("notice") {
+            assert!(item["durable"].is_boolean(), "{item}");
+        }
+    }
     // §5.6: the catalog, which the model choosers read.
     let catalog = client.catalog().expect("a catalog");
     assert!(catalog["models"].is_array(), "{catalog}");
@@ -219,46 +225,29 @@ fn a_cursor_from_another_lifetime_is_a_reset_not_a_gap() {
 }
 
 #[test]
-fn a_supervisor_restart_is_a_new_epoch_the_ready_file_names() {
-    let Some((_dir, mut server)) = server("real-restart") else {
+fn a_supervisor_restart_keeps_the_address_and_moves_the_epoch() {
+    let Some((_dir, server)) = server("real-restart") else {
         return;
     };
-    // §1 restarts the child from the exact session it was serving, so there must
-    // be one: a session that has never been written is not resumed (reported).
-    let client = server.client().clone();
-    let reply = client
-        .op(
-            "input.send",
-            json!({"text": "a turn before the restart", "queue": "now"}),
-        )
-        .expect("a reply");
-    assert!(reply.ok, "{reply:?}");
-    let deadline = std::time::Instant::now() + Duration::from_secs(60);
-    loop {
-        let status = client
-            .snapshot(&["session".to_owned()], Some(1))
-            .unwrap()
-            .topic("session")
-            .unwrap()["state"]["status"]
-            .clone();
-        if status == json!("idle") {
-            break;
-        }
-        assert!(std::time::Instant::now() < deadline, "the turn never ended");
-        std::thread::sleep(Duration::from_millis(200));
-    }
+    // §1 restarts the child from the exact session it was serving — including one
+    // that has never been written to, which is what a tab shows before its first
+    // turn.
     let epoch = server.epoch().to_owned();
     let port = server.port();
     let before = server.ready().clone();
 
     // Kill the process that is serving: the supervisor (the process we hold)
-    // brings it back, rewrites the ready file, and — in this build — binds a new
-    // port with it. The epoch is how a client learns all of that.
+    // brings it back and rewrites the ready file. What it keeps is the whole point
+    // — the port it bound and the token it minted at launch — so a client that was
+    // built from the first file keeps working, and the new epoch arrives in band as
+    // a `stream.reset` rather than as a new address to connect to.
     assert!(swarm_client::harness::kill_process(before.pid));
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     let restarted = loop {
-        if let Some(ready) = server.follow_ready() {
-            break ready;
+        if let Some(ready) = swarm_client::read_ready(server.ready_file()) {
+            if ready.epoch != epoch {
+                break ready;
+            }
         }
         assert!(
             std::time::Instant::now() < deadline,
@@ -277,19 +266,40 @@ fn a_supervisor_restart_is_a_new_epoch_the_ready_file_names() {
         restarted.session.path, before.session.path,
         "§1: --resume <the exact session it was serving>"
     );
-    // And the client built from the new file reads the new server, whatever port
-    // it chose.
+    assert_eq!(
+        restarted.token, before.token,
+        "§1: the token is minted once per launch, so a restart keeps it"
+    );
+    // Which is what makes the client the tab already had still the right one: it
+    // reads the new lifetime with the token it was built with in the first place.
     let client = server.client().clone();
     let snapshot = client
         .snapshot(&["session".to_owned()], Some(5))
         .expect("the new lifetime answers");
     assert_eq!(snapshot.epoch, restarted.epoch);
-    if restarted.port != port {
-        eprintln!(
-            "note: the restarted server moved port {port} → {}",
-            restarted.port
-        );
-    }
+
+    // §3: an epoch change is a reset on the connection that already exists, not a
+    // new address. This is exactly what a tab that was streaming when its server
+    // was killed does: it reconnects to the same URL with the cursor it had, and
+    // is told the epoch moved.
+    let stream = EventStream::start(
+        client,
+        StreamConfig::new(["session".to_owned()]).from(Cursor::new(&epoch, snapshot.seq)),
+    );
+    let connected = expect(&stream, "hello", |m| {
+        matches!(m, StreamMsg::Connected { .. })
+    });
+    let StreamMsg::Connected { cursor } = connected else {
+        unreachable!()
+    };
+    assert_eq!(cursor.epoch, restarted.epoch, "hello names the new epoch");
+    let reset = expect(&stream, "a stream reset", |m| {
+        matches!(m, StreamMsg::Reset { .. })
+    });
+    let StreamMsg::Reset { reason } = reset else {
+        unreachable!()
+    };
+    assert_eq!(reason.as_str(), "restarted");
 }
 
 #[test]

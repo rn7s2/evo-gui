@@ -69,13 +69,15 @@ const MENU_WIDTH: Pixels = px(460.);
 /// The gap between the chooser rows, and between them and the folder button.
 const ROW_GAP: Pixels = px(16.);
 
-/// The caption under the lanes chooser. It reserves **two** lines whether or not it has
-/// something to say, so the three rows never shift when a lanes model is chosen and the note
-/// — a folder's path plus what it means — wraps instead of truncating. It starts where the
-/// selects do, not under the labels. A minimum rather than a fixed height, so a theme with a
-/// taller line never clips the second line.
-const CAPTION_LINES: usize = 2;
-const CAPTION_HEIGHT: Pixels = px(40.);
+/// The caption under the lanes chooser: **one** small line, drawn only when there is
+/// something to say — what the catalog could not do, or what a chosen lanes model means.
+/// When there is nothing the row is not there at all: the space it used to reserve was a
+/// blank gap the height of a chooser row between "Lanes model" and "Lane thinking".
+///
+/// It starts where the selects do, not under the labels. The minimum is one small line, so
+/// a caption's own leading cannot move the rows below it by more than that.
+const CAPTION_LINES: usize = 1;
+const CAPTION_LINE_HEIGHT: Pixels = px(16.);
 /// [`LABEL_WIDTH`] plus the row's own gap: the selects' left edge.
 const CAPTION_INDENT: Pixels = px(166.);
 const CAPTION_ID: &str = "lanes-caption";
@@ -750,7 +752,11 @@ impl EmptyTabState {
                         v_flex()
                             .gap_1()
                             .child(self.chooser_row("Lanes model", "lanes-model", &self.lanes, cx))
-                            .child(self.render_caption(cx)),
+                            // The caption's row exists only when there is a caption: a
+                            // reserved one was a blank gap the height of a chooser row.
+                            .when_some(self.render_caption(cx), |column, caption| {
+                                column.child(caption)
+                            }),
                     )
                     .child(self.chooser_row(
                         "Lane thinking",
@@ -825,65 +831,72 @@ impl EmptyTabState {
         )
     }
 
-    fn render_caption(&self, cx: &Context<Self>) -> impl IntoElement {
-        let caption = self.caption();
+    /// The caption, or nothing at all: a row with no caption is a row the tab does not
+    /// draw, which is what keeps the choosers from having a hole in them.
+    fn render_caption(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let caption = self.caption()?;
         // The one tone that is not the page's quiet grey: a catalog that could not be read
         // is worth noticing, and it is not a mistake the person made — amber, not red.
-        let color = match caption.as_ref().map(|caption| caption.tone) {
-            Some(CaptionTone::Warning) => warning_ink(cx.theme()),
+        let color = match caption.tone {
+            CaptionTone::Warning => warning_ink(cx.theme()),
             _ => cx.theme().muted_foreground,
         };
-        // What the hover says: the server's own error where there is one, the line itself
-        // otherwise — a note that had to be elided still has to be readable in full.
-        let tooltip = caption.as_ref().map(|caption| {
-            caption
-                .detail
-                .clone()
-                .unwrap_or_else(|| caption.text.clone())
-        });
-        div()
-            .id(CAPTION_ID)
-            .test_support()
-            .ml(CAPTION_INDENT)
-            .min_w_0()
-            .min_h(CAPTION_HEIGHT)
-            .flex_none()
-            // Two lines, then an ellipsis: `line_clamp` alone would simply cut the second
-            // line mid-word at the box edge, so the caption asks for the overflow ellipsis
-            // too — that is the pair GPUI renders as a clamped, ellipsized block.
-            .line_clamp(CAPTION_LINES)
-            .text_ellipsis()
-            .text_xs()
-            .text_color(color)
-            .when_some(tooltip, |line, tooltip| {
-                line.tooltip(move |window, cx| {
+        // What the hover says: the catalog fetch's own words where there are any, the line
+        // itself otherwise — a note that had to be elided still has to be readable in full.
+        let tooltip = caption
+            .detail
+            .clone()
+            .unwrap_or_else(|| caption.text.clone());
+        Some(
+            div()
+                .id(CAPTION_ID)
+                .test_support()
+                .ml(CAPTION_INDENT)
+                .min_w_0()
+                // One small line's worth: enough that the row below never jumps by a
+                // whole chooser row when a caption comes and goes, and no more.
+                .min_h(CAPTION_LINE_HEIGHT)
+                .flex_none()
+                // One line, then an ellipsis: `line_clamp` alone would simply cut the line
+                // mid-word at the box edge, so the caption asks for the overflow ellipsis
+                // too — that is the pair GPUI renders as a clamped, ellipsized line.
+                .line_clamp(CAPTION_LINES)
+                .text_ellipsis()
+                .text_xs()
+                .text_color(color)
+                .tooltip(move |window, cx| {
                     Tooltip::new(tooltip.clone())
                         .max_w(px(460.))
                         .build(window, cx)
                 })
-            })
-            .children(caption.map(|caption| caption.text))
+                .child(caption.text)
+                .into_any_element(),
+        )
     }
 
-    /// The folder call to action (§7.2): the three choosers add up to one decision, so it is
-    /// drawn as the block they lead to — a quiet card, an icon, the label and what picking a
-    /// folder means, exactly as tall as the rows beside it.
+    /// The folder call to action (§7.2): the choosers add up to one decision — where the
+    /// swarm runs — so the space beside them is a drop target: a dashed outline with the
+    /// icon, the label and what picking a folder means inside it, exactly as tall as the
+    /// chooser column beside it. No fill: it is a space that invites a folder, not a block
+    /// sitting on the page.
     fn render_folder_button(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let surface = theme.secondary;
-        let surface_hover = card_hover_fill(theme);
         let border = theme.border;
         let accent = theme.primary;
         let ring = theme.ring;
+        // Under the pointer the target says so: the outline takes the accent colour over a
+        // whisper of the theme's own surface — quiet enough that the page still reads as
+        // one page, and visible enough to be a target.
+        let wash = theme.secondary.opacity(HOVER_WASH);
         // The icon is the one spot of colour on the screen, so it takes the theme's blue-ish
         // info tone: a near-black or near-white `primary` would be a slab (light) or the
-        // whole card in the foreground colour (dark).
+        // whole target in the foreground colour (dark).
         let icon_color = theme.info;
         Button::new(FOLDER_ID)
             .track_focus(&self.folder_focus)
             .accessibility_label("Select folder…")
-            // The card is the column's fill: it takes the height the chooser rows beside it
-            // give, less whatever the line under it needs (§9.7).
+            // The target is the column's fill: it takes exactly the height the chooser rows
+            // beside it give (§7.2).
             .w_full()
             .flex_1()
             .flex()
@@ -894,12 +907,12 @@ impl EmptyTabState {
             .p_4()
             .rounded(theme.radius_lg)
             .border_1()
+            .border_dashed()
             .border_color(border)
-            .bg(surface)
-            .hover(move |style| style.bg(surface_hover).border_color(accent))
-            // Keyboard focus strengthens the surface the same way and takes the theme's
-            // focus ring — a tab stop should read as focus, not as a second hover.
-            .focus_visible(move |style| style.border_color(ring).bg(surface_hover))
+            .hover(move |style| style.border_color(accent).bg(wash))
+            // Keyboard focus takes the theme's focus ring — a tab stop should read as focus,
+            // not as a second hover.
+            .focus_visible(move |style| style.border_color(ring).bg(wash))
             .on_click(cx.listener(|this, _, window, cx| this.pick_folder(window, cx)))
             .child(
                 Icon::new(IconName::Folder)
@@ -910,7 +923,7 @@ impl EmptyTabState {
             .child(
                 div()
                     .text_xs()
-                    .text_color(card_hint_color(theme))
+                    .text_color(theme.muted_foreground)
                     .child("The swarm starts in the folder you pick"),
             )
     }
@@ -925,28 +938,9 @@ impl Render for EmptyTabState {
     }
 }
 
-/// How much of the card's own foreground the hint line keeps: a step down from the label, so
-/// the two lines still read as a label and a hint.
-const CARD_HINT_STRENGTH: f32 = 0.75;
-
-/// The folder card's hint line. The card is filled with `secondary`, so its text is that
-/// tone's own foreground — but at full strength the hint would weigh the same as the label
-/// above it, and the muted grey is too faint to read on a filled card.
-fn card_hint_color(theme: &Theme) -> Hsla {
-    theme.secondary_foreground.opacity(CARD_HINT_STRENGTH)
-}
-
-/// The folder card's fill under the pointer. Hover strengthens the surface as well as the
-/// border, and the light theme's `secondary_hover` is the very tone `secondary` already is
-/// (both neutral-200), so the next stronger neutral is what actually moves the fill there.
-/// The dark theme's own hover tone does.
-fn card_hover_fill(theme: &Theme) -> Hsla {
-    if theme.is_dark() {
-        theme.secondary_hover
-    } else {
-        theme.secondary_active
-    }
-}
+/// How much of the theme's surface shows under a hovered or focused drop target: a wash,
+/// not a fill — the page stays one page, and the outline does the pointing.
+const HOVER_WASH: f32 = 0.35;
 
 /// The one line a check that could not run becomes (§9): evo's own answer shape, naming the
 /// binary it tried and where a path is fixed. A click on it opens Settings, which is where
@@ -1731,7 +1725,10 @@ mod tests {
             // The catalog arrived: the loading hint is gone, and both models are offered to
             // the coordinator — a coordinator runs with the user's own userspace, so the
             // catalog's own `ready` is the only answer it needs.
+            // Nothing to say, so there is no line under the chooser at all: the row the
+            // caption used to reserve was a blank gap the height of a chooser row.
             assert_eq!(caption_text(cx, &f.tab), "");
+            assert!(window.try_find(CAPTION_ID).is_none());
             let coordinator = options(cx, &f.tab, Choice::Coordinator);
             assert_eq!(coordinator.len(), 3, "Default plus two models");
             assert!(

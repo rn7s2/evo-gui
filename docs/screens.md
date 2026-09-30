@@ -30,7 +30,7 @@ call one tool, `SLOW …` makes it answer in sixty deltas over six seconds.
 
 | | |
 |---|---|
-| `01-empty-*` | The window as the app opens it: one empty tab, the four choosers, the folder card, and the history — empty, and saying so. The caption says every lane runs the one model the stub home registers. |
+| `01-empty-*` | The window as the app opens it: one empty tab, the four choosers, the folder drop target, and the history — empty, and saying so. The caption says every lane runs the one model the stub home registers. |
 | `02-lanes-working-*` | Six lanes, one of them given work: the left column reads `6 lanes · 1 busy`, `main` is waiting on its lanes, lane 1 is working with its step clock running and its own **Stop**, and the coordinator's turn — the `delegate` call and the tool's answer — is in the transcript. The button reads **■ Stop swarm**. |
 | `03-lane-transcript-*` | Lane 1 selected: the centre column is *that lane's* transcript — the `todo` call it was told to make, its result, and the lane's own checklist at the foot. Input still goes to the coordinator. |
 | `04-tool-*` | A tool row, opened: `bash`'s arguments and its result as rows, with the exit status. The row is opened by clicking its own header, and a truncated result is fetched whole with `GET /items/<id>`. |

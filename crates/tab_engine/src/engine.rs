@@ -321,7 +321,7 @@ fn run(
     };
     engine.topics_of(&snapshot);
 
-    let outcome = engine_loop(&mut engine, &mut server, &mut live, &commands, &mailbox);
+    let outcome = engine_loop(&mut engine, &mut server, &mut live, &mailbox);
     live.stop();
     let outcome = match outcome {
         Some(outcome) => outcome,
@@ -336,12 +336,12 @@ fn run(
 /// The tab's connection to one process lifetime: the client, the stream it reads,
 /// and the thread that forwards what the stream sees.
 ///
-/// A supervisor restart is a *new* lifetime: this build keeps the port but mints
-/// a new token, and the ready file is where both are written. So the connection is
-/// rebuilt rather than hoped for — the file is re-read, a client is made for the
-/// server it now names, and a fresh snapshot + stream replace the dead ones. The
-/// UI needs no extra notice: the snapshots carry the session and the epoch the
-/// stream is in, which is everything a tab draws.
+/// A supervisor restart is a *new* lifetime, but not a new address: the port and
+/// the token are the launch's (§1), so the stream reconnects to the connection it
+/// already had and the server answers hello + `stream.reset{restarted}` — which
+/// the tab takes as "read me again", not as a new server. There is no second
+/// ready-file path, and nothing in the UI needs to be told: the snapshots carry
+/// the session and the epoch, which is everything a tab draws.
 struct Live {
     client: Client,
     stream: EventStream,
@@ -371,19 +371,6 @@ impl Live {
             },
             snapshot,
         ))
-    }
-
-    /// Follow the server into the lifetime its ready file now names.
-    fn follow(
-        &mut self,
-        server: &Server,
-        topics: &[String],
-        commands: &Sender<Inbound>,
-    ) -> Option<Snapshot> {
-        self.stop();
-        let (live, snapshot) = Live::connect(server, topics, commands)?;
-        *self = live;
-        Some(snapshot)
     }
 
     /// Stop reading, and wait for the forwarding thread to end.
@@ -428,7 +415,6 @@ fn engine_loop(
     engine: &mut Engine,
     server: &mut Server,
     live: &mut Live,
-    commands: &Sender<Inbound>,
     mailbox: &Receiver<Inbound>,
 ) -> Option<ShutdownOutcome> {
     loop {
@@ -451,17 +437,11 @@ fn engine_loop(
                 });
             }
             Inbound::Stream(StreamMsg::Reconnecting { retry_in }) => {
-                // A supervisor restart is a new process lifetime, and a lifetime
-                // is more than a port: this build mints a new token with it, and
-                // the ready file is the only place that says so. The file is read
-                // before the stream is believed dead, and a lifetime that moved
-                // is followed rather than waited for.
-                if server.follow_ready().is_some() {
-                    if let Some(snapshot) = live.follow(server, &engine.topics, commands) {
-                        engine.topics_of(&snapshot);
-                    }
-                    continue;
-                }
+                // A supervisor restart is a new process lifetime, but not a new
+                // address: §1 keeps the port and the token, so the reconnect ends
+                // in a `stream.reset` on this same connection, and the reset path
+                // above reads the tab again from the new epoch. All there is to do
+                // here is say so, and give up if the process itself is gone.
                 // A stream that cannot come back is a server that is not there.
                 if !server.is_running() {
                     engine.send(Update::ServerGone);

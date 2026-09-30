@@ -128,8 +128,8 @@ selector, only the readout that shows what is running.
 
 ### Keyboard on the empty tab
 
-Tab moves the keyboard between the three choosers, the folder card and the
-history list (the card and the history frame draw a hairline focus ring while
+Tab moves the keyboard between the three choosers, the folder drop target and the
+history list (the target and the history frame draw a hairline focus ring while
 they hold it). A chooser opens with `Enter`, `Space` or an arrow; the arrows walk
 its options, `Enter` picks, `Esc` closes it without leaving the tab (and without
 choosing). The history frame takes the arrows and `Home`/`End`; `Enter` resumes

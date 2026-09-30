@@ -324,8 +324,8 @@ impl Control {
         Ok(())
     }
 
-    /// Re-exec the server: a new epoch, a new port, the same argv — what a
-    /// supervisor restart looks like from a client's side.
+    /// Re-exec the server: a new epoch, on the port it bound, with the token it
+    /// minted — what a supervisor restart looks like from a client's side (§1).
     pub fn restart(&self) -> Result<()> {
         self.control("/_restart", json!({}))?;
         Ok(())
