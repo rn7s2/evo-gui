@@ -1186,6 +1186,9 @@ impl EmptyTabState {
             .id("launch-layout")
             .test_support()
             .w_full()
+            // `.empty-head,.launch-layout{flex:0 0 auto}`: the cards keep their height and
+            // the history is what gives.
+            .flex_none()
             .items_stretch()
             .gap(LAYOUT_GAP)
             .child(
