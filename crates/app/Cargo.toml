@@ -28,3 +28,5 @@ gpui-kit = { workspace = true, features = ["test-support"] }
 # The example that draws the screenshots runs in a proof's world: a throwaway
 # HOME whose init.lisp registers the scripted model.
 proofs = { path = "../proofs" }
+# The probe crops its pictures in-process (already in the lock through gpui).
+image = { version = "0.25", default-features = false, features = ["png"] }

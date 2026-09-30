@@ -25,6 +25,9 @@
 //! find ID                         print the element's bounds
 //! launch                          launch the shown tab in the world's folder
 //! wait-running                    wait for the shown tab to be running
+//! activate                        bring the window to the front (the kit paints a
+//!                                 selection, and blinks the caret, only into an
+//!                                 active window, which a headless one is not)
 //! ```
 //!
 //! An ID is an element name, or `name#N` for a `NamedInteger`.
@@ -264,6 +267,16 @@ fn run(world: &str, out: &Path, script: &str) -> Result<(), Error> {
                 pump(&mut cx, Duration::from_millis(200));
             }
             "pump" => pump(&mut cx, Duration::from_millis(nums()[0] as u64)),
+            "activate" => {
+                cx.update_window(window, |_, window, _cx| {
+                    window.activate_window();
+                    println!("[probe]   active={}", window.is_window_active());
+                })?;
+                pump(&mut cx, Duration::from_millis(200));
+                cx.update_window(window, |_, window, _cx| {
+                    println!("[probe]   active={}", window.is_window_active());
+                })?;
+            }
             "find" => {
                 let id = element_id(rest);
                 cx.update_window(window, |_, window, _| match window.try_find(id) {
@@ -414,29 +427,26 @@ fn save(
     cx.update_window(window, |_, window, cx| window.render_frame(cx))?;
     cx.update_window(window, |_, window, cx| window.render_frame(cx))?;
     let image = cx.capture_screenshot(window)?;
-    image.save(path)?;
-    if let Some((x, y, w, h, scale)) = crop {
-        let factor = image.width() as f32 / WINDOW_SIZE.0;
-        let p = path.display().to_string();
-        let ok = std::process::Command::new("sips")
-            .args([
-                "-c",
-                &((h * factor) as u32).to_string(),
-                &((w * factor) as u32).to_string(),
-            ])
-            .args([
-                "--cropOffset",
-                &((y * factor) as u32).to_string(),
-                &((x * factor) as u32).to_string(),
-            ])
-            .arg(&p)
-            .output()?;
-        if !ok.status.success() {
-            return Err("sips crop failed".into());
+    match crop {
+        None => image.save(path)?,
+        Some((x, y, w, h, scale)) => {
+            let factor = image.width() as f32 / WINDOW_SIZE.0;
+            let sub = image::imageops::crop_imm(
+                &image,
+                (x * factor) as u32,
+                (y * factor) as u32,
+                (w * factor) as u32,
+                (h * factor) as u32,
+            )
+            .to_image();
+            image::imageops::resize(
+                &sub,
+                (w * scale) as u32,
+                (h * scale) as u32,
+                image::imageops::FilterType::Nearest,
+            )
+            .save(path)?;
         }
-        std::process::Command::new("sips")
-            .args(["--resampleWidth", &((w * scale) as u32).to_string(), &p])
-            .output()?;
     }
     println!("[probe]   -> {}", path.display());
     Ok(())
