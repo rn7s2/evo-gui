@@ -1,4 +1,4 @@
-//! Errors: transport, protocol, and the typed HTTP status mapping of docs/serve.md.
+//! Errors: transport, protocol, and the typed HTTP failures of §5.5.
 
 use std::fmt;
 use std::io;
@@ -6,7 +6,6 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
-use crate::api::Envelope;
 use crate::redact::{redact, redact_json};
 use crate::server::ShutdownOutcome;
 
@@ -53,11 +52,6 @@ impl Error {
         }
     }
 
-    /// `409 Not now` — the session is busy and nothing happened (docs/serve.md).
-    pub fn is_not_now(&self) -> bool {
-        matches!(self, Error::Status(StatusError::NotNow(_)))
-    }
-
     pub fn is_unauthorized(&self) -> bool {
         matches!(self, Error::Status(StatusError::Unauthorized(_)))
     }
@@ -88,7 +82,7 @@ impl fmt::Display for Error {
             Error::Json(e) => write!(f, "json: {e}"),
             Error::Status(s) => write!(f, "{s}"),
             Error::Timeout(m) => write!(f, "timeout: {m}"),
-            Error::Boot(b) => write!(f, "boot failed: {}", b.message),
+            Error::Boot(b) => write!(f, "boot failed: {}", b.reason),
             Error::Cancelled(outcome) => write!(f, "boot cancelled ({outcome:?})"),
             Error::Closed => write!(f, "connection closed"),
             Error::Config(m) => write!(f, "config: {m}"),
@@ -118,11 +112,12 @@ impl From<serde_json::Error> for Error {
     }
 }
 
-/// A server that did not come up.
+/// A server that did not come up: the child exited during startup, or it never
+/// wrote its ready file. A tab shows `reason` and offers Retry.
 #[derive(Clone, Debug)]
 pub struct BootFailure {
     /// What was wrong, phrased for a person.
-    pub message: String,
+    pub reason: String,
     /// The last lines of the server's log — what the tab shows (§3).
     pub log_tail: String,
     pub log_path: Option<PathBuf>,
@@ -136,31 +131,18 @@ pub struct RequestError {
     pub status: u16,
     /// The reply's `error` field, else its body.
     pub message: String,
-    /// The POST envelope, when the body was one (serve writes one for a
-    /// refusal; GET errors carry only `ok`/`error`).
-    pub envelope: Option<Envelope>,
     /// The body as it arrived, always.
     pub raw: Value,
 }
 
-/// The statuses of docs/serve.md, one variant each.
-///
-/// The payload is boxed: a `RequestError` carries the whole reply, and an
-/// unboxed one makes every `Result<_, Error>` in the crate 300+ bytes wide.
+/// The HTTP failures of the protocol (§5.5): an answered op is always 200, so a
+/// non-2xx reply is transport or auth, never a refusal to act.
 #[derive(Clone, Debug)]
 pub enum StatusError {
-    /// 400 — bad request: malformed JSON, a missing field, a bad argument.
+    /// 400 — a malformed request envelope.
     BadRequest(Box<RequestError>),
     /// 401 — missing or wrong bearer token.
     Unauthorized(Box<RequestError>),
-    /// 404 — no such endpoint, command, session or entry.
-    NotFound(Box<RequestError>),
-    /// 409 — **not now**: the session is busy; nothing happened.
-    NotNow(Box<RequestError>),
-    /// 405 — the path exists, the method is wrong.
-    MethodNotAllowed(Box<RequestError>),
-    /// 422 — the command ran and failed.
-    Unprocessable(Box<RequestError>),
     /// 503 — the server is shutting down.
     ShuttingDown(Box<RequestError>),
     /// Anything else, the status kept.
@@ -168,14 +150,14 @@ pub enum StatusError {
 }
 
 impl StatusError {
-    /// Type a reply by its status: the mapping of docs/serve.md §Statuses.
+    /// Type a reply by its status.
     ///
-    /// The reply is **redacted first**, message and body alike: a refusal quotes
-    /// what caused it, and what caused it can be the user's own configuration —
-    /// the real `/registry` 500 echoes an MCP bearer token (docs/proofs-real.md
-    /// R1). Everything downstream (the app's log, the empty tab's caption, a
-    /// boot failure) reads these two fields, so this is the one place that has
-    /// to get it right.
+    /// The reply is **redacted first**, message and body alike: a refusal can
+    /// quote what caused it, and what caused it can be the user's own
+    /// configuration — a server error once echoed an MCP bearer token back.
+    /// Everything downstream (the app's log, the empty tab's caption, a boot
+    /// failure) reads these two fields, so this is the one place that has to get
+    /// it right.
     pub fn from_reply(status: u16, raw: Value, text: &str) -> StatusError {
         let mut raw = raw;
         redact_json(&mut raw);
@@ -187,20 +169,14 @@ impl StatusError {
                 let clipped: String = text.trim().chars().take(400).collect();
                 redact(&clipped).into_owned()
             });
-        let envelope = serde_json::from_value::<Envelope>(raw.clone()).ok();
         let reply = Box::new(RequestError {
             status,
             message,
-            envelope,
             raw,
         });
         match status {
             400 => StatusError::BadRequest(reply),
             401 => StatusError::Unauthorized(reply),
-            404 => StatusError::NotFound(reply),
-            405 => StatusError::MethodNotAllowed(reply),
-            409 => StatusError::NotNow(reply),
-            422 => StatusError::Unprocessable(reply),
             503 => StatusError::ShuttingDown(reply),
             _ => StatusError::Other(reply),
         }
@@ -214,10 +190,6 @@ impl StatusError {
         match self {
             StatusError::BadRequest(r)
             | StatusError::Unauthorized(r)
-            | StatusError::NotFound(r)
-            | StatusError::NotNow(r)
-            | StatusError::MethodNotAllowed(r)
-            | StatusError::Unprocessable(r)
             | StatusError::ShuttingDown(r)
             | StatusError::Other(r) => r,
         }
@@ -228,8 +200,9 @@ impl StatusError {
         &self.request().message
     }
 
-    pub fn is_not_now(&self) -> bool {
-        matches!(self, StatusError::NotNow(_))
+    /// A wrong or missing token: nothing will work until the tab is restarted.
+    pub fn is_unauthorized(&self) -> bool {
+        matches!(self, StatusError::Unauthorized(_))
     }
 }
 
@@ -263,16 +236,16 @@ mod tests {
 
     #[test]
     fn a_reply_is_typed_by_its_status() {
-        let raw = serde_json::json!({ "ok": false, "error": "no run to steer" });
-        let not_now = StatusError::from_reply(409, raw.clone(), "no run to steer");
-        assert!(not_now.is_not_now());
-        assert_eq!(not_now.status(), 409);
-        assert_eq!(not_now.message(), "no run to steer");
-        assert_eq!(not_now.request().status, 409);
+        let raw = serde_json::json!({ "ok": false, "error": "bad token" });
+        let denied = StatusError::from_reply(401, raw.clone(), "bad token");
+        assert!(denied.is_unauthorized());
+        assert_eq!(denied.status(), 401);
+        assert_eq!(denied.message(), "bad token");
+        assert_eq!(denied.request().status, 401);
 
-        let missing = StatusError::from_reply(404, raw, "no run to steer");
-        assert!(!missing.is_not_now());
-        assert_eq!(missing.status(), 404);
+        let gone = StatusError::from_reply(503, raw, "bad token");
+        assert!(!gone.is_unauthorized());
+        assert_eq!(gone.status(), 503);
     }
 
     #[test]

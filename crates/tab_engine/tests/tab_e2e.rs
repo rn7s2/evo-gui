@@ -1,1535 +1,469 @@
-//! tab_engine against a REAL `/usr/local/bin/evo-swarm serve`.
+//! One tab, against a real fake `serve`: the ready file, the snapshot, the one
+//! stream, the resets and the ops. The updates that come out are what the
+//! `session` crate is fed, so the assertions are about frames and bodies rather
+//! than rows.
 //!
-//! The environment is `swarm_client::harness`'s `Fixture`: a temp `HOME` whose
-//! `init.lisp` registers the stub provider, a temp project, and `stub-messages.py`
-//! as the model both the coordinator and the lanes talk to. Nothing here fakes
-//! HTTP; the only thing scripted is the model.
-//!
-//! Run with `CARGO_TARGET_DIR=target/tab_engine cargo test -p tab_engine`.
+//! The tab spawns its own server, so these tests drive the server the tab is
+//! really talking to through [`Control::attach`] — one of the fake's endpoints,
+//! reached through the ready file in the tab directory.
 
-use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
 use std::time::{Duration, Instant};
 
 use async_channel::Receiver;
-use serde_json::Value;
-use swarm_client::harness::{Bins, Fixture, HarnessConfig, TempDir, STUB_MODEL};
-use tab_engine::catalog::{self, CatalogUpdate};
-use tab_engine::{Agent, Command, ShutdownReport, StreamStatus, TabEngine, TabSpec, Update};
+use serde_json::json;
+use session::{AgentKey, Op, TabModel};
+use swarm_client::harness::{Control, FakeSwarm, TempDir};
+use swarm_client::ServerConfig;
+use tab_engine::{EngineHandle, TabEngine, Update};
 
-/// One swarm at a time: a test run is not a load test, and each swarm is a
-/// supervisor plus a lane process each.
-static SWARM: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-fn one_swarm() -> std::sync::MutexGuard<'static, ()> {
-    SWARM
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+/// The config a tab is started from: the fake server in `dir`, with extra argv.
+fn config(dir: &std::path::Path, extra: &[&str]) -> ServerConfig {
+    swarm_client::harness::fake_config(dir, extra).expect("a fake server's config")
 }
 
-fn fixture(workers: u16) -> Fixture {
-    let bins = Bins::installed();
-    assert!(
-        bins.available(),
-        "no binaries to test against: {} / {}",
-        bins.swarm.display(),
-        bins.agent.display()
+/// A tab in its own directory, with the fake swarm's binary, stopped when the
+/// test ends.
+fn tab(tag: &str, extra: &[&str]) -> (TempDir, EngineHandle, Receiver<Update>) {
+    let dir = TempDir::new(tag).expect("a temp dir");
+    let (handle, updates) = TabEngine::start(config(dir.path(), extra));
+    (dir, handle, updates)
+}
+
+/// The updates a tab has sent, kept rather than skipped: a test that waits for
+/// one topic must not throw the other topics away (the server answers topics in
+/// its own order).
+struct Feed {
+    updates: Receiver<Update>,
+    seen: Vec<Update>,
+}
+
+impl Feed {
+    /// The next update of a kind, from what has arrived or from what comes next.
+    fn expect(&mut self, what: &str, wanted: impl Fn(&Update) -> bool) -> Update {
+        if let Some(index) = self.seen.iter().position(&wanted) {
+            return self.seen.remove(index);
+        }
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            match self.updates.try_recv() {
+                Ok(update) => {
+                    if wanted(&update) {
+                        return update;
+                    }
+                    self.seen.push(update);
+                }
+                Err(_) => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "timed out waiting for {what}, saw {:?}",
+                        self.seen
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        }
+    }
+
+    /// Blocks until the model is in the state the caller describes, feeding it
+    /// every update on the way.
+    fn feed_model(&mut self, model: &mut TabModel, done: impl Fn(&TabModel) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !done(model) {
+            assert!(Instant::now() < deadline, "the model never caught up");
+            if let Ok(update) = self.updates.recv_blocking() {
+                apply(model, update);
+            }
+        }
+    }
+}
+
+/// Whether an update is a snapshot of this topic.
+fn snapshot_of(topic: &str) -> impl Fn(&Update) -> bool + '_ {
+    move |update| matches!(update, Update::Snapshot { topic: name, .. } if name == topic)
+}
+
+/// Wait until the tab is serving *and* streaming: the epoch and process id it
+/// announced, and the stream live. A test that drives the server must not do it
+/// before the tab is listening to it.
+fn serving(feed: &mut Feed) -> (String, u32) {
+    let update = feed.expect("Ready", |update| matches!(update, Update::Ready { .. }));
+    let Update::Ready { epoch, pid, .. } = update else {
+        unreachable!()
+    };
+    feed.expect(
+        "the live stream",
+        |update| matches!(update, Update::Stream { status } if !status.is_reconnecting()),
     );
-    Fixture::new(HarnessConfig {
-        workers,
-        ..Default::default()
-    })
-    .expect("the fixture should come up")
+    (epoch, pid)
 }
 
-/// The tab spec a [`Fixture`] describes: its project, its tab directory, and the
-/// hermetic environment the fixture sets up.
-fn spec(fixture: &Fixture, workers: u16) -> TabSpec {
-    let mut spec = TabSpec::new(&fixture.bins.swarm, &fixture.project, fixture.tab_dir())
-        .with_agent_bin(&fixture.bins.agent)
-        .with_workers(workers);
-    for (key, value) in fixture.env() {
-        spec = spec.with_env(key, value);
-    }
-    for key in fixture.env_remove() {
-        spec = spec.with_env_removed(key);
-    }
-    spec
-}
-
-/// An ordered log of a tab's updates, with a cursor so a test can ask for "the
-/// next transcript" rather than "any transcript".
-struct Updates {
-    rx: Receiver<Update>,
-    all: Vec<Update>,
-    cursor: usize,
-}
-
-impl Updates {
-    fn new(rx: Receiver<Update>) -> Updates {
-        Updates {
-            rx,
-            all: Vec::new(),
-            cursor: 0,
-        }
-    }
-
-    fn pump(&mut self) {
-        while let Ok(update) = self.rx.try_recv() {
-            self.all.push(update);
-        }
-    }
-
-    /// The next update, from the cursor, that matches — consuming it.
-    fn next(&mut self, deadline: Instant, pred: impl Fn(&Update) -> bool) -> Update {
-        loop {
-            self.pump();
-            if let Some(offset) = self.all[self.cursor..].iter().position(&pred) {
-                let at = self.cursor + offset;
-                self.cursor = at + 1;
-                return self.all[at].clone();
-            }
-            assert!(
-                Instant::now() < deadline,
-                "no matching update before the deadline; saw {} updates: {:?}",
-                self.all.len(),
-                self.all.iter().map(kind_of).collect::<Vec<_>>()
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    }
-
-    /// Wait for the coordinator's stream to be up.
-    fn wait_connected(&mut self, agent: Agent, deadline: Instant) -> Update {
-        loop {
-            self.pump();
-            let found = self.all.iter().any(|update| {
-                matches!(update, Update::Stream { agent: a, status: StreamStatus::Connected } if *a == agent)
-            });
-            if found {
-                // Advance the cursor past everything so far.
-                self.cursor = self.all.len();
-                return self.all.last().cloned().unwrap();
-            }
-            assert!(Instant::now() < deadline, "the stream never connected");
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    }
-
-    /// Everything from `from` on, for "must not happen" checks.
-    fn since(&self, from: usize) -> &[Update] {
-        &self.all[from.min(self.all.len())..]
-    }
-
-    /// Wait for an update that matches *anywhere* in the log, leaving the cursor
-    /// alone. Two independent flows interleave — the stream's reader and an off-loop
-    /// resync's answer — so a wait that only looks forward from a cursor another
-    /// wait just stepped past would miss the update it is waiting for.
-    fn wait_seen(
-        &mut self,
-        deadline: Instant,
-        what: &str,
-        pred: impl Fn(&Update) -> bool,
-    ) -> Update {
-        loop {
-            self.pump();
-            if let Some(found) = self.all.iter().find(|update| pred(update)) {
-                return found.clone();
-            }
-            assert!(
-                Instant::now() < deadline,
-                "no {what} before the deadline; saw {:?}",
-                self.all.iter().map(kind_of).collect::<Vec<_>>()
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    }
-
-    fn len(&self) -> usize {
-        self.all.len()
-    }
-
-    fn events(&self, agent: Agent, kind: &str) -> Vec<(Option<i64>, Value)> {
-        self.all
-            .iter()
-            .filter_map(|update| match update {
-                Update::Event {
-                    agent: a,
-                    id,
-                    kind: k,
-                    data,
-                } if *a == agent && k == kind => Some((*id, data.clone())),
-                _ => None,
-            })
-            .collect()
-    }
-}
-
-fn kind_of(update: &Update) -> &'static str {
+/// Feed one update into the model, the way the workspace does.
+fn apply(model: &mut TabModel, update: Update) {
     match update {
-        Update::Booting => "Booting",
-        Update::Ready { .. } => "Ready",
-        Update::BootFailed { .. } => "BootFailed",
-        Update::Transcript { .. } => "Transcript",
-        Update::State { .. } => "State",
-        Update::Registry { .. } => "Registry",
-        Update::Lanes { .. } => "Lanes",
-        Update::Event { .. } => "Event",
-        Update::Stream { .. } => "Stream",
-        Update::CacheSeed { .. } => "CacheSeed",
-        Update::PostResult { .. } => "PostResult",
-        Update::ServerGone => "ServerGone",
-        Update::Exited { .. } => "Exited",
+        Update::Snapshot { topic, body } => {
+            model.on_snapshot(&topic, &body);
+        }
+        Update::Op { topic, op } => {
+            model.on_op(&topic, &op);
+        }
+        Update::Stream { status } => {
+            model.on_stream("session", status);
+        }
+        _ => {}
     }
 }
 
-fn lane_state_is(updates: &Updates, lane: u64, state: &str) -> bool {
-    updates.all.iter().any(|update| match update {
-        Update::Event {
-            agent: Agent::Coordinator,
-            kind,
-            data,
-            ..
-        } if kind == "lane-state" => {
-            let n = data
-                .get("lane")
-                .or_else(|| data.get("n"))
-                .and_then(Value::as_u64);
-            n == Some(lane) && data.get("state").and_then(Value::as_str) == Some(state)
-        }
-        _ => false,
-    })
-}
-
-/// Wait for a `lane-state` event on the coordinator's stream (§9.1's lane list).
-fn wait_lane_state(updates: &mut Updates, lane: u64, state: &str, deadline: Instant) {
-    loop {
-        updates.pump();
-        if lane_state_is(updates, lane, state) {
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "lane {lane} never reported {state:?}; saw {:?}",
-            updates
-                .events(Agent::Coordinator, "lane-state")
-                .iter()
-                .map(|(_, data)| (data.get("lane").cloned(), data.get("state").cloned()))
-                .collect::<Vec<_>>()
-        );
-        std::thread::sleep(Duration::from_millis(25));
-    }
-}
-
-/// #1 — boot assembles the view (§9.1): Booting, Ready, registry, lanes,
-/// transcript + state, the cache seed, and the live stream.
 #[test]
-fn boot_assembles_the_view() {
-    let _guard = one_swarm();
-    let fixture = fixture(2);
-    let (handle, rx) = TabEngine::start(spec(&fixture, 2));
-    let mut updates = Updates::new(rx);
-    let deadline = Instant::now() + Duration::from_secs(150);
-
-    updates.next(deadline, |u| matches!(u, Update::Booting));
-    let ready = updates.next(deadline, |u| matches!(u, Update::Ready { .. }));
-    let Update::Ready { health, pid, port } = ready else {
-        unreachable!()
+fn a_tab_boots_snapshots_every_topic_and_streams() {
+    let (dir, handle, updates) = tab("boot", &["--workers", "2"]);
+    let mut feed = Feed {
+        updates,
+        seen: Vec::new(),
     };
-    assert_eq!(health.name.as_deref(), Some("evo-swarm"), "{health:?}");
-    assert!(health.has_feature("swarm"), "{health:?}");
-    assert!(pid > 0 && port > 0, "{health:?} {pid} {port}");
+    feed.expect("Booting", |update| matches!(update, Update::Booting));
+    let (epoch, pid) = serving(&mut feed);
+    assert!(!epoch.is_empty());
+    assert!(pid > 0);
 
-    let registry = updates.next(deadline, |u| matches!(u, Update::Registry { .. }));
-    let Update::Registry { raw } = registry else {
-        unreachable!()
-    };
-    assert!(
-        raw["models"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|m| m["id"] == STUB_MODEL),
-        "{raw}"
-    );
-
-    let lanes = updates.next(deadline, |u| matches!(u, Update::Lanes { .. }));
-    let Update::Lanes { raw } = lanes else {
-        unreachable!()
-    };
-    assert_eq!(raw["lanes"].as_array().unwrap().len(), 2, "{raw}");
-    assert_eq!(raw["swarm"]["workers"].as_u64(), Some(2), "{raw}");
-    // Lanes are started by the coordinator and are idle within a moment; the
-    // snapshot may catch them still starting, so their states are not asserted
-    // here — the lane-state events that say otherwise arrive on the stream
-    // (tests #3) and `session::LaneList` folds them.
-
-    let transcript = updates.next(deadline, |u| matches!(u, Update::Transcript { .. }));
-    match transcript {
-        Update::Transcript {
-            agent: Agent::Coordinator,
-            revision,
-            raw,
-        } => {
-            assert_eq!(revision, 1);
-            assert!(raw["messages"].as_array().unwrap().is_empty(), "{raw}");
-        }
-        other => panic!(
-            "expected the coordinator's transcript, got {}",
-            kind_of(&other)
-        ),
+    // One snapshot update per topic the server answered with: the coordinator's,
+    // the swarm record's and each lane's.
+    for topic in ["session", "swarm", "lane:1", "lane:2"] {
+        let update = feed.expect(topic, snapshot_of(topic));
+        let Update::Snapshot { body, .. } = update else {
+            unreachable!()
+        };
+        assert!(body.get("state").is_some(), "{topic}: {body}");
     }
 
-    let state = updates.next(deadline, |u| matches!(u, Update::State { .. }));
-    let Update::State { revision, raw } = state else {
-        unreachable!()
-    };
-    assert_eq!(revision, 1);
-    assert_eq!(raw["status"].as_str(), Some("idle"), "{raw}");
-    assert_eq!(raw["model"].as_str(), Some(STUB_MODEL), "{raw}");
+    // `serving` waited for the live stream, and the tab's own server answers.
+    assert!(Control::attach(dir.path()).is_ok());
+    drop(handle);
+}
 
-    // The cache seed arrives; without `340-cache-stats.lisp` in the temp HOME
-    // there is no entry, which is the "extension absent" case.
-    let seed = updates.next(deadline, |u| matches!(u, Update::CacheSeed { .. }));
-    let Update::CacheSeed { entry } = seed else {
-        unreachable!()
+#[test]
+fn a_frame_reaches_the_model_as_an_op() {
+    let (dir, handle, updates) = tab("frames", &[]);
+    let mut feed = Feed {
+        updates,
+        seen: Vec::new(),
     };
-    if let Some(entry) = entry {
-        assert_eq!(entry["key"].as_str(), Some("cache-stats"), "{entry}");
-    }
-
-    // The live stream: Connected, then lane-state events as the lanes start.
-    updates.next(deadline, |u| {
+    serving(&mut feed);
+    let control = Control::attach(dir.path()).unwrap();
+    control
+        .emit(json!({
+            "op": "item.add", "topic": "session", "after": null,
+            "item": {"id": "e_1", "kind": "user", "ts": 1, "text": "hi", "status": "sent"}
+        }))
+        .unwrap();
+    let update = feed.expect("the item.add", |update| {
         matches!(
-            u,
-            Update::Stream {
-                status: StreamStatus::Connected,
+            update,
+            Update::Op {
+                op: Op::ItemAdd { .. },
                 ..
             }
         )
     });
+    let Update::Op { topic, op } = update else {
+        unreachable!()
+    };
+    assert_eq!(topic, "session");
 
-    // A refetch command is a fresh view at a higher revision.
-    assert!(handle.send(Command::Refetch(Agent::Coordinator)));
-    let refetched = updates.next(
-        deadline,
-        |u| matches!(u, Update::Transcript { revision, .. } if *revision >= 2),
-    );
-    assert!(matches!(refetched, Update::Transcript { revision, .. } if revision >= 2));
-
-    handle.join();
+    // It is the session crate's own op, and the session crate draws it.
+    let mut model = TabModel::new();
+    model.on_op(&topic, &op);
+    assert_eq!(model.selected_items().len(), 1);
+    assert_eq!(model.selected_items()[0].id, "e_1");
+    drop(handle);
 }
 
-/// #2 — a prompt runs, its text streams in, and `settled` triggers a resync with
-/// a higher revision.
 #[test]
-fn prompt_streams_and_settles_with_a_resync() {
-    let _guard = one_swarm();
-    let fixture = fixture(1);
-    let (handle, rx) = TabEngine::start(spec(&fixture, 1));
-    let mut updates = Updates::new(rx);
-    let deadline = Instant::now() + Duration::from_secs(150);
+fn a_topic_reset_re_reads_that_one_topic() {
+    let (dir, handle, updates) = tab("topic-reset", &[]);
+    let mut feed = Feed {
+        updates,
+        seen: Vec::new(),
+    };
+    serving(&mut feed);
+    let control = Control::attach(dir.path()).unwrap();
+    feed.expect("the first snapshot", snapshot_of("session"));
 
-    updates.wait_connected(Agent::Coordinator, deadline);
+    control
+        .snapshot_body(json!({
+            "session": {"state": {"status": "running"}, "items": [{"id": "e_9", "kind": "user", "ts": 9}]}
+        }))
+        .unwrap();
+    control
+        .emit(json!({"op": "topic.reset", "topic": "session", "reason": "leaf_moved"}))
+        .unwrap();
 
-    assert!(handle.prompt(7, "SLOW hello from the engine"));
-    let posted = updates.next(deadline, |u| matches!(u, Update::PostResult { .. }));
-    match posted {
-        Update::PostResult {
-            req_id,
-            result: Ok(envelope),
-        } => {
-            assert_eq!(req_id, 7);
-            assert!(envelope.ok);
-            assert_eq!(
-                envelope.data.get("queued"),
-                Some(&Value::Bool(true)),
-                "{envelope:?}"
-            );
-            assert!(envelope.task.is_some(), "{envelope:?}");
-        }
-        other => panic!("the prompt should have succeeded, got {}", kind_of(&other)),
-    }
-
-    // The run: message-start, the deltas, message-end, settled.
-    updates.next(
-        deadline,
-        |u| matches!(u, Update::Event { kind, .. } if kind == "message-start"),
-    );
-    let last_delta = updates.next(
-        deadline,
-        |u| matches!(u, Update::Event { kind, .. } if kind == "settled"),
-    );
-    assert!(matches!(last_delta, Update::Event { kind, .. } if kind == "settled"));
-
-    let text: String = updates
-        .events(Agent::Coordinator, "text-delta")
-        .iter()
-        .filter_map(|(_, data)| data.get("text").and_then(Value::as_str))
-        .collect();
-    assert!(
-        text.starts_with("slow0 slow1 "),
-        "streamed text was {text:?}"
-    );
-    assert!(
-        text.contains("slow59"),
-        "the whole message arrived: {text:?}"
-    );
-
-    let usage = updates
-        .events(Agent::Coordinator, "message-end")
-        .first()
-        .and_then(|(_, data)| data.get("usage").cloned())
-        .expect("message-end carries usage");
-    assert!(
-        usage.get("input").and_then(Value::as_u64).is_some(),
-        "{usage}"
-    );
-
-    // `settled` resyncs: a second transcript + state, revision 2.
-    let transcript = updates.next(
-        deadline,
-        |u| matches!(u, Update::Transcript { revision, .. } if *revision >= 2),
-    );
-    match transcript {
-        Update::Transcript {
-            agent: Agent::Coordinator,
-            revision,
-            raw,
-        } => {
-            assert!(revision >= 2);
-            let messages = raw["messages"].as_array().unwrap();
-            assert_eq!(messages.len(), 2, "{raw}");
-            assert_eq!(messages[0]["role"].as_str(), Some("user"));
-        }
-        other => panic!("expected a resync transcript, got {}", kind_of(&other)),
-    }
-    let state = updates.next(
-        deadline,
-        |u| matches!(u, Update::State { revision, .. } if *revision >= 2),
-    );
-    assert!(matches!(state, Update::State { .. }));
-
-    handle.join();
-}
-
-/// #3 — at most one lane stream: watching lane 1 streams its work, switching to
-/// lane 2 closes it, and unwatching closes everything.
-#[test]
-fn watching_a_lane_switches_the_single_stream() {
-    let _guard = one_swarm();
-    let fixture = fixture(2);
-    let (handle, rx) = TabEngine::start(spec(&fixture, 2));
-    let mut updates = Updates::new(rx);
-    let deadline = Instant::now() + Duration::from_secs(240);
-
-    updates.wait_connected(Agent::Coordinator, deadline);
-    // Lane 1 is `starting` until its baseline is evaluated, and `delegate` refuses a lane
-    // that is not idle — the swarm takes an idle lane, and says so (`swarm/lanes.lisp`).
-    // Wait for the read that says it is up: showing a lane no longer holds the engine's
-    // loop while it seeds, so a lane's boot no longer gets a moment of quiet for free.
-    updates.next(deadline, |u| match u {
-        Update::Lanes { raw } => raw["lanes"].as_array().is_some_and(|lanes| {
-            lanes
-                .iter()
-                .any(|lane| lane["n"] == 1 && lane["state"] == "idle")
-        }),
-        _ => false,
-    });
-
-    // --- watch lane 1 --------------------------------------------------------
-    assert!(handle.watch_lane(Some(1)));
-    let transcript = updates.next(deadline, |u| {
+    feed.expect("the topic.reset frame", |update| {
         matches!(
-            u,
-            Update::Transcript {
-                agent: Agent::Lane(1),
+            update,
+            Update::Op {
+                op: Op::TopicReset { .. },
                 ..
             }
         )
     });
-    assert!(
-        matches!(transcript, Update::Transcript { revision: 1, .. }),
-        "a lane's first transcript is its first revision: {transcript:?}"
-    );
-    updates.next(deadline, |u| {
+    let update = feed.expect("the re-read topic", snapshot_of("session"));
+    let Update::Snapshot { body, .. } = update else {
+        unreachable!()
+    };
+    assert_eq!(body["items"][0]["id"], "e_9");
+    assert_eq!(body["state"]["status"], "running");
+    drop(handle);
+}
+
+#[test]
+fn a_stream_reset_re_snapshots_everything_and_resumes_the_stream() {
+    let (dir, handle, updates) = tab("stream-reset", &[]);
+    let mut feed = Feed {
+        updates,
+        seen: Vec::new(),
+    };
+    serving(&mut feed);
+    let control = Control::attach(dir.path()).unwrap();
+    feed.expect("the first snapshot", snapshot_of("session"));
+    control.requests(); // forget the boot's requests
+
+    control.stream_reset("restarted").unwrap();
+    let update = feed.expect("the stream reset", |update| {
         matches!(
-            u,
-            Update::Stream {
-                agent: Agent::Lane(1),
-                status: StreamStatus::Connected
+            update,
+            Update::Op {
+                op: Op::StreamReset { .. },
+                ..
             }
         )
     });
-
-    // Delegate work to lane 1 and watch its events arrive.
-    assert!(handle.prompt(
+    let Update::Op { op, .. } = update else {
+        unreachable!()
+    };
+    assert_eq!(
+        op,
+        Op::StreamReset {
+            reason: "restarted".into()
+        }
+    );
+    // Everything is re-read, and the stream resumes from the snapshot's cursor —
+    // not from the beginning, and not from nothing.
+    feed.expect("the re-read session", snapshot_of("session"));
+    let streams = control.requests_on("/stream");
+    assert_eq!(
+        streams.len(),
         1,
-        r#"CALL delegate {"lane":1,"task":"engine lane one work"}"#
-    ));
-    updates.next(
-        deadline,
-        |u| matches!(u, Update::Event { agent: Agent::Lane(1), kind, .. } if kind == "text-delta"),
+        "one resumed stream, not a second boot: {streams:?}"
     );
-    // The coordinator's stream carries the lane-state transition the lane list folds.
-    wait_lane_state(&mut updates, 1, "working", deadline);
-
-    // --- switch to lane 2 ----------------------------------------------------
-    assert!(handle.watch_lane(Some(2)));
-    updates.next(deadline, |u| {
-        matches!(
-            u,
-            Update::Transcript {
-                agent: Agent::Lane(2),
-                ..
-            }
-        )
-    });
-    updates.next(deadline, |u| {
-        matches!(
-            u,
-            Update::Stream {
-                agent: Agent::Lane(2),
-                status: StreamStatus::Connected
-            }
-        )
-    });
-    let after_switch = updates.len();
-
-    // Lane 1 runs again, delegated while we watch lane 2: its events must NOT
-    // reach us — the old stream is closed. It has to be *idle* for the swarm to take
-    // the delegate (`swarm/lanes.lisp`), and its first run is short: wait for the
-    // lane-state that says it is done before asking for the second.
-    updates.next(deadline, |u| {
-        matches!(
-            u,
-            Update::Event { agent: Agent::Coordinator, kind, data, .. }
-                if kind == "lane-state" && data["lane"] == 1 && data["state"] == "idle"
-        )
-    });
-    let t = now();
-    assert!(handle.prompt(
-        2,
-        r#"CALL delegate {"lane":1,"task":"engine lane one again"}"#
-    ));
-    updates.next(
-        deadline,
-        |u| matches!(u, Update::Event { agent: Agent::Coordinator, kind, .. } if kind == "settled"),
-    );
-    assert!(
-        fixture
-            .stub
-            .find("lane 1", "engine lane one again", t)
-            .is_some(),
-        "lane 1 should have run again (the assertion is otherwise vacuous)"
-    );
-    assert!(
-        !updates.since(after_switch).iter().any(|u| matches!(
-            u,
-            Update::Event {
-                agent: Agent::Lane(1),
-                ..
-            }
-        )),
-        "a lane-1 event arrived after the stream was switched away"
-    );
-
-    // --- unwatch -------------------------------------------------------------
-    assert!(handle.watch_lane(None));
-    let after_unwatch = updates.len();
-    std::thread::sleep(Duration::from_millis(500));
-    updates.pump();
-    assert!(
-        !updates.since(after_unwatch).iter().any(|u| matches!(
-            u,
-            Update::Event {
-                agent: Agent::Lane(_),
-                ..
-            }
-        )),
-        "a lane event arrived after unwatching"
-    );
-
-    handle.join();
+    let path = streams[0]["path"].as_str().unwrap();
+    assert!(path.contains("since="), "{path}");
+    assert!(path.contains("lane%3A%2A"), "{path}");
+    drop(handle);
 }
 
-/// #3b — a lane watched while it is up and *idle* streams its own run, live.
-///
-/// Showing a lane seeds its column with two reads: the lane's rows, and a bounded replay
-/// of its log for the newest `todo-changed`. Both used to sit between the watch and the
-/// lane's stream — and the stream then *resumed past* whatever the replay had read, none
-/// of which the tab is shown (only the newest todo is forwarded from it). A lane put to
-/// work while the watch was still reading therefore had its whole first run swallowed:
-/// the work went by, the lane's column stayed empty, and the stream that opened
-/// afterwards had nothing left to deliver. The replay is read after the stream opens now,
-/// and the stream tails live from the moment the rows land (§9.3).
 #[test]
-fn a_lane_watched_while_idle_streams_its_own_run() {
-    let _guard = one_swarm();
-    let fixture = fixture(2);
-    let (handle, rx) = TabEngine::start(spec(&fixture, 2));
-    let mut updates = Updates::new(rx);
-    let deadline = Instant::now() + Duration::from_secs(240);
+fn a_refetch_asks_for_every_topic_again() {
+    let (_dir, handle, updates) = tab("refetch", &[]);
+    let mut feed = Feed {
+        updates,
+        seen: Vec::new(),
+    };
+    serving(&mut feed);
+    feed.expect("the first snapshot", snapshot_of("session"));
 
-    updates.wait_connected(Agent::Coordinator, deadline);
-    // Both lanes up and idle first — the moment the tab's rows turn clickable (§9.3).
-    updates.next(deadline, |u| match u {
-        Update::Lanes { raw } => raw["lanes"].as_array().is_some_and(|lanes| {
-            lanes.len() == 2 && lanes.iter().all(|lane| lane["state"] == "idle")
-        }),
-        _ => false,
-    });
-
-    // Show lane 1 while it is idle, and put it to work *immediately*: the run must not
-    // fall inside whatever the watch is still reading, or its events are gone.
-    assert!(handle.watch_lane(Some(1)));
-    assert!(handle.prompt(
-        1,
-        r#"CALL delegate {"lane":1,"task":"engine lane one quiet watch"}"#
-    ));
-    updates.next(deadline, |u| {
-        matches!(
-            u,
-            Update::Stream {
-                agent: Agent::Lane(1),
-                status: StreamStatus::Connected
-            }
-        )
-    });
-    updates.next(
-        deadline,
-        |u| matches!(u, Update::Event { agent: Agent::Lane(1), kind, .. } if kind == "text-delta"),
-    );
-    // …and the whole run, not just its first event.
-    updates.next(
-        deadline,
-        |u| matches!(u, Update::Event { agent: Agent::Lane(1), kind, .. } if kind == "settled"),
-    );
-
-    // Showing another lane afterwards still swaps the one open stream for it.
-    assert!(handle.watch_lane(Some(2)));
-    updates.next(deadline, |u| {
-        matches!(
-            u,
-            Update::Transcript {
-                agent: Agent::Lane(2),
-                ..
-            }
-        )
-    });
-    updates.next(deadline, |u| {
-        matches!(
-            u,
-            Update::Stream {
-                agent: Agent::Lane(2),
-                status: StreamStatus::Connected
-            }
-        )
-    });
-    handle.join();
+    assert!(handle.refetch());
+    feed.expect("the second snapshot", snapshot_of("session"));
+    drop(handle);
 }
 
-/// #4 — a refusal is a typed `PostResult`: `409 Not now` for a steer with no
-/// run, and `400` for an empty prompt.
 #[test]
-fn refusals_come_back_typed() {
-    let _guard = one_swarm();
-    let fixture = fixture(1);
-    let (handle, rx) = TabEngine::start(spec(&fixture, 1));
-    let mut updates = Updates::new(rx);
-    let deadline = Instant::now() + Duration::from_secs(150);
+fn a_request_from_the_model_becomes_a_post() {
+    let (dir, handle, updates) = tab("ops", &[]);
+    let mut feed = Feed {
+        updates,
+        seen: Vec::new(),
+    };
+    serving(&mut feed);
+    let control = Control::attach(dir.path()).unwrap();
+    control.requests();
 
-    updates.wait_connected(Agent::Coordinator, deadline);
+    // The model builds the op; the handle is its sink.
+    let model = TabModel::new();
+    assert!(handle.request(model.send_input("hello there", session::Queue::Now)));
 
-    // 409: `/steer` with nothing running.
-    assert!(handle.steer(1, "is anyone there?"));
-    let refused = updates.next(deadline, |u| {
-        matches!(u, Update::PostResult { req_id: 1, .. })
-    });
-    match refused {
-        Update::PostResult {
-            result: Err(error), ..
-        } => {
-            assert_eq!(error.status, Some(409), "{error:?}");
-            assert!(error.not_now, "{error:?}");
-            assert!(error.message.contains("no run to steer"), "{error:?}");
-        }
-        other => panic!("a steer with no run should be 409, got {}", kind_of(&other)),
-    }
-
-    // 400: an empty prompt.
-    assert!(handle.prompt(2, ""));
-    let empty = updates.next(deadline, |u| {
-        matches!(u, Update::PostResult { req_id: 2, .. })
-    });
-    match empty {
-        Update::PostResult {
-            result: Err(error), ..
-        } => {
-            assert_eq!(error.status, Some(400), "{error:?}");
-            assert!(!error.not_now, "{error:?}");
-        }
-        other => panic!("an empty prompt should be 400, got {}", kind_of(&other)),
-    }
-
-    // `/interrupt` with nothing to interrupt is *not* a refusal.
-    assert!(handle.interrupt(3));
-    let interrupted = updates.next(deadline, |u| {
-        matches!(u, Update::PostResult { req_id: 3, .. })
-    });
-    assert!(
-        matches!(interrupted, Update::PostResult { result: Ok(_), .. }),
-        "interrupt with nothing running should still succeed"
-    );
-
-    handle.join();
-}
-
-/// #5 — the shutdown ladder runs on the handle's drop and leaves no process.
-#[test]
-fn shutdown_leaves_no_process() {
-    let _guard = one_swarm();
-    let fixture = fixture(1);
-    let (mut handle, rx) = TabEngine::start(spec(&fixture, 1));
-    let mut updates = Updates::new(rx);
-    let deadline = Instant::now() + Duration::from_secs(150);
-
-    let ready = updates.next(deadline, |u| matches!(u, Update::Ready { .. }));
-    let Update::Ready { pid, .. } = ready else {
+    let update = feed.expect("the reply", |update| matches!(update, Update::OpReply(_)));
+    let Update::OpReply(reply) = update else {
         unreachable!()
     };
+    assert!(reply.ok, "{reply:?}");
+    assert!(!reply.rid.is_empty());
+
+    let posted = control.requests_on("/ops");
+    assert_eq!(posted.len(), 1, "{posted:?}");
+    let body = &posted[0]["body"];
+    assert_eq!(body["op"], "input.send");
+    assert_eq!(body["args"]["text"], "hello there");
+    assert_eq!(body["args"]["queue"], "now");
+    assert_eq!(body["rid"], json!(reply.rid));
+    drop(handle);
+}
+
+#[test]
+fn the_model_can_be_driven_entirely_from_the_updates() {
+    // The contract's bound: a tab's whole job is to feed the model. This is that
+    // path, end to end, with the fake server on the other side.
+    let (dir, handle, updates) = tab("model", &[]);
+    let mut feed = Feed {
+        updates,
+        seen: Vec::new(),
+    };
+    serving(&mut feed);
+    let control = Control::attach(dir.path()).unwrap();
+    let mut model = TabModel::new();
+
+    control
+        .emit(json!({
+            "op": "item.add", "topic": "session", "after": null,
+            "item": {"id": "e_1", "kind": "user", "ts": 1, "text": "hi", "status": "sent"}
+        }))
+        .unwrap();
+    control
+        .emit(json!({
+            "op": "item.append", "topic": "session", "id": "e_1", "field": "text", "text": " there"
+        }))
+        .unwrap();
+
+    feed.feed_model(&mut model, |model| {
+        model
+            .selected_items()
+            .first()
+            .map(|item| item.raw().clone())
+            == Some(json!({
+                "id": "e_1", "kind": "user", "ts": 1, "text": "hi there", "status": "sent"
+            }))
+    });
+    assert_eq!(model.selected(), AgentKey::Coordinator);
+    assert_eq!(model.selected_items().len(), 1);
+    drop(handle);
+}
+
+#[test]
+fn an_append_carries_its_id_field_and_text() {
+    let (dir, handle, updates) = tab("append", &[]);
+    let mut feed = Feed {
+        updates,
+        seen: Vec::new(),
+    };
+    serving(&mut feed);
+    let control = Control::attach(dir.path()).unwrap();
+    control
+        .emit(json!({
+            "op": "item.append", "topic": "session", "id": "e_gone", "field": "text", "text": "x"
+        }))
+        .unwrap();
+    let update = feed.expect("the append", |update| {
+        matches!(
+            update,
+            Update::Op {
+                op: Op::ItemAppend { .. },
+                ..
+            }
+        )
+    });
+    let Update::Op { topic: _, op } = update else {
+        unreachable!()
+    };
+    assert_eq!(
+        op,
+        Op::ItemAppend {
+            id: "e_gone".to_string(),
+            field: session::AppendField::Text,
+            text: "x".to_string(),
+        }
+    );
+    drop(handle);
+}
+
+#[test]
+fn a_server_that_dies_is_reported_and_the_tab_stops() {
+    let (_dir, mut handle, updates) = tab("dies", &[]);
+    let mut feed = Feed {
+        updates,
+        seen: Vec::new(),
+    };
+    let (_, pid) = serving(&mut feed);
+
+    // Kill the process behind the tab: the stream cannot come back, and the tab
+    // says so rather than reconnecting for ever.
+    assert!(swarm_client::harness::kill_process(pid));
+    feed.expect("ServerGone", |update| matches!(update, Update::ServerGone));
+    feed.expect("Exited", |update| matches!(update, Update::Exited { .. }));
+    handle.shutdown();
+}
+
+#[test]
+fn dropping_the_handle_stops_the_server() {
+    let (_dir, handle, updates) = tab("drop", &[]);
+    let mut feed = Feed {
+        updates,
+        seen: Vec::new(),
+    };
+    let (_, pid) = serving(&mut feed);
     assert!(swarm_client::process_alive(pid));
 
-    assert!(handle.shutdown());
-    let exited = updates.next(deadline, |u| matches!(u, Update::Exited { .. }));
-    let Update::Exited { outcome } = exited else {
-        unreachable!()
-    };
-    assert_ne!(
-        outcome,
-        swarm_client::ShutdownOutcome::Killed,
-        "{outcome:?}"
-    );
-    handle.join();
-    assert!(
-        !swarm_client::process_alive(pid),
-        "the swarm process is gone"
-    );
-}
-
-/// #6 — a server that never comes up carries its log tail (§3).
-#[test]
-fn boot_failure_carries_the_log_tail() {
-    let _guard = one_swarm();
-    let bins = Bins::installed();
-    assert!(bins.available(), "no binaries to test against");
-    let dir = TempDir::new("tab-engine-bootfail").expect("temp dir");
-    let project = dir.join("proj");
-    std::fs::create_dir_all(&project).expect("temp project");
-
-    let spec = TabSpec::new(&bins.swarm, &project, dir.path())
-        .with_agent_bin(&bins.agent)
-        .with_arg("--no-such-a-flag");
-    let (handle, rx) = TabEngine::start(spec);
-    let mut updates = Updates::new(rx);
-    let deadline = Instant::now() + Duration::from_secs(60);
-
-    updates.next(deadline, |u| matches!(u, Update::Booting));
-    let failed = updates.next(deadline, |u| matches!(u, Update::BootFailed { .. }));
-    match failed {
-        Update::BootFailed { message, log_tail } => {
-            assert!(
-                log_tail.contains("Unknown argument"),
-                "log tail was {log_tail:?} ({message})"
-            );
-        }
-        other => panic!("expected a boot failure, got {}", kind_of(&other)),
-    }
-    handle.join();
-}
-
-/// #7 — the coordinator is restarted by its supervisor: the stream reconnects,
-/// `hello` arrives, and the view resyncs (§5, §3).
-#[test]
-fn a_restarted_coordinator_resyncs() {
-    let _guard = one_swarm();
-    let fixture = fixture(1);
-    let (handle, rx) = TabEngine::start(spec(&fixture, 1));
-    let mut updates = Updates::new(rx);
-    let deadline = Instant::now() + Duration::from_secs(240);
-
-    let ready = updates.next(deadline, |u| matches!(u, Update::Ready { .. }));
-    let Update::Ready { health, pid, .. } = ready else {
-        unreachable!()
-    };
-    updates.wait_connected(Agent::Coordinator, deadline);
-    // The coordinator runs as its supervisor's child, so its pid is not the
-    // process this tab started.
-    assert_ne!(
-        health.pid, pid,
-        "the coordinator should be a separate process"
-    );
-    let revision_before = updates
-        .all
-        .iter()
-        .filter_map(|u| match u {
-            Update::Transcript {
-                agent: Agent::Coordinator,
-                revision,
-                ..
-            } => Some(*revision),
-            _ => None,
-        })
-        .max()
-        .unwrap_or(0);
-
-    // Kill the coordinator; the supervisor restarts it with --resume.
-    let killed = unsafe { libc::kill(health.pid as libc::pid_t, libc::SIGKILL) };
-    assert_eq!(killed, 0, "could not kill the coordinator");
-
-    // The stream drops, then comes back...
-    updates.next(deadline, |u| {
-        matches!(
-            u,
-            Update::Stream {
-                agent: Agent::Coordinator,
-                status: StreamStatus::Reconnecting { .. }
-            }
-        )
-    });
-    updates.next(deadline, |u| {
-        matches!(
-            u,
-            Update::Stream {
-                agent: Agent::Coordinator,
-                status: StreamStatus::Connected
-            }
-        )
-    });
-    // ...and the view is refetched with a higher revision.
-    let resynced = updates.next(deadline, |u| {
-        matches!(u, Update::Transcript { agent: Agent::Coordinator, revision, .. } if *revision > revision_before)
-    });
-    assert!(matches!(resynced, Update::Transcript { .. }));
-    // The restart is announced in band by `hello` (ids begin again at 1), which
-    // the stream replays from the start because `/health` named a new process.
-    //
-    // Order-blind on purpose: the replayed events come from the stream's reader and
-    // the rebuilt view from the resync's own thread, so which of the two reaches the
-    // UI first is the scheduler's business, not behaviour to pin (§9.1 makes events
-    // liveness and the transcript truth, in either order).
-    updates.wait_seen(
-        deadline,
-        "the replayed hello",
-        |u| matches!(u, Update::Event { agent: Agent::Coordinator, kind, id: Some(1), .. } if kind == "hello"),
-    );
-
-    handle.join();
-}
-
-/// #8 — a server dying on its own is reported, and nothing is left running.
-#[test]
-fn a_dead_server_is_reported() {
-    let _guard = one_swarm();
-    let fixture = fixture(1);
-    let (handle, rx) = TabEngine::start(spec(&fixture, 1));
-    let mut updates = Updates::new(rx);
-    let deadline = Instant::now() + Duration::from_secs(150);
-
-    let ready = updates.next(deadline, |u| matches!(u, Update::Ready { .. }));
-    let Update::Ready { pid, .. } = ready else {
-        unreachable!()
-    };
-    updates.wait_connected(Agent::Coordinator, deadline);
-
-    // The supervisor puts itself and everything it starts in one process group
-    // (swarm_client spawns it that way), so one signal reaches the coordinator
-    // and the lanes too.
-    let killed = unsafe { libc::killpg(pid as libc::pid_t, libc::SIGKILL) };
-    assert_eq!(killed, 0, "could not kill the swarm's process group");
-
-    updates.next(deadline, |u| matches!(u, Update::ServerGone));
-    updates.next(deadline, |u| matches!(u, Update::Exited { .. }));
-
-    let gone = Instant::now() + Duration::from_secs(10);
-    while swarm_client::process_alive(pid) && Instant::now() < gone {
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    assert!(
-        !swarm_client::process_alive(pid),
-        "the swarm process is gone"
-    );
-    handle.join();
-}
-
-/// #9 — a tab shut down while it is still booting stops within about a second,
-/// and nothing is left running.
-#[test]
-fn a_handle_stops_within_a_second_while_booting() {
-    let _guard = one_swarm();
-    let bins = Bins::installed();
-    assert!(bins.available(), "no binaries to test against");
-    let dir = TempDir::new("tab-engine-slowboot").expect("temp dir");
-    let project = dir.join("proj");
-    std::fs::create_dir_all(&project).expect("temp project");
-    // A "server" that never writes a token and never exits: a boot that will
-    // never become ready, which is exactly what the abort is for.
-    let script = dir.join("slow-server.sh");
-    std::fs::write(&script, "#!/bin/sh\nsleep 600\n").expect("write script");
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-
-    let (mut handle, rx) = TabEngine::start(TabSpec::new(&script, &project, dir.path()));
-    let mut updates = Updates::new(rx);
-    updates.next(Instant::now() + Duration::from_secs(20), |u| {
-        matches!(u, Update::Booting)
-    });
-    // Let readiness polling get going.
-    std::thread::sleep(Duration::from_millis(300));
-
-    let started = Instant::now();
-    assert!(handle.shutdown());
-    handle.join();
-    let took = started.elapsed();
-    eprintln!("aborted boot took {took:?}");
-    assert!(
-        took < Duration::from_secs(2),
-        "the aborted boot took {took:?}"
-    );
-
-    updates.pump();
-    assert!(
-        !updates
-            .all
-            .iter()
-            .any(|u| matches!(u, Update::BootFailed { .. })),
-        "an aborted boot is not a failure to show: {:?}",
-        updates.all.iter().map(kind_of).collect::<Vec<_>>()
-    );
-    assert!(
-        updates
-            .all
-            .iter()
-            .any(|u| matches!(u, Update::Exited { .. })),
-        "the tab says it stopped"
-    );
-    assert!(!running(&script), "the slow server is gone");
-}
-
-/// #10 — the §9.4 catalog probe: a userspace `evo-agent serve` for the registry
-/// and a `--no-userspace` one for the kernel's api set, both stopped again.
-#[test]
-fn the_catalog_probe_learns_registry_and_kernel_apis() {
-    let _guard = one_swarm();
-    let bins = Bins::installed();
-    assert!(bins.available(), "no binaries to test against");
-    let dir = TempDir::new("tab-engine-catalog").expect("temp dir");
-    let home = dir.join("home");
-    std::fs::create_dir_all(&home).expect("temp home");
-    // The model the userspace probe should find, registered as init.lisp does.
-    std::fs::write(
-        home.join("init.lisp"),
-        swarm_client::harness::stub_init_lisp(1, "catalog-model"),
-    )
-    .expect("write init.lisp");
-    let probe_dir = dir.join("probe");
-
-    let updates = catalog::learn_with(
-        &bins.agent,
-        &probe_dir,
-        vec![("EVO_HOME".to_owned(), home.to_string_lossy().into_owned())],
-    );
-    let update = updates.recv_blocking().expect("the probe should answer");
-    match update {
-        CatalogUpdate::Done {
-            registry,
-            kernel_apis,
-        } => {
-            let models = registry["models"].as_array().expect("models");
-            assert!(
-                models.iter().any(|model| model["id"] == "catalog-model"),
-                "the userspace registry should carry the init.lisp model: {registry}"
-            );
-            assert!(
-                registry["apis"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|api| api == "anthropic-messages"),
-                "{registry}"
-            );
-            let apis = kernel_apis.expect("the --no-userspace probe should have answered");
-            assert!(
-                apis.iter().any(|api| api == "anthropic-messages"),
-                "{apis:?}"
-            );
-        }
-        CatalogUpdate::Failed { message, log_tail } => {
-            panic!("catalog failed: {message}\n{log_tail}")
-        }
-    }
-
-    // Both probes stopped the ladder's way: it removes the token it wrote.
-    assert!(
-        !probe_dir.join("userspace/token").exists(),
-        "the userspace probe kept its token"
-    );
-    assert!(
-        !probe_dir.join("kernel/token").exists(),
-        "the kernel probe kept its token"
-    );
-}
-
-/// #11 — every tab stops at once (§3, §9.8).
-#[test]
-fn shutdown_all_stops_every_tab() {
-    let _guard = one_swarm();
-    let first = fixture(1);
-    let second = fixture(1);
-    let (first_handle, first_rx) = TabEngine::start(spec(&first, 1));
-    let (second_handle, second_rx) = TabEngine::start(spec(&second, 1));
-    let mut first_updates = Updates::new(first_rx);
-    let mut second_updates = Updates::new(second_rx);
-    let deadline = Instant::now() + Duration::from_secs(150);
-
-    let first_pid = ready_pid(&mut first_updates, deadline);
-    let second_pid = ready_pid(&mut second_updates, deadline);
-    assert_ne!(first_pid, second_pid);
-
-    let report: ShutdownReport =
-        tab_engine::shutdown_all(vec![first_handle, second_handle], Duration::from_secs(60));
-    assert!(report.all_exited(), "{report:?}");
-    assert_eq!(report.exited.len(), 2, "{report:?}");
-    assert!(
-        !swarm_client::process_alive(first_pid),
-        "the first swarm is gone"
-    );
-    assert!(
-        !swarm_client::process_alive(second_pid),
-        "the second swarm is gone"
-    );
-}
-
-/// #12 — the lane list is read again when a lane's launch announcement says it is
-/// still `starting`.
-///
-/// The swarm publishes `starting` when it launches a lane and then never announces
-/// that the lane came up (`swarm/lanes.lisp`'s `sync-lane-state :announce nil`), so a
-/// client that only folds events shows every lane as `starting` (◌) for the rest of
-/// the session — the assembly snapshot is read while they boot.
-#[test]
-fn a_lane_that_came_up_is_read_back_idle() {
-    let _guard = one_swarm();
-    let fixture = fixture(2);
-    let (handle, rx) = TabEngine::start(spec(&fixture, 2));
-    let mut updates = Updates::new(rx);
-    let deadline = Instant::now() + Duration::from_secs(150);
-
-    updates.wait_connected(Agent::Coordinator, deadline);
-
-    // An idle list arrives: both lanes up, which the assembly snapshot did not say.
-    let idle = updates.next(deadline, |update| match update {
-        Update::Lanes { raw } => raw["lanes"].as_array().is_some_and(|lanes| {
-            lanes.len() == 2 && lanes.iter().all(|lane| lane["state"] == "idle")
-        }),
-        _ => false,
-    });
-    assert!(matches!(idle, Update::Lanes { .. }));
-
-    // It is a *second* read, not the first: the engine asked again after the launch
-    // announcement rather than the snapshot happening to catch them idle.
-    let reads = updates
-        .all
-        .iter()
-        .filter(|update| matches!(update, Update::Lanes { .. }))
-        .count();
-    assert!(reads >= 2, "the lane list was read {reads} time(s)");
-
-    handle.join();
-}
-
-/// #13 — a lane shown while it is *down* gets its rows when it comes back.
-///
-/// The lane rows are on screen from the lane list on, and a red one is exactly the
-/// row a reader clicks to see what happened — while the lane's own server is dead,
-/// so the fetch that showing a lane makes cannot answer. That fetch must not be the
-/// end of it: `resync` spends a revision only on a view that came back, so a lane no
-/// view was ever read for is still at revision zero, and the first connect of its
-/// stream is the moment to read it. Without that, the lane showed an empty middle
-/// column until some unrelated reconnect happened to resync it.
-#[test]
-fn a_lane_shown_while_it_is_down_fills_its_rows_when_it_returns() {
-    let _guard = one_swarm();
-    let fixture = fixture(2);
-    let (handle, rx) = TabEngine::start(spec(&fixture, 2));
-    let mut updates = Updates::new(rx);
-    let deadline = Instant::now() + Duration::from_secs(240);
-
-    updates.wait_connected(Agent::Coordinator, deadline);
-    // Both lanes up and idle before anything is delegated: `delegate` refuses a lane
-    // that is not idle, and a lane still booting is not.
-    updates.next(deadline, |u| match u {
-        Update::Lanes { raw } => raw["lanes"].as_array().is_some_and(|lanes| {
-            lanes.len() == 2 && lanes.iter().all(|lane| lane["state"] == "idle")
-        }),
-        _ => false,
-    });
-
-    // Lane 1 runs something first, so its transcript has rows to come back with —
-    // and so a transcript that arrives empty cannot pass for the real thing.
-    let t = now();
-    assert!(handle.prompt(
-        1,
-        r#"CALL delegate {"lane":1,"task":"engine lane one pre-crash"}"#
-    ));
-    let ran = Instant::now() + Duration::from_secs(120);
-    while fixture
-        .stub
-        .find("lane 1", "engine lane one pre-crash", t)
-        .is_none()
-    {
-        assert!(Instant::now() < ran, "lane 1 never ran the delegated task");
-        std::thread::sleep(Duration::from_millis(50));
-    }
-
-    // Crash it the way a crash does.
-    let pid = lane_pid(&mut updates, deadline, 1);
-    let killed = unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
-    assert_eq!(killed, 0, "could not kill lane 1");
-
-    // Show it now, while it is red: this is the fetch with nothing behind it.
-    let before = updates.len();
-    assert!(handle.watch_lane(Some(1)));
-    std::thread::sleep(Duration::from_millis(750));
-    updates.pump();
-    assert!(
-        !updates.since(before).iter().any(|u| matches!(
-            u,
-            Update::Transcript {
-                agent: Agent::Lane(1),
-                ..
-            }
-        )),
-        "the lane's server is down, so there are no rows to fetch yet"
-    );
-
-    // Its supervisor brings it back, its stream connects, and *that* is when the
-    // rows arrive — as the lane's first revision, since no view of it was ever read.
-    let transcript = updates.next(deadline, |u| {
-        matches!(
-            u,
-            Update::Transcript {
-                agent: Agent::Lane(1),
-                ..
-            }
-        )
-    });
-    match &transcript {
-        Update::Transcript {
-            agent: Agent::Lane(1),
-            revision,
-            raw,
-        } => {
-            assert_eq!(
-                *revision, 1,
-                "a revision means a view was read: {transcript:?}"
-            );
-            let messages = raw["messages"]
-                .as_array()
-                .expect("a transcript carries messages");
-            assert!(!messages.is_empty(), "the resumed lane's own rows: {raw}");
-        }
-        other => panic!("expected lane 1's transcript, got {}", kind_of(other)),
-    }
-
-    handle.join();
-}
-
-/// The pid the lane list gives for LANE — the process to kill.
-fn lane_pid(updates: &mut Updates, deadline: Instant, lane: u64) -> u32 {
-    let found = updates.next(deadline, |u| match u {
-        Update::Lanes { raw } => raw["lanes"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .any(|row| row["n"].as_u64() == Some(lane) && row["pid"].as_u64().is_some()),
-        _ => false,
-    });
-    match found {
-        Update::Lanes { raw } => raw["lanes"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .find(|row| row["n"].as_u64() == Some(lane))
-            .and_then(|row| row["pid"].as_u64())
-            .map(|pid| pid as u32)
-            .expect("the lane list names its pid"),
-        _ => unreachable!(),
-    }
-}
-
-/// #14 — a server that goes silent is noticed, and a `POST` does not hold the tab.
-///
-/// `SIGSTOP` is not a crash: the swarm is alive and answers nothing at all — no
-/// keepalives, no replies — so the only thing that can end the tab's belief that it
-/// is connected is the client's own patience. Two of them, independent: the stream's
-/// (no bytes for the stream timeout ⇒ reconnecting) and the request's (no reply for
-/// the request timeout ⇒ the `POST` comes back as an error). The `POST` runs on a
-/// thread of its own, so the stream's news reaches the UI *while* the `POST` is still
-/// waiting — which is what the order of the two updates below says, with the stream's
-/// patience deliberately far shorter than the request's.
-#[test]
-fn a_silent_swarm_is_noticed_while_a_post_waits() {
-    let _guard = one_swarm();
-    let fixture = fixture(2);
-    let spec = spec(&fixture, 2).with_http_timeouts(Duration::from_secs(6), Duration::from_secs(1));
-    let (mut handle, rx) = TabEngine::start(spec);
-    let mut updates = Updates::new(rx);
-    let deadline = Instant::now() + Duration::from_secs(120);
-
-    let pid = ready_pid(&mut updates, deadline);
-    updates.wait_connected(Agent::Coordinator, deadline);
-
-    // Freeze it: every process this test started, and nothing else.
-    let stopped = unsafe { libc::killpg(pid as libc::pid_t, libc::SIGSTOP) };
-    assert_eq!(stopped, 0, "could not stop the swarm");
-
-    // A turn typed at a frozen swarm: the POST goes out and nothing comes back.
-    assert!(handle.prompt(1, "the frozen swarm cannot take this"));
-
-    let reconnecting = updates.next(deadline, |u| {
-        matches!(
-            u,
-            Update::Stream {
-                agent: Agent::Coordinator,
-                status: StreamStatus::Reconnecting { .. }
-            }
-        )
-    });
-    assert!(matches!(reconnecting, Update::Stream { .. }));
-
-    // …and the request ends as a typed failure rather than hanging.
-    let posted = updates.next(deadline, |u| matches!(u, Update::PostResult { .. }));
-    match posted {
-        Update::PostResult { req_id, result } => {
-            assert_eq!(req_id, 1);
-            let error = result.expect_err("a POST nobody answered is not a success");
-            eprintln!("the frozen POST said: {error:?}");
-            assert!(
-                error.status.is_none(),
-                "a silence is not a status: {error:?}"
-            );
-        }
-        other => panic!("expected a post result, got {}", kind_of(&other)),
-    }
-
-    // Which came first: the stream's notice, while the POST was still waiting. Had
-    // the POST been issued on the engine's own loop, its answer would have landed
-    // before the stream's queued message was ever looked at.
-    let stream_at = updates
-        .all
-        .iter()
-        .position(|u| {
-            matches!(
-                u,
-                Update::Stream {
-                    agent: Agent::Coordinator,
-                    status: StreamStatus::Reconnecting { .. }
-                }
-            )
-        })
-        .expect("the stream gave up");
-    let post_at = updates
-        .all
-        .iter()
-        .position(|u| matches!(u, Update::PostResult { .. }))
-        .expect("the POST came back");
-    assert!(
-        stream_at < post_at,
-        "the stream's news arrived while the POST was still waiting"
-    );
-
-    // Let it breathe, then leave the ladder to do its work.
-    unsafe { libc::killpg(pid as libc::pid_t, libc::SIGCONT) };
-    handle.shutdown();
-    updates.next(deadline, |u| matches!(u, Update::Exited { .. }));
-    let gone = Instant::now() + Duration::from_secs(60);
-    while swarm_client::process_alive(pid) && Instant::now() < gone {
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    assert!(!swarm_client::process_alive(pid), "the swarm is gone");
-    handle.join();
-}
-
-/// #14b — a resync against a silent swarm does not hold the tab either.
-///
-/// The same freeze as #14, with the *reads* outstanding this time: `Refetch` is the
-/// resync §9.1 has the tab do on `settled` (and on `hello`, on a gap, on a
-/// reconnect) — the same `/transcript` + `/state` read, issued for the same reason a
-/// `settled` issues one: a run ended and the view has to be rebuilt. `WatchLane`
-/// seeds a lane's view with two reads of its own. All of them are off the engine's
-/// loop, so while they wait out the request's patience the stream's own notice still
-/// reaches the UI at the stream's own patience — the difference between the tab
-/// saying "reconnecting" within its 45 s stream timeout and saying it half a minute
-/// later (§9.7).
-///
-/// A frozen server cannot *deliver* a `settled` from which the resync would be
-/// triggered — it answers nothing at all — so the test drives the reads from the
-/// commands the UI sends, which run the same path.
-#[test]
-fn a_resync_against_a_silent_swarm_does_not_hold_the_stream() {
-    let _guard = one_swarm();
-    let fixture = fixture(2);
-    let request = Duration::from_secs(8);
-    let spec = spec(&fixture, 2).with_http_timeouts(request, Duration::from_secs(1));
-    let (mut handle, rx) = TabEngine::start(spec);
-    let mut updates = Updates::new(rx);
-    let deadline = Instant::now() + Duration::from_secs(150);
-
-    let pid = ready_pid(&mut updates, deadline);
-    updates.wait_connected(Agent::Coordinator, deadline);
-
-    // Freeze it, then ask for both views: neither read can come back until the
-    // request's own patience runs out.
-    let stopped = unsafe { libc::killpg(pid as libc::pid_t, libc::SIGSTOP) };
-    assert_eq!(stopped, 0, "could not stop the swarm");
-    let frozen_at = Instant::now();
-    assert!(handle.refetch(Agent::Coordinator));
-    assert!(handle.watch_lane(Some(1)));
-
-    let reconnecting = updates.next(deadline, |u| {
-        matches!(
-            u,
-            Update::Stream {
-                agent: Agent::Coordinator,
-                status: StreamStatus::Reconnecting { .. }
-            }
-        )
-    });
-    let noticed = frozen_at.elapsed();
-    assert!(matches!(reconnecting, Update::Stream { .. }));
-    // The load's own slack, not a guess: the notice comes from the stream's 1 s
-    // patience, and the reads that would have held it back answer nothing before the
-    // request's 8 s. Half the request timeout is the line between the two.
-    assert!(
-        noticed < request / 2,
-        "the stream's notice took {noticed:?} — the reads held the loop, whose own \
-         patience is {request:?}"
-    );
-
-    // The reads come back as nothing at all: neither answered, so neither spent a
-    // revision and the next read of the view is still the first one that lands
-    // (§9.1 — a lane whose fetch failed is still at revision zero).
-    let dismissed = frozen_at + request + Duration::from_secs(3);
-    while Instant::now() < dismissed {
-        updates.pump();
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    let revisions: Vec<u64> = updates
-        .all
-        .iter()
-        .filter_map(|u| match u {
-            Update::Transcript {
-                agent: Agent::Coordinator,
-                revision,
-                ..
-            } => Some(*revision),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(
-        revisions,
-        [1],
-        "the assembly's read is the only view there has been"
-    );
-
-    // Let it answer again: the stream reconnects, the reconnect resyncs, and the
-    // view catches up — the reads were waiting, not lost. The resync that counts is
-    // the one after the freeze, which is why the check is made on what arrives from
-    // here on rather than on what the log holds at all.
-    let quiet = updates.len();
-    unsafe { libc::killpg(pid as libc::pid_t, libc::SIGCONT) };
-    let resumed = Instant::now() + Duration::from_secs(60);
-    loop {
-        updates.pump();
-        let resynced = updates.since(quiet).iter().any(|u| {
-            matches!(u, Update::Transcript { agent: Agent::Coordinator, revision, .. } if *revision > 1)
-        });
-        if resynced {
-            break;
-        }
-        assert!(
-            Instant::now() < resumed,
-            "the view never came back after the swarm did; saw {:?}",
-            updates.all.iter().map(kind_of).collect::<Vec<_>>()
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
-
-    handle.shutdown();
-    updates.next(deadline, |u| matches!(u, Update::Exited { .. }));
-    let gone = Instant::now() + Duration::from_secs(60);
-    while swarm_client::process_alive(pid) && Instant::now() < gone {
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    assert!(!swarm_client::process_alive(pid), "the swarm is gone");
-    handle.join();
-}
-
-/// #15 — a swarm stopped while it is still booting leaves nothing behind.
-///
-/// Not #9's case: this is a real swarm, so what has to die is a tree of processes —
-/// the supervisor, and the coordinator and lanes it starts, each of which the swarm
-/// puts in a process group of its own (so one signal to the supervisor's group does
-/// **not** reach them). The tab is stopped while the boot is still in flight: the
-/// swarm binary is wrapped in a script that waits before it execs the real one, which
-/// is why the boot cannot have finished, and the tab says so itself (no `Ready`).
-#[test]
-fn a_swarm_stopped_while_booting_leaves_nothing() {
-    let _guard = one_swarm();
-    let fixture = fixture(2);
-    let dir = TempDir::new("tab-engine-cancel-boot").expect("temp dir");
-    let project = dir.join("proj");
-    std::fs::create_dir_all(&project).expect("temp project");
-    let script = dir.join("slow-swarm.sh");
-    std::fs::write(
-        &script,
-        format!(
-            "#!/bin/sh\nsleep 1\nexec {} \"$@\"\n",
-            fixture.bins.swarm.display()
-        ),
-    )
-    .expect("write the wrapper");
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-
-    let mut spec = TabSpec::new(&script, &project, fixture.tab_dir())
-        .with_agent_bin(&fixture.bins.agent)
-        .with_workers(2);
-    for (key, value) in fixture.env() {
-        spec = spec.with_env(key, value);
-    }
-    for key in fixture.env_remove() {
-        spec = spec.with_env_removed(key);
-    }
-    let (mut handle, rx) = TabEngine::start(spec);
-    let updates = Updates::new(rx);
-
-    // The swarm process, named by the token file the tab told it to write. Its own
-    // children live under the fixture's swarm directory, which is what the check
-    // below scans for — lanes do not name the tab's token.
-    let token = format!("--token-file {}/token", fixture.tab_dir().display());
-    let swarm_dir = fixture.home.join("swarm");
-    let supervisor = wait_for_process(&token, Duration::from_secs(10)).expect("the swarm started");
-    eprintln!("the booting swarm is pid {supervisor}");
-
-    // Give it the moment a real boot has — the lanes come up while readiness is
-    // still being waited for — and take everything's measure.
-    let children_before = wait_for_children(&swarm_dir, Duration::from_secs(15));
-    let booting = !updates
-        .all
-        .iter()
-        .any(|u| matches!(u, Update::Ready { .. }));
-    eprintln!(
-        "stopping with {} process(es) besides the supervisor; the tab never became Ready: {booting}",
-        children_before.len()
-    );
-    assert!(
-        booting,
-        "the point of the test is a boot that is still in flight"
-    );
-
-    let started = Instant::now();
-    assert!(handle.shutdown());
-    handle.join();
-    eprintln!("the aborted boot took {:?}", started.elapsed());
-
-    // Nothing of that swarm survives — supervisor, coordinator, lanes, watchers.
+    drop(handle);
     let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let mut left = processes_naming(&token);
-        left.extend(processes_naming(&swarm_dir.to_string_lossy()));
-        if left.is_empty() {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "processes of the stopped swarm are still alive: {left:#?}"
-        );
-        std::thread::sleep(Duration::from_millis(50));
+    while swarm_client::process_alive(pid) {
+        assert!(Instant::now() < deadline, "the server outlived its tab");
+        std::thread::sleep(Duration::from_millis(20));
     }
 }
 
-/// `(pid, command)` for every process whose command line names NEEDLE.
-fn processes_naming(needle: &str) -> Vec<(u32, String)> {
-    let Ok(output) = std::process::Command::new("ps")
-        .args(["-axo", "pid=,command="])
-        .output()
-    else {
-        return Vec::new();
+#[test]
+fn joining_waits_for_the_server_to_be_gone() {
+    let (_dir, handle, updates) = tab("join", &[]);
+    let mut feed = Feed {
+        updates,
+        seen: Vec::new(),
     };
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| {
-            if !line.contains(needle) {
-                return None;
-            }
-            let mut fields = line.split_whitespace();
-            let pid: u32 = fields.next()?.parse().ok()?;
-            Some((pid, fields.collect::<Vec<_>>().join(" ")))
-        })
-        .collect()
+    let (_, pid) = serving(&mut feed);
+    handle.join();
+    assert!(!swarm_client::process_alive(pid));
 }
 
-/// Wait until some process names NEEDLE; the first pid that does.
-fn wait_for_process(needle: &str, timeout: Duration) -> Option<u32> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if let Some((pid, _)) = processes_naming(needle).first() {
-            return Some(*pid);
-        }
-        if Instant::now() >= deadline {
-            return None;
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
-}
-
-/// Wait until some process other than the swarm itself names the swarm's directory
-/// (the coordinator and the lanes), and give back what is there.
-fn wait_for_children(swarm_dir: &Path, timeout: Duration) -> Vec<(u32, String)> {
-    let needle = swarm_dir.to_string_lossy().into_owned();
-    let deadline = Instant::now() + timeout;
-    loop {
-        let found = processes_naming(&needle);
-        if !found.is_empty() || Instant::now() >= deadline {
-            return found;
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
-}
-
-fn ready_pid(updates: &mut Updates, deadline: Instant) -> u32 {
-    match updates.next(deadline, |u| matches!(u, Update::Ready { .. })) {
-        Update::Ready { pid, .. } => pid,
-        _ => unreachable!(),
-    }
-}
-
-/// Whether a process whose command line names PATH is running.
-fn running(path: &Path) -> bool {
-    let Ok(output) = std::process::Command::new("pgrep")
-        .arg("-f")
-        .arg(path)
-        .output()
-    else {
-        // No pgrep: the timing assertion above is the real evidence.
-        return false;
+#[test]
+fn a_boot_that_fails_says_so_with_the_log_tail() {
+    let dir = TempDir::new("boot-fail").unwrap();
+    let bin =
+        swarm_client::harness::script_that(dir.path(), "nope", "echo boom >&2; exit 3").unwrap();
+    let config = ServerConfig::swarm(bin, dir.path(), dir.path());
+    let argv = swarm_client::harness::serving_argv(&config.ready_file, &[]);
+    let (handle, updates) = TabEngine::start(config.with_argv(argv));
+    let mut feed = Feed {
+        updates,
+        seen: Vec::new(),
     };
-    output.status.success() && !output.stdout.is_empty()
+    let update = feed.expect("BootFailed", |update| {
+        matches!(update, Update::BootFailed { .. })
+    });
+    let Update::BootFailed { reason, log_tail } = update else {
+        unreachable!()
+    };
+    assert!(reason.contains("exited during startup"), "{reason}");
+    assert!(log_tail.contains("boom"), "{log_tail}");
+    drop(handle);
 }
 
-fn now() -> f64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0)
+/// A compilation check on the shape the app uses: a `FakeSwarm` and a tab in the
+/// same directory are two servers, so a test must attach to the tab's own.
+#[test]
+fn a_fake_swarm_can_still_be_driven_directly() {
+    let dir = TempDir::new("direct").unwrap();
+    let swarm = FakeSwarm::start(dir.path()).unwrap();
+    swarm
+        .control()
+        .emit(json!({"op": "hello", "epoch": "e", "seq": 1}))
+        .unwrap();
+    assert!(swarm.control().requests_on("/_emit").is_empty());
+    assert_eq!(swarm.server().port(), swarm.client().port());
 }

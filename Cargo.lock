@@ -6700,10 +6700,7 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
- "session",
- "store",
  "swarm_client",
- "tab_engine",
 ]
 
 [[package]]
@@ -6808,8 +6805,8 @@ name = "tab_engine"
 version = "0.1.0"
 dependencies = [
  "async-channel",
- "libc",
  "serde_json",
+ "session",
  "swarm_client",
 ]
 

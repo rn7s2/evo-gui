@@ -1,16 +1,13 @@
-//! A blocking HTTP/1.1 client for serve's protocol: one request per connection
-//! (`Connection: close`), loopback only, a bearer token on every request
-//! (docs/PROMPT.md §4).
+//! A blocking HTTP/1.1 client for serve's protocol: loopback only, a bearer
+//! token on every request (CONTRACT.md §5).
 //!
-//! It is hand-rolled on `std::net::TcpStream` on purpose: serve's HTTP is ~200
-//! lines and speaks nothing else (docs/serve.md §"What serve is, underneath"),
-//! and a stream is read line by line on a dedicated thread anyway (§5), so a
-//! runtime is dead weight.
+//! It is hand-rolled on `std::net::TcpStream` on purpose: serve's HTTP is small
+//! and speaks nothing else, and an SSE stream is read line by line on a
+//! dedicated thread anyway (§5.3), so a runtime is dead weight.
 
 use std::fmt;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpStream};
-use std::path::Path;
 use std::time::Duration;
 
 use serde_json::Value;
@@ -24,20 +21,6 @@ pub struct Token(String);
 impl Token {
     pub fn new(text: impl Into<String>) -> Token {
         Token(text.into())
-    }
-
-    /// Read the token a server wrote with `--token-file`. An empty file is not
-    /// a token — the server creates it empty and fills it a moment later.
-    pub fn from_file(path: &Path) -> Result<Token> {
-        let text = std::fs::read_to_string(path)?;
-        let trimmed = text.trim();
-        if trimmed.is_empty() {
-            return Err(Error::Config(format!(
-                "token file {} is still empty",
-                path.display()
-            )));
-        }
-        Ok(Token(trimmed.to_owned()))
     }
 
     pub fn as_str(&self) -> &str {
@@ -166,7 +149,6 @@ impl HttpClient {
         path: &str,
         body: Option<&Value>,
         accept_sse: bool,
-        last_event_id: Option<i64>,
     ) -> Result<()> {
         let host = if self.host.contains(':') && !self.host.starts_with('[') {
             format!("[{}]:{}", self.host, self.port)
@@ -179,9 +161,6 @@ impl HttpClient {
         );
         if accept_sse {
             head.push_str("Accept: text/event-stream\r\n");
-        }
-        if let Some(id) = last_event_id {
-            head.push_str(&format!("Last-Event-ID: {id}\r\n"));
         }
         let payload = match body {
             Some(value) => {
@@ -207,7 +186,7 @@ impl HttpClient {
     pub fn request(&self, method: &str, path: &str, body: Option<&Value>) -> Result<HttpResponse> {
         let timeout = self.timeout;
         let mut stream = self.connect(timeout)?;
-        self.write_request(&mut stream, method, path, body, false, None)?;
+        self.write_request(&mut stream, method, path, body, false)?;
         let mut reader = BufReader::new(stream);
         let (status, headers) = read_head(&mut reader, timeout)?;
         let body = read_body(&mut reader, &headers)?;
@@ -226,11 +205,13 @@ impl HttpClient {
         self.request("POST", path, Some(body))
     }
 
-    /// Open an SSE stream. A refusal is written before any stream header, so it
-    /// arrives as an ordinary HTTP error here (§swarm/routes.lisp).
-    pub fn open_sse(&self, path: &str, last_event_id: Option<i64>) -> Result<SseConnection> {
+    /// Open an SSE stream. A refusal (no token, a shut-down server) is written
+    /// before any stream header, so it arrives as an ordinary HTTP error here.
+    /// Where the stream resumes from is the `since` query parameter, not a
+    /// header: the cursor is `<epoch>.<seq>`, and the epoch is the server's.
+    pub fn open_sse(&self, path: &str) -> Result<SseConnection> {
         let mut stream = self.connect(self.stream_timeout)?;
-        self.write_request(&mut stream, "GET", path, None, true, last_event_id)?;
+        self.write_request(&mut stream, "GET", path, None, true)?;
         let socket = stream.try_clone()?;
         let mut reader = BufReader::new(stream);
         let (status, headers) = read_head(&mut reader, self.stream_timeout)?;
