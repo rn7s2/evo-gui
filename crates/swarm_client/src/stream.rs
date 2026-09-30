@@ -121,7 +121,15 @@ impl EventStream {
             thread::Builder::new()
                 .name("evo-op-stream".into())
                 .spawn(move || {
-                    run(client, config, messages_tx, orders_rx, cursor, socket, stopped)
+                    run(
+                        client,
+                        config,
+                        messages_tx,
+                        orders_rx,
+                        cursor,
+                        socket,
+                        stopped,
+                    )
                 })
                 .expect("the stream thread starts")
         };
@@ -247,19 +255,18 @@ fn run(
             // A re-read: park until the consumer says where to resume.
             Ok(Ended::Reset(reason)) => {
                 let _ = messages.send_blocking(StreamMsg::Reset { reason });
-                loop {
-                    match orders.recv_blocking() {
-                        Ok(Order::Resume(from)) => {
-                            if let Ok(mut slot) = cursor.lock() {
-                                *slot = Some(from);
-                            }
-                            attempt = 0;
-                            break;
+                // Parked until the consumer has re-snapshotted and says where to
+                // resume: that is what keeps the re-read gapless.
+                match orders.recv_blocking() {
+                    Ok(Order::Resume(from)) => {
+                        if let Ok(mut slot) = cursor.lock() {
+                            *slot = Some(from);
                         }
-                        Ok(Order::Stop) | Err(_) => {
-                            let _ = messages.send_blocking(StreamMsg::Stopped);
-                            return;
-                        }
+                        attempt = 0;
+                    }
+                    Ok(Order::Stop) | Err(_) => {
+                        let _ = messages.send_blocking(StreamMsg::Stopped);
+                        return;
                     }
                 }
             }
@@ -374,7 +381,10 @@ mod tests {
         assert_eq!(backoff.wait(1), Duration::from_millis(500));
         assert_eq!(backoff.wait(2), Duration::from_millis(1000));
         assert_eq!(backoff.wait(3), Duration::from_millis(2000));
-        assert_eq!(backoff.wait(4), Duration::from_millis(5000).min(Duration::from_millis(4000)));
+        assert_eq!(
+            backoff.wait(4),
+            Duration::from_millis(5000).min(Duration::from_millis(4000))
+        );
         assert_eq!(backoff.wait(20), Duration::from_secs(5));
     }
 

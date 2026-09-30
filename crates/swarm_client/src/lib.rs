@@ -59,8 +59,8 @@ pub use protocol::{
 };
 pub use redact::{redact, redact_json, MASK};
 pub use server::{
-    log_tail, process_alive, BootCancel, Resume, Server, ServerConfig, Shutdown, ShutdownOutcome,
-    SCRUB_ENV,
+    log_tail, process_alive, BootCancel, Server, ServerConfig, Shutdown, ShutdownOutcome,
+    StdinClose, SCRUB_ENV,
 };
 pub use sse::{SseEvent, SseParser};
 pub use stream::{Backoff, EventStream, StreamConfig, StreamMsg};

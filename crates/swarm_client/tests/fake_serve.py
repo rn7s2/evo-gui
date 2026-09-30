@@ -41,7 +41,12 @@ class State:
         self.lock = threading.Lock()
         self.epoch = uuid.uuid4().hex[:8]
         self.seq = 1
-        self.topics = {"session": {"state": {"status": "idle"}, "items": []}}
+        # The topics a real swarm always has: the coordinator's own, and the
+        # swarm record (state only, no items).
+        self.topics = {
+            "session": {"state": {"status": "idle"}, "items": []},
+            "swarm": {"state": {"workers": 0, "status": {"busy": 0}, "lanes": []}},
+        }
         self.replies = {}          # op name -> reply body (without rid/seq)
         self.replies_by_rid = {}   # rid -> the reply already given (idempotence)
         self.requests = []         # every request this server saw
@@ -132,6 +137,9 @@ class Handler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             return {"_raw": raw.decode("utf-8", "replace")}
 
+    def authorised(self):
+        return self.headers.get("Authorization", "") == f"Bearer {TOKEN}"
+
     def record(self, path, body):
         with self.server.state.lock:
             self.server.state.requests.append(
@@ -155,6 +163,8 @@ class Handler(BaseHTTPRequestHandler):
     def route(self, path, body):
         url = urlparse(path)
         query = parse_qs(url.query)
+        if url.path.startswith("/_") is False and not self.authorised():
+            return self.reply(401, {"ok": False, "error": "bad token"})
         if not url.path.startswith("/_"):
             self.record(path, body)
         handler = {
@@ -411,7 +421,7 @@ def write_ready(path, port):
         "supervisor_pid": os.getpid(),
         "port": port,
         "url": f"http://127.0.0.1:{port}/",
-        "token": "0" * 64,
+        "token": TOKEN,
         "session": {"id": "fake-session", "path": "/tmp/fake-journal.sexp"},
         "program": "evo-swarm",
         "version": "fake",
@@ -440,6 +450,7 @@ def watch_stdin(server, ready_file):
 
 
 STATE = State()
+TOKEN = "0" * 64
 
 
 def main(argv):
@@ -466,6 +477,14 @@ def main(argv):
             STATE.lanes = int(value)
             for n in range(1, STATE.lanes + 1):
                 STATE.topics[f"lane:{n}"] = {"state": {"status": "idle"}, "items": []}
+            STATE.topics["swarm"]["state"] = {
+                "workers": STATE.lanes,
+                "status": {"busy": 0},
+                "lanes": [
+                    {"n": n, "state": "idle", "reports": 0}
+                    for n in range(1, STATE.lanes + 1)
+                ],
+            }
             index += 2
         else:
             index += 1

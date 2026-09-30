@@ -19,7 +19,11 @@ pub mod engine;
 mod types;
 
 pub use engine::{shutdown_all, EngineHandle, ShutdownReport, TabEngine};
-pub use types::{tab_topics, Command, StreamStatus, TabSpec, Update};
+
+// The UI builds an op from its own model and hands it to the handle; these are
+// the pieces it needs to do that without depending on `session` directly.
+pub use session::{AgentKey, Queue, Scope, TabModel};
+pub use types::{tab_topics, StreamStatus, TabSpec, Update};
 
 // Re-exported so the UI can read what an [`Update`] carries without depending on
 // `swarm_client` directly.

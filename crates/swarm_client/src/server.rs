@@ -4,25 +4,30 @@
 //! exact argv, the environment, the readiness rule (the ready file, and nothing
 //! else), and the shutdown ladder.
 //!
-//! Three things are load-bearing here:
+//! The argv is not built here: evo's launch flags are `store::launch`'s to know,
+//! and a [`ServerConfig`] carries the argv it was given. Two things are
+//! load-bearing:
 //!
 //! * **stdin is a pipe we hold.** The child is started with `--watch-stdin` and
 //!   our end of the pipe; EOF means "the tab is gone", which is immediate and
-//!   immune to pid reuse. Dropping the [`Server`] drops the pipe.
+//!   immune to pid reuse. Dropping the [`Server`] drops the pipe, and
+//!   [`Server::stdin_handle`] hands out a closer a caller can use from anywhere —
+//!   a quit that must not wait for the ladder still stops the server at once.
 //! * **Readiness is one file.** The child writes `<tabdir>/ready.json`
 //!   atomically once it is listening, and rewrites it after every supervisor
 //!   restart: the port, the token and the epoch all come from there, so nothing
 //!   polls `/health`, nothing picks a free port, and nothing compares pids.
-//! * **`--port 0`, once.** The child picks its port and says so in the ready
-//!   file; a supervisor restart reuses the port it bound, which is the child's
-//!   business, not ours.
+//! * **Readiness is one file.** The child writes `<tabdir>/ready.json`
+//!   atomically once it is listening, and rewrites it after every supervisor
+//!   restart: the port, the token and the epoch all come from there, so nothing
+//!   polls `/health`, nothing picks a free port, and nothing compares pids.
 
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::client::Client;
@@ -47,14 +52,37 @@ pub const SCRUB_ENV: &[&str] = &[
     "EVO_IDE_CONTEXT",
 ];
 
-/// How `--resume` is passed.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub enum Resume {
-    /// A fresh session.
-    #[default]
-    No,
-    /// `--resume <path>`: an exact journal, which is all a restart ever uses.
-    Path(PathBuf),
+/// A handle on the child's stdin, from anywhere.
+///
+/// Closing it is EOF, which is how a child (and every lane under it) is told its
+/// tab is gone — immediately, and without waiting for anything. The app's quit
+/// path uses one so it can return before any ladder has run.
+#[derive(Clone, Default)]
+pub struct StdinClose(Arc<Mutex<Option<ChildStdin>>>);
+
+impl StdinClose {
+    pub fn new() -> StdinClose {
+        StdinClose::default()
+    }
+
+    /// Close the pipe. The child sees EOF; idempotent.
+    pub fn close(&self) {
+        if let Ok(mut stdin) = self.0.lock() {
+            *stdin = None;
+        }
+    }
+
+    fn put(&self, stdin: Option<ChildStdin>) {
+        if let Ok(mut slot) = self.0.lock() {
+            *slot = stdin;
+        }
+    }
+}
+
+impl std::fmt::Debug for StdinClose {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StdinClose").finish_non_exhaustive()
+    }
 }
 
 /// How long a cancelled boot waits for the child to leave on its own before a
@@ -66,8 +94,8 @@ const READY_POLL: Duration = Duration::from_millis(20);
 
 /// A flag a caller raises to abort a boot in progress.
 ///
-/// [`Server::start_cancellable`] checks it once per poll, so a cancelled boot is
-/// over quickly: it runs the same shutdown ladder as a normal stop, only with a
+/// [`Server::start_with`] checks it once per poll, so a cancelled boot is over
+/// quickly: it runs the same shutdown ladder as a normal stop, only with a
 /// shorter patience.
 #[derive(Clone, Debug, Default)]
 pub struct BootCancel(Arc<AtomicBool>);
@@ -88,36 +116,22 @@ impl BootCancel {
 }
 
 /// Everything about one server that is decided before it starts.
+///
+/// The argv is the caller's: `store::launch` is the one place that knows evo's
+/// launch flags, and this struct simply runs what it is handed.
 #[derive(Clone, Debug)]
 pub struct ServerConfig {
     /// The binary: `evo-swarm`.
     pub bin: PathBuf,
-    /// The folder the server runs in.
+    /// The argv after the binary — `serve --port 0 --ready-file … --watch-stdin …`.
+    pub argv: Vec<String>,
+    /// The folder the server runs in (its cwd).
     pub cwd: PathBuf,
-    /// Where the child writes its ready file (§1).
+    /// Where the child writes its ready file (§1). The argv must name the same
+    /// path; [`ServerConfig::swarm`] derives both from the tab directory.
     pub ready_file: PathBuf,
     /// stdout + stderr go here, appended: the log a boot failure shows.
     pub log_path: PathBuf,
-    /// `--workers N`.
-    pub workers: Option<u16>,
-    /// `--model ID[@PROVIDER]`.
-    pub model: Option<String>,
-    /// `--lane-model ID[@PROVIDER]`.
-    pub lane_model: Option<String>,
-    /// `--thinking L`.
-    pub thinking: Option<String>,
-    /// `--lane-thinking L`.
-    pub lane_thinking: Option<String>,
-    pub resume: Resume,
-    /// The `evo-agent` the lanes run (`--evo`); `None` lets the swarm find one.
-    pub evo_bin: Option<PathBuf>,
-    /// `--no-userspace`.
-    pub no_userspace: bool,
-    /// Hold the child's stdin (`--watch-stdin`). A caller that wants a server to
-    /// outlive this process turns it off; the app never does.
-    pub watch_stdin: bool,
-    /// Anything else, verbatim, after the flags above.
-    pub extra_args: Vec<String>,
     /// Set in the child's environment (after the scrub list).
     pub extra_env: Vec<(String, String)>,
     /// Extra variables to drop from the child's environment.
@@ -136,23 +150,15 @@ pub struct ServerConfig {
 }
 
 impl ServerConfig {
-    /// A tab's swarm in `tab_dir`: `ready.json` and `swarm.log` live there.
+    /// A tab's swarm in `tab_dir`: `ready.json` and `swarm.log` live there. The
+    /// argv starts empty — [`ServerConfig::with_argv`] fills it.
     pub fn swarm(bin: impl Into<PathBuf>, cwd: impl Into<PathBuf>, tab_dir: &Path) -> ServerConfig {
         ServerConfig {
             bin: bin.into(),
+            argv: Vec::new(),
             cwd: cwd.into(),
             ready_file: tab_dir.join("ready.json"),
             log_path: tab_dir.join("swarm.log"),
-            workers: None,
-            model: None,
-            lane_model: None,
-            thinking: None,
-            lane_thinking: None,
-            resume: Resume::No,
-            evo_bin: None,
-            no_userspace: false,
-            watch_stdin: true,
-            extra_args: Vec::new(),
             extra_env: Vec::new(),
             env_remove: Vec::new(),
             ready_timeout: Duration::from_secs(90),
@@ -163,43 +169,13 @@ impl ServerConfig {
         }
     }
 
-    pub fn with_workers(mut self, workers: u16) -> Self {
-        self.workers = Some(workers);
-        self
-    }
-
-    pub fn with_model(mut self, model: impl Into<String>) -> Self {
-        self.model = Some(model.into());
-        self
-    }
-
-    pub fn with_lane_model(mut self, model: impl Into<String>) -> Self {
-        self.lane_model = Some(model.into());
-        self
-    }
-
-    pub fn with_thinking(mut self, level: impl Into<String>) -> Self {
-        self.thinking = Some(level.into());
-        self
-    }
-
-    pub fn with_resume(mut self, path: impl Into<PathBuf>) -> Self {
-        self.resume = Resume::Path(path.into());
-        self
-    }
-
-    pub fn with_evo(mut self, evo_bin: impl Into<PathBuf>) -> Self {
-        self.evo_bin = Some(evo_bin.into());
-        self
-    }
-
-    pub fn with_no_userspace(mut self, yes: bool) -> Self {
-        self.no_userspace = yes;
-        self
-    }
-
-    pub fn with_arg(mut self, arg: impl Into<String>) -> Self {
-        self.extra_args.push(arg.into());
+    /// The argv the child is run with.
+    pub fn with_argv<I, S>(mut self, argv: I) -> ServerConfig
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.argv = argv.into_iter().map(Into::into).collect();
         self
     }
 
@@ -218,57 +194,6 @@ impl ServerConfig {
         self.request_timeout = request;
         self.stream_timeout = stream;
         self
-    }
-
-    /// The argv after the binary: `serve --port 0 --ready-file … --watch-stdin …`.
-    ///
-    /// The port is always `0`: the child picks one and writes it in the ready
-    /// file, and a supervisor restart reuses the port it bound. Nobody picks a
-    /// free port by hand, so two tabs can never race for one.
-    pub fn argv(&self) -> Vec<String> {
-        let mut args = vec![
-            "serve".to_owned(),
-            "--port".to_owned(),
-            "0".to_owned(),
-            "--ready-file".to_owned(),
-            self.ready_file.to_string_lossy().into_owned(),
-        ];
-        if self.watch_stdin {
-            args.push("--watch-stdin".into());
-        }
-        if let Some(workers) = self.workers {
-            args.push("--workers".into());
-            args.push(workers.to_string());
-        }
-        if let Some(model) = &self.model {
-            args.push("--model".into());
-            args.push(model.clone());
-        }
-        if let Some(model) = &self.lane_model {
-            args.push("--lane-model".into());
-            args.push(model.clone());
-        }
-        if let Some(thinking) = &self.thinking {
-            args.push("--thinking".into());
-            args.push(thinking.clone());
-        }
-        if let Some(thinking) = &self.lane_thinking {
-            args.push("--lane-thinking".into());
-            args.push(thinking.clone());
-        }
-        if let Resume::Path(path) = &self.resume {
-            args.push("--resume".into());
-            args.push(path.to_string_lossy().into_owned());
-        }
-        if let Some(evo) = &self.evo_bin {
-            args.push("--evo".into());
-            args.push(evo.to_string_lossy().into_owned());
-        }
-        if self.no_userspace {
-            args.push("--no-userspace".into());
-        }
-        args.extend(self.extra_args.iter().cloned());
-        args
     }
 }
 
@@ -298,9 +223,10 @@ pub struct Shutdown {
 /// became ready still has a way to be stopped.
 struct Proc {
     child: Child,
-    /// Our end of the child's stdin. Dropping it is EOF, which the child reads
-    /// as "the tab is gone" and stops cleanly (lanes included, §8).
-    stdin: Option<ChildStdin>,
+    /// Our end of the child's stdin, shared so a caller can close it from
+    /// anywhere. Closing it is EOF, which the child reads as "the tab is gone"
+    /// and stops cleanly (lanes included, §8).
+    stdin: StdinClose,
     log_path: PathBuf,
     ready_file: PathBuf,
     shutdown_grace: Duration,
@@ -319,7 +245,7 @@ impl Proc {
         term_grace: Duration,
     ) -> Shutdown {
         // EOF first: it is the child's own signal, and it reaches the lanes too.
-        self.stdin = None;
+        self.stdin.close();
         if let Some(client) = client {
             // A courtesy: the answer is nice, the stopping is not.
             let _ = client
@@ -407,19 +333,23 @@ impl std::fmt::Debug for Server {
 }
 
 impl Server {
-    /// Start a server and wait for its ready file (§1).
+    /// Start a server and wait for its ready file (§1), holding the child's stdin.
     pub fn start(cfg: &ServerConfig) -> Result<Server> {
-        Server::start_cancellable(cfg, &BootCancel::new())
+        Server::start_with(cfg, &BootCancel::new(), StdinClose::new())
     }
 
     /// Start a server, with a flag a caller can raise to abort the wait — the
-    /// app's quit path, which must not sit out a slow boot.
+    /// app's quit path, which must not sit out a slow boot — and with the stdin
+    /// pipe it will hold.
     ///
-    /// A cancelled boot is stopped the ladder's way, only faster: the process is
-    /// asked over HTTP when the ready file has been seen, then `SIGTERM` after
-    /// [`CANCEL_SHUTDOWN_GRACE`], then `SIGKILL` after [`CANCEL_TERM_GRACE`].
-    /// Nothing is "killed first".
-    pub fn start_cancellable(cfg: &ServerConfig, cancel: &BootCancel) -> Result<Server> {
+    /// A cancelled boot is stopped the ladder's way, only faster: EOF on stdin,
+    /// then `SIGTERM` after [`CANCEL_STOP_GRACE`], then `SIGKILL` after
+    /// [`CANCEL_TERM_GRACE`]. Nothing is "killed first".
+    pub fn start_with(
+        cfg: &ServerConfig,
+        cancel: &BootCancel,
+        stdin: StdinClose,
+    ) -> Result<Server> {
         if !cfg.cwd.is_dir() {
             return Err(Error::Config(format!(
                 "{} is not a directory",
@@ -429,13 +359,12 @@ impl Server {
         // A ready file left over from a previous server in this tab dir is not
         // this server's readiness: drop it and wait for a fresh one.
         let _ = std::fs::remove_file(&cfg.ready_file);
-        let mut child = spawn(cfg)?;
-        let stdin = child.stdin.take();
+        let mut child = spawn(cfg, &stdin)?;
         let deadline = Instant::now() + cfg.ready_timeout;
 
         loop {
             if cancel.is_cancelled() {
-                let mut proc = Proc::new(child, stdin, cfg);
+                let mut proc = Proc::new(child, stdin.clone(), cfg);
                 let outcome = proc.stop(None, CANCEL_STOP_GRACE, CANCEL_TERM_GRACE);
                 return Err(Error::Cancelled(outcome.outcome));
             }
@@ -452,7 +381,7 @@ impl Server {
                 Err(e) => return Err(e.into()),
             }
             if let Some(ready) = read_ready(&cfg.ready_file) {
-                let client = client_of(&ready).ok_or_else(|| {
+                let client = client_of(&ready, cfg).ok_or_else(|| {
                     Error::Config(format!(
                         "the ready file at {} names a server we will not talk to",
                         cfg.ready_file.display()
@@ -465,7 +394,7 @@ impl Server {
                 });
             }
             if Instant::now() >= deadline {
-                let mut proc = Proc::new(child, stdin, cfg);
+                let mut proc = Proc::new(child, stdin.clone(), cfg);
                 proc.stop(None, cfg.shutdown_grace, cfg.term_grace);
                 return Err(Error::Boot(Box::new(BootFailure {
                     message: format!(
@@ -487,8 +416,6 @@ impl Server {
         &self.ready
     }
 
-
-
     pub fn pid(&self) -> u32 {
         self.proc.child.id()
     }
@@ -507,10 +434,6 @@ impl Server {
     }
 
     /// The same, owned — a caller that keeps a handle after the tab is gone.
-    pub fn client_owned(&self) -> Client {
-        self.client.clone()
-    }
-
     pub fn log_path(&self) -> &Path {
         &self.proc.log_path
     }
@@ -528,6 +451,11 @@ impl Server {
         self.proc.is_running()
     }
 
+    /// Whether the process is still there, without surprising it.
+    pub fn alive(&self) -> bool {
+        process_alive(self.proc.child.id())
+    }
+
     /// Wait up to `timeout` for the process to exit; the code, or `None`.
     pub fn wait_for_exit(&mut self, timeout: Duration) -> Option<i32> {
         self.proc.wait_for_exit(timeout)
@@ -536,7 +464,14 @@ impl Server {
     /// Close our end of the child's stdin. EOF is how a child is told its tab is
     /// gone, and it needs no HTTP, no signal and no pid.
     pub fn close_stdin(&mut self) {
-        self.proc.stdin = None;
+        self.proc.stdin.close();
+    }
+
+    /// A closer for the child's stdin, usable from anywhere — the app's quit path
+    /// keeps one so it can stop the server and return without waiting for the
+    /// ladder.
+    pub fn stdin_handle(&self) -> StdinClose {
+        self.proc.stdin.clone()
     }
 
     /// The ladder (§8): stdin EOF, `server.shutdown`, wait, `SIGTERM`, `SIGKILL`.
@@ -545,7 +480,7 @@ impl Server {
     pub fn shutdown(&mut self) -> Result<Shutdown> {
         let started = Instant::now();
         if !self.is_running() {
-            self.proc.stdin = None;
+            self.proc.stdin.close();
             return Ok(Shutdown {
                 outcome: ShutdownOutcome::AlreadyGone,
                 exit_code: None,
@@ -571,12 +506,12 @@ impl Server {
             let _ = self.proc.child.wait();
             self.proc.reaped = true;
         }
-        self.proc.stdin = None;
+        self.proc.stdin.close();
     }
 }
 
 impl Proc {
-    fn new(child: Child, stdin: Option<ChildStdin>, cfg: &ServerConfig) -> Proc {
+    fn new(child: Child, stdin: StdinClose, cfg: &ServerConfig) -> Proc {
         Proc {
             child,
             stdin,
@@ -589,12 +524,17 @@ impl Proc {
     }
 }
 
-/// The client a ready file describes: loopback only, and never without a token.
-fn client_of(ready: &ReadyFile) -> Option<Client> {
+/// The client a ready file describes: loopback only, never without a token, with
+/// the caller's patience.
+fn client_of(ready: &ReadyFile, cfg: &ServerConfig) -> Option<Client> {
     if ready.token.is_empty() || ready.port == 0 {
         return None;
     }
-    Client::loopback(ready.port, ready.token.as_str()).ok()
+    Client::loopback(ready.port, ready.token.as_str())
+        .ok()?
+        .with_timeout(cfg.request_timeout)
+        .with_stream_timeout(cfg.stream_timeout)
+        .into()
 }
 
 /// Read and parse the ready file, if it is there and complete.
@@ -668,7 +608,7 @@ pub fn process_alive(pid: u32) -> bool {
     std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
-fn spawn(cfg: &ServerConfig) -> Result<Child> {
+fn spawn(cfg: &ServerConfig, stdin: &StdinClose) -> Result<Child> {
     let log = OpenOptions::new()
         .create(true)
         .append(true)
@@ -676,7 +616,7 @@ fn spawn(cfg: &ServerConfig) -> Result<Child> {
         .map_err(|e| Error::Config(format!("cannot open {}: {e}", cfg.log_path.display())))?;
     let mut command = Command::new(&cfg.bin);
     command
-        .args(cfg.argv())
+        .args(&cfg.argv)
         .current_dir(&cfg.cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::from(log.try_clone()?))
@@ -691,11 +631,9 @@ fn spawn(cfg: &ServerConfig) -> Result<Child> {
     let mut child = command
         .spawn()
         .map_err(|e| Error::Config(format!("cannot run {}: {e}", cfg.bin.display())))?;
-    // Keep our end open: it is the pipe whose EOF means "this tab is gone". A
-    // tiny write makes the pipe unmistakably ours rather than a closed one.
-    if let Some(stdin) = child.stdin.as_mut() {
-        let _ = stdin.write_all(b"");
-    }
+    // Our end of the pipe, shared with whoever wants to close it: it is the
+    // child's whole death signal, so it must outlive this call.
+    stdin.put(child.stdin.take());
     Ok(child)
 }
 
@@ -788,40 +726,25 @@ mod tests {
     }
 
     #[test]
-    fn argv_is_the_documented_one() {
-        let cfg = ServerConfig::swarm(
+    fn the_config_carries_its_own_argv_and_tab_paths() {
+        // evo's launch flags belong to store::launch; this crate runs what it is
+        // given, and watches the ready file the tab directory implies.
+        let config = ServerConfig::swarm(
             "/usr/local/bin/evo-swarm",
             "/tmp/proj",
             Path::new("/tmp/tab"),
         )
-        .with_workers(3)
-        .with_model("m-1@anthropic")
-        .with_lane_model("l-1")
-        .with_resume(PathBuf::from("/tmp/s.sexp"));
-        assert_eq!(
-            cfg.argv(),
-            vec![
-                "serve",
-                "--port",
-                "0",
-                "--ready-file",
-                "/tmp/tab/ready.json",
-                "--watch-stdin",
-                "--workers",
-                "3",
-                "--model",
-                "m-1@anthropic",
-                "--lane-model",
-                "l-1",
-                "--resume",
-                "/tmp/s.sexp",
-            ]
-        );
-        // No free port, no token file, no probabilities: the ready file is the
-        // whole handshake, and --allow-remote is never passed.
-        assert!(!cfg.argv().iter().any(|arg| arg == "--token-file"));
-        assert!(!cfg.argv().iter().any(|arg| arg == "--allow-remote"));
-        assert_eq!(cfg.ready_file, PathBuf::from("/tmp/tab/ready.json"));
+        .with_argv([
+            "serve",
+            "--port",
+            "0",
+            "--ready-file",
+            "/tmp/tab/ready.json",
+        ]);
+        assert_eq!(config.argv[0], "serve");
+        assert_eq!(config.ready_file, PathBuf::from("/tmp/tab/ready.json"));
+        assert_eq!(config.log_path, PathBuf::from("/tmp/tab/swarm.log"));
+        assert_eq!(config.cwd, PathBuf::from("/tmp/proj"));
     }
 
     #[test]
@@ -882,7 +805,16 @@ mod tests {
         .unwrap();
         let ready = read_ready(&path).expect("a complete file is readiness");
         assert_eq!(ready.port, 5300);
-        assert!(client_of(&ready).is_some());
+        let config = ServerConfig::swarm("/bin/true", "/tmp", &dir);
+        assert!(client_of(&ready, &config).is_some());
+        assert!(client_of(
+            &ReadyFile {
+                token: String::new(),
+                ..ready
+            },
+            &config
+        )
+        .is_none());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -9,6 +9,10 @@
 //! `EVO_SWARM_BIN` swaps the real binary in for the fake, for a run against
 //! evo-agent; the `/_…` control endpoints then answer nothing, so a test that
 //! needs them asks [`FakeSwarm::is_fake`] first.
+//!
+//! The argv is the caller's — `store::launch` is the one place that knows evo's
+//! launch flags — so the harness only offers [`serving_argv`], the shape of a
+//! `serve` command, for a test to fill in.
 
 use std::path::{Path, PathBuf};
 
@@ -21,6 +25,30 @@ use crate::server::{Server, ServerConfig};
 /// The fake server's script, beside this crate.
 pub fn fake_serve_script() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fake_serve.py")
+}
+
+/// The argv that starts a `serve`: `serve --port 0 --ready-file <path>
+/// --watch-stdin …`. `store::launch` builds the real one; this is the shape the
+/// fake and the tests use.
+pub fn serving_argv(ready_file: &Path, extra: &[&str]) -> Vec<String> {
+    let mut argv = vec![
+        "serve".to_owned(),
+        "--port".to_owned(),
+        "0".to_owned(),
+        "--ready-file".to_owned(),
+        ready_file.display().to_string(),
+        "--watch-stdin".to_owned(),
+    ];
+    argv.extend(extra.iter().map(|arg| (*arg).to_owned()));
+    argv
+}
+
+/// A [`ServerConfig`] that runs the fake server in `dir`, with extra argv.
+pub fn fake_config(dir: &Path, extra: &[&str]) -> std::io::Result<ServerConfig> {
+    let bin = fake_swarm_bin(dir)?;
+    let config = ServerConfig::swarm(bin, dir, dir);
+    let argv = serving_argv(&config.ready_file, extra);
+    Ok(config.with_argv(argv))
 }
 
 /// A binary that runs the fake server: a one-line `sh` wrapper, because the
@@ -108,30 +136,23 @@ pub struct FakeSwarm {
 }
 
 impl FakeSwarm {
-    /// Start one in `dir` (the tab directory), with the fake server's binary.
+    /// Start one in `dir` (the tab directory), with the fake server's binary and
+    /// no argv of its own.
     pub fn start(dir: impl Into<PathBuf>) -> Result<FakeSwarm> {
-        FakeSwarm::with_config(dir, |bin, cwd, tab| ServerConfig::swarm(bin, cwd, tab))
+        FakeSwarm::with_argv(dir, &[])
     }
 
-    /// Start one, letting the caller shape the config — the cwd, the workers,
-    /// the timeouts.
-    pub fn with_config<F>(dir: impl Into<PathBuf>, shape: F) -> Result<FakeSwarm>
-    where
-        F: FnOnce(PathBuf, &Path, &Path) -> ServerConfig,
-    {
+    /// Start one, with extra argv — `--workers 2`, a shorter patience.
+    pub fn with_argv(dir: impl Into<PathBuf>, extra: &[&str]) -> Result<FakeSwarm> {
         let dir = dir.into();
         std::fs::create_dir_all(&dir)?;
-        let cwd = dir.join("project");
-        std::fs::create_dir_all(&cwd)?;
-        let is_fake = std::env::var_os("EVO_SWARM_BIN").is_none();
         let bin = fake_swarm_bin(&dir)?;
-        let config = shape(bin.clone(), &cwd, &dir);
-        let server = Server::start(&config)?;
+        let server = Server::start(&fake_config(&dir, extra)?)?;
         Ok(FakeSwarm {
             server,
             dir,
             bin,
-            is_fake,
+            is_fake: std::env::var_os("EVO_SWARM_BIN").is_none(),
         })
     }
 
@@ -142,6 +163,11 @@ impl FakeSwarm {
 
     pub fn server(&self) -> &Server {
         &self.server
+    }
+
+    /// The server, to stop it or ask about its process.
+    pub fn server_mut(&mut self) -> &mut Server {
+        &mut self.server
     }
 
     pub fn client(&self) -> &Client {

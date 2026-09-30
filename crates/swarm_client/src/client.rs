@@ -240,6 +240,9 @@ mod tests {
     fn query_values_are_encoded() {
         assert_eq!(encode_value("lane:3"), "lane%3A3");
         assert_eq!(encode_value("session"), "session");
-        assert_eq!(encode_list(&["session".into(), "lane:1".into()]), "session,lane%3A1");
+        assert_eq!(
+            encode_list(&["session".into(), "lane:1".into()]),
+            "session,lane%3A1"
+        );
     }
 }

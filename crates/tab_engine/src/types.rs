@@ -1,16 +1,20 @@
-//! What the UI [asks a tab](Command) and what a [tab tells the UI](Update).
+//! What the UI [asks a tab](EngineHandle) and what a [tab tells the UI](Update).
 //!
-//! There is no session state in either direction. A tab carries the protocol's
-//! own JSON — a [`Snapshot`] because it asked for one, a [`StreamFrame`] because
-//! the server sent one, an [`OpReply`] because the UI asked for something — and
-//! the `session` crate is the only thing that knows what any of it means.
+//! The UI never runs an op itself: it builds a [`session::OpRequest`] from the
+//! tab's own model (`TabModel::send_input`, `interrupt_lane`, …) and hands it to
+//! an [`session::OpSink`], which the [`EngineHandle`](crate::EngineHandle) is.
+//! In the other direction a tab hands over the protocol's own JSON — one topic's
+//! snapshot body, one parsed [`session::Op`] — and the `session` crate is the
+//! only thing that knows what any of it means.
 
 use std::path::PathBuf;
 use std::time::Duration;
 
-use serde_json::Value;
+use swarm_client::{OpReply, SessionRef};
 
-use swarm_client::{OpReply, Snapshot, StreamFrame, StreamResetReason, TopicResetReason};
+/// The stream's state, for the "reconnecting" badge: session's own vocabulary,
+/// so the UI has one enum and not two.
+pub use session::StreamStatus;
 
 /// Everything about one tab that is decided before it starts.
 #[derive(Clone, Debug)]
@@ -21,7 +25,7 @@ pub struct TabSpec {
     pub agent_bin: Option<PathBuf>,
     /// The folder the server runs in (its cwd).
     pub folder: PathBuf,
-    /// Where the server keeps its ready file, its log; created if missing.
+    /// Where the server keeps its ready file and its log; created if missing.
     pub tab_dir: PathBuf,
     /// Lanes to start (`--workers`); `None` uses the swarm's own default.
     pub workers: Option<u16>,
@@ -153,40 +157,8 @@ impl TabSpec {
     }
 }
 
-/// What the UI asks a tab to do. Sending is non-blocking; a `false` means the
-/// engine is gone.
-#[derive(Clone, Debug)]
-pub enum Command {
-    /// `POST /ops` with these arguments (§5.5). The rid is the engine's: the
-    /// server dedupes by rid, so a retry after a dropped connection is free.
-    Op { op: String, args: Value },
-    /// Re-read the whole view (§5.2) — what a UI asks for when it dropped
-    /// updates it could not keep up with.
-    Snapshot,
-    /// Stop the server the ladder's way (§8) and end the engine.
-    Shutdown,
-}
-
-impl Command {
-    /// The common case: one op, its arguments.
-    pub fn op(op: impl Into<String>, args: Value) -> Command {
-        Command::Op {
-            op: op.into(),
-            args,
-        }
-    }
-}
-
-/// How a stream is doing, so the UI can say "reconnecting in N s".
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum StreamStatus {
-    Live,
-    Reconnecting { attempt: u32, retry_in: Duration },
-}
-
-/// What a tab tells the UI. The `session` crate applies these; nothing here is
-/// interpreted on the way.
-#[derive(Clone, Debug)]
+/// What a tab tells the UI. Everything here goes straight into the `session` crate.
+#[derive(Clone, Debug, PartialEq)]
 pub enum Update {
     /// The server is being started.
     Booting,
@@ -195,20 +167,18 @@ pub enum Update {
         epoch: String,
         pid: u32,
         port: u16,
-        session: swarm_client::SessionRef,
+        session: SessionRef,
     },
     /// The server never came up; `log_tail` is what the tab shows.
     BootFailed { message: String, log_tail: String },
-    /// A snapshot (§5.2), exactly as it arrived: `topics`, `epoch` and `seq`.
-    /// The topics present are the ones this snapshot is authoritative for.
-    Snapshot(Box<Snapshot>),
-    /// One frame of the op stream (§5.3), in stream order.
-    Frame(Box<StreamFrame>),
-    /// The server cannot continue the stream from our cursor; everything is
-    /// being re-read, and the stream will resume from the new snapshot.
-    StreamReset { reason: StreamResetReason },
-    /// One topic is stale (`topic.reset`); a snapshot of it is on its way.
-    TopicReset { topic: String, reason: TopicResetReason },
+    /// One topic of a snapshot (§5.2), exactly as the server sent it: the body
+    /// of `topics[name]` — `{state, items, has_more}`. `TabModel::on_snapshot`.
+    Snapshot { topic: String, body: serde_json::Value },
+    /// One stream frame (§5.3). `TabModel::on_op`.
+    Op {
+        topic: String,
+        op: session::Op,
+    },
     /// The stream's state, for the "reconnecting" line.
     Stream { status: StreamStatus },
     /// The reply to an op the UI sent (§5.5).
@@ -216,7 +186,9 @@ pub enum Update {
     /// The server process died on its own; the engine has stopped.
     ServerGone,
     /// The engine has stopped, and how the server went.
-    Exited { outcome: swarm_client::ShutdownOutcome },
+    Exited {
+        outcome: swarm_client::ShutdownOutcome,
+    },
 }
 
 /// The topics a tab always reads: the coordinator's own, the swarm's, and every

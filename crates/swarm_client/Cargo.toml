@@ -20,3 +20,7 @@ libc = "0.2"
 # Features are unified for the test build, which turns `test-harness` on for
 # `cargo test -p swarm_client` without a plain dependent ever compiling it.
 swarm_client = { path = ".", features = ["test-harness"] }
+
+[[test]]
+name = "protocol_e2e"
+required-features = ["test-harness"]

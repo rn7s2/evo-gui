@@ -1,45 +1,51 @@
 //! One tab's I/O, off the UI thread.
 //!
 //! ```text
-//!   UI thread ──Command──▶ [ tab-engine thread ] ──snapshot/stream/ops──▶ evo-swarm serve
-//!   UI thread ◀──Update─── [ tab-engine thread ] ◀──frames───────────────  (coordinator, lanes)
+//!   UI thread ──OpRequest──▶ [ tab-engine thread ] ──snapshot/stream/ops──▶ evo-swarm serve
+//!   UI thread ◀──Update──── [ tab-engine thread ] ◀──frames──────────────  (coordinator, lanes)
 //! ```
 //!
 //! The whole engine is one thread and four steps:
 //!
 //! 1. **spawn** — [`Server::start`], which waits for the ready file, and report
 //!    [`Update::BootFailed`] with the log tail when the server never comes up.
-//! 2. **snapshot** — one `GET /snapshot` for `session`, `swarm` and `lane:*`,
-//!    handed to the UI as it arrived.
-//! 3. **stream** — one `GET /stream` from that snapshot's cursor. Every frame
-//!    goes to the UI unchanged; a `topic.reset` makes the engine re-snapshot that
-//!    topic, and a `stream.reset` makes it re-snapshot everything and resume the
-//!    stream from the snapshot's cursor, so the re-read is gapless.
+//! 2. **snapshot** — one `GET /snapshot` for `session`, `swarm` and `lane:*`, split
+//!    into one [`Update::Snapshot`] per topic.
+//! 3. **stream** — one `GET /stream` from that snapshot's cursor. Every frame is
+//!    parsed into a [`session::Op`] and handed over; a `topic.reset` makes the
+//!    engine re-snapshot that topic, and a `stream.reset` makes it re-snapshot
+//!    everything and resume the stream from the snapshot's cursor, so the re-read
+//!    is gapless.
 //! 4. **ops** — `POST /ops` with an engine-made rid, on a thread of its own so a
 //!    slow answer never holds up the stream.
 //!
-//! There is no second stream, no per-lane bookkeeping, no revision counter and
-//! no polling: a restart is an epoch, a stale view is a reset, and a dead server
-//! is a stream that cannot reconnect (checked against the process, once).
+//! There is no second stream, no per-lane bookkeeping, no revision counter and no
+//! polling: a restart is an epoch, a stale view is a reset, and a dead server is a
+//! stream that cannot reconnect (checked against the process, once).
 
 use std::path::{Path, PathBuf};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
 
 use async_channel::{Receiver, Sender};
 use serde_json::Value;
 
+use session::{Op, OpRequest, OpSink};
 use swarm_client::{
     Client, ErrorCode, EventStream, OpError, OpReply, Server, ShutdownOutcome, Snapshot,
-    StreamConfig, StreamMsg,
+    StreamConfig, StreamFrame, StreamMsg,
 };
 
-use crate::types::{tab_topics, Command, StreamStatus, TabSpec, Update};
+use crate::types::{tab_topics, TabSpec, Update};
 
 /// What the engine thread reads: a command from the UI, or something the stream
 /// saw. One channel for both, so the loop never blocks on two things at once.
 enum Inbound {
-    Command(Command),
+    /// An op the UI asked for (session built it; the engine POSTs it).
+    Request(Box<OpRequest>),
+    /// Re-read every topic.
+    Snapshot,
+    /// Stop the server the ladder's way and end the engine.
+    Shutdown,
     Stream(StreamMsg),
 }
 
@@ -68,7 +74,7 @@ impl TabEngine {
     }
 }
 
-/// A tab's handle: commands in, and the thread's end of the story.
+/// A tab's handle: ops in, and the thread's end of the story.
 pub struct EngineHandle {
     inbox: Sender<Inbound>,
     thread: Option<JoinHandle<()>>,
@@ -81,24 +87,22 @@ impl EngineHandle {
         &self.folder
     }
 
-    /// Send a command; `false` when the engine is already gone.
-    pub fn send(&self, command: Command) -> bool {
-        self.inbox.send_blocking(Inbound::Command(command)).is_ok()
+    /// Send one op (`TabModel::send_input`, `interrupt_lane`, …).
+    pub fn request(&self, request: OpRequest) -> bool {
+        self.inbox
+            .send_blocking(Inbound::Request(Box::new(request)))
+            .is_ok()
     }
 
-    /// One op, its arguments.
-    pub fn request(&self, op: impl Into<String>, args: Value) -> bool {
-        self.send(Command::op(op, args))
-    }
-
-    /// Re-read the whole view.
+    /// Re-read every topic — what a UI asks for when it dropped updates it could
+    /// not keep up with.
     pub fn refetch(&self) -> bool {
-        self.send(Command::Snapshot)
+        self.inbox.send_blocking(Inbound::Snapshot).is_ok()
     }
 
     /// Stop the server the ladder's way and end the engine.
     pub fn shutdown(&mut self) -> bool {
-        self.send(Command::Shutdown)
+        self.inbox.send_blocking(Inbound::Shutdown).is_ok()
     }
 
     pub fn is_running(&self) -> bool {
@@ -122,6 +126,13 @@ impl EngineHandle {
     /// Hand the thread over to nobody: it ends when its server does.
     pub fn detach(mut self) {
         self.thread.take();
+    }
+}
+
+/// The UI builds an op; the transport POSTs it. This is the transport.
+impl OpSink for EngineHandle {
+    fn send(&self, request: OpRequest) {
+        self.request(request);
     }
 }
 
@@ -150,7 +161,7 @@ impl ShutdownReport {
 
 /// Stop every tab at once: ask them all first, then wait. Asking one at a time
 /// would serialize the ladders, and a slow one would hold up the rest.
-pub fn shutdown_all(mut handles: Vec<EngineHandle>, _deadline: Duration) -> ShutdownReport {
+pub fn shutdown_all(mut handles: Vec<EngineHandle>) -> ShutdownReport {
     let tabs = handles.len();
     for handle in handles.iter_mut() {
         handle.shutdown();
@@ -165,9 +176,6 @@ pub fn shutdown_all(mut handles: Vec<EngineHandle>, _deadline: Duration) -> Shut
 }
 
 /// The engine thread.
-/// `commands` is a second handle on the mailbox: the forwarding thread needs one
-/// to put the stream's messages in, and it must not be the handle's (which goes
-/// away as soon as the UI drops it).
 fn run(
     spec: TabSpec,
     mailbox: Receiver<Inbound>,
@@ -175,7 +183,7 @@ fn run(
     updates: Sender<Update>,
 ) {
     let mut engine = Engine {
-        updates: updates.clone(),
+        updates,
         topics: tab_topics(),
     };
     engine.send(Update::Booting);
@@ -199,6 +207,8 @@ fn run(
     });
 
     let client = server.client().clone();
+    // One snapshot, then one stream from its cursor: there is no window between
+    // the two in which an op could be missed.
     let snapshot = match client.snapshot(&engine.topics, None) {
         Ok(snapshot) => snapshot,
         Err(error) => {
@@ -206,7 +216,10 @@ fn run(
                 message: format!("the server answered the ready file but not a snapshot: {error}"),
                 log_tail: server.log_tail(40),
             });
-            let outcome = server.shutdown().map(|s| s.outcome).unwrap_or(ShutdownOutcome::Killed);
+            let outcome = server
+                .shutdown()
+                .map(|shutdown| shutdown.outcome)
+                .unwrap_or(ShutdownOutcome::Killed);
             engine.send(Update::Exited { outcome });
             return;
         }
@@ -216,7 +229,7 @@ fn run(
         StreamConfig::new(engine.topics.clone()).from(snapshot.cursor()),
     );
     let forwarder = forward_stream(stream.clone(), &commands);
-    engine.send(Update::Snapshot(Box::new(snapshot)));
+    engine.topics_of(&snapshot);
 
     let outcome = engine_loop(&mut engine, &mut server, &client, &stream, &mailbox);
     stream.stop();
@@ -240,8 +253,8 @@ fn boot_message(error: &swarm_client::Error) -> String {
     }
 }
 
-/// Copy the stream's messages into the engine's mailbox, so the engine thread
-/// has one thing to read. Ends when the stream does.
+/// Copy the stream's messages into the engine's mailbox, so the engine thread has
+/// one thing to read. Ends when the stream does.
 fn forward_stream(stream: EventStream, mailbox: &Sender<Inbound>) -> JoinHandle<()> {
     let mailbox = mailbox.clone();
     thread::Builder::new()
@@ -256,8 +269,8 @@ fn forward_stream(stream: EventStream, mailbox: &Sender<Inbound>) -> JoinHandle<
         .expect("the forwarding thread starts")
 }
 
-/// The loop: commands from the UI, messages from the stream, until one of them
-/// says the tab is over.
+/// The loop: ops from the UI, frames from the stream, until one of them says the
+/// tab is over.
 ///
 /// `None` means the server is gone or was stopped; `Some(outcome)` means the
 /// ladder already ran.
@@ -276,68 +289,47 @@ fn engine_loop(
             Err(_) => return None,
         };
         match message {
-            Inbound::Command(Command::Shutdown) => return None,
-            Inbound::Command(Command::Snapshot) => {
+            Inbound::Shutdown => return None,
+            Inbound::Snapshot => {
                 engine.snapshot(client, None);
             }
-            Inbound::Command(Command::Op { op, args }) => {
-                // Off the loop: a slow or refused op must not hold up the
-                // stream, and the rid makes a retry free (§5.5).
-                let client = client.clone();
-                let updates = engine.updates.clone();
-                let _ = thread::Builder::new()
-                    .name("evo-tab-op".into())
-                    .spawn(move || match client.op(&op, args) {
-                        Ok(reply) => {
-                            let _ = updates.send_blocking(Update::OpReply(Box::new(reply)));
-                        }
-                        Err(error) => {
-                            let _ = updates.send_blocking(Update::OpReply(Box::new(OpReply {
-                                rid: String::new(),
-                                ok: false,
-                                seq: 0,
-                                result: Value::Null,
-                                error: Some(OpError {
-                                    code: ErrorCode::OpFailed,
-                                    message: error.to_string(),
-                                    detail: Value::Null,
-                                }),
-                            })));
-                        }
-                    });
-            }
+            Inbound::Request(request) => post(engine, client, *request),
             Inbound::Stream(StreamMsg::Connected { .. }) => {
                 engine.send(Update::Stream {
-                    status: StreamStatus::Live,
+                    status: crate::types::StreamStatus::Connected,
                 });
             }
-            Inbound::Stream(StreamMsg::Reconnecting { attempt, retry_in }) => {
+            Inbound::Stream(StreamMsg::Reconnecting { retry_in, .. }) => {
                 // A stream that cannot come back is a server that is not there.
                 if !server.is_running() {
                     engine.send(Update::ServerGone);
                     return None;
                 }
                 engine.send(Update::Stream {
-                    status: StreamStatus::Reconnecting { attempt, retry_in },
+                    status: crate::types::StreamStatus::Reconnecting { retry_in },
                 });
             }
             Inbound::Stream(StreamMsg::Frame(frame)) => {
-                if let Some(reason) = frame.topic_reset() {
+                if frame.topic_reset().is_some() {
                     let topic = frame.topic().unwrap_or_default().to_owned();
-                    engine.send(Update::TopicReset {
-                        topic: topic.clone(),
-                        reason,
-                    });
+                    engine.frame(frame);
                     // That one topic is stale; everything else stands.
                     engine.snapshot(client, Some(topic));
                 } else {
-                    engine.send(Update::Frame(Box::new(frame)));
+                    engine.frame(frame);
                 }
             }
             Inbound::Stream(StreamMsg::Reset { reason }) => {
-                engine.send(Update::StreamReset { reason });
-                // Snapshot first, then resume from the position that snapshot
-                // was atomic at: no op is lost and none is applied twice.
+                // The server cannot continue from our cursor. Everything is stale
+                // — the session crate decides what that means — and the engine
+                // snapshots first so it can resume the stream from the position
+                // that snapshot was atomic at: no op lost, none applied twice.
+                engine.send(Update::Op {
+                    topic: swarm_client::TOPIC_SESSION.to_owned(),
+                    op: Op::StreamReset {
+                        reason: reason.as_str().to_owned(),
+                    },
+                });
                 if let Some(snapshot) = engine.snapshot(client, None) {
                     stream.resume_from(snapshot.cursor());
                 }
@@ -352,7 +344,32 @@ fn engine_loop(
     }
 }
 
-/// The engine's own state: where to send updates, and what to read.
+/// POST one op, on a thread of its own: a slow or refused op must not hold up the
+/// stream, and the rid makes the client's one retry free (§5.5).
+fn post(engine: &Engine, client: &Client, request: OpRequest) {
+    let client = client.clone();
+    let updates = engine.updates.clone();
+    let _ = thread::Builder::new()
+        .name("evo-tab-op".into())
+        .spawn(move || {
+            let reply = client.op(&request.op, request.args).unwrap_or_else(|error| {
+                OpReply {
+                    rid: String::new(),
+                    ok: false,
+                    seq: 0,
+                    result: Value::Null,
+                    error: Some(OpError {
+                        code: ErrorCode::OpFailed,
+                        message: error.to_string(),
+                        detail: Value::Null,
+                    }),
+                }
+            });
+            let _ = updates.send_blocking(Update::OpReply(Box::new(reply)));
+        });
+}
+
+/// The engine's own state: where updates go, and what to read.
 struct Engine {
     updates: Sender<Update>,
     topics: Vec<String>,
@@ -363,17 +380,73 @@ impl Engine {
         self.updates.send_blocking(update).is_ok()
     }
 
+    /// Hand a snapshot's topics over, one update each: the UI applies them topic by
+    /// topic (`TabModel::on_snapshot`).
+    fn topics_of(&mut self, snapshot: &Snapshot) {
+        for topic in snapshot.topic_names() {
+            if let Some(body) = snapshot.topic(topic) {
+                let body = body.clone();
+                self.send(Update::Snapshot {
+                    topic: topic.to_owned(),
+                    body,
+                });
+            }
+        }
+    }
+
+    /// One frame, parsed: the UI's `TabModel::on_op`. A frame this build does not
+    /// know is not the UI's to draw, and is dropped.
+    fn frame(&mut self, frame: StreamFrame) {
+        let topic = frame.topic().unwrap_or_default().to_owned();
+        if let Some(op) = Op::from_json(&frame.op, &frame.data) {
+            self.send(Update::Op { topic, op });
+        }
+    }
+
     /// Take a snapshot of everything, or of one topic after a `topic.reset`.
     ///
     /// A failed snapshot is not fatal: the stream keeps running, and the next
-    /// reset asks again. It stays silent rather than inventing an update.
+    /// reset asks again.
     fn snapshot(&mut self, client: &Client, topic: Option<String>) -> Option<Snapshot> {
         let topics = match &topic {
             Some(topic) => vec![topic.clone()],
             None => self.topics.clone(),
         };
         let snapshot = client.snapshot(&topics, None).ok()?;
-        self.send(Update::Snapshot(Box::new(snapshot.clone())));
+        self.topics_of(&snapshot);
         Some(snapshot)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_boot_exit_is_read_back_as_a_message() {
+        let error = swarm_client::Error::Boot(Box::new(swarm_client::BootFailure {
+            message: "the server exited during startup (exit status: 3)".into(),
+            log_tail: "boom".into(),
+            log_path: None,
+            exit_code: Some(3),
+        }));
+        assert!(boot_message(&error).contains("exited during startup"));
+        assert!(boot_message(&swarm_client::Error::Closed).contains("closed"));
+    }
+
+    #[test]
+    fn a_frame_becomes_the_session_crate_its_own_op() {
+        let frame = StreamFrame::parse(
+            Some("op"),
+            Some("7f3a.3"),
+            &json!({"op": "item.append", "topic": "session", "id": "e_1", "field": "text", "text": "hi"})
+                .to_string(),
+        );
+        assert_eq!(frame.topic(), Some("session"));
+        assert!(matches!(
+            Op::from_json(&frame.op, &frame.data),
+            Some(Op::ItemAppend { .. })
+        ));
     }
 }
