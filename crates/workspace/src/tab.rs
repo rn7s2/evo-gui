@@ -869,13 +869,18 @@ impl TabContent {
             Some(RowChanges::Rebuilt) => Some(live.model.selected_rows().to_vec()),
             _ => None,
         };
-        let changed: Vec<session::Row> = match changes.rows_for(selected) {
-            Some(RowChanges::Changed(ids)) => ids
-                .iter()
-                .filter_map(|id| live.model.agent_model(selected)?.row(*id).cloned())
-                .collect(),
-            _ => Vec::new(),
-        };
+        // A changed id the model no longer holds is a removed row (an assistant
+        // message that ended empty); the view has to drop it, not skip it.
+        let mut changed: Vec<session::Row> = Vec::new();
+        let mut removed: Vec<session::RowId> = Vec::new();
+        if let Some(RowChanges::Changed(ids)) = changes.rows_for(selected) {
+            for id in ids {
+                match live.model.agent_model(selected).and_then(|m| m.row(*id)) {
+                    Some(row) => changed.push(row.clone()),
+                    None => removed.push(*id),
+                }
+            }
+        }
         let todos = changes
             .todos
             .contains(&selected)
@@ -887,6 +892,13 @@ impl TabContent {
         };
         if let Some(rows) = rebuilt {
             view.update(cx, |view, cx| view.replace(revision, rows, cx));
+        }
+        if !removed.is_empty() {
+            view.update(cx, |view, cx| {
+                for id in removed {
+                    view.remove(revision, id, cx);
+                }
+            });
         }
         if !changed.is_empty() {
             view.update(cx, |view, cx| {

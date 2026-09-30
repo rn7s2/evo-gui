@@ -353,6 +353,32 @@ impl TranscriptView {
         true
     }
 
+    /// Drop one row the model no longer has — an assistant message that ended
+    /// carrying nothing (a tool-only step) is removed from the model, and its
+    /// row here must go too, or its waiting dots outlive it.
+    /// Returns `true` when the view changed.
+    pub fn remove(&mut self, revision: u64, id: RowId, cx: &mut Context<Self>) -> bool {
+        if !self.accept_revision(revision) {
+            return false;
+        }
+        let index = self.data.update(cx, |data, _| {
+            let index = data.index_of(id)?;
+            data.rows.remove(index);
+            data.documents.remove(&id);
+            data.rendered.remove(&id);
+            data.expanded.remove(&id);
+            Some(index)
+        });
+        let Some(index) = index else {
+            return false;
+        };
+        self.scroller.update(cx, |scroller, cx| {
+            scroller.splice(index..index + 1, 0, cx);
+        });
+        cx.notify();
+        true
+    }
+
     /// Replace the todos of the agent this view shows.
     pub fn set_todos(&mut self, todos: Vec<Todo>, cx: &mut Context<Self>) {
         if self.todos == todos {

@@ -547,6 +547,17 @@ fn building_rows_replace_upsert_and_the_revision_guard(cx: &mut TestAppContext) 
         assert_eq!(view.read(cx).rows(cx).len(), 3);
         assert_eq!(row_kinds(&view, cx)[2], user(3, 2, "edited").kind);
     });
+
+    // A row the model dropped (an assistant message that ended empty) leaves
+    // the view; the rows around it keep their order. Removing it again is a no-op.
+    view.update(cx, |view, cx| {
+        assert!(view.remove(4, 2, cx));
+        assert!(!view.remove(4, 2, cx));
+    });
+    cx.read(|cx| {
+        let ids: Vec<RowId> = view.read(cx).rows(cx).iter().map(|row| row.id).collect();
+        assert_eq!(ids, vec![1, 3]);
+    });
 }
 
 /// A window host: the transcript above, the todo panel below, as the tab page

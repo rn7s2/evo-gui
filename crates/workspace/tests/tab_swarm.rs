@@ -1778,3 +1778,154 @@ fn the_tab_keys_reach_the_strip_with_the_caret_in_the_composer(cx: &mut TestAppC
     })
     .unwrap();
 }
+
+/// The row ids the coordinator's **view** shows, in order.
+fn view_row_ids(
+    cx: &mut TestAppContext,
+    tab: &Entity<workspace::TabContent>,
+) -> Vec<session::RowId> {
+    tab_rows(cx, tab).iter().map(|row| row.id).collect()
+}
+
+/// The row ids the coordinator's **model** holds, in order: what its view has to be
+/// showing. A row the model dropped and the view kept is a row the model's ids do not
+/// have — which is the whole shape of the stale-dots bug.
+fn model_row_ids(
+    cx: &mut TestAppContext,
+    tab: &Entity<workspace::TabContent>,
+) -> Vec<session::RowId> {
+    cx.update(|cx| {
+        tab.read(cx)
+            .model()
+            .map(|model| {
+                model
+                    .coordinator()
+                    .rows()
+                    .iter()
+                    .map(|row| row.id)
+                    .collect()
+            })
+            .unwrap_or_default()
+    })
+}
+
+/// §9.1, and the stale waiting dots: a step that only calls a tool opens a row on
+/// `message-start` and `message-end` drops it again — no text, no thinking, no error.
+/// The model names the dropped id in `RowChanges::Changed` with no row behind it, and
+/// the tab has to tell the view to **remove** that row. A sync that only pushes the rows
+/// the model still has leaves the empty streaming row on screen, and it keeps drawing
+/// its waiting dots over the tool row for as long as the tool runs — until the run's
+/// `settled` resync finally rebuilds the transcript.
+///
+/// The window those dots lived in is the tool call itself: the stub's `CALL <tool> {…}`
+/// gives the step its call, and `sleep 3` keeps it running long enough to read the
+/// transcript while it is. What the view shows in that window is the assertion — the
+/// tool row, no assistant row at all (the step carried nothing), and exactly the rows
+/// the model holds.
+#[gpui_kit::test]
+fn a_tool_only_step_leaves_no_waiting_dots_over_the_tool_row(cx: &mut TestAppContext) {
+    let b = bench(cx, 1);
+    let tab = cx.update(|cx| b.view.read(cx).selected_tab().clone());
+    launch(
+        cx,
+        &b,
+        &tab,
+        b.fixture.project.clone(),
+        LaunchPlan {
+            workers: Some(1),
+            ..LaunchPlan::default()
+        },
+    );
+    wait_for_running(cx, &tab);
+
+    prompt(cx, &b, &tab, r#"CALL bash {"command":"sleep 3"}"#);
+
+    // The call is out and its result has not come back: the row the step opened has
+    // been dropped by now, in the same stream, in order.
+    wait_for(cx, "the tool call to be running", |cx| {
+        tab_rows(cx, &tab).iter().any(|row| {
+            matches!(&row.kind, session::RowKind::Tool { name, result: None, .. } if name == "bash")
+        })
+    });
+
+    let rows = tab_rows(cx, &tab);
+    let dots: Vec<session::RowId> = rows
+        .iter()
+        .filter(|row| {
+            matches!(
+                &row.kind,
+                session::RowKind::Assistant { markdown, thinking, streaming: true, .. }
+                    if markdown.is_empty() && thinking.is_empty()
+            )
+        })
+        .map(|row| row.id)
+        .collect();
+    assert!(
+        dots.is_empty(),
+        "the dropped row left its waiting dots over the tool row: {rows:#?}"
+    );
+    assert!(
+        !rows
+            .iter()
+            .any(|row| matches!(&row.kind, session::RowKind::Assistant { .. })),
+        "a tool-only step carries nothing, so it leaves no assistant row: {rows:#?}"
+    );
+    assert_eq!(
+        view_row_ids(cx, &tab),
+        model_row_ids(cx, &tab),
+        "the transcript shows what the model has, and nothing else"
+    );
+
+    // The turn ends and the answer lands: it is the one assistant row, the tool row
+    // carries its result, and the view is still exactly the model.
+    wait_for(cx, "the run to settle", |cx| {
+        cx.update(|cx| {
+            tab.read(cx)
+                .model()
+                .is_some_and(|model| model.activity() == session::Activity::Idle)
+        })
+    });
+    wait_for(cx, "the answer the tool call led to", |cx| {
+        let rows = tab_rows(cx, &tab);
+        rows.iter().any(|row| {
+            matches!(
+                &row.kind,
+                session::RowKind::Tool {
+                    result: Some(_),
+                    ..
+                }
+            )
+        }) && rows.iter().any(|row| {
+            matches!(
+                &row.kind,
+                session::RowKind::Assistant { markdown, streaming, .. }
+                    if !markdown.is_empty() && !streaming
+            )
+        })
+    });
+
+    let rows = tab_rows(cx, &tab);
+    let assistants: Vec<&session::Row> = rows
+        .iter()
+        .filter(|row| matches!(&row.kind, session::RowKind::Assistant { .. }))
+        .collect();
+    assert_eq!(
+        assistants.len(),
+        1,
+        "the run left one assistant row — the dropped one is not there to be counted: {rows:#?}"
+    );
+    assert!(
+        matches!(
+            &assistants[0].kind,
+            session::RowKind::Assistant { markdown, streaming, .. }
+                if !markdown.is_empty() && !*streaming
+        ),
+        "and it is the answer, not a row still waiting: {:#?}",
+        assistants[0]
+    );
+    assert_eq!(
+        view_row_ids(cx, &tab),
+        model_row_ids(cx, &tab),
+        "the settled rebuild left the view and the model agreeing"
+    );
+}

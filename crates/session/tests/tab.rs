@@ -1084,3 +1084,89 @@ fn the_status_line_follows_the_selection() {
     // A lane's own events never move the coordinator's activity, and never its line.
     assert!(!changes.activity);
 }
+
+/// §9.1: the row a tool-only step opened is **dropped** at `message-end`, and the tab
+/// says so the only way it can — the dropped id comes back in `Changed` while the model
+/// no longer holds it. That pair is the contract with the UI: an id in `Changed` with no
+/// row behind it is what tells the transcript view to `remove` the row instead of
+/// refreshing it. Skip it and the empty streaming row stays on screen, drawing its
+/// waiting dots over the tool rows that follow until the run's `settled` resync finally
+/// rebuilds the transcript.
+#[test]
+fn a_tool_only_step_reports_the_row_it_dropped() {
+    let mut tab = TabModel::new();
+    tab.on_transcript(COORDINATOR, 1, &fixture("transcript.json"));
+    let before = tab.coordinator().rows().len();
+
+    // A step that calls a tool: `message-start` opens a row, `message-end` ends it
+    // carrying no text, no thinking and no error.
+    tab.on_event(COORDINATOR, 2, "message-start", &json!({}));
+    let opened = tab.coordinator().streaming_row().expect("the opened row");
+    let changes = tab.on_event(
+        COORDINATOR,
+        3,
+        "message-end",
+        &json!({ "usage": null, "error": null }),
+    );
+    assert_eq!(
+        changes.rows_for(COORDINATOR),
+        Some(&RowChanges::Changed(vec![opened])),
+        "the dropped row is named, so the UI can drop its own copy"
+    );
+    assert!(
+        tab.coordinator().row(opened).is_none(),
+        "and it is gone from the model: an id in `Changed` with no row behind it"
+    );
+    assert_eq!(
+        tab.coordinator().rows().len(),
+        before,
+        "a tool-only step leaves no row behind"
+    );
+    assert_eq!(
+        tab.coordinator().streaming_row(),
+        None,
+        "and nothing is left open"
+    );
+
+    // The tool row the step goes on to open follows the row above it: the id the
+    // dropped row had is never handed out again.
+    tab.on_event(
+        COORDINATOR,
+        4,
+        "tool-call-start",
+        &json!({ "name": "bash", "id": "t1", "arguments_json": "{\"command\":\"ls\"}" }),
+    );
+    let tool = tab.coordinator().rows().last().expect("the tool row");
+    assert!(tool.id > opened, "the dropped id is not reused");
+
+    // The next step's message opens a row of its own — a new id, and the only row
+    // that is streaming (whatever the step goes on to say).
+    let changes = tab.on_event(COORDINATOR, 5, "message-start", &json!({}));
+    assert_eq!(
+        changes.rows_for(COORDINATOR),
+        Some(&RowChanges::Changed(vec![tab
+            .coordinator()
+            .streaming_row()
+            .expect("the next row")])),
+        "and it is announced as the streaming one"
+    );
+    let streaming: Vec<session::RowId> = tab
+        .coordinator()
+        .rows()
+        .iter()
+        .filter(|row| {
+            matches!(
+                &row.kind,
+                RowKind::Assistant { markdown, thinking, streaming: true, .. }
+                    if markdown.is_empty() && thinking.is_empty()
+            )
+        })
+        .map(|row| row.id)
+        .collect();
+    assert_eq!(
+        streaming,
+        vec![tab.coordinator().rows().last().expect("a row").id],
+        "exactly one empty streaming row, and it is the last"
+    );
+    assert!(streaming[0] > opened, "it is not the row that was dropped");
+}
