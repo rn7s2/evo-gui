@@ -120,11 +120,17 @@ const ITEM_CHOSEN_MIX: f32 = 9.;
 const INPUT_FONT: Pixels = px(14.);
 const INPUT_LINE: Pixels = px(20.);
 
-/// What the wrapper around the input adds to reach the design's `padding:11px 14px
-/// 4px` from the kit's own (top, right, bottom, left). The design's textarea paints
-/// its first line 11px down and 14px in, and its foot row 4px under the last line —
-/// the app matches it to the pixel rather than to the kit's 10/12/10.
-const INPUT_NUDGE: (f32, f32, f32, f32) = (1., 2., 4., 2.);
+/// The input's box, as the design writes it: `padding:11px 14px 4px` and
+/// `min-height:62px`. The kit's own input padding is a function of its size (a
+/// `Large` one carries 10px above and below and 12px beside), and no size it offers
+/// is this shape — so the input wears the size whose own padding is the least
+/// (`XSmall`: none vertically, 4px beside) and the wrapper carries the rest: 11
+/// above, 10 + the kit's 4 = 14 beside, 4 below.
+///
+/// The resting height is the design's 62 (its 55px of text and padding under a
+/// `min-height` of 62), and the input grows past it with the text.
+const INPUT_PAD: (f32, f32, f32, f32) = (11., 10., 4., 10.);
+const INPUT_MIN: Pixels = px(62.);
 
 /// Sizes drawn from the design's CSS rather than from a shared token: the chrome
 /// text of a strip or a drawer, and the item text under it.
@@ -209,21 +215,22 @@ pub enum ActionFace {
 }
 
 impl ActionFace {
-    /// The button's visible label.
+    /// The button's visible label — the design's own words, glyph and all:
+    /// `.composer-send` holds one text run, `↑ Send`, at the button's own 13px, not a
+    /// glyph beside a word. Stop's square is a character for the same reason.
     pub fn label(self) -> &'static str {
         match self {
-            Self::Send => "Send",
+            Self::Send => "\u{2191} Send",
             Self::StopSwarm => "\u{25a0} Stop swarm",
         }
     }
 
-    /// The glyph leading the label: an up arrow to send. Stop's square is part of its
-    /// label instead — the icon set the app bundles carries no plain square, and the
-    /// screen's own glyph draws one at the label's own size.
-    pub fn icon(self) -> Option<IconName> {
+    /// What the button is *called*, for a reader that cannot see the glyph it leads
+    /// with: the word alone.
+    pub fn name(self) -> &'static str {
         match self {
-            Self::Send => Some(IconName::ArrowUp),
-            Self::StopSwarm => None,
+            Self::Send => "Send",
+            Self::StopSwarm => "Stop swarm",
         }
     }
 }
@@ -1024,11 +1031,14 @@ impl Composer {
                 .child(
                     h_flex()
                         .flex_none()
-                        .gap(px(5.))
                         .child(
                             div()
                                 .text_color(paint::color(palette.muted_fg))
-                                .child(format!("{} ·", model.provider)),
+                                // `<span class="drawer-dim">{provider} ·</span> {id}`:
+                                // the design writes the name as one line of text — a
+                                // space either side of the dot — so the space after it
+                                // is the font's own, not a gap of the app's.
+                                .child(format!("{} · ", model.provider)),
                         )
                         .child(SharedString::from(model.id.clone())),
                 )
@@ -1044,10 +1054,7 @@ impl Composer {
                         // window is not the fact that matters about a model that
                         // could not be set.
                         .child(SharedString::from(
-                            model
-                                .reason
-                                .clone()
-                                .unwrap_or_else(|| model.detail.clone()),
+                            model.reason.clone().unwrap_or_else(|| model.detail.clone()),
                         )),
                 )
                 .child(div().w(px(14.)).flex_none().child(if is_chosen {
@@ -1274,14 +1281,16 @@ impl Composer {
 
     fn action_button(&self, cx: &Context<Self>) -> impl IntoElement {
         let face = self.face();
-        let mut button = Button::new(BUTTON_ID)
+        Button::new(BUTTON_ID)
             .h(ACTION_HEIGHT)
             .px(px(12.))
             .rounded(ACTION_RADIUS)
             .text_size(px(13.))
+            // The design's label is text — `↑ Send`, glyph and all — so there is no
+            // icon element beside the word and no gap the design does not have. What a
+            // reader hears is still the word: the glyph is decoration.
             .label(face.label())
-            // The glyph is decoration: what the button is called is the word.
-            .accessibility_label(face.label())
+            .accessibility_label(face.name())
             // A request of this composer's own in flight is the only thing that greys
             // it. An empty draft is not a disabled button: the design draws
             // `.composer-send` in the primary face at rest, and a blank draft simply
@@ -1297,26 +1306,26 @@ impl Composer {
                     cx.emit(ComposerEvent::StopSwarm);
                     cx.notify();
                 }
-            }));
-        if let Some(icon) = face.icon() {
-            button = button.icon(icon);
-        }
-
-        // One button, the design's own: primary in both faces, because it is the
-        // same button with a different word on it (`.composer-send`).
-        button.primary()
+            }))
+            // One button, the design's own: primary in both faces, because it is the
+            // same button with a different word on it (`.composer-send`). The design
+            // writes no `:hover` for it, so the pointer does not repaint it; the kit's
+            // primary face is the one part of that this button still wears — its
+            // hover and pressed fills are the theme's own steps — and it keeps the
+            // disabled face the in-flight state is shown with.
+            .primary()
     }
 }
 
 /// How many of the input's rows fit in `room`, with the design's floor.
 fn rows_for(room: Pixels) -> usize {
     // A row of this input is one line of its own type (`INPUT_LINE`): the kit grows
-    // in rows, and its row is the line the text is set on. The row box carries the
-    // textarea's own padding (`input_py`, 10px a side) on top of the rows, which is
-    // the whole of the difference between this cap and the design's — the design
-    // measures pixels, so its half-pane includes that padding and this one is at
-    // most one line over it.
-    ((f32::from(room) / f32::from(INPUT_LINE)).floor() as usize).max(MIN_ROWS)
+    // in rows, and its row is the line the text is set on. The design measures
+    // pixels — `height = min(scrollHeight, pane / 2)` includes the textarea's own
+    // padding — so the wrapper's padding comes off the room before the rows are
+    // counted, and the cap is the pane's half as the design means it.
+    let text = f32::from(room) - INPUT_PAD.0 - INPUT_PAD.2;
+    ((text / f32::from(INPUT_LINE)).floor() as usize).max(MIN_ROWS)
 }
 
 /// One todo: its 14px box, and its text.
@@ -1472,23 +1481,23 @@ impl Render for Composer {
                     .children(strip)
                     .children(drawer)
                     .child(
-                        // The kit's own input padding is a function of its size — a
-                        // `Large` input carries `input_py` 10px above and below and
-                        // `input_px` 12px beside — and no size it offers is the
-                        // design's `padding:11px 14px 4px`. The input is a child of
-                        // the box, so the difference is made up on the wrapper: the
-                        // text starts where the design starts it (11px down, 14px in)
-                        // and the foot row sits the design's 4px under the last line.
+                        // The input's own box: the design's padding, and the design's
+                        // 62px floor under it (`INPUT_PAD`, `INPUT_MIN`). The kit
+                        // grows the *rows* inside, so the padding stays outside them
+                        // and a taller draft grows this wrapper with it.
                         div()
                             .w_full()
                             .min_w_0()
-                            .pt(px(INPUT_NUDGE.0))
-                            .pr(px(INPUT_NUDGE.1))
-                            .pb(px(INPUT_NUDGE.2))
-                            .pl(px(INPUT_NUDGE.3))
+                            .pt(px(INPUT_PAD.0))
+                            .pr(px(INPUT_PAD.1))
+                            .pb(px(INPUT_PAD.2))
+                            .pl(px(INPUT_PAD.3))
+                            .min_h(INPUT_MIN)
                             .child(
+                                // `XSmall`: the kit's own padding is the least one it
+                                // has, so the design's is not compounded with it.
                                 Textarea::new(&self.input)
-                                    .with_size(Size::Large)
+                                    .with_size(Size::XSmall)
                                     .appearance(false)
                                     .bordered(false)
                                     .text_size(INPUT_FONT)
@@ -1970,21 +1979,15 @@ mod tests {
         );
     }
 
+    /// The design's own words: `.composer-send` holds one text run — `↑ Send`, the
+    /// arrow a character at the button's 13px — and Stop reads the same way. What a
+    /// reader hears is the word alone.
     #[test]
-    fn each_face_has_a_label_and_its_own_glyph() {
-        use gpui_kit::component::IconNamed as _;
-
-        assert_eq!(ActionFace::Send.label(), "Send");
+    fn each_face_reads_as_the_design_writes_it() {
+        assert_eq!(ActionFace::Send.label(), "\u{2191} Send");
         assert_eq!(ActionFace::StopSwarm.label(), "\u{25a0} Stop swarm");
-        assert_eq!(
-            ActionFace::Send.icon().map(|icon| icon.path().to_string()),
-            Some("icons/arrow-up.svg".to_string()),
-            "Send leads with an up arrow"
-        );
-        assert!(
-            ActionFace::StopSwarm.icon().is_none(),
-            "Stop's square is a glyph in its label"
-        );
+        assert_eq!(ActionFace::Send.name(), "Send");
+        assert_eq!(ActionFace::StopSwarm.name(), "Stop swarm");
     }
 
     #[gpui_kit::test]
@@ -2029,6 +2032,9 @@ mod tests {
         assert_eq!(f.events(), vec![ComposerEvent::Send("queued".into())]);
     }
 
+    /// One button, and what it *is called* follows the swarm: the word alone — the
+    /// glyph the design leads it with is decoration, and a reader that cannot see it
+    /// hears `Send` or `Stop swarm`, never the arrow.
     #[gpui_kit::test]
     fn the_one_button_follows_the_activity_and_is_never_send_and_stop(cx: &mut TestAppContext) {
         let f = open(cx);
@@ -2038,11 +2044,11 @@ mod tests {
 
             f.busy(true, cx);
             window.render_frame(cx);
-            assert_eq!(window.find(BUTTON_ID).label(), Some("\u{25a0} Stop swarm"));
+            assert_eq!(window.find(BUTTON_ID).label(), Some("Stop swarm"));
 
             f.busy(true, cx);
             window.render_frame(cx);
-            assert_eq!(window.find(BUTTON_ID).label(), Some("\u{25a0} Stop swarm"));
+            assert_eq!(window.find(BUTTON_ID).label(), Some("Stop swarm"));
 
             f.busy(false, cx);
             window.render_frame(cx);
@@ -2141,7 +2147,7 @@ mod tests {
             f.busy(true, cx);
             window.render_frame(cx);
 
-            assert_eq!(window.find(BUTTON_ID).label(), Some("\u{25a0} Stop swarm"));
+            assert_eq!(window.find(BUTTON_ID).label(), Some("Stop swarm"));
             window.click(BUTTON_ID, cx);
         });
 
