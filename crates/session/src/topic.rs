@@ -123,7 +123,7 @@ impl Topic {
     pub fn apply_op(&mut self, op: &Op) -> TopicChanges {
         match op {
             Op::Hello { .. } => TopicChanges::default(),
-            Op::ItemAdd { item, after } => self.add(item.clone(), after.as_deref()),
+            Op::ItemAdd { item, after } => self.add(item.as_ref().clone(), after.as_deref()),
             Op::ItemAppend { id, field, text } => {
                 let Some(item) = self.item_mut(id) else {
                     // An append for an item this mirror never saw (a stream that joined
