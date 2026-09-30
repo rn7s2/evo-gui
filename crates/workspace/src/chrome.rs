@@ -543,6 +543,18 @@ impl WorkspaceView {
     /// it started with, which is what the panel's own note says.
     pub fn set_launch_env(&mut self, config: Arc<LaunchEnv>, cx: &mut Context<Self>) {
         self.config = config;
+        // A tab that has started nothing yet is still the empty tab, and its check
+        // runs the binary Settings now names (§9, §13): a path fixed in the panel
+        // has to take effect on the tab the person is looking at. A tab that has
+        // started keeps what it started with — the panel's own note (§13).
+        let bin = self.config.swarm_bin.clone();
+        for tab in &self.tabs {
+            tab.update(cx, |tab, cx| {
+                if tab.state() == &crate::tab::TabState::Empty {
+                    tab.set_swarm_bin(bin.clone(), cx);
+                }
+            });
+        }
         cx.notify();
     }
 

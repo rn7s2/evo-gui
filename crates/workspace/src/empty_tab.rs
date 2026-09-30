@@ -1561,6 +1561,30 @@ mod tests {
         }
     }
 
+    /// The window's own view (§7.1), with one empty tab started from `env`. The
+    /// handle is kept: it is what the test's window lives on.
+    fn open_window_with_env(
+        cx: &mut TestAppContext,
+        env: crate::LaunchEnv,
+    ) -> (AnyWindowHandle, Entity<crate::chrome::WorkspaceView>) {
+        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            let options = WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(Bounds {
+                    origin: point(px(0.), px(0.)),
+                    size: size(px(WINDOW.0), px(WINDOW.1)),
+                })),
+                ..Default::default()
+            };
+            gpui_kit::open_window(options, cx, |window, cx| {
+                cx.new(|cx| {
+                    crate::chrome::WorkspaceView::with_config(std::sync::Arc::new(env), window, cx)
+                })
+            })
+            .expect("workspace window")
+        })
+    }
+
     /// A `model-cache.json` on disk, as the app's own `catalog --json` fetch leaves it,
     /// loaded the way the app loads it. The temp directory removes itself.
     struct CacheDir(std::path::PathBuf);
@@ -2533,6 +2557,55 @@ mod tests {
             });
             window.render_frame(cx);
             assert!(window.try_find(PROBLEMS_ID).is_none());
+        });
+    }
+
+    /// §9, §13: the check runs the binary the **app** would spawn — the one Settings
+    /// names — and follows it while the tab is still empty. A path that cannot run is
+    /// the line that says so, naming that path.
+    #[gpui_kit::test]
+    fn the_check_runs_the_binary_the_app_names(cx: &mut TestAppContext) {
+        let (_window, view) = open_window_with_env(
+            cx,
+            crate::LaunchEnv {
+                swarm_bin: PathBuf::from("/nonexistent/from-settings"),
+                ..crate::LaunchEnv::default()
+            },
+        );
+        // The tab opens on the app's path, and a check is a process: its answer
+        // lands on the executor, not in the update that asked.
+        cx.run_until_parked();
+        let tab = cx.update(|cx| view.read(cx).selected_tab().clone());
+        cx.update(|cx| {
+            let lines = problem_lines(cx, &tab);
+            assert_eq!(lines.len(), 1, "{lines:?}");
+            assert!(
+                lines[0].contains("/nonexistent/from-settings"),
+                "the check ran, and named, the app's own binary: {lines:?}"
+            );
+        });
+
+        // Settings points somewhere else: a tab that has started nothing is still the
+        // empty tab, so its check follows the window's new binary (§13).
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.set_launch_env(
+                    std::sync::Arc::new(crate::LaunchEnv {
+                        swarm_bin: PathBuf::from("/also/nonexistent"),
+                        ..crate::LaunchEnv::default()
+                    }),
+                    cx,
+                )
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let lines = problem_lines(cx, &tab);
+            assert_eq!(lines.len(), 1, "{lines:?}");
+            assert!(
+                lines[0].contains("/also/nonexistent"),
+                "the empty tab followed Settings: {lines:?}"
+            );
         });
     }
 

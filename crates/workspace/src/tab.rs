@@ -401,7 +401,7 @@ impl TabContent {
             },
         );
 
-        TabContent {
+        let mut tab = TabContent {
             id,
             state: TabState::Empty,
             choosers: Choosers::new(window, cx),
@@ -423,7 +423,12 @@ impl TabContent {
                 composer_subscription,
                 agents_subscription,
             ],
-        }
+        };
+        // The empty tab's check runs the binary this app would spawn, and says so
+        // when it cannot: the app's own path, not the installed default (§9, §13).
+        let bin = tab.config.swarm_bin.clone();
+        tab.set_swarm_bin(bin, cx);
+        tab
     }
 
     pub fn id(&self) -> TabId {
