@@ -14,12 +14,13 @@ use evo_desktop::{open_settings_panel, AppLog, Shell};
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
-    point, px, size, AnyWindowHandle, AppContext as _, Bounds, Entity, Point, TestAppContext,
-    WindowBounds, WindowOptions,
+    point, px, size, AnyWindowHandle, AppContext as _, Bounds, ElementId, Entity, Point,
+    TestAppContext, WindowBounds, WindowOptions,
 };
 use session::LaunchPlan;
 use settings::{
-    SettingsPanel, AGENT_PATH_ID, PANEL_ID, SAVE_ID, SWARM_CHOOSE_ID, SWARM_PATH_ID, THEME_ID,
+    Check, SettingsPanel, AGENT_PATH_ID, PANEL_ID, SAVE_ID, SWARM_CHOOSE_ID, SWARM_PATH_ID,
+    THEME_ID,
 };
 use store::app_state::{AppState, Binaries, Theme};
 use store::model_cache::ModelCache;
@@ -103,11 +104,50 @@ fn wait_for(
     }
 }
 
+/// How many frames a control is given to stop moving. Bounded, so a control that
+/// never settles fails the test rather than hanging it.
+const SETTLE_FRAMES: usize = 60;
+
+/// How many frames in a row have to agree before the layout counts as settled.
+const SETTLED: usize = 2;
+
+/// Render frames until the element stops moving, and leave the last one rendered.
+///
+/// The harness looks a target's position up in one frame and lets the pointer land
+/// in the next (`click_target`), so a layout that is still settling under the click
+/// — a dialog's first frames, the panel's rows as their answers arrive, the theme
+/// change re-resolving its fonts — can put the press on the dialog's backdrop
+/// rather than on the control. The backdrop used to close the dialog without a
+/// word, so the typed paths were gone and the assertions below saw the *defaults*:
+/// one full-workspace run lost this test that way.
+///
+/// Frame-driven, not a sleep: the loop ends as soon as the frames agree, and the
+/// gesture after it lands where the frame before it drew the control.
+fn settle(cx: &mut TestAppContext, window: AnyWindowHandle, id: impl Into<ElementId>) {
+    let id = id.into();
+    let mut last = None;
+    let mut agreed = 0;
+    for _ in 0..SETTLE_FRAMES {
+        let bounds = cx
+            .update_window(window, |_, window, cx| {
+                window.render_frame(cx);
+                window.find(id.clone()).bounds()
+            })
+            .expect("the window");
+        agreed = if last == Some(bounds) { agreed + 1 } else { 0 };
+        if agreed >= SETTLED {
+            return;
+        }
+        last = Some(bounds);
+    }
+    panic!("{id:?} is still moving after {SETTLE_FRAMES} frames");
+}
+
 /// Type a path into one of the panel's fields, the way a person does: click the
 /// field, take everything, type over it.
 fn type_into(cx: &mut TestAppContext, window: AnyWindowHandle, id: &'static str, text: &str) {
+    settle(cx, window, id);
     cx.update_window(window, |_, window, cx| {
-        window.render_frame(cx);
         window.click(id, cx);
         window.press("cmd-a", cx);
         window.input(text, cx);
@@ -119,8 +159,8 @@ fn type_into(cx: &mut TestAppContext, window: AnyWindowHandle, id: &'static str,
 /// Choose one of the three theme choices by clicking its third of the row — the
 /// same gesture the settings crate's own capture uses.
 fn choose_theme(cx: &mut TestAppContext, window: AnyWindowHandle, fraction: f32) {
+    settle(cx, window, THEME_ID);
     cx.update_window(window, |_, window, cx| {
-        window.render_frame(cx);
         let row = window.find(THEME_ID).bounds().size;
         window.click_at(THEME_ID, point(row.width * fraction, row.height / 2.), cx);
         window.render_frame(cx);
@@ -147,7 +187,7 @@ fn saving_settings_persists_them_and_the_next_tab_spawns_with_them(cx: &mut Test
     // What the Settings… menu item does with the window it is handed.
     // The entity itself is not needed below: everything under test shows up in
     // `app.json`, on the `Shell`, and in the next tab's failure.
-    let _panel: Entity<SettingsPanel> = cx
+    let panel: Entity<SettingsPanel> = cx
         .update_window(window, |_, window, cx| open_settings_panel(window, cx))
         .expect("the settings panel");
     assert!(
@@ -156,12 +196,28 @@ fn saving_settings_persists_them_and_the_next_tab_spawns_with_them(cx: &mut Test
         "the panel is up, over the app's window"
     );
 
+    // The panel's path checks answer from a fixed table rather than by running a
+    // process: what this test is about is where Save puts the values, and a probe
+    // would be a second, slower subject (`crates/settings`' own tests hold the
+    // probing to account). It is also what keeps the panel's rows — and so the
+    // footer the Save button sits in — from changing height under the clicks
+    // below, as answers arrive.
+    panel.update(cx, |panel, cx| {
+        panel.set_verdicts(
+            [
+                (PathBuf::from(SAVED_SWARM), Check::Missing),
+                (PathBuf::from(SAVED_AGENT), Check::Missing),
+            ],
+            cx,
+        )
+    });
+
     // The panel fits the dialog it is drawn in. The kit's dialog pads its content by
     // 16 pt on each side: left in place, the 560 pt panel was 32 pt wider than the box
     // it was drawn in, and the right-hand controls — `Choose…`, `Save` — were clipped
     // at the dialog's edge. The dialog's own bounds are its surface, which the kit
     // gives the layer's index as an element id.
-    let (slot, save, choose, panel) = cx
+    let (slot, save, choose, inner) = cx
         .update_window(window, |_, window, cx| {
             window.render_frame(cx);
             (
@@ -181,11 +237,11 @@ fn saving_settings_persists_them_and_the_next_tab_spawns_with_them(cx: &mut Test
         "and so is a row's Choose… button: {choose:?} in {slot:?}"
     );
     assert!(
-        panel.left() >= slot.left() && panel.right() <= slot.right(),
-        "the panel is inside it too, rather than 32 pt wider: {panel:?} in {slot:?}"
+        inner.left() >= slot.left() && inner.right() <= slot.right(),
+        "the panel is inside it too, rather than 32 pt wider: {inner:?} in {slot:?}"
     );
     assert_eq!(
-        panel.size.width, slot.size.width,
+        inner.size.width, slot.size.width,
         "the embedded panel takes the whole box the dialog gives it"
     );
 
@@ -194,6 +250,20 @@ fn saving_settings_persists_them_and_the_next_tab_spawns_with_them(cx: &mut Test
     type_into(cx, window, AGENT_PATH_ID, SAVED_AGENT);
     choose_theme(cx, window, 5. / 6.);
 
+    // What the panel will hand over, checked before Save: a gesture that missed —
+    // a lost keystroke, a click that landed beside the field — is named here, at
+    // the step that lost it, rather than three assertions later as a value that
+    // never changed.
+    let typed = cx.update(|cx| panel.read(cx).values(cx));
+    assert_eq!(
+        typed.evo_swarm,
+        PathBuf::from(SAVED_SWARM),
+        "the typed swarm path is what the panel holds"
+    );
+    assert_eq!(typed.evo_agent, PathBuf::from(SAVED_AGENT));
+    assert_eq!(typed.theme, Theme::Dark, "and the theme that was clicked");
+
+    settle(cx, window, SAVE_ID);
     cx.update_window(window, |_, window, cx| {
         window.click(SAVE_ID, cx);
         window.render_frame(cx);
