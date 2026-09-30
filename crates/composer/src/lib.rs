@@ -801,7 +801,11 @@ impl Composer {
                     .gap(px(10.))
                     .pl(px(14.))
                     .pr(px(10.))
-                    .cursor_pointer()
+                    // The design keeps the arrow over every control of its own — a
+                    // macOS app's chrome does not turn the pointer into a hand
+                    // (`.todo-strip-row{cursor:default}`) — and only the effort
+                    // slider, a control the pointer does track, asks for one.
+                    .cursor_default()
                     .text_size(STRIP_FONT)
                     // `.todo-strip-row:hover{color:var(--fg)}`: the row's own words
                     // take the ink; the count is already the ink.
@@ -909,7 +913,7 @@ impl Composer {
                         .gap(px(10.))
                         .pl(px(14.))
                         .pr(px(10.))
-                        .cursor_pointer()
+                        .cursor_default()
                         .text_size(STRIP_FONT)
                         .text_color(paint::color(palette.muted_fg))
                         .hover(move |row| row.text_color(paint::color(palette.fg)))
@@ -1008,7 +1012,7 @@ impl Composer {
                 let weak = weak.clone();
                 let (id, provider) = (id.clone(), provider.clone());
                 row = row
-                    .cursor_pointer()
+                    .cursor_default()
                     .hover(move |row| row.bg(hover))
                     .on_click(move |_, _, cx| {
                         if let Some(composer) = weak.upgrade() {

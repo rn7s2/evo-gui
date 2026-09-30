@@ -426,7 +426,9 @@ impl AgentList {
             .border_color(paint::color(palette.border))
             .text_size(STOP_SIZE)
             .text_color(paint::color(palette.muted_fg))
-            .cursor_pointer()
+            // The design keeps the arrow over its chrome; only the slider asks for a
+            // hand (`cursor:default` throughout `Workspace.css`).
+            .cursor_default()
             .group_hover("lane", |stop| stop.visible())
             .hover(move |stop| stop.text_color(paint::color(palette.destructive)))
             .aria_label(format!("Stop lane {lane}"))
