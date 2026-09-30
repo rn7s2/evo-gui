@@ -233,6 +233,9 @@ pub struct TabContent {
     /// agent's scroll position, documents or todos into another's.
     pub(crate) transcripts: BTreeMap<AgentKey, Entity<TranscriptView>>,
     pub(crate) composer: Entity<Composer>,
+    /// The failure screen's log box scroll position: the kit's thumb is driven by
+    /// a handle, and one made fresh each frame would put the box back at the top.
+    pub(crate) log_scroll: gpui_kit::ScrollHandle,
     /// What every tab of this window starts its swarms with: the two binaries, the
     /// app's data root and the environment a hermetic run needs (§1).
     config: Arc<LaunchEnv>,
@@ -416,6 +419,7 @@ impl TabContent {
             history,
             transcripts: BTreeMap::new(),
             composer,
+            log_scroll: gpui_kit::ScrollHandle::default(),
             config,
             panes: store::app_state::Panes::default(),
             pane_state: None,

@@ -17,6 +17,7 @@ use std::rc::Rc;
 
 use gpui_kit::base::{InteractiveElementExt as _, ResizeHandleRenderer};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
@@ -25,7 +26,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    div, px, AnyElement, App, Context, IntoElement, MouseButton, MouseDownEvent, Pixels,
+    div, px, AnyElement, App, Context, ElementId, IntoElement, MouseButton, MouseDownEvent, Pixels,
     SharedString, TestSupportExt as _, Window,
 };
 use session::AgentKey;
@@ -115,6 +116,9 @@ impl TabContent {
         tab_dir: Option<&Path>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        // The log's own scroll position, kept on the tab: a handle made fresh each
+        // frame would reset the box to the top on the next one.
+        let log_scroll = self.log_scroll.clone();
         let folder = folder.to_path_buf();
         let retry = folder.clone();
         let show_log = !log_tail.trim().is_empty()
@@ -183,15 +187,21 @@ impl TabContent {
                     // not rewrapped — a stack trace and a long command line are
                     // read as they were written — so the box scrolls sideways
                     // too, and carries the whole tail for a screen reader.
-                    div()
+                    //
+                    // The kit's own overlay thumbs rather than a bare overflow
+                    // (`crate::app::theme` sets their mode and colours), as siblings of
+                    // the box they measure: a bar inside the scroller is dragged along
+                    // by the very scroll it draws. The frame is what keeps the cap and
+                    // the padding, and the box inside takes its height.
+                    v_flex()
                         .id("boot-log-tail")
                         .test_support()
                         .aria_label(log.clone())
                         .w_full()
                         .max_w(px(720.))
                         .max_h(px(320.))
-                        .overflow_x_scroll()
-                        .overflow_y_scroll()
+                        .relative()
+                        .overflow_hidden()
                         .p_3()
                         .text_xs()
                         .font_family(cx.theme().mono_font_family.clone())
@@ -200,7 +210,21 @@ impl TabContent {
                         .border_color(cx.theme().border)
                         .bg(cx.theme().muted)
                         .text_color(cx.theme().muted_foreground)
-                        .child(div().whitespace_nowrap().child(log)),
+                        .child(
+                            div()
+                                // Named as the kit names the box inside its own
+                                // scrollable wrapper.
+                                .id((ElementId::from("boot-log-tail"), "content"))
+                                .w_full()
+                                .flex_grow_1()
+                                .flex_shrink_1()
+                                .min_h_0()
+                                .overflow_scroll()
+                                .track_scroll(&log_scroll)
+                                .child(div().whitespace_nowrap().child(log)),
+                        )
+                        .vertical_scrollbar(&log_scroll)
+                        .horizontal_scrollbar(&log_scroll),
                 )
             })
             .child(
@@ -320,7 +344,9 @@ impl TabContent {
             Some(
                 div()
                     // Only what a double-click needs: the divider itself is the kit's,
-                    // and the cursor while it is dragged is the band's own.
+                    // and the cursor while it is dragged is the band's own. The band is
+                    // named so a script or a test can put a pointer on it, which is the
+                    // only way to reach the kit's own handle.
                     .id("pane-handle")
                     .h_full()
                     .w(px(1.))
@@ -332,6 +358,7 @@ impl TabContent {
                             tab.update(cx, |_, cx| cx.emit(TabContentEvent::ResetPane));
                         }
                     })
+                    .test_support()
                     .child(painted.unwrap_or_else(|| {
                         div()
                             .h_full()
@@ -445,18 +472,28 @@ impl TabContent {
         if !has_thinking {
             return None;
         }
+        // The design's `.ghost`: a bare 12px label in the muted ink — no border,
+        // no surface and no padding (`.ws-head`'s third child in
+        // `Workspace.tsx`: `button.ghost{border:0;background:transparent;
+        // color:var(--muted-fg);font-size:12px}`).
         Some(
-            Button::new("transcript-thinking")
-                .label(if showing {
+            div()
+                .id("transcript-thinking")
+                .test_support()
+                .flex_shrink_0()
+                .text_size(px(12.))
+                .text_color(paint::color(
+                    design::palette(cx.theme().mode.is_dark()).muted_fg,
+                ))
+                .cursor_pointer()
+                .on_click(cx.listener(move |_this, _, _window, cx| {
+                    view.update(cx, |view, cx| view.toggle_thinking(cx));
+                }))
+                .child(if showing {
                     "Hide thinking"
                 } else {
                     "Show thinking"
                 })
-                .ghost()
-                .xsmall()
-                .on_click(cx.listener(move |_this, _, _window, cx| {
-                    view.update(cx, |view, cx| view.toggle_thinking(cx));
-                }))
                 .into_any_element(),
         )
     }

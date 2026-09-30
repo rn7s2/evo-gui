@@ -15,16 +15,30 @@
 //!
 //! ```text
 //! shot NAME [light|dark|both]    picture of the window (default both)
-//! crop NAME X Y W H [scale]      picture of a region, scaled up (default 2)
+//! crop NAME X Y W H [scale]      picture of a region, scaled up (default 2);
+//!                                 after a `tap` it says how long the thing
+//!                                 being watched had had when it started to
+//!                                 draw (its own two frames land a render later)
 //! theme light|dark               switch the theme
 //! click ID | dclick ID | hover ID   (never `click select-folder`: a real dialog)
 //! at X Y                          move the pointer to window coordinates
-//! scroll ID DY                    wheel DY pixels over an element (negative = up)
+//! scroll ID [DX] DY               a wheel over an element, at its centre
+//! scroll X Y DX DY                a wheel at a point — both are dispatched as
+//!                                 real wheel events, so they land in the box's
+//!                                 own handler the way a reader's does
 //! down X Y | up X Y               press / release the left button there
 //! press KEY | input TEXT          keyboard
 //! focus                           the shown tab's primary control (its composer)
 //! pump MS                         let the app run
 //! find ID                         print the element's bounds
+//! tap X Y                         press and release there and come back at once,
+//!                                 with no pump — a pump is longer than any of
+//!                                 the design's transitions, so a script that
+//!                                 wants to watch one cannot use `down`+`up`
+//! frames ID MS1 MS2 ...           a frame at each offset from here, printing
+//!                                 where ID lands in each, and how long it has
+//!                                 really been since the `tap` before it: a
+//!                                 transition, frame by frame
 //! launch                          launch the shown tab in the world's folder
 //! wait-running                    wait for the shown tab to be running
 //! activate                        bring the window to the front (the kit paints a
@@ -44,7 +58,7 @@ use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
     point, px, size, AnyWindowHandle, AppContext as _, BorrowAppContext as _, Bounds, ElementId,
     Entity, HeadlessAppContext, InputEvent as _, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Point, WindowBounds, WindowOptions,
+    MouseUpEvent, Point, ScrollDelta, ScrollWheelEvent, TouchPhase, WindowBounds, WindowOptions,
 };
 use store::app_state::{AppState, Binaries, Theme};
 use store::model_cache::ModelCache;
@@ -128,6 +142,17 @@ fn run(world: &str, out: &Path, script: &str) -> Result<(), Error> {
     let mut mode = ThemeMode::Light;
     set_theme(&mut cx, window, mode)?;
     let mut pointer = Point::default();
+    // When the step being watched last happened: `tap` sets it, `frames` and
+    // `crop` measure against it. A step's own render takes time and that time is
+    // part of the move, so the nominal offsets a script writes are not the ages a
+    // transition actually has.
+    let mut watching: Option<Instant> = None;
+    // Read before a frame is drawn, never after: a frame takes time to draw, and
+    // the numbers in it are the ones at its start.
+    let age = move |watching: Option<Instant>| match watching {
+        Some(since) => format!(" ({:.0}ms into it)", since.elapsed().as_secs_f32() * 1000.),
+        None => String::new(),
+    };
     for (n, line) in script.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -179,6 +204,10 @@ fn run(world: &str, out: &Path, script: &str) -> Result<(), Error> {
                 } else {
                     "light"
                 };
+                let into_it = age(watching);
+                if !into_it.is_empty() {
+                    println!("[probe] {into_it}");
+                }
                 save(
                     &mut cx,
                     window,
@@ -218,14 +247,47 @@ fn run(world: &str, out: &Path, script: &str) -> Result<(), Error> {
                 })?;
                 pump(&mut cx, Duration::from_millis(300));
             }
+            // `scroll ID [DX] DY` (a wheel over an element, at its centre) or
+            // `scroll X Y DX DY` (a wheel at a point). Both are dispatched as real
+            // wheel events, so they land in the box's own handler the way a
+            // reader's does — a scroll of a named element with no wheel would move
+            // the box without telling it anything, and the transcript unpins only
+            // for a reader's own scroll.
             "scroll" => {
-                // `scroll ID DY`: a wheel of DY pixels over the element (negative = up).
-                let (id, dy) = rest.rsplit_once(' ').expect("scroll ID DY");
-                let dy: f32 = dy.parse()?;
-                let id = element_id(id);
-                cx.update_window(window, |_, window, cx| {
-                    window.scroll(id, gpui_kit::ScrollDelta::Pixels(point(px(0.), px(dy))), cx)
-                })?;
+                let words: Vec<&str> = rest.split_whitespace().collect();
+                let v: Vec<f32> = words.iter().filter_map(|word| word.parse().ok()).collect();
+                if words.len() == 4 && v.len() == 4 {
+                    let position = point(px(v[0]), px(v[1]));
+                    let delta = point(px(v[2]), px(v[3]));
+                    cx.update_window(window, |_, window, cx| {
+                        window.dispatch_event(
+                            ScrollWheelEvent {
+                                position,
+                                delta: ScrollDelta::Pixels(delta),
+                                modifiers: Default::default(),
+                                touch_phase: TouchPhase::Moved,
+                            }
+                            .to_platform_input(),
+                            cx,
+                        );
+                    })?;
+                } else {
+                    let id = element_id(words.first().copied().unwrap_or_default());
+                    let delta = match v.as_slice() {
+                        [dy] => point(px(0.), px(*dy)),
+                        [dx, dy] => point(px(*dx), px(*dy)),
+                        _ => {
+                            return Err(format!(
+                                "line {}: scroll wants ID DY, ID DX DY, or X Y DX DY",
+                                n + 1
+                            )
+                            .into());
+                        }
+                    };
+                    cx.update_window(window, |_, window, cx| {
+                        window.scroll(id, ScrollDelta::Pixels(delta), cx);
+                    })?;
+                }
                 pump(&mut cx, Duration::from_millis(200));
             }
             "at" => {
@@ -303,10 +365,11 @@ fn run(world: &str, out: &Path, script: &str) -> Result<(), Error> {
                 let id = element_id(rest);
                 cx.update_window(window, |_, window, _| match window.try_find(id) {
                     Some(found) => println!(
-                        "[probe]   {rest}: {:?} value={:?} focused={:?}",
+                        "[probe]   {rest}: {:?} value={:?} focused={:?} visible={}",
                         found.bounds(),
                         found.value(),
-                        found.focused()
+                        found.focused(),
+                        found.visible()
                     ),
                     None => println!("[probe]   {rest}: not found"),
                 })?;
@@ -319,6 +382,82 @@ fn run(world: &str, out: &Path, script: &str) -> Result<(), Error> {
                     tab.update(cx, |tab, cx| tab.focus_primary(window, cx));
                 })?;
                 pump(&mut cx, Duration::from_millis(100));
+            }
+            // `tap X Y`: a press and a release at a point, with no pump after
+            // them. Every other clicking step waits 200ms, which is longer than
+            // any of the design's transitions — so this is the one a script uses
+            // when the frames just after the click are the point.
+            "tap" => {
+                let v = rest
+                    .split_whitespace()
+                    .filter_map(|word| word.parse().ok())
+                    .collect::<Vec<f32>>();
+                let position = point(px(v[0]), px(v[1]));
+                pointer = position;
+                watching = Some(Instant::now());
+                cx.update_window(window, |_, window, cx| {
+                    window.dispatch_event(
+                        MouseMoveEvent {
+                            position,
+                            pressed_button: None,
+                            modifiers: Default::default(),
+                        }
+                        .to_platform_input(),
+                        cx,
+                    );
+                    for event in [
+                        MouseDownEvent {
+                            button: MouseButton::Left,
+                            position,
+                            modifiers: Default::default(),
+                            click_count: 1,
+                            first_mouse: false,
+                        }
+                        .to_platform_input(),
+                        MouseUpEvent {
+                            button: MouseButton::Left,
+                            position,
+                            modifiers: Default::default(),
+                            click_count: 1,
+                        }
+                        .to_platform_input(),
+                    ] {
+                        window.dispatch_event(event, cx);
+                    }
+                    window.render_frame(cx);
+                })?;
+            }
+            // `frames ID MS1 MS2 ...`: a frame at each offset from the step before
+            // it, printing where `ID` is drawn in each, and how long it has really
+            // been since the `tap` — what a transition in flight looks like, frame
+            // by frame, at the ages it really had.
+            "frames" => {
+                let mut words = rest.split_whitespace();
+                let id = element_id(words.next().unwrap_or_default());
+                let times = words
+                    .filter_map(|word| word.parse::<u64>().ok())
+                    .collect::<Vec<_>>();
+                let start = Instant::now();
+                for ms in times {
+                    let at = start + Duration::from_millis(ms);
+                    while Instant::now() < at {
+                        cx.run_until_parked();
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                    let into_it = age(watching);
+                    cx.update_window(window, |_, window, cx| window.render_frame(cx))?;
+                    cx.update_window(window, |_, window, _| match window.try_find(id.clone()) {
+                        Some(found) => {
+                            let bounds = found.bounds();
+                            let centre: f32 = bounds.center().x.into();
+                            let width: f32 = bounds.size.width.into();
+                            println!(
+                                "[probe]   {id:?} at {ms}ms{into_it}: centre x {centre}, width {width}"
+                            );
+                        }
+                        None => println!("[probe]   {id:?} at {ms}ms{into_it}: not found"),
+                    })?;
+                }
             }
             "launch" => {
                 let tab = cx.update(|cx| view.read(cx).selected_tab().clone());
