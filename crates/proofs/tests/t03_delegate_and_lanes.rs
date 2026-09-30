@@ -95,6 +95,15 @@ fn t03_delegate_and_lanes() {
             .iter()
             .any(|item| item["kind"] == "tool" && item["name"] == json!("todo"))
     });
+    // The checklist is a later `state.patch` on that topic than the item that
+    // wrote it, so this waits for it rather than reading what happens to be there.
+    watcher.wait_mirror(deadline, "the lane's checklist", |mirror| {
+        mirror
+            .state("lane:1")
+            .get("todos")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|todos| todos.len() == 2)
+    });
     let todos = watcher
         .mirror
         .state("lane:1")
@@ -102,11 +111,6 @@ fn t03_delegate_and_lanes() {
         .cloned()
         .unwrap_or(json!(null));
     println!("{NOTE} lane 1's todos: {todos}");
-    assert_eq!(
-        todos.as_array().map(Vec::len),
-        Some(2),
-        "the lane's checklist is in its own state, seeded by the snapshot: {todos}"
-    );
 
     // And it finishes: the whole cycle is on the swarm topic, not just the end.
     watcher.wait_mirror(deadline, "lane 1 idle again", |mirror| {
@@ -121,6 +125,22 @@ fn t03_delegate_and_lanes() {
     println!("{NOTE} lanes after the task: {states}");
 
     // --- what the lane said comes back to the coordinator ------------------------
+    //
+    // A lane reports by *calling the `report` tool*: that item is the only channel
+    // (§4.1), so the second delegation is the one that makes the lane report.
+    let asked = send(
+        &client,
+        &format!(
+            "CALL delegate {}",
+            json!({ "lane": 1, "task": format!("CALL report {}", json!({
+                "done": "t03 the lane's own words",
+                "evidence": "crates/proofs/tests/t03_delegate_and_lanes.rs",
+                "next": "nothing",
+            })) })
+        ),
+    );
+    assert_eq!(asked["blocked"], json!(null), "{asked}");
+
     // §4.1's `lane_report`: fields, not prose — a GUI renders it, it does not read
     // `[lane 1 report]` out of a sentence.
     watcher.wait_mirror(deadline, "the lane's report", |mirror| {
@@ -143,8 +163,27 @@ fn t03_delegate_and_lanes() {
         started.elapsed(),
         report["done"].as_str().unwrap_or_default()
     );
+    assert_eq!(
+        report["done"].as_str(),
+        Some("t03 the lane's own words"),
+        "the lane's own words, as data: {report}"
+    );
+    assert_eq!(
+        watcher.mirror.state("swarm")["lanes"][0]["reports"].as_u64(),
+        Some(1),
+        "and the swarm counts it: {:?}",
+        watcher.mirror.state("swarm")["lanes"]
+    );
 
     // --- and the coordinator is only held while the lanes work (§4.2) ------------
+    // The turn that asked for the report is still running when the report lands:
+    // this waits for it to settle rather than reading whatever it was doing.
+    watcher.wait_mirror(deadline, "the coordinator to settle", |mirror| {
+        matches!(
+            mirror.state("session")["status"].as_str(),
+            Some("idle") | Some("waiting")
+        )
+    });
     let status = watcher.mirror.state("session")["status"].clone();
     assert!(
         matches!(status.as_str(), Some("idle") | Some("waiting")),

@@ -78,13 +78,22 @@ fn t01_launch_ready() {
         .as_u64()
         .map(|seq| swarm_client::Cursor::new(ready.epoch.clone(), seq));
     let mut watcher = proofs::watch::Watcher::start(&client, &["session", "swarm"], cursor.clone());
-    let hello = watcher.wait_frame(deadline, "the hello frame", |frame| frame.is_hello());
+    // The stream's `hello` names where it starts (§5.3), and a client takes it as
+    // the connection's cursor rather than as an op: the epoch a cursor from another
+    // process has to be forgotten from.
+    let started_at = wait_for(deadline, "the stream to connect", || {
+        watcher.pump();
+        watcher.cursor().cloned()
+    });
     assert_eq!(
-        hello.get("epoch").and_then(serde_json::Value::as_str),
-        Some(ready.epoch.as_str()),
-        "hello names the epoch a client forgets a cursor from: {:?}",
-        hello.data
+        started_at.epoch, ready.epoch,
+        "the stream starts in this process's epoch"
     );
+    assert!(
+        started_at.seq >= seq,
+        "and no earlier than the snapshot it resumed from: {started_at:?} after {seq}"
+    );
+    println!("{NOTE} stream connected at {started_at:?}");
 
     // --- and it stops when the pipe goes (§8) -----------------------------------
     let stopped = server.shutdown().expect("the ladder ran");

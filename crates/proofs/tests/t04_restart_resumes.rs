@@ -24,10 +24,11 @@ use proofs::watch::{deadline_after, send, snapshot, wait_for, Watcher};
 use store::launch::Program;
 use swarm_client::ReadyFile;
 
-/// A tab's server is a swarm; the restart machinery is the same in both, and the
-/// two-in-one-folder hazard is about folders, not lanes. Switch to
-/// `Program::Swarm` (with workers) to run the same proof through a swarm.
-const PROGRAM: Program = Program::Agent;
+/// A tab's server is a swarm: a tab is one `evo-swarm serve`, and the restart
+/// machinery that has to name the exact journal is the same one either way.
+const PROGRAM: Program = Program::Swarm;
+/// One lane: a real swarm startup, without the proof waiting on a pool.
+const WORKERS: u16 = 1;
 
 const FIRST: &str = "t04 first turn";
 const OTHER: &str = "t04 the other tab's turn";
@@ -38,14 +39,15 @@ fn t04_restart_resumes() {
     let deadline = deadline_after(WAIT);
     let fixture = Fixture::new("t04");
     let (tab_a, tab_b) = (fixture.new_tab(), fixture.new_tab());
-    let mut a = fixture.spawn(&fixture.spec_in(PROGRAM, 0, &tab_a));
-    let mut b = fixture.spawn(&fixture.spec_in(PROGRAM, 0, &tab_b));
+    let mut a = fixture.spawn(&fixture.spec_in(PROGRAM, WORKERS, &tab_a));
+    let mut b = fixture.spawn(&fixture.spec_in(PROGRAM, WORKERS, &tab_b));
     assert_eq!(
         a.ready().program,
-        "evo-agent",
+        "evo-swarm",
         "both run in the same folder: {}",
         fixture.folder.display()
     );
+    assert!(a.ready().supervisor_pid.is_some(), "a supervisor started it");
 
     // --- each tab answers its own turn ------------------------------------------
     let a_path = a.ready().session.path.clone();

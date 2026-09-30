@@ -525,7 +525,10 @@ impl EmptyTabState {
             let problems = cx
                 .background_executor()
                 .spawn(async move {
-                    match cli::run_json(&bin, &argv) {
+                    // `check` exits 1 when it found problems and prints them
+                    // anyway (§2), so the document is read on that exit too: those
+                    // problems are exactly what these lines are.
+                    match cli::run_json_reporting(&bin, &argv) {
                         Ok(body) => CheckReport::from_json(&body).problems,
                         Err(error) => vec![check_failed(&error)],
                     }

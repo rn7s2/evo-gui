@@ -22,11 +22,11 @@ use proofs::watch::{deadline_after, send, snapshot, wait_for, Watcher};
 use serde_json::Value;
 use store::launch::Program;
 
-/// A tab's server is a swarm; this proof's subject is the prompt path, and a
-/// swarm's server is a coordinator plus lanes. Switch to `Program::Swarm` and
-/// give it workers to run the same assertions through one.
-const PROGRAM: Program = Program::Agent;
-const WORKERS: u16 = 0;
+/// A tab's server is a swarm: the prompt path this proof is about is the
+/// coordinator's, and a swarm is a coordinator with lanes under it. Two lanes, so
+/// the answers below arrive while a swarm is up rather than in a bare session.
+const PROGRAM: Program = Program::Swarm;
+const WORKERS: u16 = 2;
 
 /// A prompt the scripted model answers at once, and one it answers in sixty
 /// deltas over six seconds — long enough for a client to see the item growing.

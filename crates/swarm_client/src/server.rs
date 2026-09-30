@@ -24,6 +24,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -44,6 +45,7 @@ use crate::redact::redact;
 /// token from an outer process must not silently authenticate ours.
 pub const SCRUB_ENV: &[&str] = &[
     "EVO_SERVE_TOKEN",
+    "EVO_SERVE_WATCH_PID",
     "EVO_SESSIONS_DIR",
     "EVO_SUPERVISED_CHILD",
     "EVO_NO_SUPERVISOR",
@@ -552,6 +554,80 @@ fn wait_for_exit(child: &mut Child, timeout: Duration) -> Option<i32> {
 
 /// A signal to the child's process group (it is spawned as its own group
 /// leader), so the supervisor and every lane it started hear it too.
+/// Every process group this process has spawned and not yet seen empty.
+///
+/// A server is started as its own group leader (`process_group(0)`), so its pid
+/// **is** the group to signal — and that is the only handle anything needs to
+/// clean up after a spawn: the groups this process created, and nothing else. No
+/// name, no command line, no pattern, nothing to get wrong.
+///
+/// A group is forgotten as soon as it has nobody left in it, which is what
+/// [`group_alive`] asks the kernel. So a pid that the system later reuses cannot
+/// be signalled as "ours": we only ever hold groups that still have our processes
+/// in them, and a group with a member is not a group whose id has been reused.
+static SPAWNED: Mutex<BTreeSet<u32>> = Mutex::new(BTreeSet::new());
+
+/// Remember the group a server was started in.
+fn register_group(pgid: u32) {
+    if let Ok(mut groups) = SPAWNED.lock() {
+        groups.insert(pgid);
+    }
+}
+
+/// Whether a process group still has somebody in it — asked of the kernel, not of
+/// a process listing: `killpg(pgid, 0)` answers `ESRCH` when the group is gone.
+pub fn group_alive(pgid: u32) -> bool {
+    let sent = unsafe { libc::killpg(pgid as libc::pid_t, 0) };
+    sent == 0
+        || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// The groups this process started that still have somebody in them.
+pub fn spawned_groups() -> Vec<u32> {
+    let Ok(mut groups) = SPAWNED.lock() else {
+        return Vec::new();
+    };
+    groups.retain(|pgid| group_alive(*pgid));
+    groups.iter().copied().collect()
+}
+
+/// Stop every server this process started, and give them `wait` to go.
+///
+/// This is a harness's whole cleanup: a proof's own servers stop themselves (they
+/// hold the child's pipe, and EOF is the signal), but a server the *app* started
+/// belongs to nobody's `Drop` — the app's quit leaves before the client it would
+/// have escalated with, and its process group is all that is left to stop it by.
+///
+/// `SIGTERM` to every group, a wait for them to empty, `SIGKILL` for whatever is
+/// left. Returns how many groups were signalled.
+pub fn reap_spawned(wait: Duration) -> usize {
+    let started = spawned_groups();
+    if started.is_empty() {
+        return 0;
+    }
+    for pgid in &started {
+        signal_group(*pgid, libc::SIGTERM);
+    }
+    let deadline = Instant::now() + wait;
+    while Instant::now() < deadline {
+        if started.iter().all(|pgid| !group_alive(*pgid)) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let mut left = 0;
+    for pgid in &started {
+        if group_alive(*pgid) {
+            left += 1;
+            signal_group(*pgid, libc::SIGKILL);
+        }
+        if let Ok(mut groups) = SPAWNED.lock() {
+            groups.remove(pgid);
+        }
+    }
+    left
+}
+
 fn signal_group(pid: u32, signal: i32) {
     let target = pid as libc::pid_t;
     let sent = unsafe { libc::killpg(target, signal) };
@@ -619,6 +695,9 @@ fn spawn(cfg: &ServerConfig, stdin: &StdinClose) -> Result<Child> {
     let mut child = command
         .spawn()
         .map_err(|e| Error::Config(format!("cannot run {}: {e}", cfg.bin.display())))?;
+    // Its group is `child.id()`, because it was made a group leader above. That
+    // is the handle a harness cleans up by (see `reap_spawned`).
+    register_group(child.id());
     // Our end of the pipe, shared with whoever wants to close it: it is the
     // child's whole death signal, so it must outlive this call.
     stdin.put(child.stdin.take());

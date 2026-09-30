@@ -88,7 +88,8 @@ fn t07_catalog_choosers() {
 
 /// `evo-swarm check --json` for one spec: the same argv the empty tab builds.
 fn check(fixture: &Fixture, spec: &store::launch::LaunchSpec) -> CheckReport {
-    let body = cli::run_json(&fixture.bins.swarm, &spec.check_argv())
+    // The app's own reader: `check` answers with its document on exit 1 too.
+    let body = cli::run_json_reporting(&fixture.bins.swarm, &spec.check_argv())
         .expect("evo-swarm check --json answered");
     CheckReport::from_json(&body)
 }

@@ -123,6 +123,36 @@ pub fn run_json(bin: &Path, args: &[String]) -> Result<Value, CliError> {
     })
 }
 
+/// Run `bin args…` for a command that prints its document whether or not it is
+/// happy: `evo-swarm check --json` exits **1** when it found problems (§2) and still
+/// prints them, so a caller that wants the problems has to read stdout on a failure
+/// too — otherwise the one answer the empty tab exists to show reads as a command
+/// that could not run.
+///
+/// Anything else — a document that does not parse, and no exit code 1 to explain
+/// it — is still the failure it looks like.
+pub fn run_json_reporting(bin: &Path, args: &[String]) -> Result<Value, CliError> {
+    let output = Command::new(bin)
+        .args(args)
+        .output()
+        .map_err(|source| CliError::NotFound {
+            bin: bin.to_path_buf(),
+            source,
+        })?;
+    match serde_json::from_slice(&output.stdout) {
+        Ok(value) => Ok(value),
+        Err(_) if !output.status.success() => Err(CliError::Failed {
+            bin: bin.to_path_buf(),
+            status: output.status.code(),
+            stderr: tail(&output.stderr),
+        }),
+        Err(error) => Err(CliError::Malformed {
+            bin: bin.to_path_buf(),
+            message: error.to_string(),
+        }),
+    }
+}
+
 /// The last [`STDERR_CAP`] bytes of a child's stderr, on a character boundary,
 /// with the trailing newline trimmed.
 fn tail(stderr: &[u8]) -> String {

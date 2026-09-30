@@ -18,9 +18,11 @@ use proofs::watch::{deadline_after, send, snapshot, wait_for, Watcher};
 use store::history::{self, SessionsQuery};
 use store::launch::Program;
 
-/// A tab's server is a swarm; what this proof is about is the index and the
-/// resume of one session, which the agent records the same way.
-const PROGRAM: Program = Program::Agent;
+/// A tab's server is a swarm: the history the app lists is the sessions `evo-swarm`
+/// ran, and resuming one is the exact journal path the ready file named.
+const PROGRAM: Program = Program::Swarm;
+/// One lane: the index is about the coordinator's session.
+const WORKERS: u16 = 1;
 
 const TURN: &str = "t06 the turn that has to come back";
 
@@ -34,7 +36,7 @@ fn t06_history_resume() {
     fixture.enter();
 
     // --- a session, and a turn in it -------------------------------------------
-    let mut server = fixture.spawn(&fixture.spec(PROGRAM, 0));
+    let mut server = fixture.spawn(&fixture.spec(PROGRAM, WORKERS));
     let path = server.ready().session.path.clone();
     let client = server.client().clone();
     let seeded = snapshot(&client, &["session"], 200);
