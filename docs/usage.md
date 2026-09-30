@@ -65,9 +65,11 @@ the session stays on disk and comes back in the history list.
 
 Two small marks answer questions a label cannot:
 
-- A **green dot** before a tab's name while that tab's coordinator has a run in
-  flight. When a background tab's run *ends*, its dot turns muted — "something
-  happened here" — and looking at that tab is what clears it.
+- The **dot** before a tab's name breathes while that tab's swarm is working —
+  any lane at work, or the coordinator's own run, which is the same rule the
+  composer's button follows. When a background tab's run *ends*, its dot turns to
+  a full ring — "something happened here" — and looking at that tab is what
+  clears it. A tab with nothing going on wears the ring quietly.
 - The **window's own title** — what Mission Control and the app switcher show —
   names the tab being shown: `evo-gui — Evo Desktop`, or `Evo Desktop` alone on
   an empty tab.

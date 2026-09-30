@@ -13,7 +13,7 @@ it.
 ![Six lanes, one of them working: the agents column, the delegate call, and the Stop swarm button](docs/screens/02-lanes-working-light.png)
 ![A lane's transcript: the work it was given, and the checklist it left](docs/screens/03-lane-transcript-dark.png)
 
-Those are three of the eighteen captures in [`docs/screens.md`](docs/screens.md) — nine
+Those are three of the twenty captures in [`docs/screens.md`](docs/screens.md) — ten
 states, each in both themes — which is also the recipe for taking them again, and
 `crates/app/examples/screens.rs` is what takes them.
 
