@@ -379,13 +379,21 @@ impl Stub {
     fn start(home: &Path) -> Stub {
         let log_path = home.join("stub.log");
         let log = fs::File::create(&log_path).expect("the stub's log");
-        let child = Command::new("python3")
+        let mut command = Command::new("python3");
+        command
             .arg(Stub::script())
             .arg("0")
             .stdout(Stdio::from(log.try_clone().expect("the log twice")))
-            .stderr(Stdio::from(log))
-            .spawn()
-            .expect("python3 starts the stub model");
+            .stderr(Stdio::from(log));
+        // Its own process group: on this platform `python3` is a shim that leaves
+        // the interpreter as a separate process, so killing the child we spawned
+        // would leave the model itself running with nobody to reap it.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        let child = command.spawn().expect("python3 starts the stub model");
         let port = Stub::wait_for_port(home, &log_path)
             .unwrap_or_else(|| panic!("the stub did not print a port: see {}", log_path.display()));
         Stub { child, port }
@@ -411,6 +419,8 @@ impl Stub {
     }
 
     fn stop(&mut self) {
+        // The whole group: the shim and the interpreter it left behind.
+        unsafe { libc::killpg(self.child.id() as libc::pid_t, libc::SIGKILL) };
         let _ = self.child.kill();
         let _ = self.child.wait();
     }

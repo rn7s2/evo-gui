@@ -46,58 +46,53 @@ client would be holding.
 
 | proof | subject | proves |
 |---|---|---|
-| `t01_launch_ready` | swarm | The ready file names the program, the port the child chose, a 64-hex token and the session under this fixture's home; `/health` and the snapshot agree on the epoch; the stream's `hello` frame carries it; and the shutdown ladder leaves nothing running. |
-| `t02_prompt_streams` | agent | `input.send` answers with the **pre-minted item id** and that id is the item the stream adds; the answer is visible while its status is `streaming` and grows where it stands; the topic says `running`, then `idle`; a long answer arrives as `item.append` ops on one item, in seq order, never re-sent whole. |
-| `t03_delegate_and_lanes` | swarm | The `swarm` topic publishes every lane transition (including a lane coming up idle) and its `lanes[]`; a delegated task reaches `lane:1`'s own topic as items; the lane's todos are in its own state; and the report comes back to the coordinator as a `lane_report` **item with fields**, not as a sentence. |
-| `t04_restart_resumes` | agent, two servers in **one folder** | §1's E1: kill one child, and the one that comes back is the one that died — same journal path in the rewritten ready file, `--resume <that exact path>` on its command line, its earlier turn still there, and the other tab untouched. |
+| `t01_launch_ready` | swarm | The ready file names the program, the pid **and** its supervisor, the port the child chose, a 64-hex token and the session under this fixture's home; `/health` and the snapshot agree on the epoch; the stream connects in that epoch (a `hello` is the connection's cursor, not an op a client sees); and the shutdown ladder leaves nothing running. |
+| `t02_prompt_streams` | swarm | `input.send` answers with the **pre-minted item id** and that id is the item the stream adds; the answer is visible while its status is `streaming` and grows where it stands; the topic says `running`, then `idle`; a long answer arrives as `item.append` ops on one item, in seq order, never re-sent whole. |
+| `t03_delegate_and_lanes` | swarm | The `swarm` topic publishes every lane transition (including a lane coming up idle) and its `lanes[]`; a delegated task reaches `lane:1`'s own topic as items; the lane's todos are in its own state; and a lane that *calls the `report` tool* comes back to the coordinator as a `lane_report` **item with fields** — and the swarm's own `reports` count — not as a sentence parsed out of prose. |
+| `t04_restart_resumes` | swarm, two servers in **one folder** | §1's E1: kill one child, and the one that comes back is the one that died — same journal path in the rewritten ready file, `--resume <that exact path>` on its command line, its earlier turn still there, and the other tab untouched. |
 | `t05_interrupt_swarm` | swarm | `run.interrupt` with scope `swarm` stops the work, the lanes settle, and the coordinator is told: a `human_action` item naming the lanes (§7.4 — stopped, never redirected behind its back). |
-| `t06_history_resume` | agent | `evo-agent sessions --json` lists the session (one process, one document, no journal parsed here) and `--resume <that exact path>` brings the turn back. |
+| `t06_history_resume` | swarm | `evo-agent sessions --json` lists the session (one process, one document, no journal parsed here) and `--resume <that exact path>` brings the turn back. |
 | `t07_catalog_choosers` | no server at all | `evo-swarm catalog --json` fills the choosers — models, `lanes.models`, a registration with its provider — and `evo-swarm check --json` judges the launch the choosers describe, including refusing a model nothing registered, in evo's own words. |
 | `t08_quit_on_eof` | agent | §8's first rung, and the whole of the app's quit: closing the pipe the tab was started with ends the child — a tab that has served nothing **and** a tab that has answered a turn. |
 
-`t03` and `t05` are the swarm's: lanes are their subject. `t02`, `t04` and `t06`
-name `Program::Agent` because what they prove — the prompt path, the restart, the
-index — is the same in the coordinator a swarm runs; each is one line from
-`Program::Swarm` (`const PROGRAM`), which is how they run once evo-swarm's lane
-work is in the integration build.
+Every proof runs against `Program::Swarm` (`const PROGRAM`) — the server a tab
+really starts — except `t08`, which is about the pipe and names the agent because
+the coordinator a swarm is built on reads it the same way. `t07` starts no server
+at all: it reads the offline CLIs.
 
-## Findings the proofs are carrying
+## What the proofs found
 
-Each of these is a proof failing with its evidence in the message, against the
-builds as they were when it was written. They are the reason the proofs exist;
-when they pass, the finding is fixed.
+Against the builds before the integration merge, and what happened to each:
 
-- **`t02`** — the assistant item's id is not the one it streamed under. The view
-  mints `a_…` at `message-start`, streams into it, then emits `item.remove a_…`
-  and `item.add <the journaled id>` (CONTRACT §3's pre-minted id does not reach
-  the frontend yet; `evo-agent --events` on that build printed
-  `(:type :message-start :run-id … :turn 0)` with no `:entry-id`).
-- **`t04`** — a supervisor restart is started as
-  `serve --ready-file … --watch-stdin --port 0 --resume`: a **bare** `--resume`
-  (the newest journal in the folder, which with two tabs in one folder can be the
-  other tab's — E1) and `--port 0` again (a port no client knows — E2). The same
-  restart reported `restarts: 0` and `supervisor_pid: null`, because the
-  supervisor sets neither `EVO_RESTARTS` nor `EVO_SUPERVISOR_PID`.
-- **`t04`** — a restart is still `--resume` bare and `--port 0` (see above), and
-  the rewritten ready file still says `restarts: 0`, `supervisor_pid: null`.
-- **`t08`** — the pipe stops meaning anything once a run has happened: an idle
-  child exits 0 within two seconds of EOF (`--no-userspace`, a tenth of a
-  second), but a child that has answered one prompt was still running 45 seconds
-  after its pipe closed. That is the state a quit is most often made in, and the
-  app's quit is only the pipe, so such a server leaks — nothing left alive knows
-  its pid.
-- **`t07`** — `evo-swarm catalog --json` and `check --json` answer
-  `Unknown argument` in a build whose `evo-swarm serve` is still the old one
-  (`--token-file`), so the empty tab's choosers and its problem lines have
-  nothing to read yet. (This one is the swarm branch, not the agent's.)
-- **`t01`/`t03`/`t05`** — `evo-swarm serve --ready-file` does not exist yet in the
-  same build (exit 64, `Unknown argument: --ready-file`), so the swarm's launch,
-  its lanes and its interrupt cannot be reached at all.
-
-Fixed and green: **`t02`** — the pre-minted item id arrives in `input.send`'s own
-reply and is the id the answer streams under, 60 appends on one item; **`t06`** —
-`sessions --json` lists the session with its title, and `--resume <that exact
-path>` brings the turn back.
+- **Restart exactness (fixed).** A supervisor restart used to be started as
+  `serve … --port 0 --resume`: a **bare** `--resume` (the newest journal in the
+  folder, which with two tabs in one folder can be the other tab's) and a port no
+  client knows. Now the restarted child is told `--resume <that exact journal>` and
+  the rewritten ready file names it — pinned by `t04`.
+- **`supervisor_pid` (fixed).** The ready file used to publish the session's pid
+  and leave `supervisor_pid` null, so the process the app had spawned — the one that
+  outlives its session — was named nowhere on disk. It is named now, and `t01`
+  checks it.
+- **EOF after a run (fixed).** A server that had answered a prompt used to keep
+  running after its pipe closed — 45 seconds and counting, against 2 seconds for an
+  idle one — which is a server the app's quit cannot stop, since the quit is only
+  the pipe. `t08` pins both states now.
+- **The pre-minted item id (fixed).** The view used to mint its own `a_…` id,
+  stream into it, then remove it and add the journaled id. `t02` checks the id
+  `input.send` answers with is the id the answer streams under.
+- **`check --json` exits 1 with its document (not a server bug).** §2 says the
+  offline CLIs exit 0/1, and `check` exits 1 when it found problems — with the
+  problems on stdout. The app read that as a command that could not run, so the
+  empty tab said "the check could not run" instead of evo's own lines. The client
+  reads the document on that exit now (`store::cli::run_json_reporting`), and `t07`
+  checks it.
+- **A `hello` is a connection's cursor, not a frame (not a server bug).** The
+  stream does send `hello` first, even with a `since` — verifiable by hand — and
+  `swarm_client` takes it as the connection's cursor, which is what a client acts
+  on. `t01` asked for the wrong thing and now asks for that cursor.
+- **A lane reports by calling the `report` tool (not a server bug).** Nothing comes
+  back to the coordinator for a lane that merely finishes; `t03` delegates the
+  report call, which is how the channel works.
 
 ## The app's own tests
 

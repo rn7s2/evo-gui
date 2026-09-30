@@ -47,7 +47,10 @@ fn t04_restart_resumes() {
         "both run in the same folder: {}",
         fixture.folder.display()
     );
-    assert!(a.ready().supervisor_pid.is_some(), "a supervisor started it");
+    assert!(
+        a.ready().supervisor_pid.is_some(),
+        "a supervisor started it"
+    );
 
     // --- each tab answers its own turn ------------------------------------------
     let a_path = a.ready().session.path.clone();
