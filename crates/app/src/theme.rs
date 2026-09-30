@@ -8,7 +8,10 @@
 //! and `Theme::change` keeps switching between them.
 //!
 //! What the kit has no token for — the tab strip's own surfaces, the table rules —
-//! is `store::design` itself, next to the design's numbers.
+//! is `store::design` itself, next to the design's numbers. The one colour that is
+//! not in that palette is a selection's own ([`SELECTION_LIGHT`] and
+//! [`SELECTION_DARK`]): the design's editor keeps it in its theme file, as a wash
+//! over the surface it covers rather than a colour of its own.
 //!
 //! The app follows the system's appearance — the macOS setting, which is also the
 //! one the Dock and every other app follow — unless `app.json`'s `theme` says
@@ -32,6 +35,27 @@ use crate::Shell;
 const LIGHT_THEME: &str = "Evo Light (Dimmed 2026)";
 const DARK_THEME: &str = "Evo Dark";
 const THEME_SET: &str = "Evo";
+
+/// The colour selected text is painted with, in each mode: a wash over the surface
+/// it covers (`#RRGGBBAA`, which the kit's colour parser takes and keeps the alpha
+/// of), not a colour of the palette.
+///
+/// The light one is the design's own, verbatim: the editor the palette comes from
+/// (`~/coding/rl-vscode-dimmed/themes/2026-light.json`'s
+/// `editor.selectionBackground`), which over the light card's `--input` renders
+/// `#BCD4E8` — a 1.44:1 step. The design's own live page, which leaves a selection
+/// to the browser (it sets no `::selection`), measures `#B9D3F6` on `#FAF8F3`:
+/// 1.44:1, the same weight to two places.
+///
+/// That editor has no dark file, and the kit caps a selection's alpha at 0.3
+/// (`ThemeColor::apply_config`'s `clamp_alpha`), so on the dark side the colour
+/// itself has to carry the weight: the dark palette's own blue — its `info`, the
+/// only blue that side of the design owns — renders `#21485A`, 1.83:1. The design's
+/// live dark page measures 2.28:1 there (`#3D5371`), which the cap puts out of
+/// reach without washing the blue to grey: a tint light enough for a 2.2:1 step
+/// renders `#495158`. `#38BDF8` is the strongest *blue* the cap allows.
+const SELECTION_LIGHT: &str = "#0069CC40";
+const SELECTION_DARK: &str = "#38BDF84C";
 
 /// What to show, given `app.json`'s choice and what the system says.
 ///
@@ -126,13 +150,13 @@ fn apply(cx: &mut App, window: &mut Window) {
 /// place a size is written down.
 fn theme_set() -> String {
     let themes = [
-        theme(LIGHT_THEME, "light", &design::LIGHT),
-        theme(DARK_THEME, "dark", &design::DARK),
+        theme(LIGHT_THEME, "light", &design::LIGHT, SELECTION_LIGHT),
+        theme(DARK_THEME, "dark", &design::DARK, SELECTION_DARK),
     ];
     serde_json::json!({ "name": THEME_SET, "themes": themes }).to_string()
 }
 
-fn theme(name: &str, mode: &str, palette: &Palette) -> serde_json::Value {
+fn theme(name: &str, mode: &str, palette: &Palette, selection: &str) -> serde_json::Value {
     serde_json::json!({
         "name": name,
         "is_default": false,
@@ -143,7 +167,7 @@ fn theme(name: &str, mode: &str, palette: &Palette) -> serde_json::Value {
         "radius": design::RADIUS as u32,
         "radius.lg": design::RADIUS_LG as u32,
         "shadow": true,
-        "colors": colors(palette),
+        "colors": colors(palette, selection),
     })
 }
 
@@ -155,7 +179,7 @@ fn theme(name: &str, mode: &str, palette: &Palette) -> serde_json::Value {
 ///
 /// Built as a list rather than one `json!`: the macro's nesting is the compiler's
 /// recursion limit, and the design has more tokens than the limit has levels.
-fn colors(p: &Palette) -> serde_json::Value {
+fn colors(p: &Palette, selection: &str) -> serde_json::Value {
     // A row's hover and selection, as the design's lane rows do it: the foreground
     // a few percent into the surface the row sits on.
     let row_hover = hex(p.fg.mix(p.sidebar, 0.05));
@@ -199,7 +223,11 @@ fn colors(p: &Palette) -> serde_json::Value {
         ("input.border", border.clone()),
         ("ring", primary.clone()),
         ("caret", fg.clone()),
-        ("selection.background", muted.clone()),
+        // A wash, not a token: what a selection looks like over whatever surface it
+        // covers — see [`SELECTION_LIGHT`]. `muted` (what this used to be) is the
+        // card's own surface in the light theme, so selected text was invisible on
+        // it.
+        ("selection.background", selection.to_string()),
         ("title_bar.background", hex(p.title_bar)),
         ("title_bar.border", border.clone()),
         ("tab.background", hex(p.tab_strip)),
@@ -254,7 +282,7 @@ fn hex(c: Rgb) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui_kit::component::try_parse_color;
+    use gpui_kit::component::{try_parse_color, ActiveTheme as _};
 
     #[test]
     fn system_follows_what_the_window_reports() {
@@ -319,6 +347,101 @@ mod tests {
         }
     }
 
+    /// Selected text is its own colour, in both modes: the design's blue wash, and not
+    /// the `muted` token the mapping used to put here — `muted` is the card's own surface
+    /// in the light theme, so a selection drawn with it was invisible (review-2 C4).
+    #[test]
+    fn a_selection_is_a_blue_wash_you_can_see_on_the_card() {
+        let set: serde_json::Value = serde_json::from_str(&theme_set()).expect("JSON");
+        let themes = set["themes"].as_array().expect("themes");
+        let colors = |mode: &str| -> serde_json::Map<String, serde_json::Value> {
+            themes
+                .iter()
+                .find(|theme| theme["mode"] == mode)
+                .and_then(|theme| theme["colors"].as_object().cloned())
+                .unwrap_or_default()
+        };
+        let (light, dark) = (colors("light"), colors("dark"));
+        assert_eq!(
+            light["selection.background"].as_str(),
+            Some(SELECTION_LIGHT)
+        );
+        assert_eq!(dark["selection.background"].as_str(), Some(SELECTION_DARK));
+
+        let parsed = |colors: &serde_json::Map<String, serde_json::Value>| {
+            try_parse_color(
+                colors["selection.background"]
+                    .as_str()
+                    .expect("a colour string"),
+            )
+            .expect("a colour the kit reads")
+        };
+        let (light, dark) = (parsed(&light), parsed(&dark));
+        // A wash, not a fill: the surface shows through, and the text stays legible on
+        // it. The light one is the design's own value, whose alpha is its own.
+        assert_eq!(light.a, 64.0 / 255.0);
+        assert!(
+            light.a > 0.0 && light.a < 1.0 && dark.a > 0.0 && dark.a < 1.0,
+            "a wash, not a fill: {light:?} {dark:?}"
+        );
+        // And inside the kit's own cap on a selection (`clamp_alpha`): the file states an
+        // alpha the kit will not cut down, so what is written is what is painted.
+        assert!(dark.a <= 0.3, "the kit's cap: {dark:?}");
+        // The step each takes on the card's own surface, which is what the colour has to
+        // stand out from.
+        let steps = [
+            (SELECTION_LIGHT, design::LIGHT),
+            (SELECTION_DARK, design::DARK),
+        ]
+        .map(|(wash, p)| {
+            let blended = blend(wash, p.input);
+            assert_ne!(blended, (p.input.r, p.input.g, p.input.b), "{wash}");
+            assert_ne!(blended, (p.muted.r, p.muted.g, p.muted.b), "{wash}");
+            // Blue: it is a text selection, not a grey box.
+            assert!(blended.2 > blended.0, "{wash} renders {blended:?}");
+            contrast(blended, (p.input.r, p.input.g, p.input.b))
+        });
+        let (light_step, dark_step) = (steps[0], steps[1]);
+        assert!(
+            (1.40..1.50).contains(&light_step),
+            "the design's own wash, which its live page also renders: {light_step:.2}"
+        );
+        assert!(
+            dark_step > light_step,
+            "the cap keeps a wash weaker on a dark card, so the blue carries it: \
+             {light_step:.2} and {dark_step:.2}"
+        );
+    }
+
+    /// A `#RRGGBBAA` wash, mixed into the surface it covers, in sRGB — what the eye
+    /// sees where the two overlap.
+    fn blend(wash: &str, base: Rgb) -> (u8, u8, u8) {
+        assert_eq!(wash.len(), 9, "a wash with an alpha: {wash}");
+        let alpha = u32::from_str_radix(&wash[7..9], 16).expect("alpha");
+        let channel = |n: usize| {
+            let top = u32::from_str_radix(&wash[1 + 2 * n..3 + 2 * n], 16).expect("a channel");
+            let base = u32::from([base.r, base.g, base.b][n]);
+            ((top * alpha + base * (255 - alpha) + 127) / 255) as u8
+        };
+        (channel(0), channel(1), channel(2))
+    }
+
+    /// WCAG's contrast ratio: how much brighter one colour is than another.
+    fn contrast(a: (u8, u8, u8), b: (u8, u8, u8)) -> f64 {
+        let linear = |c: u8| {
+            let c = f64::from(c) / 255.0;
+            if c <= 0.04045 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        let luminance =
+            |(r, g, b): (u8, u8, u8)| 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b);
+        let (a, b) = (luminance(a), luminance(b));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
     /// The kit has no input *surface* to map: `Theme::input_background()` is the
     /// page's background in the light mode and its own `input` mixed towards
     /// transparent in the dark one, whatever a theme file says. So the design's
@@ -351,6 +474,37 @@ mod tests {
                 theme.input_background(),
                 theme.background,
                 "in the light mode it is the page's own background"
+            );
+        });
+    }
+
+    /// The kit clamps a selection's alpha in `ThemeColor::apply_config` (`clamp_alpha`,
+    /// capped at 0.3): a theme file that asks for a stronger wash is cut down in silence.
+    /// So the installed theme, not the file, is what the numbers above have to agree with
+    /// — and the file is written to sit under the cap rather than be cut.
+    #[gpui_kit::test]
+    fn the_installed_theme_paints_the_selection_the_file_asks_for(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            install(cx);
+            ComponentTheme::change(ThemeMode::Light, None, cx);
+        });
+        cx.update(|cx| {
+            assert_eq!(
+                cx.theme().selection,
+                try_parse_color(SELECTION_LIGHT).expect("the light wash")
+            );
+            assert_eq!(
+                cx.global::<ComponentTheme>().dark_theme.name.as_ref(),
+                DARK_THEME,
+                "the dark palette is the design's own, not the kit's"
+            );
+            ComponentTheme::change(ThemeMode::Dark, None, cx);
+            assert_eq!(
+                cx.theme().selection,
+                try_parse_color(SELECTION_DARK).expect("the dark wash")
             );
         });
     }

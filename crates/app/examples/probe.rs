@@ -268,10 +268,9 @@ fn run(world: &str, out: &Path, script: &str) -> Result<(), Error> {
             }
             "pump" => pump(&mut cx, Duration::from_millis(nums()[0] as u64)),
             "activate" => {
-                cx.update_window(window, |_, window, _cx| {
-                    window.activate_window();
-                    println!("[probe]   active={}", window.is_window_active());
-                })?;
+                cx.update_window(window, |_, window, _cx| window.activate_window())?;
+                // The platform's own report of it arrives on the foreground executor,
+                // so it takes a pump to land: printing it is how a script sees that.
                 pump(&mut cx, Duration::from_millis(200));
                 cx.update_window(window, |_, window, _cx| {
                     println!("[probe]   active={}", window.is_window_active());
