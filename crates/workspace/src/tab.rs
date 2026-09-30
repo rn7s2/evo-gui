@@ -1510,7 +1510,7 @@ impl TabContent {
 /// nothing else on the page says so — which is the run a person most often wants
 /// to stop.
 fn swarm_is_busy(model: &TabModel) -> bool {
-    model.is_swarm_busy() || model.activity() != Status::Idle
+    model.lanes_busy() || model.activity() != Status::Idle
 }
 
 /// Whether this tab has a clock to move (§7.3).

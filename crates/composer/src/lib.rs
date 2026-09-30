@@ -308,9 +308,9 @@ impl Composer {
         }
     }
 
-    /// Whether the swarm is doing anything — `TabModel::is_swarm_busy`, which is the
-    /// coordinator's own status *and* whether it is held while its lanes work. It is what
-    /// the button's face follows.
+    /// Whether anything is going on — the window's own reading of the model: the
+    /// coordinator running or held, a lane working. It is what the button's face
+    /// follows.
     pub fn set_swarm_busy(&mut self, busy: bool, cx: &mut Context<Self>) {
         if self.busy != busy {
             self.busy = busy;

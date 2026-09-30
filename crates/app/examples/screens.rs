@@ -178,6 +178,7 @@ fn capture(dir: &Path, via_agent: Option<PathBuf>) -> Result<(), Box<dyn std::er
                 },
             )?;
             boot_failure(&mut cx, failed_window, &failed_view, dir, &fixture.folder)?;
+            stop_tabs(&mut cx, &failed_view);
         }
         TabState::Failed { message, .. } => {
             println!(
@@ -194,8 +195,24 @@ fn capture(dir: &Path, via_agent: Option<PathBuf>) -> Result<(), Box<dyn std::er
         other => println!("[capture] the tab settled in {other:?}: nothing captured"),
     }
 
-    let _ = std::fs::remove_dir_all(&fixture.dir);
+    // The tabs' servers are told to stop, the way the app's own quit tells them.
+    stop_tabs(&mut cx, &view);
+    // And the fixture goes first, while the app's context is still here: its `Drop`
+    // is what stops a server the app started, and the context's own drop is where
+    // this process ends.
+    drop(fixture);
     Ok(())
+}
+
+/// Every tab's server gets the app's own stop: the pipe closes, and the engine
+/// thread runs the rest of the ladder in its own time.
+fn stop_tabs(cx: &mut HeadlessAppContext, view: &Entity<WorkspaceView>) {
+    let engines = cx.update(|cx| view.update(cx, |view, cx| view.take_engines(cx)));
+    println!("[capture] stopping {} tab(s)", engines.len());
+    for mut engine in engines {
+        engine.shutdown();
+    }
+    pump(cx, Duration::from_secs(2));
 }
 
 /// The tab page, as a person builds it: a tool call, its row opened, an answer

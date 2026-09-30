@@ -28,6 +28,14 @@ line it prints before it fails.
 file: nothing here polls a health endpoint, picks a port, waits for a token file
 or compares pids.
 
+A fixture is also what guarantees the servers are *gone* when it is: a proof's own
+`Server` stops itself (it holds the child's pipe, and EOF is the whole signal), but
+a server the app started — the captures, a UI test — belongs to nobody's `Drop` and
+would go on running after the process that drove it ends. So the fixture's `Drop`
+finds every process whose command line names its own temp directory (the ready file
+publishes the session's pid and leaves `supervisor_pid` null, so a pid is not
+enough), and stops them: `SIGTERM`, then `SIGKILL`.
+
 `Watcher` (in `watch.rs`) is how a proof reads a server: one snapshot seeds a
 topic, items and state mirror, and every op of §5.3 keeps it current
 (`item.add`/`append`/`patch`/`remove` with the contract's merge rules,
