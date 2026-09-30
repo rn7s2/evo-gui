@@ -27,10 +27,12 @@
 //! `color-mix` is [`widgets::wash`].
 
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use gpui_kit::base::Button;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::list::{ListDelegate, ListItem, ListState};
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::FocusableExt as _;
@@ -41,14 +43,15 @@ use gpui_kit::component::{
 use gpui_kit::prelude::*;
 use gpui_kit::{
     div, px, AnyElement, App, BoxShadow, Context, ElementId, Entity, FocusHandle, Focusable as _,
-    Hsla, IntoElement, MouseButton, Pixels, SharedString, Subscription, TestSupportExt as _,
-    TextAlign, WeakEntity, Window,
+    Hsla, IntoElement, MouseButton, Pixels, ScrollHandle, SharedString, Subscription,
+    TestSupportExt as _, TextAlign, WeakEntity, Window,
 };
 use serde_json::Value;
 use session::{HistoryEntry, LaunchPlan, Launcher, ModelOption, Role as Card};
 use store::catalog::{CheckReport, Problem, ProblemTarget};
 use store::cli::{self, CliError};
 use store::design;
+use widgets::paint;
 
 use crate::history::{rows_from_session, HistoryRow};
 use crate::tab::{TabContent, TabContentEvent};
@@ -107,6 +110,16 @@ const ROW_MIN_H: Pixels = px(58.);
 const ROW_GAP: Pixels = px(12.);
 const ROW_PAD_X: Pixels = px(12.);
 const ROW_PAD_Y: Pixels = px(8.);
+/// The curve a row's pointer fill carries where it meets one of the list's corners: the
+/// frame's own radius less its hairline, so the fill's corner and the border's inner edge
+/// are the same curve. gpui clips an overflow to a rectangle rather than to the frame's
+/// rounded border, so a square fill paints into the corner the border rounds off — the
+/// same arithmetic the composer's box does for the strips that meet its corners.
+const ROW_INNER_RADIUS: Pixels = px(design::RADIUS_LG - 1.);
+/// The name every history row joins, so that a part of the row can dress itself while the
+/// row is hovered: the resume arrow is the one that does (`.resume-arrow` goes from the
+/// muted ink to the page's own under the pointer, and nothing else about the row moves).
+const ROW_GROUP: &str = "history-row";
 /// `.folder-card-large{padding:20px;gap:8px}` and
 /// `.folder-card-large .folder-icon{margin-bottom:3px}`.
 const BADGE_PAD_X: Pixels = px(7.);
@@ -160,6 +173,9 @@ const COUNT_PLUS_ID: &str = "workers-count-plus";
 /// The history region and its states.
 const HISTORY_ID: &str = "history";
 const HISTORY_LIST_ID: &str = "history-list";
+/// The arrow at a row's end, which is the one part of a row that answers the pointer —
+/// named so that it can (a `group_hover` needs its own state) and so a probe can watch it.
+const HISTORY_ARROW_ID: &str = "history-arrow";
 const HISTORY_ROW_ID: &str = "history-row";
 const HISTORY_HINT_ID: &str = "history-hint";
 const HISTORY_COUNT_ID: &str = "history-count";
@@ -201,6 +217,22 @@ gpui_kit::actions!(
 fn warning_ink(theme: &Theme) -> Hsla {
     theme.warning
 }
+
+/// The fill a history row wears under the pointer, and under the keyboard's focus:
+/// `color-mix(in srgb, var(--fg) 5%, var(--bg))`, the vocabulary the design's own
+/// `.history-row:hover` would use — its `--fg` mixed into the surface the row sits on.
+///
+/// The surface is the page, not the sidebar a lane row sits on, which is why the theme's
+/// own `list.hover.background` (that same 5% into the sidebar) is not this colour. A row
+/// that changes nothing else about itself when the pointer arrives — no shadow, no border,
+/// no shift — is the design's, and this is the one thing it does change.
+fn row_hover_fill(dark: bool) -> Hsla {
+    let palette = design::palette(dark);
+    paint::color(palette.fg.mix(palette.bg, ROW_HOVER_MIX))
+}
+
+/// How much of the page's ink the design mixes into it for a hovered row: 5%.
+const ROW_HOVER_MIX: f32 = 0.05;
 
 /// `font-weight:500`, as much of it as this app can draw.
 ///
@@ -495,12 +527,19 @@ struct EmptyTabState {
     /// The history list's two states (§2): still being fetched, or it could not be read.
     history_loading: bool,
     history_error: Option<String>,
+    /// The history list's own scroll position. The kit's thumb is driven by a handle, and
+    /// a handle made fresh each frame would reset the list to the top on the next one.
+    history_scroll: ScrollHandle,
     /// The folder card's own focus handle, so keyboard traversal and its focus ring have
     /// somewhere to land.
     folder_focus: FocusHandle,
     /// The two sliders' focus handles: a click on a rail focuses it, which is what makes
     /// the arrows work.
     effort_focus: [FocusHandle; 2],
+    /// The two rails' motion: the level's move along the rail, the press under the
+    /// pointer, and the two rings' fades. One per rail, handed back on every render —
+    /// the slider is rebuilt each time, and a transition has to outlive that.
+    effort_motion: [Rc<widgets::effort::Motion>; 2],
     /// The tab that owns this state: what a launch is emitted on.
     tab: WeakEntity<TabContent>,
     _subscriptions: Vec<Subscription>,
@@ -561,8 +600,13 @@ impl EmptyTabState {
             picker: FolderPicker::Dialog,
             history_loading: false,
             history_error: None,
+            history_scroll: ScrollHandle::default(),
             folder_focus: cx.focus_handle(),
             effort_focus: [cx.focus_handle(), cx.focus_handle()],
+            effort_motion: [
+                Rc::new(widgets::effort::Motion::new()),
+                Rc::new(widgets::effort::Motion::new()),
+            ],
             tab,
             _subscriptions: subscriptions,
         }
@@ -1097,23 +1141,29 @@ impl EmptyTabState {
         let weak = cx.entity().downgrade();
         // The slider is named with the page's own id: it registers `<id>`, `<id>-rail`,
         // `<id>-thumb` and `<id>-fill` itself, which is what a test finds them by.
-        widgets::EffortSlider::with_levels(id, levels, self.launcher.effort(role))
-            .palette(design::palette(cx.theme().is_dark()))
-            .focus(self.effort_focus[slot(role)].clone())
-            .notify({
-                let weak = weak.clone();
-                move |cx: &mut App| {
-                    let _ = weak.update(cx, |_, cx| cx.notify());
+        widgets::EffortSlider::with_levels(
+            id,
+            levels,
+            self.launcher.effort(role),
+            self.effort_motion[slot(role)].clone(),
+        )
+        .palette(design::palette(cx.theme().is_dark()))
+        .reduce_motion(cx.reduce_motion())
+        .focus(self.effort_focus[slot(role)].clone())
+        .notify({
+            let weak = weak.clone();
+            move |cx: &mut App| {
+                let _ = weak.update(cx, |_, cx| cx.notify());
+            }
+        })
+        .on_change(move |level, _window, cx| {
+            let _ = weak.update(cx, |state, cx| {
+                if state.launcher.set_effort(role, level) {
+                    cx.notify();
                 }
-            })
-            .on_change(move |level, _window, cx| {
-                let _ = weak.update(cx, |state, cx| {
-                    if state.launcher.set_effort(role, level) {
-                        cx.notify();
-                    }
-                });
-            })
-            .render(window)
+            });
+        })
+        .render(window)
     }
 
     /// The count control: `.worker-count` — a label, then the box the `−`/`+` steppers and
@@ -1417,12 +1467,13 @@ impl EmptyTabState {
                 .into_any_element();
         }
         let theme = cx.theme();
+        let count = rows.len();
         let rows: Vec<AnyElement> = rows
             .iter()
             .enumerate()
-            .map(|(ix, row)| self.history_row(ix, row, cx).into_any_element())
+            .map(|(ix, row)| self.history_row(ix, count, row, cx).into_any_element())
             .collect();
-        div()
+        v_flex()
             .id(HISTORY_LIST_ID)
             .test_support()
             .w_full()
@@ -1431,26 +1482,60 @@ impl EmptyTabState {
             .flex_grow_0()
             .flex_shrink_1()
             .min_h_0()
-            .overflow_y_scroll()
-            .role(gpui_kit::Role::Group)
-            .aria_label(HISTORY_LABEL)
+            .relative()
+            // The frame is the box the design draws: its border and its rounded corners
+            // are the edges of the window onto the rows, not of the rows themselves —
+            // what a browser draws for a scroll container that has a border and a
+            // radius — and why the clip belongs here rather than on the scroll box.
+            .overflow_hidden()
             .rounded(theme.radius_lg)
             .border_1()
             .border_color(theme.border)
-            .children(rows)
+            .role(gpui_kit::Role::Group)
+            .aria_label(HISTORY_LABEL)
+            .child(
+                // The rows, and the box that scrolls them: as tall as the frame gives it
+                // (grow to fill, floor at zero), while the rows' own height is what sets
+                // the frame's — `flex_basis: auto` — so the list goes on hugging them
+                // until the page runs out.
+                div()
+                    // The box that scrolls, named the way the kit's own scrollable
+                    // names the box inside its wrapper.
+                    .id((ElementId::from(HISTORY_LIST_ID), "content"))
+                    .w_full()
+                    .flex_grow_1()
+                    .flex_shrink_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.history_scroll)
+                    .children(rows),
+            )
+            // The kit's own thumb over that overflow, in the app's mode and colours
+            // (`crate::app::theme`, `ScrollbarMode::Hover`): a thin overlay with no track
+            // behind it. A sibling of the box it measures rather than a child of it — a
+            // bar inside the scroller is dragged along by the very scroll it draws.
+            .vertical_scrollbar(&self.history_scroll)
             .into_any_element()
     }
 
     /// One history row: the folder glyph, the title with the badge the app's own recents
     /// earn, the path and how long ago under it, and the arrow that says what a click does.
+    ///
+    /// `count` is how many rows the list has, which is what the first and last rows need:
+    /// the fill they wear under the pointer has to follow the list's own corners.
     fn history_row(
         &self,
         ix: usize,
+        count: usize,
         row: &session::HistoryRow,
         cx: &Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme();
         let muted = theme.muted_foreground;
+        // Under the pointer, and on a row the keyboard has focused, the row wears the
+        // design's row-hover fill (`color-mix(in srgb, var(--fg) 5%, var(--bg))`); the
+        // cursor is still the page's own arrow, and nothing about the row moves.
+        let fill = row_hover_fill(cx.theme().mode.is_dark());
         let session = PathBuf::from(&row.session_path);
         let folder = PathBuf::from(&row.folder);
         let badge = row.open_at_quit.then(|| {
@@ -1478,6 +1563,13 @@ impl EmptyTabState {
             .rounded(px(0.))
             .gap(ROW_GAP)
             .justify_start()
+            .group(ROW_GROUP)
+            .hover(move |row| row.bg(fill))
+            .focus_visible(move |row| row.bg(fill))
+            // The list's own corners, less its hairline: only the rows that meet them
+            // wear the curve, and only while their fill is showing.
+            .when(ix == 0, |row| row.rounded_t(ROW_INNER_RADIUS))
+            .when(ix + 1 == count, |row| row.rounded_b(ROW_INNER_RADIUS))
             .when(ix > 0, |row| row.border_t_1().border_color(theme.border))
             .tooltip({
                 let tooltip = SharedString::from(row.tooltip.clone());
@@ -1546,9 +1638,18 @@ impl EmptyTabState {
             )
             .child(
                 // `.resume-arrow{color:var(--muted-fg)}` and nothing else: the glyph is the
-                // page's own base 16 on its 1.5 line.
+                // page's own base 16 on its 1.5 line — and the one part of the row that
+                // answers the pointer, where it takes the page's ink.
+                //
+                // The arrow is named because a `group_hover` only fires on an element
+                // with state of its own (measured: without the id the style never
+                // applies, with it the glyph goes from the muted ink to the page's);
+                // the name is also what lets a probe watch it.
                 div()
+                    .id(ElementId::NamedInteger(HISTORY_ARROW_ID.into(), ix as u64))
+                    .test_support()
                     .flex_none()
+                    .group_hover(ROW_GROUP, |arrow| arrow.text_color(theme.foreground))
                     .text_size(px(design::FONT_BASE))
                     .line_height(px(design::FONT_BASE * 1.5))
                     .text_color(muted)
@@ -2178,6 +2279,12 @@ mod tests {
             // The box catches up on the frame the window paints.
             window.render_frame(cx);
             assert_eq!(state.read(cx).count.read(cx).value().as_ref(), "12");
+            // The sliders' own thumbs are where those levels put them — a level that
+            // arrives from a check is a change like any other, so the thumb moves to
+            // it over the design's 140ms and the frame that shows the arrival is the
+            // one after the next.
+            std::thread::sleep(std::time::Duration::from_millis(160));
+            window.render_frame(cx);
             // The sliders' own thumbs are where those levels put them.
             let rail = window.find("coordinator-effort-rail").bounds();
             let thumb = window.find("coordinator-effort-thumb").bounds();
@@ -2755,6 +2862,35 @@ mod tests {
                 folder: PathBuf::from("/Users/you/coding/bar"),
             }]
         );
+    }
+
+    /// The row's pointer fill is the design's own arithmetic — 5% of the page's ink mixed
+    /// into the page — in the numbers the design publishes, and it is a *different* colour
+    /// from the theme's `list.hover.background`, which is the same 5% into the sidebar a
+    /// lane row sits on.
+    #[test]
+    fn a_history_rows_pointer_fill_is_the_designs_five_percent_on_the_page() {
+        let light = design::LIGHT.fg.mix(design::LIGHT.bg, ROW_HOVER_MIX);
+        assert_eq!(
+            (light.r, light.g, light.b),
+            (0xE5, 0xDF, 0xD5),
+            "`color-mix(in srgb, #202020 5%, #EFE9DF)`"
+        );
+        let dark = design::DARK.fg.mix(design::DARK.bg, ROW_HOVER_MIX);
+        assert_eq!(
+            (dark.r, dark.g, dark.b),
+            (0x16, 0x16, 0x16),
+            "`color-mix(in srgb, #FAFAFA 5%, #0A0A0A)`"
+        );
+
+        assert_eq!(row_hover_fill(false), paint::color(light));
+        assert_eq!(row_hover_fill(true), paint::color(dark));
+        assert_ne!(
+            row_hover_fill(false),
+            paint::color(design::LIGHT.fg.mix(design::LIGHT.sidebar, ROW_HOVER_MIX)),
+            "the surface is the page, not the sidebar the lane rows sit on"
+        );
+        assert_ne!(row_hover_fill(true), row_hover_fill(false));
     }
 
     /// Before the index arrives the history says what it is doing, and a failure says why.

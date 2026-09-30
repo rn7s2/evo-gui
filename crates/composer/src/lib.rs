@@ -31,6 +31,7 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{InputEvent, Textarea, TextareaState},
+    scroll::ScrollableElement,
     v_flex, ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, Size, StyledExt as _,
 };
 use gpui_kit::prelude::*;
@@ -42,7 +43,7 @@ use gpui_kit::{
 };
 use session::{ordered_segments, Segment, Todo, TodoStatus, TopicState};
 use store::design::{self, Palette, INSET, MEASURE, RADIUS};
-use widgets::effort::cubic_bezier;
+use widgets::effort::{cubic_bezier, Motion};
 use widgets::{paint, Chip, EffortSlider};
 
 /// The input grows from the design's two lines to as much as half the conversation
@@ -69,6 +70,14 @@ const PLACEHOLDER: &str =
 /// (`.composer-box`).
 const BOX_RADIUS: Pixels = px(12.);
 const BOX_BORDER: Pixels = px(1.);
+/// The curve the box's children carry where they meet one of its corners: the
+/// box's 12px radius less its own hairline, so a child's corner and the inner
+/// edge of the border are the same curve. A child left square — the todo strip,
+/// the drawer, the input's own surface — paints its rectangle into the corner,
+/// and the box's near-white fill shows as a wedge against the strip's colour
+/// (the design clips its children to the rounded box; a squared child is a
+/// corner the page can see).
+const BOX_INNER_RADIUS: Pixels = px(11.);
 /// The focus ring: `box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 12%,
 /// transparent)`, and the border it comes with — `55%` of the primary into the
 /// border.
@@ -361,8 +370,12 @@ pub struct Composer {
     /// The tallest the input may grow: half the conversation pane, as the page
     /// measured it. The floor is the design's 62px, which the kit's two rows are.
     room: Pixels,
-    /// The todo list's own scroll position, kept across frames.
+    /// The todo list's own scroll position, kept across frames (and per composer,
+    /// so two tabs' lists do not share one).
     todos_scroll: ScrollHandle,
+    /// The effort slider's own motion: the level's move along the rail, the press,
+    /// the hover and the focus fades. One per composer, handed back every render.
+    effort_motion: Rc<Motion>,
     /// Where the box was painted last frame: what "outside the box" is measured
     /// against when the page folds an open drawer on a press (`useOutsideClose`).
     box_bounds: Rc<Cell<Bounds<Pixels>>>,
@@ -450,6 +463,7 @@ impl Composer {
             pending_send: None,
             room: px(320.),
             todos_scroll: ScrollHandle::new(),
+            effort_motion: Rc::new(Motion::new()),
             box_bounds: Rc::new(Cell::new(Bounds::default())),
             effort_focus: cx.focus_handle(),
             _subscriptions: vec![subscription, interceptor],
@@ -809,12 +823,16 @@ impl Composer {
         let open = self.todos_open;
         let stripe = paint::color(palette.sidebar);
         let ink = paint::color(palette.muted_fg);
+        // It is the box's first child whenever it is drawn, so its corners are the
+        // box's top corners: the same curve as the border's inner edge, never a
+        // square that leaves the box's own fill showing in the wedge.
         let mut strip = v_flex()
             .id("todo-strip")
             .test_support()
             .w_full()
             .flex_none()
             .bg(stripe)
+            .rounded_t(BOX_INNER_RADIUS)
             .border_b_1()
             .border_color(paint::color(palette.border))
             .child(
@@ -863,26 +881,39 @@ impl Composer {
                     ),
             );
         if open {
+            // The rows scroll inside the list, and the bar is the kit's, on a host
+            // that does not scroll (its own absolute overlay) — the same shape
+            // gpui-component's own popup menu uses. The list keeps the id the tests
+            // and probes find it by, and its own handle, so two tabs' todo lists do
+            // not share a scroll position.
             strip = strip.child(
                 div()
-                    .id("todo-list")
-                    .test_support()
+                    .id(("todo-list-host", cx.entity_id()))
+                    .relative()
                     .w_full()
-                    .max_h(STRIP_LIST_MAX)
-                    .overflow_y_scroll()
-                    .track_scroll(&self.todos_scroll)
-                    .pb(px(4.))
-                    .px(px(14.))
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.))
-                    .children(
-                        self.agent
-                            .todos
-                            .iter()
-                            .enumerate()
-                            .map(|(index, todo)| todo_row(index, todo, palette)),
-                    ),
+                    .flex_none()
+                    .child(
+                        div()
+                            .id("todo-list")
+                            .test_support()
+                            .w_full()
+                            .max_h(STRIP_LIST_MAX)
+                            .overflow_y_scroll()
+                            .track_scroll(&self.todos_scroll)
+                            .pb(px(4.))
+                            .px(px(14.))
+                            .flex()
+                            .flex_col()
+                            .gap(px(4.))
+                            .children(
+                                self.agent
+                                    .todos
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(index, todo)| todo_row(index, todo, palette)),
+                            ),
+                    )
+                    .vertical_scrollbar(&self.todos_scroll),
             );
         }
         Some(strip.into_any_element())
@@ -894,6 +925,7 @@ impl Composer {
         palette: &'static Palette,
         window: &Window,
         cx: &Context<Self>,
+        top: bool,
     ) -> Option<AnyElement> {
         let drawer = self.drawer?;
         let title: AnyElement = match drawer {
@@ -933,6 +965,9 @@ impl Composer {
                 .w_full()
                 .flex_none()
                 .bg(paint::color(palette.sidebar))
+                // `top` when no todo strip is drawn above it: then the drawer's own
+                // corners are the box's, and they take the box's curve.
+                .when(top, |this| this.rounded_t(BOX_INNER_RADIUS))
                 .border_b_1()
                 .border_color(paint::color(palette.border))
                 .child(
@@ -1147,6 +1182,7 @@ impl Composer {
                         "composer-effort-rail",
                         levels.iter().cloned(),
                         index,
+                        self.effort_motion.clone(),
                     )
                     .palette(palette)
                     .focus(self.effort_focus.clone())
@@ -1433,7 +1469,7 @@ impl Render for Composer {
         }
 
         let strip = self.todo_strip(palette, cx);
-        let drawer = self.drawer_panel(palette, window, cx);
+        let drawer = self.drawer_panel(palette, window, cx, strip.is_none());
         let foot = self.foot(palette, cx);
 
         // Where the box was painted: the page asks this against the press it sees, so
@@ -1481,32 +1517,45 @@ impl Render for Composer {
                     .children(strip)
                     .children(drawer)
                     .child(
-                        // The input's own box: the design's padding, and the design's
-                        // 62px floor under it (`INPUT_PAD`, `INPUT_MIN`). The kit
-                        // grows the *rows* inside, so the padding stays outside them
-                        // and a taller draft grows this wrapper with it.
-                        div()
+                        // Everything under the strip: the input and the foot, on the
+                        // box's own surface, curved with the box's inner radius so the
+                        // bottom corners are that colour up to the border whatever the
+                        // box's clip does with a square child.
+                        v_flex()
                             .w_full()
-                            .min_w_0()
-                            .pt(px(INPUT_PAD.0))
-                            .pr(px(INPUT_PAD.1))
-                            .pb(px(INPUT_PAD.2))
-                            .pl(px(INPUT_PAD.3))
-                            .min_h(INPUT_MIN)
+                            .flex_none()
+                            .bg(paint::color(palette.input))
+                            .rounded_b(BOX_INNER_RADIUS)
                             .child(
-                                // `XSmall`: the kit's own padding is the least one it
-                                // has, so the design's is not compounded with it.
-                                Textarea::new(&self.input)
-                                    .with_size(Size::XSmall)
-                                    .appearance(false)
-                                    .bordered(false)
-                                    .text_size(INPUT_FONT)
-                                    .line_height(INPUT_LINE)
+                                // The input's own box: the design's padding, and the
+                                // design's 62px floor under it (`INPUT_PAD`, `INPUT_MIN`).
+                                // The kit grows the *rows* inside, so the padding stays
+                                // outside them and a taller draft grows this wrapper with
+                                // it.
+                                div()
                                     .w_full()
-                                    .min_w_0(),
-                            ),
-                    )
-                    .child(foot),
+                                    .min_w_0()
+                                    .pt(px(INPUT_PAD.0))
+                                    .pr(px(INPUT_PAD.1))
+                                    .pb(px(INPUT_PAD.2))
+                                    .pl(px(INPUT_PAD.3))
+                                    .min_h(INPUT_MIN)
+                                    .child(
+                                        // `XSmall`: the kit's own padding is the least
+                                        // one it has, so the design's is not compounded
+                                        // with it.
+                                        Textarea::new(&self.input)
+                                            .with_size(Size::XSmall)
+                                            .appearance(false)
+                                            .bordered(false)
+                                            .text_size(INPUT_FONT)
+                                            .line_height(INPUT_LINE)
+                                            .w_full()
+                                            .min_w_0(),
+                                    ),
+                            )
+                            .child(foot),
+                    ),
             )
     }
 }
@@ -2417,6 +2466,32 @@ mod tests {
         });
     }
 
+    /// A lane's foot is the lane's own state: the segments its topic publishes, in
+    /// the server's words — the same chips the coordinator's box shows, drawn from
+    /// whatever the selected agent's topic carries. Nothing is composed here, so a
+    /// lane whose topic has not reached this box yet has an empty foot.
+    #[gpui_kit::test]
+    fn a_lanes_own_state_is_what_its_foot_shows(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.act(cx, |window, cx| {
+            let state = state_with(&["model", "thinking", "context", "cache_stats"]);
+            f.composer.update(cx, |composer, cx| {
+                composer.set_agent(&state, "lane 1", false, cx)
+            });
+            window.render_frame(cx);
+            let model = window.find(chip_id("model"));
+            let ctx = window.find(chip_id("context"));
+            let cache = window.find(chip_id("cache_stats"));
+            assert!(
+                model.visible() && ctx.visible() && cache.visible(),
+                "the lane's own segments are its chips"
+            );
+            assert_eq!(model.label(), Some("stub-a high"), "its model and effort");
+            assert_eq!(ctx.label(), Some("ctx 48k/936k (5%)"));
+            assert_eq!(cache.label(), Some("97% cached"));
+        });
+    }
+
     /// The todo strip: one title row with the count, and the list under it while it is
     /// open — folded to begin with, as the design's default.
     #[gpui_kit::test]
@@ -2447,6 +2522,56 @@ mod tests {
                 "the items are under the title row: {first:?} vs {row_:?}"
             );
             assert_eq!(window.find("todo-0").label(), Some("port the view model"));
+        });
+    }
+
+    /// A plan longer than the list's cap scrolls inside it: the list is the design's
+    /// 156px whatever the server sends, and a wheel moves the rows under it rather
+    /// than growing the box.
+    #[gpui_kit::test]
+    fn a_long_todo_list_caps_and_scrolls(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.act(cx, |window, cx| {
+            let todos: Vec<serde_json::Value> = (0..12)
+                .map(|n| serde_json::json!({"text": format!("step {n}"), "status": "pending"}))
+                .collect();
+            let state = TopicState::from_json(&serde_json::json!({
+                "model": {"id": "stub-a", "provider": "openai", "ready": true},
+                "segments": [
+                    {"name": "model", "order": 100, "side": "left", "text": "stub-a",
+                     "data": {}}
+                ],
+                "todos": todos,
+            }));
+            f.set_agent(&state, cx);
+            window.render_frame(cx);
+            window.click("todo-strip-row", cx);
+            window.render_frame(cx);
+
+            let list = window.find("todo-list").bounds();
+            assert!(
+                list.size.height <= px(156.),
+                "the list caps at the design's 156px: {list:?}"
+            );
+            let first = window.find("todo-0").bounds().top();
+            // A wheel down is a negative y delta in gpui's own units.
+            window.scroll(
+                "todo-list",
+                gpui_kit::ScrollDelta::Pixels(point(px(0.), px(-60.))),
+                cx,
+            );
+            window.render_frame(cx);
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("todo-list").bounds().size.height,
+                list.size.height,
+                "scrolling does not grow the list"
+            );
+            assert!(
+                window.find("todo-0").bounds().top() < first,
+                "the rows move under the cap: {} was {first:?}",
+                window.find("todo-0").bounds().top()
+            );
         });
     }
 
