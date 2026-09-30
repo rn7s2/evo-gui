@@ -22,9 +22,9 @@ test, and is ticked here with that evidence.
   `.tab-add` measured on the live page is 808 + 8 in window terms, 30×30, 4px bottom
   margin. Strip crops with the first tab and the `+` hovered, light and dark, read the
   design's surfaces (strip #E6E0D5/#1F1F1F, active #F6F2EA/#141414, hover #EFE9DF/#2A2A2A).
-  Remaining, accepted: the first tab starts at window x 92 (design 88) because the clip
-  box keeps the first tab's outward corner; the active tab's −0.5px hairline shadow is
-  not drawn.
+  Follow-up (61c02ed): first tab at x 88 (design 88) with its corner whole, the shown
+  tab's −0.5px hairline (pixel 216,211,200 vs the page's 216,211,201), × ink follows
+  hover. Not drawn: `.tab-row`'s 8px padding after the `+` (nothing follows it).
 
 ## New Swarm page
 
@@ -54,14 +54,14 @@ test, and is ticked here with that evidence.
 
 ## Swarm tab (composer)
 
-- [ ] C1 The model drawer lists no models and has no effort rail: `Composer::set_catalog`
+- [x] C1 The model drawer lists no models and has no effort rail: `Composer::set_catalog`
   is never called by the workspace, so `models`/`levels` stay empty — nothing to select.
-- [ ] C2 The composer box is filled with the kit's `input_background()` (= the page `--bg`
+- [x] C2 The composer box is filled with the kit's `input_background()` (= the page `--bg`
   in light, a grey mix in dark) instead of the design's `--input`; chips are
   `fg 6% over --input`, so they vanish into the box in both themes.
 - [ ] C3 No `N% cached` chip for a lane: lanes boot `--no-userspace`, so the user
   extension `340-cache-stats` never runs there and their `state.segments` carry no cache
   segment. The design shows it for every agent (`0% cached` on an idle lane).
-- [ ] C4 Selected text in the input is `muted` on `--input` — indistinguishable. Use the
+- [x] C4 Selected text in the input is `muted` on `--input` — indistinguishable. Use the
   design theme's own selection: light `#0069CC40` (rl-vscode-dimmed
   `editor.selectionBackground`), dark a primary-blue selection of the same weight.

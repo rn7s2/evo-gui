@@ -41,8 +41,8 @@ use gpui_kit::component::{
 use gpui_kit::prelude::*;
 use gpui_kit::{
     div, px, AnyElement, App, BoxShadow, Context, ElementId, Entity, FocusHandle, Focusable as _,
-    Hsla, IntoElement, Pixels, SharedString, Subscription, TestSupportExt as _, TextAlign,
-    WeakEntity, Window,
+    Hsla, IntoElement, MouseButton, Pixels, SharedString, Subscription, TestSupportExt as _,
+    TextAlign, WeakEntity, Window,
 };
 use serde_json::Value;
 use session::{HistoryEntry, LaunchPlan, Launcher, ModelOption, Role as Card};
@@ -77,12 +77,28 @@ const FIELD_COLUMN: Pixels = px(180.);
 const FIELD_GAP: Pixels = px(14.);
 /// `.field label{margin-bottom:4px}`.
 const LABEL_GAP: Pixels = px(4.);
-/// `.shad-select-wrap{height:34px}`, `.select-summary{padding:0 34px 0 10px}`.
+/// `.shad-select-wrap{height:34px}`; `.select-summary{padding:0 34px 0 10px}` — the right
+/// padding is what keeps the summary from running under the chevron, which is drawn at
+/// `.select-chevron{right:11px;top:5px}`, 16px on a 24px line.
 const SELECT_H: Pixels = px(34.);
 const SELECT_PAD: Pixels = px(10.);
+const SELECT_PAD_R: Pixels = px(34.);
+/// The kit's select puts the title at the top of the row it is given, where the design
+/// centres the summary's 18px line in the 34px box. Six pixels of head room is where the
+/// line's own ink lands on the design's (measured off the probe's picture: the summary's
+/// ink sits 12..24 from the box's top, as it does in the design).
+const SELECT_TEXT_TOP: Pixels = px(6.);
+const CHEVRON: &str = "⌄";
+const CHEVRON_RIGHT: Pixels = px(11.);
+const CHEVRON_TOP: Pixels = px(5.);
 /// `.number-input{height:28px}` and `.number-input button{width:25px}`.
 const COUNT_H: Pixels = px(28.);
 const COUNT_STEP: Pixels = px(25.);
+/// The kit's field centres its *line box* in the row it is given, and the UI font's own
+/// ascent leaves a 12px digit's cap about 3px below the middle of the box; the design's
+/// browser centres the digit itself. Six pixels of inset at the foot is what lifts the one
+/// line the field holds by those three (measured off the probe's own picture).
+const COUNT_TEXT_LIFT: Pixels = px(6.);
 /// `.history{margin-top:24px}`, `.history-head{gap:8px;margin-bottom:8px}`.
 const HISTORY_GAP: Pixels = px(24.);
 const HISTORY_HEAD_GAP: Pixels = px(8.);
@@ -91,15 +107,13 @@ const ROW_MIN_H: Pixels = px(58.);
 const ROW_GAP: Pixels = px(12.);
 const ROW_PAD_X: Pixels = px(12.);
 const ROW_PAD_Y: Pixels = px(8.);
-/// `.badge{padding:0 7px}`, `.folder-card-large{padding:20px;gap:8px}` and
+/// `.folder-card-large{padding:20px;gap:8px}` and
 /// `.folder-card-large .folder-icon{margin-bottom:3px}`.
 const BADGE_PAD_X: Pixels = px(7.);
 const FOLDER_PAD: Pixels = px(20.);
 const FOLDER_GAP: Pixels = px(8.);
 const FOLDER_ICON_GAP: Pixels = px(3.);
 const FOLDER_ICON: Pixels = px(36.);
-/// `.folder-card-large .folder-hint{max-width:180px}`.
-const FOLDER_HINT_W: Pixels = px(180.);
 
 /// The type sizes: `.empty-title{font-size:20px;line-height:28px}`, `.field label{12px}`,
 /// `.select-summary span{13px;line-height:18px}`, `.config-title{14px}`, `.badge{11px}`
@@ -111,6 +125,16 @@ const TINY: Pixels = px(11.);
 const FIELD_TEXT: Pixels = px(13.);
 const FIELD_LINE: Pixels = px(18.);
 const CARD_TITLE: Pixels = px(14.);
+/// The line heights the design gets for free: its `.app` sets `line-height:1.5`, so a rule
+/// that names only a font size lays out at one and a half of it — 18px for the 12px labels
+/// and facts, 21 for the 14px titles and the subtitle. gpui's own default is a little
+/// taller, which is what pushed the first field's box a few pixels down the card.
+const SMALL_LINE: Pixels = px(18.);
+const BODY_LINE: Pixels = px(21.);
+/// `.worker-count>label{line-height:16px}` — the one line the design names.
+const COUNT_LABEL_LINE: Pixels = px(16.);
+/// `.badge` is 11px on the inherited 1.5.
+const TINY_LINE: Pixels = px(16.5);
 
 /// The check's problem lines under the cards (§9): one calm line each, and a click opens
 /// the control the line is about. There are none when the launch is fine.
@@ -157,7 +181,6 @@ const MODEL_LABEL: &str = "Model";
 const EFFORT_LABEL: &str = "Effort";
 const COUNT_LABEL: &str = "Count";
 const FOLDER_LABEL: &str = "Select folder…";
-const FOLDER_HINT: &str = "The swarm starts in the folder you pick";
 const HISTORY_TITLE: &str = "History";
 
 gpui_kit::actions!(
@@ -177,6 +200,20 @@ gpui_kit::actions!(
 /// olive on the light page and an amber on the dark one — readable either way.
 fn warning_ink(theme: &Theme) -> Hsla {
     theme.warning
+}
+
+/// `font-weight:500`, as much of it as this app can draw.
+///
+/// The design names 500 in five places on this page — the model field's provider, the two
+/// effort levels, the folder card's label and a history row's title. This app's font stack
+/// has no medium face: gpui resolves the theme's `.SystemUIFont` by family, and asking it
+/// for 500 rasterises *exactly* like 400 (measured off the probe's own pictures — the two
+/// weights' ink is identical to the pixel), which is why the provider used to weigh
+/// whatever its id did. The nearest face that really is heavier is the semibold, so that is
+/// what every 500 on this page wears; the day the theme carries a family with a medium
+/// face, this is the one place to change.
+fn medium<T: Styled>(element: T) -> T {
+    element.font_semibold()
 }
 
 /// `box-shadow: 0 0 0 <spread>px <colour>` — the ring the design draws on a focused field.
@@ -220,12 +257,34 @@ impl From<(&ModelOption, Card)> for ModelItem {
     }
 }
 
+impl ModelItem {
+    /// The design's own line for a registration, in the trigger and in the menu alike:
+    /// `<b>provider</b> · id`.
+    ///
+    /// The design's `b` is `font-weight:500`, and this app's font stack has no 500:
+    /// gpui's matcher rounds it to the regular face (measured — 400 and 500 rasterise
+    /// identically in this window), which would leave the provider weighing exactly what
+    /// the id does. The nearest face that *is* heavier is the semibold, and that is what
+    /// the design's own picture shows (`medium`).
+    fn summary(&self) -> AnyElement {
+        h_flex()
+            .min_w_0()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .child(medium(div().flex_none()).child(self.provider.clone()))
+            .child(div().flex_none().child(" · "))
+            .child(div().min_w_0().child(self.id.clone()))
+            .into_any_element()
+    }
+}
+
 impl SelectItem for ModelItem {
     type Value = SharedString;
 
-    /// What a screen reader hears, and what the menu's own first line is.
+    /// What a screen reader hears, and what the menu's own first line is — the design's own
+    /// `<option>` text, `provider · label`.
     fn title(&self) -> SharedString {
-        self.id.clone()
+        SharedString::from(format!("{} · {}", self.provider, self.id))
     }
 
     fn value(&self) -> &Self::Value {
@@ -240,22 +299,18 @@ impl SelectItem for ModelItem {
     }
 
     /// A model this card cannot run is shown, not hidden: seeing why is the point (§5.6).
+    ///
+    /// Disabled is a row that cannot be *picked* here — nothing more. A field the check
+    /// resolved onto one still shows it in its trigger, which is the only thing that can
+    /// say which model the launch would carry while the problem line under the cards says
+    /// why it cannot run.
     fn disabled(&self) -> bool {
         !self.available
     }
 
     /// The trigger's own line, which is the design's markup: `<b>provider</b> · id`.
     fn display_title(&self) -> Option<AnyElement> {
-        Some(
-            h_flex()
-                .min_w_0()
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .child(div().flex_none().font_medium().child(self.provider.clone()))
-                .child(div().flex_none().child(" · "))
-                .child(div().min_w_0().child(self.id.clone()))
-                .into_any_element(),
-        )
+        Some(self.summary())
     }
 
     fn render(&self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
@@ -268,7 +323,7 @@ impl SelectItem for ModelItem {
         v_flex()
             .gap_0p5()
             .py_0p5()
-            .child(div().child(self.id.clone()))
+            .child(self.summary())
             .when(!detail.is_empty(), |row| {
                 row.child(div().text_xs().text_color(detail_color).child(detail))
             })
@@ -356,6 +411,12 @@ impl Choosers {
                 state.folder_focus.clone(),
             )
         };
+        // The keyboard is placed by the app, not by a person: until one of them touches
+        // the page the field wears no ring, which is how the design opens.
+        self.state.update(cx, |state, cx| {
+            state.untouched = true;
+            cx.notify();
+        });
         window.focus(&field, cx);
         if window.focused(cx).as_ref() == Some(&field) {
             return true;
@@ -390,6 +451,20 @@ struct EmptyTabState {
     workers: Entity<SelectState<Vec<ModelItem>>>,
     /// The count field, and the two steppers beside it.
     count: Entity<InputState>,
+    /// The count the box is showing. The field is the launcher's own number, but it is
+    /// written only when that number moves: a render that wrote it every frame would
+    /// overwrite a keystroke before its event had reached the launcher.
+    count_shown: u16,
+    /// The check's answer resolved the two model fields to something else, and the selects
+    /// showing them have not been rebuilt yet.
+    ///
+    /// A check runs off the thread that draws, and its answer arrives where there is no
+    /// [`Window`] to build a select in — and the window a tab is not drawn in has none
+    /// either, so the answer cannot simply carry one. It marks the fields instead, and the
+    /// next frame rebuilds them: the check is newer than the catalog, so the catalog's own
+    /// resolution — the first registration the card can run — is what the fields would keep
+    /// showing otherwise.
+    fields_stale: bool,
     /// The home directory the `~` paths are shortened around.
     home: Option<String>,
     /// The catalog has arrived, from the cache or from a server: until it has, the model
@@ -397,6 +472,13 @@ struct EmptyTabState {
     catalog: bool,
     /// The catalog could not be read: shown under the cards, where the check's lines are.
     catalog_error: Option<String>,
+    /// Nobody has touched this page since it opened.
+    ///
+    /// The app hands the keyboard to the page's first control when a tab is shown — the
+    /// design's own `:focus-within` ring would then be on at rest, where the design shows
+    /// none. So the field's ring is only attached once a person has clicked or typed
+    /// anywhere on the page; closing and reopening the tab puts it back.
+    untouched: bool,
     /// The `evo-swarm` a check runs. The app's own path from Settings, so the check is
     /// about the swarm this app would really spawn.
     swarm_bin: PathBuf,
@@ -427,6 +509,7 @@ struct EmptyTabState {
 impl EmptyTabState {
     fn new(window: &mut Window, tab: WeakEntity<TabContent>, cx: &mut Context<Self>) -> Self {
         let launcher = Launcher::new();
+        let workers_before = launcher.workers();
         let coordinator = model_state(&launcher, Card::Coordinator, window, cx);
         let workers = model_state(&launcher, Card::Lanes, window, cx);
         let count = cx.new(|cx| {
@@ -463,9 +546,12 @@ impl EmptyTabState {
             coordinator,
             workers,
             count,
+            count_shown: workers_before,
+            fields_stale: false,
             home: std::env::var("HOME").ok(),
             catalog: false,
             catalog_error: None,
+            untouched: true,
             // The app hands its own path in as soon as it can; until then this is where
             // the installed binary is (§1).
             swarm_bin: cli::swarm_bin(),
@@ -514,13 +600,10 @@ impl EmptyTabState {
             .parse::<u16>()
             .unwrap_or(0)
             .clamp(session::WORKERS_MIN, session::WORKERS_MAX);
-        if self.launcher.set_workers(count) {
+        let moved = self.launcher.set_workers(count);
+        put_count(&self.count, &mut self.count_shown, count, window, cx);
+        if moved {
             cx.notify();
-        }
-        if typed.as_ref() != count.to_string() {
-            self.count.update(cx, |state, cx| {
-                state.set_value(count.to_string(), window, cx)
-            });
         }
     }
 
@@ -533,15 +616,20 @@ impl EmptyTabState {
             current.saturating_sub(1)
         };
         if self.launcher.set_workers(next) {
-            let count = self.launcher.workers().to_string();
-            self.count
-                .update(cx, |state, cx| state.set_value(count, window, cx));
+            put_count(
+                &self.count,
+                &mut self.count_shown,
+                self.launcher.workers(),
+                window,
+                cx,
+            );
             cx.notify();
         }
     }
 
     /// Rebuild the two model fields and the count from the launcher: the catalog arrived,
-    /// or the resolved values changed with it.
+    /// the resolved values changed with it, or a check answered somewhere there was no
+    /// window to rebuild them in (`fields_stale`).
     fn sync_fields(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         for (role, field) in [
             (Card::Coordinator, self.coordinator.clone()),
@@ -559,11 +647,15 @@ impl EmptyTabState {
 
     /// The count box reads what the launcher holds — the only count there is, so the box
     /// cannot show one number while the launch passes another.
+    ///
+    /// It is pulled on every frame, but only a *moved* count is written into the field:
+    /// typing reaches the launcher one event later than the keystroke that caused it, so a
+    /// box that blindly painted the model would wipe the digits under the caret, one frame
+    /// after someone typed them.
     fn sync_count(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let workers = self.launcher.workers().to_string();
-        if self.count.read(cx).value().as_ref() != workers {
-            self.count
-                .update(cx, |state, cx| state.set_value(workers, window, cx));
+        let workers = self.launcher.workers();
+        if workers != self.count_shown {
+            put_count(&self.count, &mut self.count_shown, workers, window, cx);
         }
     }
 
@@ -614,7 +706,7 @@ impl EmptyTabState {
         let revision = self.check_revision;
 
         if let CheckProbe::Fixed(report) = self.check_probe.clone() {
-            self.launcher.set_check(&check_body(&report));
+            self.fields_stale |= self.launcher.set_check(&check_body(&report));
             self.settle(&report.problems, revision, cx);
             return;
         }
@@ -644,7 +736,10 @@ impl EmptyTabState {
                 if state.check_revision != revision {
                     return;
                 }
-                state.launcher.set_check(&report);
+                // The answer is not only its lines: it is what the two fields resolve to,
+                // and they are rebuilt on the next frame, which has a window (see
+                // [`EmptyTabState::fields_stale`]).
+                state.fields_stale |= state.launcher.set_check(&report);
                 state.settle(&problems, revision, cx);
             });
         })
@@ -683,6 +778,17 @@ impl EmptyTabState {
         window.focus(&handle, cx);
     }
 
+    /// The page was touched — a click or a keystroke anywhere on it. That is what puts the
+    /// focus ring on the field the keyboard was placed in, so a page nobody has touched
+    /// opens the way the design draws it.
+    fn by_person(&mut self, cx: &mut Context<Self>) {
+        if self.untouched {
+            self.untouched = false;
+            cx.notify();
+        }
+    }
+
+    /// The catalog could not be learned: one more line under the cards, in evo's own words.
     fn set_catalog_error(&mut self, error: Option<String>, cx: &mut Context<Self>) {
         self.catalog_error = error.filter(|error| !error.trim().is_empty());
         cx.notify();
@@ -756,6 +862,7 @@ impl EmptyTabState {
             .child(
                 div()
                     .text_size(px(design::FONT_BASE - 2.))
+                    .line_height(BODY_LINE)
                     .text_color(cx.theme().muted_foreground)
                     .child(SUBTITLE),
             )
@@ -837,6 +944,7 @@ impl EmptyTabState {
         let border = theme.border;
         let primary = theme.primary;
         let muted = theme.muted;
+        let untouched = self.untouched;
         // A field that resolved no model says so in the box, in evo's own words: the click
         // still opens the menu, which is where another registration would come from.
         let note = self
@@ -850,6 +958,7 @@ impl EmptyTabState {
                 div()
                     .mb(LABEL_GAP)
                     .text_size(SMALL)
+                    .line_height(SMALL_LINE)
                     .text_color(theme.muted_foreground)
                     .child(MODEL_LABEL),
             )
@@ -875,7 +984,30 @@ impl EmptyTabState {
                     // var(--primary);box-shadow:0 0 0 2px var(--muted)}`. Painted by the
                     // element that carries the handle, so it follows the keyboard without a
                     // re-render of the page.
-                    .focus(move |style| style.border_color(primary).shadow(vec![ring(2., muted)]))
+                    //
+                    // The one focus the design has no ring for is the one the app itself
+                    // places: opening a tab hands the keyboard to the field before anyone
+                    // has touched the page, and the design shows nothing until someone
+                    // does. So the ring is attached only once a person has been here
+                    // (`EmptyTabState::untouched`).
+                    .when(!untouched, |box_| {
+                        box_.focus(move |style| {
+                            style.border_color(primary).shadow(vec![ring(2., muted)])
+                        })
+                    })
+                    .child(
+                        // `.select-chevron{position:absolute;right:11px;top:5px}`: the
+                        // design draws its own chevron, under the control, so the control's
+                        // trailing icon is asked for nothing.
+                        div()
+                            .absolute()
+                            .right(CHEVRON_RIGHT)
+                            .top(CHEVRON_TOP)
+                            .text_size(px(design::FONT_BASE))
+                            .line_height(px(design::FONT_BASE * 1.5))
+                            .text_color(theme.muted_foreground)
+                            .child(CHEVRON),
+                    )
                     .child(
                         // The control fills the frame and draws nothing of its own: the
                         // border, the radius and the surface are the box's.
@@ -889,12 +1021,22 @@ impl EmptyTabState {
                             .placeholder(note)
                             .w_full()
                             .h_full()
-                            .px(SELECT_PAD)
+                            // `.select-summary{padding:0 34px 0 10px}` — and no vertical
+                            // inset of its own: the 18px line is centred by the trigger.
+                            .pl(SELECT_PAD)
+                            .pr(SELECT_PAD_R)
+                            .pt(SELECT_TEXT_TOP)
+                            .pb(px(0.))
                             .text_size(FIELD_TEXT)
                             .line_height(FIELD_LINE)
                             .text_color(theme.foreground)
                             .menu_width(px(340.))
-                            .accessibility_label(label),
+                            .accessibility_label(label)
+                            // The design draws its own chevron (the box's `.select-chevron`
+                            // above); the kit's trailing caret is an empty icon, so the
+                            // control keeps the design's own layout — `padding-right:34px`
+                            // and no second chevron.
+                            .icon(Icon::empty()),
                     ),
             )
     }
@@ -920,15 +1062,18 @@ impl EmptyTabState {
                     .child(
                         div()
                             .text_size(SMALL)
+                            .line_height(SMALL_LINE)
                             .text_color(theme.muted_foreground)
                             .child(EFFORT_LABEL),
                     )
                     .child(
-                        div()
-                            .text_size(SMALL)
-                            .font_medium()
-                            .text_color(theme.foreground)
-                            .child(level),
+                        medium(
+                            div()
+                                .text_size(SMALL)
+                                .line_height(SMALL_LINE)
+                                .text_color(theme.foreground),
+                        )
+                        .child(level),
                     ),
             )
             .child(self.effort_slider(role, window, cx))
@@ -982,6 +1127,8 @@ impl EmptyTabState {
         let ink = theme.muted_foreground;
         // The design's steppers are one tone, with no hover or pressed rule of their own:
         // `.number-input button{border:0;background:var(--muted);color:var(--muted-fg)}`.
+        // They carry no font size of their own either, so they inherit the page's 16 — the
+        // glyphs are as tall as the field's text is wide.
         let step = |id: &'static str, label: &'static str, up: bool, cx: &Context<Self>| {
             Button::new(id)
                 .rounded(px(0.))
@@ -990,7 +1137,8 @@ impl EmptyTabState {
                 .w(COUNT_STEP)
                 .h_full()
                 .flex_none()
-                .text_size(SMALL)
+                .text_size(px(design::FONT_BASE))
+                .line_height(px(design::FONT_BASE * 1.5))
                 .child(label)
                 // The design's own `onClick`: a click steps, and a focused button's
                 // `Enter` or `Space` is a click too.
@@ -1007,6 +1155,7 @@ impl EmptyTabState {
                 div()
                     .flex_none()
                     .text_size(SMALL)
+                    .line_height(COUNT_LABEL_LINE)
                     .text_color(theme.muted_foreground)
                     .child(COUNT_LABEL),
             )
@@ -1037,10 +1186,21 @@ impl EmptyTabState {
                                 // `.number-input input{border:0;background:transparent}`:
                                 // the box's own surface is the card's, and the field only
                                 // holds the digits.
+                                //
+                                // The kit's field brings its own 10px/8px inset and a
+                                // 1.25 line for a 32px row; in a 28px box that pushed the
+                                // digits low and, with the field's own align, left. The
+                                // design's input is `flex:1`, `padding:1px 2px`,
+                                // `text-align:center` in a 26px line — so the field takes
+                                // the box's own height and centres its one line in it.
                                 Input::new(&self.count)
                                     .appearance(false)
                                     .bg(theme.transparent)
                                     .h_full()
+                                    .px(px(0.))
+                                    .pt(px(0.))
+                                    .pb(COUNT_TEXT_LIFT)
+                                    .text_align(TextAlign::Center)
                                     .text_size(SMALL)
                                     .aria_label(COUNT_LABEL),
                             ),
@@ -1085,16 +1245,7 @@ impl EmptyTabState {
                         .text_color(theme.foreground),
                 ),
             )
-            .child(div().text_size(px(14.)).font_medium().child(FOLDER_LABEL))
-            .child(
-                div()
-                    .max_w(FOLDER_HINT_W)
-                    .text_size(SMALL)
-                    .line_height(px(16.))
-                    .text_center()
-                    .text_color(theme.muted_foreground)
-                    .child(FOLDER_HINT),
-            )
+            .child(medium(div().text_size(CARD_TITLE).line_height(BODY_LINE)).child(FOLDER_LABEL))
     }
 
     /// What `evo-swarm check --json` found wrong with this launch (§9), and what the
@@ -1227,6 +1378,7 @@ impl EmptyTabState {
                     .child(
                         div()
                             .text_size(CARD_TITLE)
+                            .line_height(BODY_LINE)
                             .font_semibold()
                             .child(HISTORY_TITLE),
                     )
@@ -1235,6 +1387,7 @@ impl EmptyTabState {
                             .id(HISTORY_COUNT_ID)
                             .test_support()
                             .text_size(SMALL)
+                            .line_height(SMALL_LINE)
                             .text_color(cx.theme().muted_foreground)
                             .child(count),
                     ),
@@ -1258,6 +1411,7 @@ impl EmptyTabState {
                 .w_full()
                 .pb(px(8.))
                 .text_size(CARD_TITLE)
+                .line_height(BODY_LINE)
                 .text_color(cx.theme().muted_foreground)
                 .child(note)
                 .into_any_element();
@@ -1305,11 +1459,11 @@ impl EmptyTabState {
                 .test_support()
                 .flex_none()
                 .px(BADGE_PAD_X)
-                .py(px(1.))
                 .rounded(px(999.))
                 .bg(theme.muted)
                 .text_color(muted)
                 .text_size(TINY)
+                .line_height(TINY_LINE)
                 .child(OPEN_AT_QUIT_TEXT)
                 .into_any_element()
         });
@@ -1339,8 +1493,11 @@ impl EmptyTabState {
                 });
             }))
             .child(
+                // `.history-icon{color:var(--muted-fg)}`: the row's own glyph is quiet,
+                // the title beside it is not.
                 div()
                     .flex_none()
+                    .text_color(muted)
                     .child(Icon::new(IconName::Folder).with_size(ROW_ICON)),
             )
             .child(
@@ -1354,14 +1511,16 @@ impl EmptyTabState {
                             .min_w_0()
                             .gap(px(8.))
                             .child(
-                                div()
-                                    .min_w_0()
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_ellipsis()
-                                    .text_size(px(14.))
-                                    .font_medium()
-                                    .child(row.title.clone()),
+                                medium(
+                                    div()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_ellipsis()
+                                        .text_size(CARD_TITLE)
+                                        .line_height(BODY_LINE),
+                                )
+                                .child(row.title.clone()),
                             )
                             .children(badge),
                     )
@@ -1371,6 +1530,7 @@ impl EmptyTabState {
                             .min_w_0()
                             .gap(px(5.))
                             .text_size(SMALL)
+                            .line_height(SMALL_LINE)
                             .text_color(muted)
                             .child(
                                 div()
@@ -1385,9 +1545,12 @@ impl EmptyTabState {
                     ),
             )
             .child(
+                // `.resume-arrow{color:var(--muted-fg)}` and nothing else: the glyph is the
+                // page's own base 16 on its 1.5 line.
                 div()
                     .flex_none()
-                    .text_size(px(14.))
+                    .text_size(px(design::FONT_BASE))
+                    .line_height(px(design::FONT_BASE * 1.5))
                     .text_color(muted)
                     .child(RESUME_ARROW),
             )
@@ -1396,6 +1559,12 @@ impl EmptyTabState {
 
 impl Render for EmptyTabState {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // A check's answer resolved the two model fields somewhere there was no window to
+        // rebuild a select in; this is that window.
+        if self.fields_stale {
+            self.fields_stale = false;
+            self.sync_fields(window, cx);
+        }
         // The count box shows what the launcher holds, whoever moved it: the catalog
         // arrived, a check resolved another count, or the person typed one.
         self.sync_count(window, cx);
@@ -1408,6 +1577,13 @@ impl Render for EmptyTabState {
             .pt(PAGE_TOP)
             .pb(PAGE_BOTTOM)
             .px(PAGE_X)
+            // Anything a person does on the page is what puts the focus ring on the field
+            // the keyboard was placed in when the tab opened (`untouched`).
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| this.by_person(cx)),
+            )
+            .capture_key_down(cx.listener(|this, _, _, cx| this.by_person(cx)))
             .child(
                 v_flex()
                     .id("empty-tab-block")
@@ -1429,6 +1605,25 @@ fn slot(role: Card) -> usize {
     match role {
         Card::Coordinator => 0,
         Card::Lanes => 1,
+    }
+}
+
+/// Put the count box on a number: its digits, and the count it is now known to show.
+///
+/// The second half is what keeps a render from undoing a keystroke: the field's own event
+/// reaches the launcher one turn later, so the box is written from the model only when the
+/// model has moved past the number it already shows.
+fn put_count(
+    field: &Entity<InputState>,
+    shown: &mut u16,
+    count: u16,
+    window: &mut Window,
+    cx: &mut Context<EmptyTabState>,
+) {
+    *shown = count;
+    let text = count.to_string();
+    if field.read(cx).value().as_ref() != text {
+        field.update(cx, |state, cx| state.set_value(text, window, cx));
     }
 }
 
@@ -1995,7 +2190,8 @@ mod tests {
             );
         });
 
-        // A launch from here passes exactly what the controls show.
+        // What the controls show is not what a launch passes: nobody has touched one, so
+        // the launch carries no flags and evo resolves the lot itself (§9).
         let tab = f.tab.clone();
         f.act(cx, |_, cx| {
             tab.update(cx, |tab, cx| {
@@ -2007,12 +2203,173 @@ mod tests {
             f.events(),
             vec![TabContentEvent::Launch {
                 folder,
+                plan: LaunchPlan::default(),
+            }]
+        );
+    }
+
+    /// §7.2/§9: `check` is newer than the catalog, and what it resolved is what the two
+    /// fields show — including a registration this card cannot run, whose problem line is
+    /// what says why. The catalog on its own answers with the first registration the card
+    /// *can* run, which is a different model: the real HOME's `super_relay · seed-evolving`
+    /// was that answer, kept after the check had resolved another one.
+    #[gpui_kit::test]
+    fn the_checks_model_reaches_the_fields(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.set_catalog(cx, &catalog_body());
+        f.render(cx);
+
+        let state = f.state(cx);
+        f.act(cx, |_, cx| {
+            let state = state.read(cx);
+            // On the catalog alone: its own default, which both cards can run.
+            assert_eq!(
+                shown(state, Card::Coordinator, cx),
+                "claude-opus-4.5@anthropic"
+            );
+            assert_eq!(shown(state, Card::Lanes, cx), "claude-opus-4.5@anthropic");
+        });
+
+        // The check resolves a model that cannot run here for the coordinator, and one no
+        // lane can register for the lanes.
+        f.set_check(
+            cx,
+            check(
+                ("claude-sonnet-5", "proxy"),
+                ("ark-deepseek-v4.1-flash", "aiden"),
+                Vec::new(),
+            ),
+        );
+        f.render(cx);
+
+        f.act(cx, |_, cx| {
+            let state = state.read(cx);
+            assert_eq!(
+                shown(state, Card::Coordinator, cx),
+                "claude-sonnet-5@proxy",
+                "the field shows what the check resolved, ready or not"
+            );
+            assert_eq!(
+                shown(state, Card::Lanes, cx),
+                "ark-deepseek-v4.1-flash@aiden"
+            );
+            // …which is a registration this card cannot launch on as it stands: the field
+            // still shows it, and the check's own line under the cards explains it.
+            let model = state.launcher.chosen(Card::Coordinator).expect("a model");
+            assert!(!model.usable(Card::Coordinator));
+            assert_eq!(model.ready_reason.as_deref(), Some("no credential"));
+        });
+    }
+
+    /// §7.2: a registration a person picked is theirs — a later check resolves around it,
+    /// and the field stays where they put it while the card nobody touched follows.
+    #[gpui_kit::test]
+    fn a_picked_model_survives_a_later_check(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.set_catalog(cx, &catalog_body());
+        f.render(cx);
+        let state = f.state(cx);
+        // The person picks the ark registration in the coordinator's field: the event the
+        // select itself emits when a row is clicked.
+        f.act(cx, |window, cx| {
+            state.update(cx, |state, cx| {
+                state.on_choose(
+                    Card::Coordinator,
+                    &SelectEvent::Confirm(Some(SharedString::from(
+                        "ark-deepseek-v4.1-flash@aiden",
+                    ))),
+                    window,
+                    cx,
+                )
+            });
+        });
+        f.render(cx);
+
+        // A newer check resolves another registration for the same card.
+        f.set_check(
+            cx,
+            check(
+                ("claude-sonnet-5", "proxy"),
+                ("claude-sonnet-5", "proxy"),
+                Vec::new(),
+            ),
+        );
+        f.render(cx);
+
+        f.act(cx, |_, cx| {
+            let state = state.read(cx);
+            assert_eq!(
+                state.launcher.chosen_key(Card::Coordinator),
+                Some("ark-deepseek-v4.1-flash@aiden")
+            );
+            assert_eq!(
+                shown(state, Card::Coordinator, cx),
+                "ark-deepseek-v4.1-flash@aiden",
+                "the field stays where the person put it"
+            );
+            assert_eq!(
+                shown(state, Card::Lanes, cx),
+                "claude-sonnet-5@proxy",
+                "the card nobody touched follows the check"
+            );
+        });
+    }
+
+    /// What one card's field shows: the registration the select holds, which is what the
+    /// trigger draws.
+    fn shown(state: &EmptyTabState, role: Card, cx: &App) -> String {
+        let field = match role {
+            Card::Coordinator => &state.coordinator,
+            Card::Lanes => &state.workers,
+        };
+        field
+            .read(cx)
+            .selected_value()
+            .map(|key| key.to_string())
+            .unwrap_or_default()
+    }
+
+    /// §7.2/§9: a control a person set is the flag a launch passes — and it is the *only*
+    /// one: the rest are left to evo's own chains, exactly as the check reported them.
+    #[gpui_kit::test]
+    fn a_control_a_person_moved_is_the_only_flag_a_launch_passes(cx: &mut TestAppContext) {
+        let f = open(cx);
+        let folder = PathBuf::from("/Users/you/coding/foo");
+        f.set_catalog(cx, &catalog_body());
+        f.set_check(
+            cx,
+            CheckReport {
+                thinking: Some("xhigh".to_string()),
+                lane_thinking: Some("low".to_string()),
+                workers: Some(12),
+                ..check(
+                    ("claude-opus-4.5", "anthropic"),
+                    ("claude-opus-4.5", "anthropic"),
+                    Vec::new(),
+                )
+            },
+        );
+        f.render(cx);
+        let state = f.state(cx);
+        let tab = f.tab.clone();
+        f.act(cx, |_, cx| {
+            tab.update(cx, |tab, cx| {
+                tab.set_folder_picker(Some(folder.clone()), cx)
+            })
+        });
+        // A person steps the count up once, and leaves everything else alone.
+        f.act(cx, |window, cx| {
+            state.update(cx, |state, cx| state.step_count(true, window, cx));
+        });
+        f.act(cx, |window, cx| window.click(FOLDER_ID, cx));
+        assert_eq!(
+            f.events(),
+            vec![TabContentEvent::Launch {
+                folder,
+                // The count is theirs; the models and the efforts stay evo's own.
                 plan: LaunchPlan {
-                    model: Some(("claude-opus-4.5".to_string(), "anthropic".to_string())),
-                    thinking: Some("xhigh".to_string()),
-                    workers: Some(12),
-                    lanes_model: Some(("claude-opus-4.5".to_string(), "anthropic".to_string())),
-                    lane_thinking: Some("low".to_string()),
+                    workers: Some(13),
+                    ..LaunchPlan::default()
                 },
             }]
         );
@@ -2198,6 +2555,79 @@ mod tests {
         }
     }
 
+    /// Typing a count: the digits stay in the field — a render must not paint the launcher
+    /// over a keystroke the launcher has not heard about yet — and the launcher ends on
+    /// what was typed.
+    #[gpui_kit::test]
+    fn a_count_typed_with_the_keyboard_lands_in_the_field(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.render(cx);
+        let state = f.state(cx);
+        f.act(cx, |window, cx| {
+            window.click(COUNT_FIELD_ID, cx);
+            window.press("cmd-a", cx);
+            window.input("12", cx);
+            // The frame right after the keystrokes: the field holds them.
+            window.render_frame(cx);
+            assert_eq!(
+                state.read(cx).count.read(cx).value().as_ref(),
+                "12",
+                "the field shows what was typed"
+            );
+        });
+        // The field's own change reaches the launcher on the next turn of the loop.
+        f.act(cx, |_, cx| {
+            assert_eq!(state.read(cx).launcher.workers(), 12);
+        });
+    }
+
+    /// A count typed out of the range the design allows is clamped *in the field*, the way
+    /// the design's own `onChange` is: the box is put back to the number the launch would
+    /// pass, so it never shows one number while the launch carries another.
+    ///
+    /// [`a_count_typed_out_of_range_is_put_back_in_range`] asks the state the same question
+    /// through `on_type`; this one goes through the field's own `Change` and looks after a
+    /// frame, which is the path the per-frame sync used to clobber.
+    #[gpui_kit::test]
+    fn a_count_typed_by_hand_is_clamped_without_a_frame_in_between(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.render(cx);
+        let state = f.state(cx);
+        for (typed, expected) in [("99", "64"), ("0", "1")] {
+            f.act(cx, |window, cx| {
+                window.click(COUNT_FIELD_ID, cx);
+                window.press("cmd-a", cx);
+                window.input(typed, cx);
+            });
+            f.act(cx, |_, cx| {
+                assert_eq!(
+                    state.read(cx).count.read(cx).value().as_ref(),
+                    expected,
+                    "typing {typed:?}"
+                );
+                assert_eq!(state.read(cx).launcher.workers().to_string(), expected);
+            });
+        }
+    }
+
+    /// Backspace to an empty box is a count of one — the design's `n || 1`.
+    #[gpui_kit::test]
+    fn an_empty_count_box_is_a_count_of_one(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.render(cx);
+        let state = f.state(cx);
+        f.act(cx, |window, cx| {
+            window.click(COUNT_FIELD_ID, cx);
+            window.press("cmd-a", cx);
+            window.press("backspace", cx);
+            assert_eq!(state.read(cx).count.read(cx).value().as_ref(), "");
+        });
+        f.act(cx, |_, cx| {
+            assert_eq!(state.read(cx).launcher.workers(), session::WORKERS_MIN);
+            assert_eq!(state.read(cx).count.read(cx).value().as_ref(), "1");
+        });
+    }
+
     /// The two steppers walk one count at a time and stop at the ends.
     #[gpui_kit::test]
     fn the_count_steppers_walk_and_stop_at_the_ends(cx: &mut TestAppContext) {
@@ -2351,10 +2781,10 @@ mod tests {
         });
     }
 
-    /// §7.2: the folder card launches in the folder it picked, with the flags the controls
-    /// show — the two models, the two rungs and the count.
+    /// §7.2: the folder card launches in the folder it picked. Nobody has touched a
+    /// control, so the plan carries no flags and evo resolves the launch itself (§9).
     #[gpui_kit::test]
-    fn a_chosen_folder_launches_with_the_resolved_plan(cx: &mut TestAppContext) {
+    fn a_chosen_folder_launches_with_no_flags_while_nobody_set_a_control(cx: &mut TestAppContext) {
         let f = open(cx);
         f.set_catalog(cx, &catalog_body());
         let folder = PathBuf::from("/Users/you/coding/foo");
@@ -2371,13 +2801,7 @@ mod tests {
             f.events(),
             vec![TabContentEvent::Launch {
                 folder,
-                plan: LaunchPlan {
-                    model: Some(("claude-opus-4.5".to_string(), "anthropic".to_string())),
-                    thinking: Some("medium".to_string()),
-                    workers: Some(6),
-                    lanes_model: Some(("claude-opus-4.5".to_string(), "anthropic".to_string())),
-                    lane_thinking: Some("medium".to_string()),
-                },
+                plan: LaunchPlan::default(),
             }]
         );
     }
