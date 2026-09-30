@@ -129,8 +129,8 @@ pub fn apply(values: &SettingsValues, cx: &mut App) {
     // The next tab this window opens starts with them. A running tab keeps the
     // binaries it started with, and the panel says so in its own note.
     if let Some(view) = crate::quit::view(cx) {
-        let config = Arc::new(crate::swarm_config(cx));
-        view.update(cx, |view, cx| view.set_swarm_config(config, cx));
+        let env = Arc::new(crate::launch_env(cx));
+        view.update(cx, |view, cx| view.set_launch_env(env, cx));
     }
 }
 

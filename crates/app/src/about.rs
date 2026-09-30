@@ -80,22 +80,6 @@ pub fn summary(versions: &Versions) -> String {
     )
 }
 
-/// The `~` a path is shortened around, and the line the empty tab shows when the
-/// swarm binary cannot be run at all.
-///
-/// `probed` is what `--version` answered, or `None` when the path is not a binary
-/// that runs — the one case with a line to show. Nothing can start from a swarm
-/// binary that is not there, so the tab says it before the user picks a folder
-/// rather than after a launch fails (§9.7), and points at where it is fixed.
-pub fn missing_swarm(bin: &Path, probed: Option<&str>, home: Option<&str>) -> Option<String> {
-    probed.is_none().then(|| {
-        format!(
-            "evo-swarm not found at {} — fix it in Settings…",
-            tilde(bin, home)
-        )
-    })
-}
-
 /// A path as a person reads it: `$HOME` becomes `~`.
 pub fn tilde(path: &Path, home: Option<&str>) -> String {
     let text = path.display().to_string();
@@ -120,8 +104,6 @@ pub fn start(cx: &mut App) {
             shell.log.clone(),
         )
     };
-    // Kept for the message the empty tab shows when this is not a binary that runs.
-    let named = swarm.clone();
     let (tx, rx) = async_channel::bounded(1);
     let spawned = std::thread::Builder::new()
         .name("evo-desktop-versions".to_owned())
@@ -143,14 +125,7 @@ pub fn start(cx: &mut App) {
         cx.update(|cx| {
             let log = cx.global::<Shell>().log.clone();
             log.info(format!("versions: {}", summary(&versions)));
-            cx.global_mut::<Shell>().versions = versions.clone();
-            // A swarm binary that never answered is one nothing can be launched
-            // from: the empty tabs say so where the folder button is (§9.7).
-            let home = crate::launcher::home_string();
-            crate::launcher::set_swarm_problem(
-                cx,
-                missing_swarm(&named, versions.swarm.as_deref(), home.as_deref()),
-            );
+            cx.global_mut::<Shell>().versions = versions;
         });
     })
     .detach();
@@ -314,29 +289,6 @@ mod tests {
     fn a_binary_that_refuses_reads_as_no_version() {
         // `/usr/bin/false` succeeds at nothing.
         assert_eq!(probe(Path::new("/usr/bin/false")), None);
-    }
-
-    #[test]
-    fn a_swarm_binary_that_answers_has_no_line_to_show() {
-        let bin = Path::new("/usr/local/bin/evo-swarm");
-        assert_eq!(missing_swarm(bin, Some("evo-swarm 0.1.0"), None), None);
-    }
-
-    #[test]
-    fn a_swarm_binary_that_does_not_run_names_its_path_and_where_to_fix_it() {
-        let bin = Path::new("/usr/local/bin/evo-swarm");
-        let line = missing_swarm(bin, None, None).expect("a line to show");
-        assert_eq!(
-            line,
-            "evo-swarm not found at /usr/local/bin/evo-swarm — fix it in Settings…"
-        );
-    }
-
-    #[test]
-    fn that_line_is_shortened_around_home_like_every_other_path() {
-        let bin = Path::new("/Users/x/.local/bin/evo-swarm");
-        let line = missing_swarm(bin, None, Some("/Users/x")).expect("a line to show");
-        assert!(line.contains(" at ~/.local/bin/evo-swarm —"), "{line}");
     }
 
     #[test]

@@ -16,7 +16,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use evo_desktop::{swarm_config, AppLog, Shell};
+use evo_desktop::{launch_env, AppLog, Shell};
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
     px, size, AnyWindowHandle, AppContext as _, Bounds, Entity, Point, TestAppContext,
@@ -76,7 +76,7 @@ fn open(
                 ..AppState::default()
             };
             Shell::new(root, log, state, ModelCache::default()).install(cx);
-            let config = Arc::new(swarm_config(cx));
+            let config = Arc::new(launch_env(cx));
             gpui_kit::open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(Bounds {

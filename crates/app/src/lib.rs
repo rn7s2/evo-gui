@@ -32,7 +32,7 @@ mod theme;
 pub use about::{start as start_version_probe, Versions};
 pub use bounds::{window_bounds, window_options, Tracker};
 pub use housekeeping::{prune_tab_dirs, Pruned, TAB_DIR_TTL};
-pub use launcher::{history_entries, push_launcher_data, tab_count, utc_offset_seconds, Launcher};
+pub use launcher::{history_entries, push_launcher_data, tab_count, Launcher};
 pub use logging::{AppLog, Level, LOG_NAME};
 pub use menus::open_about;
 pub use menus::{install as install_menus, open_settings, CloseTab, NewTab, QuitApp};
@@ -112,15 +112,17 @@ impl Shell {
     }
 }
 
-/// What this launch's tabs start their swarms with (§3): the binaries `app.json`
-/// names and this app's own root.
+/// What a tab's launch needs from the app (§3): the binaries `app.json` names,
+/// this app's own root, and the environment the child runs in.
 ///
 /// The binary paths are in `app.json` so they can be pointed elsewhere (§9.1);
 /// without passing them on, a window would run whatever the defaults happen to
-/// be and the file would be a lie.
-pub fn swarm_config(cx: &App) -> workspace::SwarmConfig {
+/// be and the file would be a lie. The window builds a
+/// [`LaunchSpec`](store::launch::LaunchSpec) out of this — the choosers are the
+/// window's own state — and the client spawns that.
+pub fn launch_env(cx: &App) -> workspace::LaunchEnv {
     let shell = cx.global::<Shell>();
-    workspace::SwarmConfig {
+    workspace::LaunchEnv {
         swarm_bin: shell.binaries.evo_swarm.clone(),
         agent_bin: shell.binaries.evo_agent.clone(),
         root: shell.root.clone(),
@@ -197,10 +199,10 @@ pub fn run() {
             let options = bounds::window_options(cx, stored_bounds);
             let opened = gpui_kit::open_window(options, cx, |window, cx: &mut App| {
                 let tracker = cx.new(|cx| Tracker::new(window, cx));
-                // The window's tabs start swarms with the binaries `app.json`
+                // The window's tabs start servers with the binaries `app.json`
                 // names, out of this app's own root.
-                let config = std::sync::Arc::new(swarm_config(cx));
-                let view = cx.new(|cx| WorkspaceView::with_config(config, window, cx));
+                let env = std::sync::Arc::new(launch_env(cx));
+                let view = cx.new(|cx| WorkspaceView::with_env(env, window, cx));
                 cx.update_global::<Shell, _>(|shell, _| shell.tracker = Some(tracker));
                 view
             });

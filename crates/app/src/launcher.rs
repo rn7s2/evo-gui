@@ -16,12 +16,13 @@
 //! cycle: by then the window is free to be borrowed (the same trick
 //! `Context::defer_in` uses).
 
+use std::path::PathBuf;
+
 use gpui_kit::App;
 
 use session::{HistoryEntry, HistorySource};
 use store::history::HistorySource as StoreSource;
 use store::model_cache::ModelCache;
-use store::time;
 
 use crate::Shell;
 
@@ -32,21 +33,14 @@ pub struct Launcher {
     pub cache: ModelCache,
     /// The resumable swarms the session index lists, plus the app's own recents.
     pub history: Vec<HistoryEntry>,
-    /// The clock the rows' relative times are measured against.
-    pub now: i64,
-    /// The system's UTC offset in seconds, so the rows show local times.
-    pub offset_seconds: i32,
-    /// The `~` the history paths are shortened around.
-    pub home: Option<String>,
+    /// The `~` the history rows are shortened around.
+    pub home: PathBuf,
     /// The session read is still running.
-    pub scanning: bool,
+    pub history_loading: bool,
     /// Why there is no catalog, when there is none.
     pub catalog_error: Option<String>,
     /// Why the history is empty, when the read could not run at all.
     pub history_error: Option<String>,
-    /// The swarm binary `app.json` names cannot be run at all (§9.7, said before a
-    /// launch instead of after one). See [`crate::about::missing_swarm`].
-    pub swarm_problem: Option<String>,
 }
 
 impl Launcher {
@@ -55,67 +49,36 @@ impl Launcher {
         Launcher {
             cache,
             history: Vec::new(),
-            now: time::now_epoch() as i64,
-            offset_seconds: utc_offset_seconds(),
-            home: home_string(),
-            scanning: false,
+            home: store::paths::home_dir(),
+            history_loading: false,
             catalog_error: None,
             history_error: None,
-            swarm_problem: None,
         }
     }
 
     /// This, as the window takes it.
     ///
-    /// The shape the empty tabs are fed in — public because it is the app's whole
-    /// contract with the window, and what a test (or a capture) reads instead of
-    /// the widgets: `registry`/`model_cache` are `None` until a catalog is known,
-    /// which is exactly the state the choosers call "still loading".
+    /// The shape the empty tabs are fed in — the app's whole contract with the
+    /// window, and what a test (or a capture) reads instead of the widgets. An
+    /// empty catalog is handed on as `None`: the choosers stay on their loading
+    /// hint rather than claiming a catalog of nothing.
     pub fn data(&self) -> workspace::LauncherData {
-        // An empty catalog is the same as no catalog: leave the choosers saying
-        // they are still loading rather than claiming a registry of nothing.
-        let known = !self.cache.is_empty();
         workspace::LauncherData {
-            registry: known.then(|| self.cache.raw().clone()),
-            model_cache: known.then(|| self.cache.clone()),
+            catalog: (!self.cache.is_empty()).then(|| self.cache.raw().clone()),
             catalog_error: self.catalog_error.clone(),
-            scanning: self.scanning,
             history: self.history.clone(),
-            now: self.now,
-            offset_seconds: self.offset_seconds,
+            history_loading: self.history_loading,
             history_error: self.history_error.clone(),
-            swarm_problem: self.swarm_problem.clone(),
             home: self.home.clone(),
         }
     }
 }
 
-/// The `~` the history paths are shortened around, and where the folder dialog
+/// The `~` the history rows are shortened around, and where the folder dialog
 /// starts.
 pub fn home_string() -> Option<String> {
     let home = store::paths::home_dir();
     (!home.as_os_str().is_empty()).then(|| home.to_string_lossy().into_owned())
-}
-
-/// The system's current UTC offset, in seconds east of UTC (`UTC+08:00` → 28800).
-///
-/// Only for display: every timestamp the app *writes* stays UTC (`store::time`).
-/// The offset comes from `localtime_r`, so it follows the zone the machine is
-/// actually in, including a daylight-saving change since launch.
-pub fn utc_offset_seconds() -> i32 {
-    #[cfg(unix)]
-    unsafe {
-        let now = libc::time(std::ptr::null_mut());
-        let mut broken_down: libc::tm = std::mem::zeroed();
-        if libc::localtime_r(&now, &mut broken_down).is_null() {
-            return 0;
-        }
-        broken_down.tm_gmtoff as i32
-    }
-    #[cfg(not(unix))]
-    {
-        0
-    }
 }
 
 /// The store's history entries as `session` wants them (§7.2). The two crates
@@ -205,35 +168,22 @@ pub fn set_history(
     {
         let launch = &mut cx.global_mut::<Shell>().launcher;
         launch.history = history_entries(&entries);
-        launch.now = time::now_epoch() as i64;
-        launch.offset_seconds = utc_offset_seconds();
-        launch.home = home_string();
-        launch.scanning = false;
+        launch.home = store::paths::home_dir();
+        launch.history_loading = false;
         launch.history_error = error;
     }
     push_launcher_data(cx);
 }
 
 /// The session read started (`true`) or finished (`false`).
-pub fn set_scanning(cx: &mut App, scanning: bool) {
-    cx.global_mut::<Shell>().launcher.scanning = scanning;
+pub fn set_history_loading(cx: &mut App, loading: bool) {
+    cx.global_mut::<Shell>().launcher.history_loading = loading;
     push_launcher_data(cx);
 }
 
 /// The catalog could not be learned: the tabs say so where the loading hint was.
 pub fn set_catalog_error(cx: &mut App, message: Option<String>) {
     cx.global_mut::<Shell>().launcher.catalog_error = message;
-    push_launcher_data(cx);
-}
-
-/// The swarm binary `app.json` names cannot be run: the empty tabs say so next to
-/// the folder button, rather than only failing after a launch (§9.7). `None`
-/// clears the line — the path was fixed in Settings.
-pub fn set_swarm_problem(cx: &mut App, problem: Option<String>) {
-    if let Some(problem) = &problem {
-        log_warn(cx, format!("swarm binary: {problem}"));
-    }
-    cx.global_mut::<Shell>().launcher.swarm_problem = problem;
     push_launcher_data(cx);
 }
 
@@ -304,54 +254,35 @@ mod tests {
     }
 
     #[test]
-    fn the_local_offset_is_a_plausible_zone_offset() {
-        let offset = utc_offset_seconds();
-        // Whole minutes, within ±14 h — and the same answer twice.
-        assert_eq!(offset % 60, 0, "{offset} is not a whole minute");
+    fn an_empty_catalog_is_handed_over_as_nothing_rather_than_an_empty_body() {
+        let data = Launcher::new(ModelCache::default()).data();
         assert!(
-            offset.abs() <= 14 * 3600,
-            "{offset} is not a real zone offset"
-        );
-        assert_eq!(offset, utc_offset_seconds());
-    }
-
-    #[test]
-    fn an_empty_catalog_is_handed_over_as_nothing_rather_than_an_empty_registry() {
-        let launch = Launcher::new(ModelCache::default());
-        let data = launch.data();
-        assert!(
-            data.registry.is_none(),
+            data.catalog.is_none(),
             "the choosers stay on their loading hint"
         );
-        assert!(data.model_cache.is_none());
-        assert!(!data.scanning);
+        assert!(!data.history_loading);
     }
 
     #[test]
-    fn a_catalog_is_handed_over_as_both_shapes_the_tabs_take() {
+    fn a_catalog_is_handed_over_as_the_body_the_window_reads() {
         let cache = ModelCache::from_catalog(
             "evo-swarm",
             serde_json::json!({ "models": [{ "id": "m" }], "lanes": {"models": []} }),
         );
         let data = Launcher::new(cache.clone()).data();
-        assert_eq!(data.registry, Some(cache.raw().clone()));
-        assert!(data.model_cache.is_some());
+        assert_eq!(data.catalog, Some(cache.raw().clone()));
     }
 
     #[test]
     fn the_history_and_its_errors_are_carried_through() {
         let mut launch = Launcher::new(ModelCache::default());
         launch.history = history_entries(&[store_entry(StoreSource::Index, Some(5), 3)]);
-        launch.scanning = false;
+        launch.history_loading = false;
         launch.history_error = Some("no such binary".to_owned());
-        launch.home = Some("/Users/x".to_owned());
-        launch.offset_seconds = 8 * 3600;
-        launch.now = 42;
+        launch.home = PathBuf::from("/Users/x");
         let data = launch.data();
         assert_eq!(data.history.len(), 1);
         assert_eq!(data.history_error.as_deref(), Some("no such binary"));
-        assert_eq!(data.home.as_deref(), Some("/Users/x"));
-        assert_eq!(data.offset_seconds, 8 * 3600);
-        assert_eq!(data.now, 42);
+        assert_eq!(data.home, PathBuf::from("/Users/x"));
     }
 }

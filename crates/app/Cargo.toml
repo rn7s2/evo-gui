@@ -21,11 +21,6 @@ tab_engine = { path = "../tab_engine" }
 settings = { path = "../settings" }
 serde_json = { workspace = true }
 async-channel = "2"
-libc = "0.2"
 
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }
-# The reusable real-server harness: a temp `EVO_HOME` whose `init.lisp` registers
-# a stub provider, for the app-level milestone proofs (`tests/m2_relaunch.rs`,
-# `tests/m3_lane_ui.rs`). Dev-only: the binary's own graph is unchanged.
-swarm_client = { path = "../swarm_client", features = ["test-harness"] }

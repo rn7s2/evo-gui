@@ -88,7 +88,7 @@ pub fn refresh_catalog(cx: &mut App) {
 /// (§9.5).
 fn load_history(cx: &mut App, bin: PathBuf) {
     let log = cx.global::<Shell>().log.clone();
-    launcher::set_scanning(cx, true);
+    launcher::set_history_loading(cx, true);
 
     let (tx, rx) = async_channel::bounded(1);
     let thread_log = log.clone();
@@ -104,7 +104,7 @@ fn load_history(cx: &mut App, bin: PathBuf) {
         });
     if let Err(error) = spawned {
         log.error(format!("could not start the history read: {error}"));
-        launcher::set_scanning(cx, false);
+        launcher::set_history_loading(cx, false);
         return;
     }
 
