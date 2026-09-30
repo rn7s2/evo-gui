@@ -8777,6 +8777,7 @@ dependencies = [
  "swarm_client",
  "tab_engine",
  "transcript",
+ "widgets",
 ]
 
 [[package]]
