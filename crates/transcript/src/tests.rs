@@ -728,3 +728,72 @@ fn a_panel_caps_what_it_draws_and_counts_what_it_cut() {
     assert_eq!(take_chars("abc", 2), "ab");
     assert_eq!(take_chars("abc", 9), "abc");
 }
+
+/// The tool head's sentence is read out of the call's own arguments: where it
+/// went, and what it was asked to do. Nothing is invented — a call that names
+/// neither is drawn as its name and its status.
+#[test]
+fn a_tool_calls_sentence_comes_from_its_arguments() {
+    // A delegation: the lane it went to, and the task it was given.
+    let (target, summary) = crate::rows::tool_sentence(&json!({
+        "lane": 5,
+        "task": "Lower-case the collapsible captions"
+    }));
+    assert_eq!(target, "lane 5");
+    assert_eq!(summary, "Lower-case the collapsible captions");
+
+    // A command: the command is what it was aimed at, and there is nothing else
+    // worth saying in the head.
+    let (target, summary) = crate::rows::tool_sentence(&json!({"command": "make test"}));
+    assert_eq!(target, "make test");
+    assert_eq!(summary, "");
+
+    // A file and a patch: the path leads, the change describes.
+    let (target, summary) = crate::rows::tool_sentence(&json!({
+        "path": "crates/transcript/src/rows.rs",
+        "content": "the new body"
+    }));
+    assert_eq!(target, "crates/transcript/src/rows.rs");
+    assert_eq!(summary, "the new body");
+
+    // Nothing to say: no sentence, no invented subject.
+    let (target, summary) = crate::rows::tool_sentence(&json!({}));
+    assert_eq!((target.as_str(), summary.as_str()), ("", ""));
+    let (target, summary) = crate::rows::tool_sentence(&Value::Null);
+    assert_eq!((target.as_str(), summary.as_str()), ("", ""));
+
+    // A long task is cut to the head's own limit rather than measured whole.
+    let long = "x".repeat(400);
+    let (_, summary) = crate::rows::tool_sentence(&json!({"path": "a", "task": long}));
+    assert!(summary.chars().count() <= 121, "{}", summary.len());
+    assert!(summary.ends_with('…'));
+}
+
+/// Switching agent starts the new transcript at its latest item, whatever the old
+/// one's reader was doing.
+#[gpui_kit::test]
+fn switching_agent_follows_the_tail_again(cx: &mut TestAppContext) {
+    let (view, cx) = open!(
+        cx,
+        vec![user("u_1", "hello"), assistant("e_1", "hi", "final")]
+    );
+    cx.update(|window, cx| window.render_frame(cx));
+    assert!(cx.read(|cx| view.read(cx).is_following_tail(cx)));
+
+    // The reader scrolls up, well past the pill's threshold.
+    view.update(cx, |view, cx| {
+        view.pin.touched();
+        view.pin.on_scroll(900.);
+        assert!(!view.is_following_tail(cx));
+        assert!(view.is_away_from_latest(cx));
+    });
+
+    view.update(cx, |view, cx| {
+        view.set_agent(session::AgentKey::Lane(1), cx)
+    });
+    assert!(
+        cx.read(|cx| view.read(cx).is_following_tail(cx)),
+        "another agent's transcript opens at its latest"
+    );
+    assert!(cx.read(|cx| !view.read(cx).is_away_from_latest(cx)));
+}

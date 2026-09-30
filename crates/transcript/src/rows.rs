@@ -22,7 +22,7 @@ use gpui_kit::component::{h_flex, Icon, IconName};
 use gpui_kit::TestSupportExt as _;
 use gpui_kit::{
     div, px, Animation, AnimationExt as _, AnyElement, App, ClipboardItem, Context, Div, ElementId,
-    FontWeight, InteractiveElement as _, IntoElement, ParentElement, Pixels, SharedString,
+    FontWeight, Hsla, InteractiveElement as _, IntoElement, ParentElement, Pixels, SharedString,
     Stateful, StatefulInteractiveElement as _, Styled as _, WeakEntity,
 };
 use serde_json::Value;
@@ -34,7 +34,7 @@ use session::{
 use crate::imgcheck::picture;
 use crate::ImageState;
 
-use crate::style::{text_style, Palette, BLOCK_GAP, GROUP_GAP, MEASURE, TIGHT_GAP, TURN_GAP};
+use crate::style::{mix, text_style, Palette, BLOCK_GAP, GROUP_GAP, MEASURE, TIGHT_GAP, TURN_GAP};
 use crate::{link, markdown, TranscriptData, TranscriptView};
 
 /// Fade window for text appended by a streaming delta (§2.8).
@@ -59,7 +59,6 @@ pub(crate) const VALUE_LIMIT: usize = 96;
 pub(crate) const TOOL_ROW_HEIGHT: Pixels = px(24.);
 /// Width of the disclosure and status columns of a tool row.
 const DISCLOSURE_WIDTH: Pixels = px(14.);
-const STATUS_DOT: Pixels = px(6.);
 /// The disclosure chevron: a glyph with about ten pixels of ink, centred in its
 /// own column. The glyph box is larger than the ink a chevron actually draws.
 const CARET_SIZE: Pixels = px(14.);
@@ -86,7 +85,7 @@ const STATUS_SIZE: Pixels = px(12.);
 /// The line height of payload text, as a multiple of its size.
 pub(crate) const PAYLOAD_LINE_HEIGHT: f32 = 1.45;
 /// Width of the label column of a report row.
-const REPORT_LABEL_WIDTH: Pixels = px(66.);
+const REPORT_LABEL_WIDTH: Pixels = px(80.);
 
 /// The waiting pips that hold an assistant row's place between `message-start`
 /// and the first delta: one cycle of the pulse, and how long each pip is.
@@ -440,25 +439,35 @@ pub(crate) fn render_row(
 }
 
 /// The hairline between two turns, labelled with the turn it opens.
+/// The rule between two turns: a hairline 26px above the turn it opens, with
+/// `turn N` sitting on it at the right, in the page's own colour so it reads as a
+/// label on the line rather than a break in it (`.turn-rule`).
 fn turn_separator(turn: usize, palette: &Palette) -> AnyElement {
     div()
         .id(("transcript-turn", turn))
+        .relative()
         .w_full()
-        .flex()
-        .items_center()
-        .gap_2()
-        .pt(TURN_GAP)
-        .pb(GROUP_GAP)
-        .child(div().flex_1().h(px(1.)).bg(palette.border))
+        .h(px(TURN_RULE))
+        .mt(TURN_GAP)
+        .border_b_1()
+        .border_color(palette.border)
+        .text_size(px(12.))
         .child(
             div()
-                .text_xs()
+                .absolute()
+                .right(px(0.))
+                .bottom(px(-7.))
+                .pl(px(8.))
+                .bg(palette.background)
                 .text_color(palette.muted_foreground)
                 .child(format!("turn {turn}")),
         )
         .test_support()
         .into_any_element()
 }
+
+/// The turn rule's own height: `.turn-rule { height: 26px }`.
+const TURN_RULE: f32 = 26.;
 
 /// A user turn: plain text on a muted card, with the accent bar that marks where the turn
 /// starts. A queued turn is held back (muted, said so, and cancellable); a cancelled one is
@@ -499,6 +508,7 @@ fn user_row(
         .flex()
         .flex_col()
         .gap_1()
+        .text_size(px(14.))
         .text_color(text_color)
         .child(SelectableText::new(
             row_id("transcript-user-text", &id),
@@ -1137,9 +1147,17 @@ pub(crate) fn dot_ink(delta: f32, phase: f32) -> f32 {
     DOT_INK_FLOOR + (1. - DOT_INK_FLOOR) * swell
 }
 
-/// A tool call: one compact line — `name · ok|error|running` — that opens onto the call's
-/// arguments and its result. A result the server truncated says so, and offers the whole
-/// of it (`GET /items/<id>`) in place rather than pretending the tail is not there.
+/// A tool call: one quiet card, as `Rows.css` draws it.
+///
+/// The head reads as a sentence — the tool, what it was called on, and a small
+/// status — and opens onto its arguments as a key/value grid and its result. A
+/// result the server truncated says so, and offers the whole of it
+/// (`GET /items/<id>`) in place rather than pretending the tail is not there.
+///
+/// What the sentence says comes from the call's own arguments: [`tool_sentence`]
+/// picks the one the tool was aimed at and the one that describes the work. A
+/// call with nothing to say in either stays a name and a status — no invented
+/// subject.
 fn tool_row(
     item: &Item,
     tool: &ToolItem,
@@ -1149,69 +1167,110 @@ fn tool_row(
 ) -> AnyElement {
     let id = item.id.clone();
     let expanded = data.expanded.contains(&id);
-    let (status, status_color) = match tool.status {
+    let (status, pill) = match tool.status {
         session::ToolStatus::Running => ("running", palette.warning),
         session::ToolStatus::Error => ("error", palette.destructive),
         session::ToolStatus::Blocked => ("blocked", palette.destructive),
         session::ToolStatus::Ok => ("ok", palette.success),
     };
+    let (target, summary) = tool_sentence(&tool.args);
 
     let click_view = view.clone();
     let click_id = id.clone();
-    let header = div()
+    let mut head = div()
         .id(row_id("transcript-tool", &id))
+        .h(px(TC_HEAD))
+        .w_full()
         .flex()
         .items_center()
         .gap_2()
-        .h(TOOL_ROW_HEIGHT)
+        .pl_2()
+        .pr(px(10.))
+        .text_size(px(13.))
         .cursor_pointer()
+        .hover({
+            let sidebar = palette.sidebar;
+            move |style| style.bg(mix(palette.foreground, 4., sidebar))
+        })
         .on_click(move |_, _, cx| {
             let _ = click_view.update(cx, |view, cx| view.toggle_expanded(&click_id, cx));
         })
         .child(caret(expanded, palette))
         .child(
             div()
-                .min_w_0()
-                .font_family(palette.mono.clone())
-                .font_weight(FontWeight::NORMAL)
-                .text_size(NAME_SIZE)
+                .size(px(TC_ICON))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(5.))
+                .bg(mix(palette.foreground, 8., palette.sidebar))
                 .text_color(palette.foreground)
+                .child(Icon::new(IconName::ArrowRight).size(px(12.))),
+        )
+        .child(
+            div()
+                .flex_shrink_0()
+                .font_family(palette.mono.clone())
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_size(px(12.5))
                 .child(tool.name.clone()),
-        )
-        .child(
-            div()
-                .flex_shrink_0()
-                .size(STATUS_DOT)
-                .rounded_full()
-                .bg(status_color),
-        )
-        .child(
-            div()
-                .flex_shrink_0()
-                .text_size(STATUS_SIZE)
-                .text_color(palette.muted_foreground)
-                .child(status),
-        )
-        .test_support();
+        );
+    if !target.is_empty() {
+        head = head
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .text_color(palette.muted_foreground)
+                    .child("→"),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(target),
+            );
+    }
+    head = head.child(
+        div()
+            .flex_1()
+            .min_w_0()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_ellipsis()
+            .text_color(palette.muted_foreground)
+            .child(summary),
+    );
+    head = head.child(status_pill(status, pill, palette));
 
-    let mut row = div()
+    let mut card = div()
         .id(row_id("transcript-tool-row", &id))
         .w_full()
         .min_w_0()
-        .flex()
-        .flex_col()
-        .child(header);
+        .rounded(px(10.))
+        .border_1()
+        .border_color(palette.rule_soft())
+        .bg(palette.sidebar)
+        .overflow_hidden()
+        .child(head.test_support());
 
     if expanded {
         let full = data.full_results.get(&id);
         let can_fetch = data.on_fetch_item.borrow().is_some();
-        row = row.child(
+        card = card.child(
             div()
+                .id(row_id("transcript-tool-body", &id))
+                .w_full()
                 .flex()
                 .flex_col()
-                .gap_1()
-                .pt(px(2.))
-                .pb(px(4.))
+                .gap(px(10.))
+                .border_t_1()
+                .border_color(palette.rule_soft())
+                .bg(palette.input)
+                .pt(px(10.))
+                .pr(px(12.))
+                .pb(px(12.))
+                .pl(px(42.))
                 .child(arguments_block(id.clone(), &tool.args, palette))
                 .child(result_block(
                     id.clone(),
@@ -1224,7 +1283,91 @@ fn tool_row(
         );
     }
 
-    row.test_support().into_any_element()
+    card.test_support().into_any_element()
+}
+
+/// The tool's head height, its icon box, and the label size above a payload —
+/// `Rows.css`'s `.tc-head`, `.tc-icon` and `.tc-caption`.
+const TC_HEAD: f32 = 34.;
+const TC_ICON: f32 = 20.;
+
+/// What the call was aimed at, and what it was asked to do — the two halves of the
+/// design's sentence, read out of the call's own arguments.
+///
+/// The first is the argument that says *where* the tool went: a lane, a path, a
+/// command, a pattern. The second is the longest other string, which is what a
+/// task, a prompt or a note looks like. Neither is invented: a call that names
+/// neither is drawn as its name alone.
+///
+/// A `delegate` to lane 5 with a task reads `→ lane 5` and the task; a `bash` with
+/// a command reads `→ make test` and nothing else, because that is all it was.
+pub(crate) fn tool_sentence(args: &Value) -> (String, String) {
+    const WHERE: [&str; 9] = [
+        "lane", "target", "path", "file", "command", "cmd", "url", "pattern", "name",
+    ];
+    let Some(object) = args.as_object() else {
+        return (String::new(), String::new());
+    };
+    let text = |value: &Value| match value {
+        Value::String(text) => text.trim().to_string(),
+        Value::Number(number) => number.to_string(),
+        _ => String::new(),
+    };
+    let mut target = String::new();
+    for key in WHERE {
+        if let Some(value) = object.get(key) {
+            let value = text(value);
+            if !value.is_empty() {
+                // A lane is named as the design names it; everything else is what
+                // the argument says.
+                target = if key == "lane" {
+                    format!("lane {value}")
+                } else {
+                    value
+                };
+                break;
+            }
+        }
+    }
+    // The work, rather than the place: the longest string argument that is not the
+    // target itself.
+    let mut summary = String::new();
+    for (key, value) in object {
+        if WHERE.contains(&key.as_str()) {
+            continue;
+        }
+        let value = text(value);
+        if value.len() > summary.len() {
+            summary = value;
+        }
+    }
+    if summary.len() > TC_SUMMARY_LIMIT {
+        summary = format!("{}…", &summary[..TC_SUMMARY_LIMIT.min(summary.len())]);
+    }
+    (target, summary)
+}
+
+/// How much of a call's summary the head shows before the ellipsis. The design
+/// lets CSS cut it to the row; this keeps a head from measuring a novel.
+const TC_SUMMARY_LIMIT: usize = 120;
+
+/// The status pill a card's head carries: the success green most of the way to the
+/// ink, on a ground of the same green 12% over the surface, at a fixed 20px.
+fn status_pill(status: &str, _status_color: Hsla, palette: &Palette) -> AnyElement {
+    div()
+        .flex_shrink_0()
+        .h(px(20.))
+        .flex()
+        .items_center()
+        .gap_1()
+        .pl(px(5.))
+        .pr(px(7.))
+        .rounded_full()
+        .text_size(px(11.5))
+        .text_color(palette.pill_ink)
+        .bg(palette.pill_ground(palette.sidebar))
+        .child(status.to_string())
+        .into_any_element()
 }
 
 /// The disclosure of a tool row.
@@ -1407,7 +1550,6 @@ fn quiet_line(id: ItemId, name: &'static str, text: &str, color: gpui_kit::Hsla)
 /// One lane's report: what it did, in the fields the item carries — never re-parsed out of
 /// the prose the swarm used to send.
 fn report_row(id: ItemId, report: &LaneReport, palette: &Palette) -> AnyElement {
-    let heading = format!("Lane {} report", report.lane);
     let fields = [
         ("done", report.done.as_str(), palette.foreground),
         (
@@ -1425,25 +1567,44 @@ fn report_row(id: ItemId, report: &LaneReport, palette: &Palette) -> AnyElement 
         ),
     ];
 
+    // `Rows.css`'s `.rp`: a labelled card — a head with who sent it and what state
+    // it is in, then one row per section, so the answer is scannable rather than a
+    // wall.
     let mut row = div()
         .id(row_id("transcript-report", &id))
         .w_full()
         .min_w_0()
         .flex()
         .flex_col()
-        .gap_1()
-        .rounded(palette.radius_lg)
+        .rounded(px(10.))
         .border_1()
-        .border_color(palette.border)
-        .px_3()
-        .py_2()
+        .border_color(palette.rule_soft())
+        .bg(palette.input)
+        .overflow_hidden()
         .child(
             div()
                 .id(row_id("transcript-report-heading", &id))
-                .text_xs()
-                .text_color(palette.muted_foreground)
-                .aria_label(heading.clone())
-                .child(heading)
+                .h(px(36.))
+                .flex()
+                .items_center()
+                .gap_2()
+                .px(px(12.))
+                .border_b_1()
+                .border_color(palette.rule_soft())
+                .bg(palette.sidebar)
+                .text_size(px(13.))
+                .aria_label(format!("Lane {} report", report.lane))
+                .child(
+                    div()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(format!("lane {}", report.lane)),
+                )
+                .child(div().text_color(palette.muted_foreground).child("report"))
+                .child(
+                    div()
+                        .ml_auto()
+                        .child(status_pill("done", palette.success, palette)),
+                )
                 .test_support(),
         );
 
@@ -1456,18 +1617,26 @@ fn report_row(id: ItemId, report: &LaneReport, palette: &Palette) -> AnyElement 
             div()
                 .flex()
                 .items_start()
-                .gap_2()
-                .text_sm()
+                .gap_3()
+                .px(px(12.))
+                .py(px(9.))
+                .border_t_1()
+                .border_color(palette.rule_soft())
+                .text_size(px(13.5))
+                .line_height(px(20.))
                 .child(
                     div()
                         .w(REPORT_LABEL_WIDTH)
                         .flex_shrink_0()
+                        .text_size(px(12.))
+                        .line_height(px(20.))
                         .text_color(palette.muted_foreground)
                         .child(label),
                 )
                 .child(
                     div()
                         .min_w_0()
+                        .flex_1()
                         .text_color(color)
                         .child(SelectableText::new(value_id, value.to_string())),
                 ),
@@ -1827,6 +1996,8 @@ fn fields_block(
     let id = id.into();
     let mut cap = Cap::new(limit);
     let fields = cap_fields(fields, &mut cap);
+    // `Rows.css`'s `.tc-body`: a caption, then the payload as a grid of
+    // `72px 1fr` k/v pairs. The card around it is the tool's own.
     let mut block = div()
         .id(id.clone())
         .flex()
@@ -1834,11 +2005,6 @@ fn fields_block(
         .gap_1()
         .w_full()
         .min_w_0()
-        .rounded(palette.radius)
-        .border_1()
-        .border_color(palette.border)
-        .px_2()
-        .py_1()
         .text_size(palette.payload_size)
         .line_height(palette.payload_size * PAYLOAD_LINE_HEIGHT)
         .child(caption(&id, label, palette));
