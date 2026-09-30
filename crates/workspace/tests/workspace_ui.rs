@@ -721,7 +721,7 @@ fn the_add_button_never_sits_on_a_tab(cx: &mut TestAppContext) {
         // the most tabs behind the button.
         window.render_frame(cx);
 
-        let add = window.find("tab-add-box");
+        let add = window.find("tab-add");
         let add_bounds = add.bounds();
         let strip = window.find("tab-strip-scroll").bounds();
         assert!(
