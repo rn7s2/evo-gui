@@ -19,8 +19,10 @@
 //! theme light|dark               switch the theme
 //! click ID | dclick ID | hover ID   (never `click select-folder`: a real dialog)
 //! at X Y                          move the pointer to window coordinates
+//! scroll ID DY                    wheel DY pixels over an element (negative = up)
 //! down X Y | up X Y               press / release the left button there
 //! press KEY | input TEXT          keyboard
+//! focus                           the shown tab's primary control (its composer)
 //! pump MS                         let the app run
 //! find ID                         print the element's bounds
 //! launch                          launch the shown tab in the world's folder
@@ -216,6 +218,16 @@ fn run(world: &str, out: &Path, script: &str) -> Result<(), Error> {
                 })?;
                 pump(&mut cx, Duration::from_millis(300));
             }
+            "scroll" => {
+                // `scroll ID DY`: a wheel of DY pixels over the element (negative = up).
+                let (id, dy) = rest.rsplit_once(' ').expect("scroll ID DY");
+                let dy: f32 = dy.parse()?;
+                let id = element_id(id);
+                cx.update_window(window, |_, window, cx| {
+                    window.scroll(id, gpui_kit::ScrollDelta::Pixels(point(px(0.), px(dy))), cx)
+                })?;
+                pump(&mut cx, Duration::from_millis(200));
+            }
             "at" => {
                 let v = nums();
                 pointer = point(px(v[0]), px(v[1]));
@@ -298,6 +310,15 @@ fn run(world: &str, out: &Path, script: &str) -> Result<(), Error> {
                     ),
                     None => println!("[probe]   {rest}: not found"),
                 })?;
+            }
+            "focus" => {
+                // The shown tab's primary control: its composer, or the New Swarm
+                // page's first field — what switching to the tab does.
+                let tab = cx.update(|cx| view.read(cx).selected_tab().clone());
+                cx.update_window(window, |_, window, cx| {
+                    tab.update(cx, |tab, cx| tab.focus_primary(window, cx));
+                })?;
+                pump(&mut cx, Duration::from_millis(100));
             }
             "launch" => {
                 let tab = cx.update(|cx| view.read(cx).selected_tab().clone());
@@ -422,9 +443,15 @@ fn set_theme(
 
 fn pump(cx: &mut HeadlessAppContext, how_long: Duration) {
     let deadline = Instant::now() + how_long;
+    // The headless dispatcher keeps a virtual clock that only moves when told to,
+    // so without this every animation (a slider's move, the split's pill, a
+    // breathing dot) would be drawn at its first frame forever. Each tick moves
+    // it by the same 16ms the thread sleeps, so it tracks wall time.
     while Instant::now() < deadline {
         cx.run_until_parked();
         std::thread::sleep(Duration::from_millis(16));
+        cx.background_executor
+            .advance_clock(Duration::from_millis(16));
     }
 }
 
