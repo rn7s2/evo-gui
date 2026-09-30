@@ -19,7 +19,7 @@ use gpui_kit::{
     div, px, relative, Animation, AnimationExt as _, AnyElement, App, Bounds, BoxShadow, ElementId,
     FocusHandle, InteractiveElement as _, IntoElement as _, KeyDownEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, SharedString,
-    Styled as _, TestSupportExt as _, Window,
+    StatefulInteractiveElement as _, Styled as _, TestSupportExt as _, Window,
 };
 use store::design::Palette;
 
@@ -27,6 +27,11 @@ use crate::paint::{color, wash, Rgb};
 
 /// A re-render a caller lends the slider.
 pub type Notify = Rc<dyn Fn(&mut App)>;
+/// The name a screen reader reads for the rail — `EffortSlider.tsx`'s
+/// `aria-label="Effort"`. There is one slider in the app, and this is what it is
+/// called.
+pub const ARIA_LABEL: &str = "Effort";
+
 /// What a slider does when a click, a drag or an arrow picks a level.
 pub type OnChange = Rc<dyn Fn(usize, &mut Window, &mut App)>;
 
@@ -409,9 +414,17 @@ impl EffortSlider {
                 }
             }
         };
+        // The design's own accessibility: `role="slider"`, a name, and the value
+        // as both a number and the level's word.
+        let value = self.label();
         let mut slider = div()
             .on_children_prepainted(measure)
             .id(ElementId::Name(self.id.clone()))
+            .role(gpui_kit::Role::Slider)
+            .aria_label(ARIA_LABEL)
+            .aria_numeric_value(self.level as f64)
+            .aria_numeric_value_step(1.)
+            .aria_value(value)
             .test_support()
             .group(SLIDER_GROUP)
             .relative()

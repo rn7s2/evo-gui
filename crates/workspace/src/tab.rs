@@ -1090,23 +1090,9 @@ impl TabContent {
             });
         }
 
-        let selected = self.live.as_ref().expect("checked above").model.selected();
-        let selected_changed = changes
-            .for_topic(&selected.topic())
-            .is_some_and(|topic| topic.state)
-            || changes.selection;
-        if selected_changed {
-            let todos = self
-                .live
-                .as_ref()
-                .expect("checked above")
-                .model
-                .selected_todos()
-                .to_vec();
-            if let Some(view) = self.transcripts.get(&selected).cloned() {
-                view.update(cx, |view, cx| view.set_todos(todos, cx));
-            }
-        }
+        // The todos of the selected agent are the composer's: the design puts the
+        // strip inside the composer box and reads them off the topic state, so the
+        // transcript is fed items only (`sync_composer`).
         self.sync_composer(cx);
         // The lane column takes the same facts, on the same batch (§7.3).
         self.sync_agents(cx);

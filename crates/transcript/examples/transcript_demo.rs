@@ -23,7 +23,7 @@ use gpui_kit::{
     Render, Styled as _, Window, WindowBounds, WindowOptions,
 };
 use serde_json::{json, Value};
-use session::{Item, Queue, Todo};
+use session::{Item, Queue};
 
 use transcript::TranscriptView;
 
@@ -199,26 +199,6 @@ impl Demo {
         items.push(user("e_10", "and then the view crates", "queued"));
         let view = self.transcript.clone();
         view.update(cx, |view, cx| view.replace(items, cx));
-        let view = self.transcript.clone();
-        view.update(cx, |view, cx| {
-            view.set_todos(
-                vec![
-                    Todo {
-                        text: "port the item model".to_string(),
-                        status: session::TodoStatus::Done,
-                    },
-                    Todo {
-                        text: "the view crates".to_string(),
-                        status: session::TodoStatus::InProgress,
-                    },
-                    Todo {
-                        text: "trim the workspace".to_string(),
-                        status: session::TodoStatus::Pending,
-                    },
-                ],
-                cx,
-            )
-        });
         cx.notify();
     }
 }

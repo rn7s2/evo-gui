@@ -14,7 +14,7 @@ use crate::rows::{
     cap_fields, cap_text, json_fields, row_id, take_chars, Cap, FieldValue, CONTEXT_BLOCK_LINES,
     RESULT_LIMIT, TURN_LABEL_OVERHANG, VALUE_LIMIT,
 };
-use crate::{TodoPanel, TranscriptView};
+use crate::TranscriptView;
 
 /// One item of a fixture, by id.
 fn item(value: Value) -> Item {
@@ -123,13 +123,12 @@ impl TranscriptHost {
 }
 
 impl Render for TranscriptHost {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
             .flex_col()
             .size_full()
             .child(div().flex_1().min_h_0().child(self.transcript.clone()))
-            .child(TodoPanel::new(self.transcript.read(cx).todos()))
             .id("transcript-host")
             .test_support()
     }
@@ -668,32 +667,6 @@ fn transcript_png() -> Vec<u8> {
         .write_to(&mut bytes, ImageFormat::Png)
         .expect("a PNG in memory");
     bytes.into_inner()
-}
-
-#[gpui_kit::test]
-fn a_todo_panel_hides_while_there_is_nothing_to_check_off(cx: &mut TestAppContext) {
-    cx.update(gpui_kit::init);
-    let (host, cx) = cx.add_window_view(|_window, cx| TranscriptHost::new(cx));
-    let view = cx.read(|cx| host.read(cx).transcript.clone());
-
-    cx.update(|window, cx| {
-        window.render_frame(cx);
-        assert!(window.try_find("todo-panel").is_none());
-    });
-
-    view.update(cx, |view, cx| {
-        view.set_todos(
-            vec![session::Todo {
-                text: "port the items".to_string(),
-                status: session::TodoStatus::InProgress,
-            }],
-            cx,
-        );
-    });
-    cx.update(|window, cx| {
-        window.render_frame(cx);
-        assert!(window.try_find("todo-panel").is_some());
-    });
 }
 
 // --- the panel helpers, which need no window ------------------------------------------
