@@ -4,7 +4,7 @@
 //! then the resumable swarms — and nothing else. The choosers' options, the note under the
 //! lanes select and the history rows all come from [`session::Launcher`]; this module owns
 //! only what the session model cannot know: the select widgets, the folder dialog, whether
-//! the catalog has arrived, and whether the history scan is still running.
+//! the catalog has arrived, and whether the session index is still being fetched.
 //!
 //! ```text
 //! set_catalog                      the /catalog body (§5.6): the cache, or a server
@@ -1103,7 +1103,7 @@ impl TabContent {
     fn render_history(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.history.read(cx).delegate();
         let rows = state.rows().len();
-        let count = match (rows, state.scanning()) {
+        let count = match (rows, state.loading()) {
             (0, true) => SharedString::default(),
             (0, false) => SharedString::default(),
             (1, _) => SharedString::from("1 resumable"),
@@ -1218,9 +1218,9 @@ impl TabContent {
 
     /// The session index is still being fetched (§2): the list says so instead of claiming
     /// there is nothing.
-    pub fn set_history_loading(&mut self, scanning: bool, cx: &mut Context<Self>) {
+    pub fn set_history_loading(&mut self, loading: bool, cx: &mut Context<Self>) {
         self.history.update(cx, |state, cx| {
-            state.delegate_mut().set_scanning(scanning, cx)
+            state.delegate_mut().set_loading(loading, cx)
         });
         cx.notify();
     }
@@ -1278,9 +1278,9 @@ impl TabContent {
 /// The empty tab's history list (§2): the rows, and the states before there are any.
 pub(crate) struct HistoryList {
     rows: Vec<HistoryRow>,
-    /// The background scan is still running.
-    scanning: bool,
-    /// The scan could not read the sessions directory at all.
+    /// The session index is still being fetched.
+    loading: bool,
+    /// The index could not be fetched.
     error: Option<String>,
     selected: Option<IndexPath>,
 }
@@ -1289,7 +1289,7 @@ impl HistoryList {
     pub(crate) fn new(rows: Vec<HistoryRow>) -> Self {
         HistoryList {
             rows,
-            scanning: false,
+            loading: false,
             error: None,
             selected: None,
         }
@@ -1303,8 +1303,8 @@ impl HistoryList {
         self.rows.get(row)
     }
 
-    pub(crate) fn scanning(&self) -> bool {
-        self.scanning
+    pub(crate) fn loading(&self) -> bool {
+        self.loading
     }
 
     fn set_rows(&mut self, rows: Vec<HistoryRow>, cx: &mut Context<ListState<Self>>) {
@@ -1317,9 +1317,9 @@ impl HistoryList {
         cx.notify();
     }
 
-    fn set_scanning(&mut self, scanning: bool, cx: &mut Context<ListState<Self>>) {
-        if self.scanning != scanning {
-            self.scanning = scanning;
+    fn set_loading(&mut self, loading: bool, cx: &mut Context<ListState<Self>>) {
+        if self.loading != loading {
+            self.loading = loading;
             cx.notify();
         }
     }
@@ -1488,7 +1488,7 @@ impl ListDelegate for HistoryList {
         cx.notify();
     }
 
-    /// Nothing to list: say which nothing it is — the scan is still running, the scan
+    /// Nothing to list: say which nothing it is — the index is still being fetched, the
     /// failed, or there is genuinely nothing to resume.
     fn render_empty(
         &mut self,
@@ -1496,7 +1496,7 @@ impl ListDelegate for HistoryList {
         cx: &mut Context<ListState<Self>>,
     ) -> impl IntoElement {
         let muted = cx.theme().muted_foreground;
-        let (line, color) = match (&self.error, self.scanning) {
+        let (line, color) = match (&self.error, self.loading) {
             (Some(error), _) => (error.clone(), cx.theme().danger),
             (None, true) => ("Scanning sessions…".to_string(), muted),
             (None, false) => ("No resumable swarms yet".to_string(), muted),
@@ -1510,7 +1510,7 @@ impl ListDelegate for HistoryList {
             .items_center()
             .text_sm()
             .text_color(color)
-            .when(self.error.is_none() && self.scanning, |row| {
+            .when(self.error.is_none() && self.loading, |row| {
                 row.child(Spinner::new().small())
             })
             .child(line)
@@ -2001,7 +2001,7 @@ mod tests {
     fn only_a_row_the_app_had_open_wears_the_badge(cx: &mut TestAppContext) {
         let f = open(cx);
         f.act(cx, |window, cx| {
-            // The app's own recents know the tab was open when it last quit; the scan cannot.
+            // The app's own recents know the tab was open when it last quit; the index cannot.
             let mut opened = history_entry(
                 "/Users/you/.evo/sessions/a/1.sexp",
                 "/Users/you/coding/foo",
@@ -2036,7 +2036,7 @@ mod tests {
                 window
                     .try_find(ElementId::NamedInteger(OPEN_AT_QUIT_ID.into(), 1))
                     .is_none(),
-                "a session the scan alone found cannot say it was open at quit"
+                "a session the index alone found cannot say it was open at quit"
             );
             // A badge is decoration on the row, not a thing of its own: the pill takes no
             // click, so the click lands on the row under it and opens the session.
@@ -2328,15 +2328,15 @@ mod tests {
                     .to_string()
             };
             let opened_said = said(0);
-            let scanned_said = said(1);
+            let indexed_said = said(1);
             // The pill is the only place the row says this, so the name has to carry it.
             assert!(
                 opened_said.contains(OPEN_AT_QUIT_TEXT),
                 "the row's name must say what the pill says: {opened_said}"
             );
             assert!(
-                !scanned_said.contains(OPEN_AT_QUIT_TEXT),
-                "a row the scan alone found must not claim it: {scanned_said}"
+                !indexed_said.contains(OPEN_AT_QUIT_TEXT),
+                "a row the index alone found must not claim it: {indexed_said}"
             );
             // ... and the row still names itself: title, path and facts.
             assert!(opened_said.contains("foo"), "{opened_said}");
@@ -2352,13 +2352,13 @@ mod tests {
             // Nothing yet.
             assert!(window.find(HISTORY_HINT_ID).visible());
 
-            // The scan is running: it says so, with a spinner.
+            // The index is still coming: it says so, with a spinner.
             f.tab
                 .update(cx, |tab, cx| tab.set_history_loading(true, cx));
             window.render_frame(cx);
             assert!(window.find(HISTORY_HINT_ID).visible());
 
-            // The scan could not read the sessions directory: it says why.
+            // The index could not be fetched: it says why.
             f.tab
                 .update(cx, |tab, cx| tab.set_history_loading(false, cx));
             f.tab.update(cx, |tab, cx| {
