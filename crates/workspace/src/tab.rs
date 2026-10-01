@@ -26,7 +26,7 @@ use gpui_kit::{
 };
 
 use async_channel::Receiver;
-use composer::{Composer, ComposerEvent, ModelRow};
+use composer::{Candidate, Composer, ComposerEvent, ModelRow};
 use session::{
     AgentKey, Changes, ItemChange, LaunchPlan, Op, Queue, Status, StreamStatus, TabModel,
 };
@@ -348,15 +348,22 @@ struct AgentsSnapshot {
 /// What one outstanding op was, so its reply is read for what it is: only a *send*'s
 /// `ok` clears the draft — a stop is answered `ok` too, and the text the person was
 /// typing is none of its business (§7.3).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum Pending {
     /// `input.send` — the reply is the one that clears the draft.
     Send,
-    /// A `run.interrupt`, from the button, from a lane's Stop, or from `Esc`.
+    /// `run.interrupt`, from the button, from a lane's Stop, or from `Esc`.
     Interrupt,
     /// `model.set` or `thinking.set`, from a drawer. The composer's button has nothing
     /// to do with these: the reply only releases the composer's own in-flight flag.
     Settings,
+    /// `command.run` — the slash command a whole message was. Its own output is the
+    /// session's `notice` items, which the transcript draws; this reply says only
+    /// whether the command was taken at all.
+    Command,
+    /// The `eval` op behind one half-typed symbol, carried with the token it asked
+    /// about: the answer is only an answer for that token.
+    Symbols(String),
 }
 
 /// One tab's live swarm: the engine, the model its updates land in, and the pump
@@ -1517,8 +1524,18 @@ impl TabContent {
                 detail: model.detail,
             })
             .collect();
-        self.composer
-            .update(cx, |composer, cx| composer.set_catalog(levels, models, cx));
+        // The commands the registry lists are the popup's candidates: evo's own table,
+        // extension commands and skills included, never a list this client keeps.
+        let commands = session::command_options(catalog)
+            .into_iter()
+            .map(|command| Candidate {
+                name: command.name,
+                description: command.description,
+            })
+            .collect();
+        self.composer.update(cx, |composer, cx| {
+            composer.set_catalog(levels, models, commands, cx)
+        });
     }
 
     /// Feed the agent list from the model: the rows, the coordinator's status and step
@@ -1667,6 +1684,7 @@ impl TabContent {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let mut unanswered: Option<String> = None;
         let sent = match self.live.as_mut() {
             Some(live) => {
                 let (request, pending) = match event {
@@ -1690,6 +1708,18 @@ impl TabContent {
                     ComposerEvent::ThinkingSet(level) => {
                         (session::OpRequest::thinking_set(&level), Pending::Settings)
                     }
+                    // A message that is one slash command is the command layer's: the
+                    // server dispatches it exactly as the TUI does, extension commands
+                    // and all, and says `not_found` for a word it does not know.
+                    ComposerEvent::Command { name, args } => (
+                        session::OpRequest::command_run(&name, &args),
+                        Pending::Command,
+                    ),
+                    // The popup's question about a symbol being typed inside `/eval`:
+                    // the one op that can ask the image about its own symbols.
+                    ComposerEvent::Symbols { token } => {
+                        (session::symbol_request(&token), Pending::Symbols(token))
+                    }
                 };
                 // The engine mints the request's id, and the reply comes back tagged
                 // with it: that is what says which op was answered (§5.5).
@@ -1698,7 +1728,15 @@ impl TabContent {
                         live.pending.insert(rid, pending);
                         true
                     }
-                    None => false,
+                    // The engine is gone — the tab is stopping. A question about a
+                    // symbol would leave the popup waiting for an answer that cannot
+                    // come, so it is answered with nothing.
+                    None => {
+                        if let Pending::Symbols(token) = pending {
+                            unanswered = Some(token);
+                        }
+                        false
+                    }
                 }
             }
             // No swarm: there is nothing to send to, and the button must not stay
@@ -1706,9 +1744,18 @@ impl TabContent {
             None => false,
         };
         if !sent {
-            self.composer.update(cx, |composer, cx| {
-                composer.request_finished(false, window, cx)
-            });
+            match unanswered {
+                Some(token) => {
+                    self.composer.update(cx, |composer, cx| {
+                        composer.set_symbols(&token, Vec::new(), cx)
+                    });
+                }
+                None => {
+                    self.composer.update(cx, |composer, cx| {
+                        composer.request_finished(false, window, cx)
+                    });
+                }
+            }
         }
     }
 
@@ -1843,15 +1890,42 @@ impl TabContent {
     ) {
         let asked = self.live.as_mut().and_then(|live| live.pending.remove(rid));
         if let Some(asked) = asked {
-            if asked == Pending::Send {
-                self.composer.update(cx, |composer, cx| {
-                    composer.request_finished(reply.ok, window, cx)
-                });
-            } else {
+            match asked {
+                Pending::Send | Pending::Command => {
+                    // A command that was taken clears the draft the same way a sent
+                    // message does; its output is the session's own `notice` items,
+                    // which the transcript has already drawn (§4.1) — the reply is not
+                    // a second place to say it.
+                    self.composer.update(cx, |composer, cx| {
+                        composer.request_finished(reply.ok, window, cx)
+                    });
+                }
+                Pending::Symbols(token) => {
+                    // The image's answer, read off the op's own output: one
+                    // `name<TAB>description` line per candidate. A refusal — an image
+                    // with no `--http-eval`, a token that matched nothing — is no rows,
+                    // which is an answer like any other.
+                    let rows: Vec<Candidate> = reply
+                        .result
+                        .get("output")
+                        .and_then(serde_json::Value::as_str)
+                        .map(session::symbol_options)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|symbol| Candidate {
+                            name: symbol.name,
+                            description: symbol.description,
+                        })
+                        .collect();
+                    self.composer
+                        .update(cx, |composer, cx| composer.set_symbols(&token, rows, cx));
+                }
                 // A stop's reply only re-arms the button; the draft is untouched.
-                self.composer.update(cx, |composer, cx| {
-                    composer.request_finished(false, window, cx)
-                });
+                _ => {
+                    self.composer.update(cx, |composer, cx| {
+                        composer.request_finished(false, window, cx)
+                    });
+                }
             }
         }
         if let Some(error) = reply.error() {

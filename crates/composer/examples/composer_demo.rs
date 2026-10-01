@@ -20,7 +20,7 @@ use gpui_kit::{
 };
 use session::TopicState;
 
-use composer::{Composer, ComposerEvent, ModelRow};
+use composer::{Candidate, Composer, ComposerEvent, ModelRow};
 
 const WINDOW_SIZE: (f32, f32) = (1000., 720.);
 
@@ -79,6 +79,26 @@ fn models() -> Vec<ModelRow> {
     ]
 }
 
+/// The commands the registry lists, as `GET /catalog` would: what a `/word`
+/// completes against, and what `command.run` answers for.
+fn commands() -> Vec<Candidate> {
+    [
+        ("help", "commands and keys"),
+        ("image", "attach an image"),
+        ("lore", "durable guidance"),
+        ("memory", "what is remembered"),
+        ("reload", "reload the image's own code"),
+        ("theme", "switch the light/dark theme"),
+        ("eval", "evaluate one form in the live image"),
+    ]
+    .iter()
+    .map(|(name, description)| Candidate {
+        name: name.to_string(),
+        description: description.to_string(),
+    })
+    .collect()
+}
+
 struct Demo {
     composer: Entity<Composer>,
     busy: bool,
@@ -101,6 +121,12 @@ impl Demo {
                         println!("model.set: {id}@{provider}")
                     }
                     ComposerEvent::ThinkingSet(level) => println!("thinking.set: {level}"),
+                    ComposerEvent::Command { name, args } => {
+                        println!("command.run: {name} {args:?} — /help to see the registry")
+                    }
+                    ComposerEvent::Symbols { token } => {
+                        println!("eval: the image's symbols for {token:?}")
+                    }
                 }
             },
         )
@@ -142,6 +168,7 @@ impl Demo {
                     "max".to_string(),
                 ],
                 models(),
+                commands(),
                 cx,
             );
             composer.set_swarm_busy(busy, cx);

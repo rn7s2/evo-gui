@@ -26,7 +26,7 @@ use gpui_kit::{
 };
 use session::TopicState;
 
-use composer::{Composer, ModelRow};
+use composer::{Candidate, Composer, ModelRow};
 
 /// The window the pictures are taken in: one conversation column, the width the app
 /// gives it, so the box is docked on the reading measure it is drawn on.
@@ -85,6 +85,26 @@ fn models() -> Vec<ModelRow> {
     ]
 }
 
+/// The commands the registry lists, as `GET /catalog` would: what a `/word`
+/// completes against.
+fn commands() -> Vec<Candidate> {
+    [
+        ("help", "commands and keys"),
+        ("image", "attach an image"),
+        ("lore", "durable guidance"),
+        ("memory", "what is remembered"),
+        ("reload", "reload the image's own code"),
+        ("theme", "switch the light/dark theme"),
+        ("eval", "evaluate one form in the live image"),
+    ]
+    .iter()
+    .map(|(name, description)| Candidate {
+        name: name.to_string(),
+        description: description.to_string(),
+    })
+    .collect()
+}
+
 /// The column the box is docked at the foot of: what the app renders above it.
 struct Page {
     composer: Entity<Composer>,
@@ -105,6 +125,7 @@ impl Page {
                     "max".to_string(),
                 ],
                 models(),
+                commands(),
                 cx,
             );
         });

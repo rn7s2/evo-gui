@@ -19,6 +19,11 @@
 //! fixed when it starts — so a lane's drawer states what that lane runs and says that
 //! this box is not what changes it. Nothing is offered that the server would refuse.
 //!
+//! The inline completion the caret's word raises is the third thing evo owns: the
+//! candidates are the commands `GET /catalog` lists, and — inside `/eval` — the
+//! symbols the running image answers with. Nothing here invents one; what the popup
+//! does with what comes back is [`complete`].
+//!
 //! The composer does no I/O. It emits [`ComposerEvent`] and the owner posts the
 //! request, then reports the outcome with [`Composer::request_finished`]: that is what
 //! keeps a failed send's draft alive, and what keeps the button disabled only while
@@ -38,15 +43,20 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    div, px, radians, Animation, AnimationExt as _, AnyElement, App, Bounds, BoxShadow, ClickEvent,
-    ClipboardItem, Context, ElementId, Entity, EventEmitter, FocusHandle, Global, IntoElement,
-    KeyBinding, Keystroke, KeystrokeEvent, Pixels, Point, Render, ScrollHandle, SharedString,
-    Subscription, TestSupportExt as _, WeakEntity, Window,
+    anchored, deferred, div, point, px, radians, Anchor, Animation, AnimationExt as _, AnyElement,
+    App, Bounds, BoxShadow, ClickEvent, ClipboardItem, Context, ElementId, Entity, EventEmitter,
+    FocusHandle, Global, IntoElement, KeyBinding, Keystroke, KeystrokeEvent, Pixels, Point, Render,
+    ScrollHandle, SharedString, Subscription, Task, TestSupportExt as _, WeakEntity, Window,
 };
 use session::{ordered_segments, GoalInfo, Segment, Todo, TodoStatus, TopicState};
 use store::design::{self, Palette, INSET, MEASURE, RADIUS};
 use widgets::effort::{cubic_bezier, Motion};
 use widgets::{paint, Chip, EffortSlider};
+
+mod complete;
+
+pub use complete::Candidate;
+use complete::{Kind, Popup};
 
 /// The input grows from the design's two lines to as much as half the conversation
 /// pane, and scrolls inside itself past that (`AutoTextarea.tsx`).
@@ -124,6 +134,28 @@ const DRAWER_LABEL_MIN: Pixels = px(112.);
 /// the surface the drawer sits on (`--sidebar`), as the design's rows do it.
 const ITEM_HOVER_MIX: f32 = 6.;
 const ITEM_CHOSEN_MIX: f32 = 9.;
+
+/// The completion popup: a drawer's item list, but floating over the box at the
+/// caret rather than folded out of it, so it wears the drawer's own surface, a
+/// radius of its own and the shadow the box has.
+const POPUP_WIDTH: f32 = 320.;
+const POPUP_RADIUS: Pixels = px(10.);
+const POPUP_PAD: f32 = 6.;
+const POPUP_ROW: f32 = 28.;
+/// How far above the caret the popup's own edge stands.
+const POPUP_GAP: f32 = 6.;
+const POPUP_FONT: Pixels = px(12.5);
+/// The row the counter under the list is set on, when the list is longer than the
+/// popup shows.
+const POPUP_COUNTER: f32 = 18.;
+/// The list's own fold: the rows the popup shows at once, and nothing else — the
+/// popup's padding and its counter stand outside it.
+const POPUP_LIST_MAX: Pixels = px(POPUP_ROW * complete::MAX_ROWS as f32);
+
+/// How long the caret has to rest on a token before the image is asked about it:
+/// a keystroke in the middle of a word is not a question, and one round trip per
+/// word is enough — the same debounce a code editor waits.
+const SYMBOL_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(80);
 
 /// The input's own type: `.composer-box textarea{font-size:14px;line-height:20px}`
 /// — a size of its own, not the theme's base, and the line the autogrow counts in.
@@ -208,6 +240,14 @@ pub enum ComposerEvent {
     ModelSet { id: String, provider: String },
     /// Change the coordinator's effort (`thinking.set`).
     ThinkingSet(String),
+    /// Run this message as the slash command it is (`command.run`, §5.5): a
+    /// message that is one command from its start is the command's, not the
+    /// agent's — `/eval` included, whose content is a form for the image.
+    Command { name: String, args: String },
+    /// Ask the image what its own symbols complete to, for a token the reader is
+    /// typing inside `/eval` (`eval` op). The answer comes back through
+    /// [`Composer::set_symbols`], labelled with this same token.
+    Symbols { token: String },
 }
 
 /// What the one button says — and therefore what clicking it does.
@@ -329,6 +369,18 @@ pub struct Composer {
     levels: Vec<SharedString>,
     /// The models the catalog lists, for the drawer (§5.6).
     models: Vec<ModelRow>,
+    /// The commands the catalog lists: what a `/word` word completes against.
+    /// The registry is the server's — a client never writes a command down (§8).
+    commands: Vec<Candidate>,
+    /// The inline completion popup, while the caret's word has candidates.
+    popup: Option<Popup>,
+    /// The popup's own scroll position, kept across frames, and the prefix `Esc`
+    /// has put the popup away for: it comes back when the word moves on.
+    popup_scroll: ScrollHandle,
+    dismissed: Option<String>,
+    /// The symbols the image last answered about, while `/eval` content is
+    /// being typed (see [`Symbols`]).
+    symbols: Symbols,
     /// Whether the model drawer is folded out, as the model chip folds it.
     model_open: bool,
     /// Whether the goal strip's objective is unfolded.
@@ -387,6 +439,26 @@ pub struct ModelRow {
     pub reason: Option<String>,
 }
 
+/// The `/eval` content's symbols, as the image last answered for one token.
+///
+/// The image is asked on a debounce — a keystroke in the middle of a word is not
+/// a question — and one question is out at a time. The answer carries the token
+/// it belongs to, so an answer the caret has already left can only ever fill the
+/// cache, never the popup: what is drawn is drawn for the caret's own token.
+#[derive(Default)]
+struct Symbols {
+    /// The token the rows belong to, and the rows themselves.
+    token: String,
+    rows: Vec<Candidate>,
+    /// The token a question is out for, while one is. Cleared by the answer
+    /// ([`Composer::set_symbols`]) whether it found anything or not, so a token
+    /// is never left unanswerable.
+    asked: Option<String>,
+    /// The debounce itself. Held so the next keystroke can drop it — a dropped
+    /// task is a cancelled timer.
+    timer: Option<Task<()>>,
+}
+
 impl EventEmitter<ComposerEvent> for Composer {}
 
 impl Composer {
@@ -417,6 +489,9 @@ impl Composer {
                     // An edit is what ends a walk through the history: the reader has
                     // taken the recalled prompt and made it their own draft.
                     this.walking = None;
+                    // And an edit is what the completion popup is about: the caret's
+                    // word has just changed under it.
+                    this.refresh(cx);
                     cx.notify();
                 }
                 _ => {}
@@ -443,6 +518,11 @@ impl Composer {
             settable: true,
             levels: Vec::new(),
             models: Vec::new(),
+            commands: Vec::new(),
+            popup: None,
+            popup_scroll: ScrollHandle::new(),
+            dismissed: None,
+            symbols: Symbols::default(),
             model_open: false,
             goal_open: false,
             todos_open: false,
@@ -521,20 +601,182 @@ impl Composer {
         }
     }
 
-    /// The models the drawer offers, and the effort ladder `thinking.set` accepts:
-    /// both are the server's (`GET /catalog`, §5.6), and both come in one call.
+    /// The models the drawer offers, the effort ladder `thinking.set` accepts and
+    /// the commands a `/word` completes against: all of it the server's
+    /// (`GET /catalog`, §5.6), and all of it in one call.
     pub fn set_catalog(
         &mut self,
         levels: Vec<String>,
         models: Vec<ModelRow>,
+        commands: Vec<Candidate>,
         cx: &mut Context<Self>,
     ) {
         let levels: Vec<SharedString> = levels.into_iter().map(SharedString::from).collect();
-        if self.levels != levels || self.models != models {
+        if self.levels != levels || self.models != models || self.commands != commands {
             self.levels = levels;
             self.models = models;
+            self.commands = commands;
+            // A registry that arrived while a word was being typed is a new set of
+            // candidates for it.
+            self.refresh(cx);
             cx.notify();
         }
+    }
+
+    /// The image's answer about one token: the symbols `/eval` content completes
+    /// to, as `evo.eval:completions-for` returned them.
+    ///
+    /// Empty is an answer like any other — the token matched nothing, or the op
+    /// that asked could not be run — and it is the answer that releases the
+    /// question, so the next token can be asked about.
+    pub fn set_symbols(&mut self, token: &str, rows: Vec<Candidate>, cx: &mut Context<Self>) {
+        if self.symbols.asked.as_deref() == Some(token) {
+            self.symbols.asked = None;
+        }
+        self.symbols.token = token.to_string();
+        self.symbols.rows = rows;
+        self.refresh(cx);
+    }
+
+    /// The word under the caret, read again: what the popup shows, and what it
+    /// hides.
+    ///
+    /// Every edit lands here, and so does every key that may have moved the
+    /// caret. Nothing else decides what the popup holds, so what is drawn is
+    /// always the caret's own word.
+    fn refresh(&mut self, cx: &mut Context<Self>) {
+        let (text, caret) = {
+            let input = self.input.read(cx);
+            (input.value().to_string(), input.cursor())
+        };
+        // A prompt recalled from the history is not the reader's input: what the
+        // caret sits on raises no popup until it is edited. Sending from the popup
+        // would be worse than an absent suggestion — the list would capture the
+        // ↑/↓ the history walks with.
+        let target = if self.walking.is_none() {
+            complete::target(&text, caret)
+        } else {
+            None
+        };
+        let Some(target) = target else {
+            self.popup = None;
+            return;
+        };
+        // Esc puts the popup away for the word it was on: a word that has moved
+        // on is a new one, and asks again.
+        if self.dismissed.as_deref() == Some(target.prefix.as_str()) {
+            self.popup = None;
+            return;
+        }
+        self.dismissed = None;
+        let rows = match target.kind {
+            Kind::Command => complete::matches(&self.commands, &target.prefix),
+            Kind::Symbol => self.symbol_rows(&target.prefix, cx),
+        };
+        // Nothing to offer, or nothing left to choose: a popup whose only
+        // candidate is the word already typed shows the reader their own input
+        // back, and would capture the ↑/↓ that browse the history with it.
+        if rows.is_empty() || complete::settled(&target.prefix, &rows) {
+            self.popup = None;
+            return;
+        }
+        // The highlight stays where it was while the same word is still being
+        // typed; a new word starts at the top of its own list.
+        let index = match &self.popup {
+            Some(popup) if popup.prefix == target.prefix && popup.kind == target.kind => {
+                popup.index
+            }
+            _ => 0,
+        };
+        let mut popup = Popup::new(&target, rows);
+        popup.index = index.min(popup.rows.len() - 1);
+        self.popup = Some(popup);
+    }
+
+    /// What the image has to say for a token being typed, asking it if it has not
+    /// been asked about this one.
+    ///
+    /// Until the answer lands, the rows that stood for the token's own beginning
+    /// stand in — a name is typed forwards, so the last answer is almost always
+    /// the current list, one keystroke short.
+    fn symbol_rows(&mut self, token: &str, cx: &mut Context<Self>) -> Vec<Candidate> {
+        let rows = if self.symbols.token == token {
+            self.symbols.rows.clone()
+        } else if token.starts_with(self.symbols.token.as_str()) {
+            complete::prefix_matches(&self.symbols.rows, token)
+        } else {
+            Vec::new()
+        };
+        // One question at a time, and only one per word: the token the caret is
+        // on now is what the answer has to be about.
+        if self.symbols.token != token && self.symbols.asked.is_none() {
+            self.ask(token.to_string(), cx);
+        }
+        rows
+    }
+
+    /// Put a question about a token to the image, after the caret has rested on
+    /// it for [`SYMBOL_DEBOUNCE`].
+    fn ask(&mut self, token: String, cx: &mut Context<Self>) {
+        self.symbols.asked = Some(token.clone());
+        self.symbols.timer = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SYMBOL_DEBOUNCE).await;
+            let _ = this.update(cx, |composer, cx| {
+                composer.symbols.timer = None;
+                // The caret may have left the token while the timer ran: the
+                // question follows the caret, not the keystroke that raised it.
+                if composer.symbols.asked.as_deref() == Some(token.as_str()) {
+                    cx.emit(ComposerEvent::Symbols { token });
+                }
+            });
+        }));
+    }
+
+    /// Move the popup's highlight by `delta` rows, wrapping at both ends.
+    fn walk(&mut self, delta: isize, cx: &mut Context<Self>) {
+        cx.stop_propagation();
+        let Some(popup) = self.popup.as_mut() else {
+            return;
+        };
+        popup.walk(delta);
+        // A highlight below the list's own fold is no highlight at all: the list
+        // follows the keys.
+        self.popup_scroll.scroll_to_item(popup.index);
+        cx.notify();
+    }
+
+    /// Put the popup away until the word changes: the reader has said they are
+    /// not choosing from it. This is what the popup's `Esc` means — not the
+    /// coordinator's own interrupt, which a second `Esc` still is.
+    fn dismiss(&mut self, cx: &mut Context<Self>) {
+        cx.stop_propagation();
+        self.dismissed = self.popup.as_ref().map(|popup| popup.prefix.clone());
+        self.popup = None;
+        cx.notify();
+    }
+
+    /// Take the highlighted candidate into the input: the whole `/command` word,
+    /// or just the symbol token under the caret.
+    fn accept(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        cx.stop_propagation();
+        // The word as the text stands now, not as it stood when the popup was
+        // built: a caret moved by a click since then is still this key's word.
+        self.refresh(cx);
+        let Some(popup) = self.popup.take() else {
+            return;
+        };
+        let Some(candidate) = popup.chosen() else {
+            return;
+        };
+        let name = candidate.name.clone();
+        let text = self.input.read(cx).value().to_string();
+        let (text, caret) = complete::accepted(&text, popup.kind, &popup.word, &name);
+        let caret = end_position(&text[..caret]);
+        self.input.update(cx, |input, cx| {
+            input.set_value(text.as_str(), window, cx);
+            input.set_cursor_position(caret, window, cx);
+        });
+        cx.notify();
     }
 
     /// Unfold or fold the goal's objective, which is also the chevron's turn: the angle
@@ -680,7 +922,18 @@ impl Composer {
         // request is still on its way.
         self.remember(&draft);
         self.walking = None;
-        cx.emit(ComposerEvent::Send(draft));
+        // A message that *is* a slash command is the command's, not the agent's:
+        // it goes to `command.run`, and the server decides — including whether
+        // the command exists at all. Anything else, `/` and all, is the reader's
+        // words to the coordinator.
+        let event = match complete::command_message(&draft) {
+            Some((name, args)) => ComposerEvent::Command {
+                name: name.to_string(),
+                args: args.to_string(),
+            },
+            None => ComposerEvent::Send(draft),
+        };
+        cx.emit(event);
         cx.notify();
     }
 
@@ -760,6 +1013,23 @@ impl Composer {
 
         let keystroke = &event.keystroke;
 
+        // The popup is a list, and while it is up the keys that walk a list are
+        // its own: ↑/↓ pick a row rather than move the caret or browse the
+        // history, Tab and Enter take the row, and Esc puts the list away —
+        // never the coordinator's interrupt, which is what Esc means with no
+        // popup up. Nothing here reaches the input, so a row taken with Enter
+        // is not also a draft sent.
+        if self.popup.is_some() {
+            match keystroke.key.as_str() {
+                "up" => return self.walk(-1, cx),
+                "down" => return self.walk(1, cx),
+                "tab" => return self.accept(window, cx),
+                "enter" if is_submit(keystroke) => return self.accept(window, cx),
+                "escape" => return self.dismiss(cx),
+                _ => {}
+            }
+        }
+
         // A plain `Enter` submits, but the input submits at the end of this update:
         // the reader's words are taken now, at the key, so that whatever rewrites the
         // input in between is not what goes out.
@@ -786,6 +1056,15 @@ impl Composer {
                 cx.stop_propagation();
             }
             _ => {}
+        }
+
+        // The caret may end up somewhere else than this key left it — an arrow, a
+        // Home, a word-delete — and the popup is about where the caret is. It is
+        // read again once this key's update is over, which is when the input has
+        // moved it. A key that types something says so through the input's own
+        // `Change`.
+        if keystroke.key_char.is_none() {
+            cx.defer_in(window, |this, _window, cx| this.refresh(cx));
         }
     }
 
@@ -1119,6 +1398,129 @@ impl Composer {
                         ),
                 )
                 .child(body)
+                .into_any_element(),
+        )
+    }
+
+    /// The completion popup: the caret's word, and what would finish it (§7.3).
+    ///
+    /// A drawer's own language — the sidebar surface, one hairline, the box's
+    /// radius and the warm shadow — but floating at the caret rather than folded
+    /// out of the box: a word being typed does not move the box's own content
+    /// one row up and down as suggestions come and go.
+    fn completion_popup(
+        &self,
+        palette: &'static Palette,
+        cx: &Context<Self>,
+    ) -> Option<AnyElement> {
+        let popup = self.popup.as_ref()?;
+        let hover = paint::color(paint::mix(palette.fg, ITEM_HOVER_MIX, palette.sidebar));
+        let chosen_fill = paint::color(paint::mix(palette.fg, ITEM_CHOSEN_MIX, palette.sidebar));
+        let weak = cx.entity().downgrade();
+
+        let rows = popup.rows.iter().enumerate().map(|(index, candidate)| {
+            let chosen = index == popup.index;
+            let label = SharedString::from(popup.label(candidate));
+            let description = SharedString::from(candidate.description.clone());
+            let mut row = h_flex()
+                .id(ElementId::from(format!("completion-row-{index}")))
+                .test_support()
+                // The row as a reader that cannot see it hears it: the label, then
+                // the line beside it — `{label} · {description}` on one line, the way
+                // the drawer names a model.
+                .aria_label(SharedString::from(format!("{label} · {description}")))
+                .flex_none()
+                .h(px(POPUP_ROW))
+                .w_full()
+                .items_center()
+                .gap(px(10.))
+                .px(px(8.))
+                .rounded(DRAWER_ITEM_RADIUS)
+                .text_size(POPUP_FONT)
+                .text_color(paint::color(palette.fg))
+                .cursor_default()
+                // `.drawer-item.chosen` is written after `.drawer-item:hover`: the
+                // chosen row keeps its own fill under the pointer.
+                .when(!chosen, |row| row.hover(move |row| row.bg(hover)))
+                .child(div().flex_none().child(label))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(paint::color(palette.muted_fg))
+                        .child(description),
+                );
+            // A press is a choice: the row the pointer is on is the row taken.
+            let weak = weak.clone();
+            row = row.on_click(move |_, window, cx| {
+                if let Some(composer) = weak.upgrade() {
+                    composer.update(cx, |this, cx| {
+                        if let Some(popup) = this.popup.as_mut() {
+                            popup.index = index;
+                        }
+                        this.accept(window, cx);
+                    });
+                }
+            });
+            if chosen {
+                row = row.bg(chosen_fill);
+            }
+            row
+        });
+
+        let list = v_flex()
+            .id("completion-list")
+            .test_support()
+            .w_full()
+            .max_h(POPUP_LIST_MAX)
+            .overflow_y_scroll()
+            .track_scroll(&self.popup_scroll)
+            .children(rows);
+
+        // The TUI's own overflow line: without it a list longer than the popup
+        // shows gives no sign that it is longer. The index is the reader's, one
+        // based, and the count is how many there are.
+        let counter = (popup.rows.len() > complete::MAX_ROWS).then(|| {
+            h_flex()
+                .id("completion-counter")
+                .test_support()
+                .flex_none()
+                .h(px(POPUP_COUNTER))
+                .w_full()
+                .items_center()
+                .gap(px(10.))
+                .px(px(8.))
+                .border_t_1()
+                .border_color(paint::faded(palette.border, 0.7))
+                .text_size(POPUP_FONT)
+                .text_color(paint::color(palette.muted_fg))
+                .child(SharedString::from(format!(
+                    "… {}/{}",
+                    popup.index + 1,
+                    popup.rows.len()
+                )))
+        });
+
+        Some(
+            v_flex()
+                .id("completion-popup")
+                .test_support()
+                .w(px(POPUP_WIDTH))
+                .flex_none()
+                .p(px(POPUP_PAD))
+                .rounded(POPUP_RADIUS)
+                .border(BOX_BORDER)
+                .border_color(paint::color(palette.border))
+                .bg(paint::color(palette.sidebar))
+                .shadow(vec![BoxShadow::new(
+                    px(0.),
+                    px(2.),
+                    paint::wash(SHADOW_INK, 8.),
+                )
+                .blur_radius(px(6.))])
+                .child(list)
+                .children(counter)
                 .into_any_element(),
         )
     }
@@ -1574,6 +1976,31 @@ impl Render for Composer {
         // there.
         let body_at_top = goal.is_none() && strip.is_none() && drawer.is_none();
 
+        // The completion popup floats at the caret, out of the box's own clipping: a
+        // deferred draw is painted after its ancestors, so neither the box's fold nor
+        // the transcript under it can cut it. Its *layout* is still the box's, which
+        // is why the anchored element it draws is positioned absolutely — taken out
+        // of the flow, it moves nothing.
+        let popup = self.completion_popup(palette, cx).map(|popup| {
+            let at = match self.input.read(cx).cursor_layout() {
+                // The caret's own line: the popup stands over it, its bottom edge a
+                // gap above the line the next character goes on.
+                Some((caret, _)) => point(caret.left(), caret.top() - px(POPUP_GAP)),
+                // Nothing laid out yet, or no caret in the input: the box's own left
+                // edge, under the first line of it.
+                None => {
+                    let bounds = self.input.read(cx).input_bounds();
+                    point(bounds.left(), bounds.top() + INPUT_LINE)
+                }
+            };
+            deferred(
+                anchored()
+                    .anchor(Anchor::BottomLeft)
+                    .position(at)
+                    .child(popup),
+            )
+        });
+
         // Where the box was painted: the page asks this against the press it sees, so
         // that a press in the box and a press outside it are told apart by where they
         // landed rather than by who handled them first (the input, a chip and the
@@ -1662,7 +2089,10 @@ impl Render for Composer {
                                     ),
                             )
                             .child(foot),
-                    ),
+                    )
+                    // The popup, if the caret's word has one: the box's last child,
+                    // drawn over everything the box holds.
+                    .children(popup),
             )
     }
 }
@@ -1759,6 +2189,24 @@ mod tests {
             .collect()
     }
 
+    /// The commands the server's registry lists, in its own order (§5.6) — the
+    /// popup's candidates, never the client's.
+    fn catalog_commands() -> Vec<Candidate> {
+        [
+            ("help", "commands and keys"),
+            ("lore", "durable guidance"),
+            ("memory", "what is remembered"),
+            ("reload", "reload the image's own code"),
+            ("eval", "evaluate one form in the live image"),
+        ]
+        .iter()
+        .map(|(name, description)| Candidate {
+            name: name.to_string(),
+            description: description.to_string(),
+        })
+        .collect()
+    }
+
     struct Fixture {
         window: AnyWindowHandle,
         composer: Entity<Composer>,
@@ -1796,10 +2244,11 @@ mod tests {
             });
         }
 
-        /// The server's catalog: the effort ladder and the models the drawer offers.
+        /// The server's catalog: the effort ladder, the models the drawer offers,
+        /// and the commands a `/word` completes against.
         fn set_catalog(&self, cx: &mut App) {
             self.composer.update(cx, |composer, cx| {
-                composer.set_catalog(catalog_levels(), catalog_models(), cx)
+                composer.set_catalog(catalog_levels(), catalog_models(), catalog_commands(), cx)
             });
         }
 
