@@ -248,13 +248,21 @@ the agent header are the same height on the same surface, so the rule under them
   5. the **completion popup**: a word being typed is completed inline, as an editor does — the
      commands `GET /catalog` lists for a `/word`, and the *running image's* own symbols for a
      token inside `/eval `, which only the image can enumerate (`docs/api-gaps.md`: the `eval`
-     op is the only thing to ask). It is a drawer's item list floating at the caret — the
-     sidebar surface, one hairline, a 10 px radius, the box's own shadow — over the caret's
-     line and a small gap off it, under it when the window has no room above (it is a deferred
-     draw, so neither the box nor the page can clip it), up to eight rows with the list
-     scrolling inside its own fold and a dim `… n/m` counter under it while there are more. A
-     row reads `label` then the description dim and truncated, in the drawer's own shape; the
-     highlighted row wears the drawer item's chosen fill. The keys are the list's while it is
+     op is the only thing to ask). It is a drawer's item list floating at the word: the sidebar
+     surface, one hairline, a 10 px radius, the box's own shadow, standing over the *word's* own
+     line — not the caret's end — a small gap off it, and under it when the window has no room
+     above (it is a deferred draw, so neither the box nor the page can clip it). Every row's
+     label starts at the x the typed word does, the popup being placed by that column rather
+     than by its own edge; a word near the window's right edge pulls the whole list back inside
+     it, which is the one case the labels leave the word. It is as wide as its widest row —
+     measured over every candidate of the list, not only the rows it shows, so ↑/↓ never
+     resizes it — between 240 and 560 px and never wider than the window, and past that ceiling
+     a description is what truncates. Up to eight rows, the list scrolling inside its own fold
+     and a dim `… n/m` counter under it while there are more. A row reads `label` then the
+     description dim, in the drawer's own shape, with the characters the word matched drawn
+     heavier — the prefix a name begins with, or the positions a fuzzy match took, so `/re`
+     offering `/lore` says which two letters it found; the highlighted row wears the drawer
+     item's chosen fill. The keys are the list's while it is
      up: `↑`/`↓` walk the rows and wrap, `Tab`/`Enter` take the highlighted one — **Enter takes
      the row and does not send** — and `Esc` dismisses until the word changes (so it is never
      the coordinator's interrupt). A `/word` completes anywhere in the message, and a second

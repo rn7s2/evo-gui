@@ -336,10 +336,15 @@ copied while the caret sits in the input.
 
 **A word completes while it is typed**, as it does in the TUI and in an editor. A
 word that starts with `/` — anywhere in the message, not only at its start —
-raises a list of the commands `GET /catalog` lists, drawn over the caret's own
-line: `↑`/`↓` walk the rows and wrap, **Tab** or **Enter** takes the highlighted
-one — **Enter takes the row instead of sending the message** — and **Esc** puts
-the list away until the word changes. A command is taken with a space after it
+raises a list of the commands `GET /catalog` lists, drawn over the word's own
+line, with every row's label beginning where the word does and every description
+whole (the list is as wide as its widest row, and only past 560 px does a
+description give). The characters the word matched are drawn heavier, so it is
+clear why a row is there: `/re` offers `/reload` as a prefix match and `/lore` as
+a subsequence one. `↑`/`↓` walk the rows and wrap, **Tab** or **Enter** takes the
+highlighted one — **Enter takes the row instead of sending the message** — and
+**Esc** puts the list away until the word changes. A word started near the right
+edge of the box pulls the list back inside the window rather than off it. A command is taken with a space after it
 when it is at the message's own start, so its arguments can be typed straight on.
 Typing a second `/` in the word ends it: `/usr/local/bin` is a path, and offers
 nothing. The list is the server's registry, so extension commands and skills
