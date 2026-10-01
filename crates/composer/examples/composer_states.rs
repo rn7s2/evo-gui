@@ -334,7 +334,8 @@ fn main() {
         }),
         // The registry's fourteen commands over the word being started at the
         // message's own start: the first row highlighted, the list's own counter
-        // saying how many there are, and the long descriptions cut at the row's edge.
+        // saying how many there are, and every description whole — the list is as
+        // wide as its widest row, and these are the rows evo's own registry sends.
         ("completion-command", |cx, window, page| {
             type_into(cx, window, page, "/");
         }),
@@ -346,10 +347,11 @@ fn main() {
                 press(cx, window, "down");
             }
         }),
-        // A word mid-prose: the caret is at the end of `/mo`, and the popup stands
-        // over that line — which is where the caret is — not over the end of the
-        // message. `mo` is what three commands begin or contain, so the list is a
-        // list and not a single row.
+        // A word mid-prose: the caret is at the end of `/mo`, and the popup's every
+        // label starts where that word does — the popup is placed by the word's own
+        // beginning, not by the caret. `mo` is what three commands begin or contain,
+        // so the list is a list and not a single row, and the letters it matched
+        // (`mo` of `/model`, the `m` and `o` of `/memory`) are drawn heavier.
         ("completion-mid-prose", |cx, window, page| {
             type_into(cx, window, page, "please run /mo now");
             // Four lefts put the caret at the end of `/mo`.
