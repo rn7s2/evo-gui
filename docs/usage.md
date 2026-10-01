@@ -1,12 +1,14 @@
 # Using evo-desktop
 
-One window, one tab per swarm. A **tab** is one `evo-swarm serve` process — a
-coordinator agent plus a pool of worker lanes — running in a folder you pick,
-spawned by the app and driven over one loopback protocol: the ready file the
-child writes, one snapshot, one stream of ops, and `POST /ops`
+One window, one session per tab. A **tab** is one evo `serve` process —
+`evo-swarm`'s coordinator plus a pool of worker lanes, or `evo-agent`'s single
+agent — running in a folder you pick, spawned by the app and driven over one
+loopback protocol: the ready file the child writes, one snapshot, one stream of
+ops, and `POST /ops`
 ([`CONTRACT.md`](../CONTRACT.md)). Lanes are not addressed by the app at all:
 they are the coordinator's own children, and their topics arrive mirrored in the
-coordinator's stream.
+coordinator's stream; a single agent has none, and the page says so instead of
+showing a count of nothing.
 
 ## Starting, and the second launch
 
@@ -52,7 +54,7 @@ nobody hears is worse than one the window handles.
 
 ## Tabs
 
-The title bar **is** the tab strip: one tab per swarm, labelled with the folder's
+The title bar **is** the tab strip: one tab per session, labelled with the folder's
 name (a tab nothing has been launched from says `New Swarm`), and hovering one
 shows the whole path plus what the tab is doing — `no folder chosen`, `starting
 the swarm…`, `swarm: running`, `swarm: reconnecting…`, `stopping the swarm…`,
@@ -67,16 +69,16 @@ disk and comes back in the history list.
 
 Two small marks answer questions a label cannot:
 
-- The **dot** before a tab's name breathes while that tab's swarm is working —
-  any lane at work, or the coordinator's own run, which is the same rule the
-  composer's button follows. When a background tab's run *ends*, its dot turns to
-  a full ring — "something happened here" — and looking at that tab is what
-  clears it. A tab with nothing going on wears the ring quietly.
+- The **dot** before a tab's name breathes while that tab's session is working —
+  any lane at work, or the agent's own run (a single agent has no lanes), which is
+  the same rule the composer's button follows. When a background tab's run *ends*,
+  its dot turns to a full ring — "something happened here" — and looking at that
+  tab is what clears it. A tab with nothing going on wears the ring quietly.
 - The **window's own title** — what Mission Control and the app switcher show —
   names the tab being shown: `evo-gui — Evo Desktop`, or `Evo Desktop` alone on
   an empty tab.
 
-## The empty tab: choosing a swarm
+## The empty tab: choosing a session
 
 Every new tab opens on the New Swarm page (`design/doc28/NewSwarm.tsx`): what the
 launch will be, then the folder to run it in, then what can be resumed.
@@ -88,10 +90,11 @@ Choose how it runs, then select a project folder.
 ┌─ Coordinator ──────────────────────────┐   ┌────────────────────────┐
 │ Model                                  │   │   [folder icon]        │
 │ [ acme · deepseek-v4.1-flash        ▾ ]│   │   Select folder…       │
-│ Effort                          medium │   │   The swarm starts in  │
-│ ──●─────────────────────────────────── │   │   the folder you pick  │
-└────────────────────────────────────────┘   └────────────────────────┘
-┌─ Workers ────────────── Count ── 6 ─+ ─┐
+│ Effort                          medium │   │   The session starts   │
+│ ──●─────────────────────────────────── │   │   in the folder you    │
+└────────────────────────────────────────┘   │   pick                 │
+                                             └────────────────────────┘
+┌─ Workers ── Use swarm [●] ── Count ── 6 ─+ ─┐
 │ Model                                  │
 │ [ anthropic · claude-opus-4.5       ▾ ]│
 │ Effort                          medium │
@@ -127,6 +130,18 @@ a model is a launch that runs it:
   the effort `check` resolved — evo's own chain, journal and settings included,
   so a resumed swarm opens on the level it was running at; click, drag or use the
   arrows, and the level's name is beside the label.
+- **Workers — Use swarm** is a switch, not a flag: on, the launch is
+  `evo-swarm serve` — a coordinator and its pool of lanes; off, it is
+  `evo-agent serve`, one agent, addressed as `Main` on the page that opens, and
+  launched with the coordinator's `--model` and `--thinking` and nothing a lane
+  would take. It is a value of the window's, like the tab strip's order: one for
+  every tab, written to `app.json` when you change it and read again at the next
+  launch. Off, the Workers card's model, its effort and the count grey **in
+  place** — the same boxes in the same places, taking no click, no keystroke and
+  no tab stop, so nothing moves under the pointer that flipped it — and those are
+  no longer the launch's own questions: with no `check` to ask (`evo-agent` has no
+  such subcommand), the page reads `evo-agent catalog --json` for the list it
+  shows them from.
 - **Workers — Count** is `--workers`, 1–64, opening on the count `check`
   resolved — `--workers`, then the `swarm-workers` setting, then 6. Typing clamps
   to the range — `0`, `99` or a word lands on the nearest count — and `−`/`+`
@@ -139,12 +154,16 @@ a model is a launch that runs it:
   no project file: the lanes' model is a launch flag, and
   `<folder>/.evo/swarm.lisp` stays yours.
 - **Select folder…** — the native folder dialog. Picking a folder starts the
-  swarm there and turns the tab into a tab page; cancelling leaves the tab empty.
+  launch there and turns the tab into a tab page; cancelling leaves the tab empty.
 
 A control the launcher resolved follows `check`: when the answer changes, the
 page moves the control onto it. A control **you** moved is yours, and stays where
 you put it. The one exception is the frame before the first `check` comes back,
 where the sliders sit on the middle rung and the count on evo-swarm's own 6.
+
+With **Use swarm** off there is nothing to follow — `evo-agent` has no `check` —
+so the fields stand on one agent's own catalog instead: its default registration,
+or the first one it says is ready.
 
 Under the cards, one calm line each: what `evo-swarm check --json` found wrong
 with the launch the controls describe — a model evo cannot reach, a lane that
@@ -154,34 +173,50 @@ the control it is about, or opens Settings when it is about the machine (the
 binary that is not there). The check runs again on every model change, so these
 lines describe what **Select folder…** would actually start.
 
-The tab's models are fixed when the swarm starts — the tab page has no model
+With **Use swarm** off there is no check to run, so the one line is evo's own
+`reason` for the registration the launch resolved — a model it cannot reach — and
+nothing is said about lanes, the count or the effort: those are `check`'s answers,
+and a single agent is never asked for them. Each read's trouble keeps its own
+words, so what is under the cards is always about the list this launch would
+really run on.
+
+The tab's models are fixed when the session starts — the tab page has no model
 selector, only the readout that shows what is running.
 
 ### Keyboard on the empty tab
 
 Tab walks the page in the order it is read: the Coordinator's model field and
-effort slider, the Workers' count, model and slider, the folder card, then the
-history rows. The two model fields open with `Enter`, `Space` or an arrow, the
-arrows walk the options, `Enter` picks, `Esc` closes the menu without leaving the
+effort slider, the Workers' **Use swarm** switch and — while it is on — their
+count, model and slider, the folder card, then the history rows. The two model
+fields open with `Enter`, `Space` or an arrow, the arrows walk the options,
+`Enter` picks, `Esc` closes the menu without leaving the
 tab; the count box takes digits; a slider takes the arrows, `Home` and `End`; the
-folder card and every history row are buttons, so `Enter` is what a click is.
+switch takes `Enter` or `Space`, and a Workers control it turned off is not a tab
+stop at all; the folder card and every history row are buttons, so `Enter` is
+what a click is.
 A focused model field or count box draws the design's ring — a primary border
 with a 2px muted halo — and a focused slider rings its thumb.
 
 ### History
 
-The history lists every resumable swarm `evo-agent sessions --json` reports —
-any folder, not only the ones this app started — merged with the app's own recent
-sessions, newest first. The app reads no journal: evo keeps an index and prints
-it. A row leads with the session's own title (its first user text) and, under it,
-the `~`-shortened folder with how long ago it ran, joined by `·`; a session the
-app had open when it last quit wears an `open at last quit` pill beside its
-title, and the `›` at the row's end says what a click does. Hovering shows the
+The history lists every resumable session `evo-agent sessions --json` reports —
+any folder, not only the ones this app started, and either program: a swarm's
+coordinator or a single agent. A lane's own journal is not a row: a lane belongs
+to the swarm that started it, and the swarm's session is the row for it. The list
+is merged with the app's own recent sessions, newest first. The app reads no
+journal: evo keeps an index and prints it. A row leads with the session's own
+title (its first user text) and, under it,
+the `~`-shortened folder with how long ago it ran, joined by `·`; the kind it is
+wears its own mark — `Agent session` or `Swarm session` — and a
+session the app had open when it last quit wears an `open at last quit` pill
+beside its title, and the `›` at the row's end says what a click does. Hovering shows the
 full path, the journal's name, the absolute time, the models and the lane count.
 
 Click a row (or press `Enter` while it has the keyboard) to open it as a new tab:
-the swarm resumes that session (`--resume <that exact journal>`) in the folder it
-ran in, so two tabs in one folder can never cross sessions. The list scrolls
+it resumes that session (`--resume <that exact journal>`) in the folder it
+ran in and **with the program that wrote it** — an agent session opens as one
+agent, a swarm's as a swarm, because only the program that wrote a journal can
+open it — so two tabs in one folder can never cross sessions. The list scrolls
 inside the height that is left, under the fixed head and cards; and it has three
 quiet states of its own: `Looking for sessions…` while the index is read, `No
 swarms to resume yet.`, and the read's error in words. The calm one is what a
@@ -218,6 +253,13 @@ row carries a small **Stop** — the one thing a person may do
 to a lane (`run.interrupt`, scope `lane`); the coordinator is told, and steering
 the lane stays its job.
 
+A **single-agent session** has no lanes, so the band keeps its `Lanes` title and
+carries no count at all — a count of lanes a single agent does not have is not a
+thing to read — and the column is its
+one row, `Main`: no lane rows, whatever a swarm's snapshot left behind. The row's
+state is the session's own, `idle`/`running`/`compacting`, and the transcript
+beside it is that one agent's.
+
 | glyph | meaning |
 |---|---|
 | `●` | working |
@@ -229,16 +271,19 @@ the lane stays its job.
 
 Clicking a row selects that agent: it changes what the conversation shows and
 nothing else. The keyboard walks the rows with `↓`/`↑` and jumps to the ends
-with `Home`/`End`. Input always goes to the coordinator. The folder the swarm
-runs in is pinned at the bottom of the column, one line, `~`-shortened where it
+with `Home`/`End`. Input always goes to the session's own agent — the coordinator
+in a swarm, the one agent in an `evo-agent` session, which is the only row there
+is. The folder the session runs in is pinned at the bottom of the column, one
+line, `~`-shortened where it
 is under the home directory and trimmed from the front — whole directories at a
 time, so a name is never cut in half: `…/project`, or
 `~/…/gui-model/crates/workspace/src`. Hovering shows the whole path.
 
 ### The transcript
 
-A slim header names the agent being shown (`coordinator`, `lane 1`) with the same status
-glyph the left column uses, the task that agent was given, and — when that
+A slim header names the agent being shown (`coordinator`, `Main` in a
+single-agent session, or `lane 1`) with the same status glyph the left column
+uses, the task that agent was given, and — when that
 agent's transcript carries thinking text — a **Show thinking** button that
 reveals it (**Hide thinking** puts it back). The toggle is per agent: switching
 agents shows each transcript the way you left it.
@@ -348,7 +393,9 @@ drawer says so.
 
 The input grows from two rows to half the pane, and scrolls after that.
 **Enter** sends, **Shift+Enter** is a newline, **Esc** interrupts the
-coordinator's turn. An empty input's **↑** walks
+coordinator's turn. An empty box says what it is addressed to: `Message the
+coordinator…` in a swarm, and `Message the agent…` in a single-agent session,
+where there is no coordinator to name. An empty input's **↑** walks
 back through the prompts this tab has sent (**↓** walks forward again), so a
 prompt can be sent twice without retyping it; typing anything makes the recalled
 text a draft like any other. **⌘C** with nothing selected in the input copies the
@@ -414,6 +461,11 @@ own in flight greys it. There is never a Send and a Stop side by side; `Esc` is 
 same interrupt with the keyboard, and **Enter** still sends while the swarm is busy
 (that is what the queue is for). A lane can be stopped from its own row in the left column.
 
+A **single-agent session** has no swarm to stop, so there the same button reads **■
+Stop** while its run is going on, and clicking it (or `Esc`) posts
+`run.interrupt` with scope `session` — one agent's own run is the only run there
+is, and the only scope its server knows.
+
 The chips row is that agent's status line, chipped: the `segments` the server
 publishes for it, in its order, so the same session reads the same here and in the
 TUI. A core registry builds them — model, thinking, context, goal — and an
@@ -478,18 +530,19 @@ The app keeps its own data in `~/.evo/desktop/`:
 
 | path | what |
 |---|---|
-| `app.json` | window bounds, the recorded tab set, binary paths, recent sessions, theme |
+| `app.json` | window bounds, the recorded tab set, binary paths, the workers switch, recent sessions, theme |
 | `lock`, `activate.sock` | the single-instance lock and its activation socket |
 | `model-cache.json` | the last `catalog --json` body, for the New Swarm page's controls |
 | `tabs/<id>/ready.json` | where the server publishes its port, URL and bearer token (0600) |
-| `tabs/<id>/swarm.log` | the swarm's stdout and stderr |
+| `tabs/<id>/swarm.log` | the server's stdout and stderr (either program's) |
 | `app.log` | the app's own log, one line per event, each with a UTC timestamp |
 
 The token in `ready.json` is never logged and never shown. Nothing else is
 written: the app reads no journal and edits no project file. What it shows comes
 from evo itself — `evo-swarm catalog --json` for the controls (at startup, and
-again whenever the binaries change), `evo-agent sessions --json` for the history
-list, `evo-swarm check --json` for the problem lines, and the running swarm for
+again whenever the binaries change), `evo-agent catalog --json` for them instead
+while **Use swarm** is off, `evo-agent sessions --json` for the history
+list, `evo-swarm check --json` for the problem lines, and the running server for
 everything on the tab page. Model names are never hardcoded.
 
 ## Running it against a scripted model
