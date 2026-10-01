@@ -74,29 +74,38 @@ fn levels() -> Vec<String> {
         .collect()
 }
 
-/// The models the drawer offers, as `GET /catalog` lists them (§5.6): one chosen,
-/// one ready, one that cannot be used and says why.
+/// The models the drawer offers, as `GET /catalog` lists them (§5.6): one chosen, one
+/// ready, one that cannot be used and says why. Each carries the levels it takes — the
+/// whole ladder, a provider's own three rungs, and none at all — which is what the
+/// drawer's own ladder is drawn from.
 fn models() -> Vec<ModelRow> {
     vec![
         ModelRow {
             id: "stub-a".to_string(),
             provider: "openai".to_string(),
-            detail: "200k ctx · vision · effort low–max".to_string(),
+            detail: "200k ctx · vision · effort low, medium, high, xhigh, max".to_string(),
+            effort_levels: rungs(&["low", "medium", "high", "xhigh", "max"]),
             reason: None,
         },
         ModelRow {
             id: "stub-b".to_string(),
             provider: "proxy".to_string(),
-            detail: "936k ctx · effort low–xhigh".to_string(),
+            detail: "936k ctx · effort low, high, max".to_string(),
+            effort_levels: rungs(&["low", "high", "max"]),
             reason: None,
         },
         ModelRow {
             id: "stub-c".to_string(),
             provider: "acme".to_string(),
             detail: "1M ctx".to_string(),
+            effort_levels: Vec::new(),
             reason: Some("no credential".to_string()),
         },
     ]
+}
+
+fn rungs(names: &[&str]) -> Vec<String> {
+    names.iter().map(|name| name.to_string()).collect()
 }
 
 /// A catalog long enough to need the drawer's region: ten registrations, so the
@@ -108,7 +117,11 @@ fn many_models() -> Vec<ModelRow> {
         .map(|n| ModelRow {
             id: format!("stub-{}", char::from(b'a' + n)),
             provider: ["openai", "proxy", "acme"][n as usize % 3].to_string(),
-            detail: format!("{}k ctx · effort low–max", (n as u32 + 1) * 100),
+            detail: format!(
+                "{}k ctx · effort low, medium, high, xhigh, max",
+                (n as u32 + 1) * 100
+            ),
+            effort_levels: rungs(&["low", "medium", "high", "xhigh", "max"]),
             reason: (n % 5 == 2).then(|| "no credential".to_string()),
         })
         .collect()

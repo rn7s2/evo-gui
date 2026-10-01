@@ -2,13 +2,16 @@
   "models": [
     {"id": "claude-opus-5", "provider": "anthropic", "name": "Claude Opus 5",
      "api": "anthropic-messages", "context_window": 200000,
-     "reasoning": true, "images": true, "ready": true, "reason": null},
+     "reasoning": true, "effort_levels": ["low", "medium", "high", "xhigh", "max"],
+     "images": true, "ready": true, "reason": null},
     {"id": "deepseek-v4.1-flash", "provider": "acme", "name": "DeepSeek V4.1 Flash",
      "api": "chat-model", "context_window": 936000,
-     "reasoning": false, "images": false, "ready": true, "reason": null},
+     "reasoning": false, "effort_levels": [],
+     "images": false, "ready": true, "reason": null},
     {"id": "claude-sonnet-5", "provider": "proxy", "name": "Claude Sonnet 5",
      "api": "anthropic-oauth-messages", "context_window": 1000000,
-     "reasoning": true, "images": true, "ready": false, "reason": "no credential"}
+     "reasoning": true, "effort_levels": ["low", "high", "max"],
+     "images": true, "ready": false, "reason": "no credential"}
   ],
   "providers": [
     {"name": "anthropic", "api": "anthropic-messages", "has_key": true, "key_env": "ANTHROPIC_API_KEY"},
@@ -25,10 +28,13 @@
   "skills": [{"name": "humanizer", "description": "Take the AI out of the prose"}],
   "tools": [{"name": "bash", "description": "Run a shell command"}],
   "lanes": {"models": [
-    {"id": "claude-opus-5", "provider": "anthropic", "ok": true, "reason": null},
-    {"id": "deepseek-v4.1-flash", "provider": "acme", "ok": true, "reason": null},
+    {"id": "claude-opus-5", "provider": "anthropic", "ok": true, "reason": null,
+     "effort_levels": ["low", "medium", "high", "xhigh", "max"]},
+    {"id": "deepseek-v4.1-flash", "provider": "acme", "ok": true, "reason": null,
+     "effort_levels": []},
     {"id": "claude-sonnet-5", "provider": "proxy", "ok": false,
-     "reason": "api anthropic-oauth-messages is not in a lane"}
+     "reason": "api anthropic-oauth-messages is not in a lane",
+     "effort_levels": ["low", "high", "max"]}
   ]},
   "warnings": ["mcp[2] could not be encoded"]
 }

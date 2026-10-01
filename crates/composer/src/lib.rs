@@ -130,6 +130,9 @@ const DRAWER_ITEM: Pixels = px(30.);
 const DRAWER_ITEM_RADIUS: Pixels = px(RADIUS);
 const DRAWER_EFFORT_ROW: Pixels = px(36.);
 const DRAWER_LABEL_MIN: Pixels = px(112.);
+/// What the effort row says for a model the catalog gives no levels: the level is not
+/// shown, because there is none to show — the model takes no effort setting at all.
+const NO_EFFORT: &str = "not offered by this model";
 /// How many of the drawer's rows the models take before they scroll: seven of
 /// them is the region's whole height, so a catalog long enough to need a scroll
 /// bar costs the box these rows and not one row more — the title above and the
@@ -486,13 +489,28 @@ pub struct Composer {
     _subscriptions: Vec<Subscription>,
 }
 
+/// What the drawer's effort row has to offer: the chosen model's own rungs, or the fact
+/// that it takes no effort setting at all.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum DrawerLevels {
+    /// The levels to draw, in the order they are offered.
+    Rungs(Vec<SharedString>),
+    /// The catalog names none for this model — `effort_levels: []` — which is the model's
+    /// own answer, and not the same as no ladder being published.
+    None,
+}
+
 /// One model the drawer offers, as `GET /catalog` describes it (§5.6).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModelRow {
     pub id: String,
     pub provider: String,
-    /// The dim line under the name: the context window and what else evo reports.
+    /// The dim line under the name: the context window, the modalities, and the levels
+    /// this registration takes.
     pub detail: String,
+    /// The levels this registration takes, in the catalog's own order, empty when it
+    /// takes no effort setting at all — what the drawer's ladder is drawn from.
+    pub effort_levels: Vec<String>,
     /// Whether evo can reach it right now; the rest are listed with why not.
     pub reason: Option<String>,
 }
@@ -1906,6 +1924,40 @@ impl Composer {
             .into_any_element()
     }
 
+    /// The rungs the drawer's effort row offers, and whose they are.
+    ///
+    /// A ladder is the **model's** (`/catalog.models[].effort_levels`): a provider offers
+    /// `low, high, max`, another the whole run, and a model with no effort parameter at
+    /// all offers none. The session's own `thinking_levels` is what stands when no model
+    /// is chosen, or when the catalog names no levels for the chosen one — which is a
+    /// catalog written before evo published them.
+    fn drawer_levels(&self) -> DrawerLevels {
+        if let Some((id, provider)) = self.agent.model.as_ref() {
+            if let Some(model) = self
+                .models
+                .iter()
+                .find(|model| &model.id == id && &model.provider == provider)
+            {
+                return if model.effort_levels.is_empty() {
+                    // The catalog answers for this registration, and its answer is that
+                    // it has no effort setting: the row says so rather than offering the
+                    // session's ladder for a model that would clamp it.
+                    DrawerLevels::None
+                } else {
+                    DrawerLevels::Rungs(
+                        model
+                            .effort_levels
+                            .iter()
+                            .cloned()
+                            .map(SharedString::from)
+                            .collect(),
+                    )
+                };
+            }
+        }
+        DrawerLevels::Rungs(self.levels.clone())
+    }
+
     /// The effort row: the level's name, and the rail that changes it.
     fn effort_row(
         &self,
@@ -1914,9 +1966,20 @@ impl Composer {
         cx: &Context<Self>,
     ) -> AnyElement {
         let level = self.agent.thinking.clone().unwrap_or_default();
+        let levels = self.drawer_levels();
+        let stated = match &levels {
+            // The model takes no effort setting: the row keeps its place — a control
+            // that came and went with every model would move the drawer under the
+            // reader — and says what the model is instead of drawing rungs for it.
+            DrawerLevels::None => SharedString::from(NO_EFFORT),
+            _ => SharedString::from(level.clone()),
+        };
         let row = h_flex()
             .id("drawer-effort")
             .test_support()
+            // The row as a reader that cannot see it hears it: the level it states, or
+            // that the model has none to state.
+            .aria_label(SharedString::from(format!("Effort {stated}")))
             .h(DRAWER_EFFORT_ROW)
             .w_full()
             .items_center()
@@ -1936,11 +1999,17 @@ impl Composer {
                     .child("Effort")
                     .child(
                         div()
+                            .id("drawer-effort-level")
+                            .test_support()
                             .text_color(paint::color(palette.muted_fg))
-                            .child(SharedString::from(level.clone())),
+                            .child(stated),
                     ),
             );
-        if self.levels.is_empty() {
+        let DrawerLevels::Rungs(levels) = levels else {
+            // The model's own answer: no rungs to offer.
+            return row.into_any_element();
+        };
+        if levels.is_empty() {
             // The server published no ladder: say what the agent runs and change
             // nothing, rather than draw rungs a client made up.
             return row.into_any_element();
@@ -1949,12 +2018,12 @@ impl Composer {
             // A lane's effort belongs to the swarm, as its model does.
             return row.into_any_element();
         }
-        let levels = self.levels.clone();
         let index = levels
             .iter()
             .position(|name| name.as_str() == level)
             .unwrap_or(0);
         let weak = cx.entity().downgrade();
+        let ladder = levels.clone();
         row.child(
             div()
                 .id("composer-effort")
@@ -1974,9 +2043,9 @@ impl Composer {
                     .on_change(move |level: usize, _, cx: &mut App| {
                         if let Some(composer) = weak.upgrade() {
                             composer.update(cx, |this, cx| {
-                                if let Some(name) =
-                                    this.levels.get(level).map(|name| name.to_string())
-                                {
+                                // The rungs the rail was drawn with are the ones its own
+                                // press means: the model's ladder, not the session's.
+                                if let Some(name) = ladder.get(level).map(|name| name.to_string()) {
                                     this.choose_effort(&name, cx);
                                 }
                             });
@@ -2462,22 +2531,38 @@ mod tests {
         }))
     }
 
-    /// The models a catalog would list, one of them chosen already.
+    /// The models a catalog would list, one of them chosen already — and the three
+    /// answers a catalog gives about effort: `stub-a` takes the session's whole ladder,
+    /// `stub-b`'s provider offers two rungs of its own, and `stub-c` takes none at all.
     fn catalog_models() -> Vec<ModelRow> {
         vec![
             ModelRow {
                 id: "stub-a".to_string(),
                 provider: "openai".to_string(),
-                detail: "200k ctx · vision · effort".to_string(),
+                detail: "200k ctx · vision · effort low, medium, high, xhigh, max".to_string(),
+                effort_levels: catalog_levels(),
                 reason: None,
             },
             ModelRow {
                 id: "stub-b".to_string(),
                 provider: "openai".to_string(),
-                detail: "936k ctx".to_string(),
+                detail: "936k ctx · effort low, max".to_string(),
+                effort_levels: rungs(&["low", "max"]),
+                reason: None,
+            },
+            ModelRow {
+                id: "stub-c".to_string(),
+                provider: "openai".to_string(),
+                detail: "1M ctx".to_string(),
+                effort_levels: Vec::new(),
                 reason: None,
             },
         ]
+    }
+
+    /// The rungs a provider's own ladder names.
+    fn rungs(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| name.to_string()).collect()
     }
 
     /// The ladder evo's own registration declares (CONTRACT §5.6).
@@ -2513,6 +2598,7 @@ mod tests {
                 id: format!("stub-{}", char::from(b'a' + n)),
                 provider: "openai".to_string(),
                 detail: format!("{}k ctx", (n as u32 + 1) * 100),
+                effort_levels: catalog_levels(),
                 reason: None,
             })
             .collect()
@@ -3444,6 +3530,73 @@ mod tests {
         );
     }
 
+    /// The rail's rungs are the **chosen model's own** (`/catalog.models[].effort_levels`),
+    /// not the session's: the same press is a different level on a model whose provider
+    /// offers two rungs than on one that takes the whole ladder — and a model the catalog
+    /// gives no levels says so, with no rail to press at all.
+    #[gpui_kit::test]
+    fn the_drawer_offers_the_chosen_models_own_levels(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.act(cx, |window, cx| {
+            f.set_catalog(cx);
+            f.set_agent(&state_running("stub-a"), cx);
+            window.render_frame(cx);
+            window.click(chip_id("model"), cx);
+            window.render_frame(cx);
+        });
+
+        // Three quarters along the rail: the fourth of `stub-a`'s five rungs, which the
+        // topic's own `high` is not. The press is answered the way the tab answers it —
+        // one setting is in flight at a time, so until the reply lands the next press
+        // is not the reader's to make.
+        let press = |f: &Fixture, cx: &mut TestAppContext| {
+            f.act(cx, |window, cx| {
+                let at = three_quarters_of_the_rail(window);
+                window.click_at("composer-effort", at, cx);
+                f.composer.update(cx, |composer, cx| {
+                    composer.request_finished(false, window, cx)
+                });
+            })
+        };
+        press(&f, cx);
+        assert_eq!(
+            f.events().last(),
+            Some(&ComposerEvent::ThinkingSet("xhigh".to_string())),
+            "the session's ladder: {:?}",
+            f.events()
+        );
+
+        // The same press on a model whose provider offers two rungs is that ladder's
+        // last: `max`, not `xhigh` — the rail has no rung the model does not take.
+        f.act(cx, |window, cx| {
+            f.set_agent(&state_running("stub-b"), cx);
+            window.render_frame(cx);
+        });
+        press(&f, cx);
+        assert_eq!(
+            f.events().last(),
+            Some(&ComposerEvent::ThinkingSet("max".to_string())),
+            "the model's own ladder: {:?}",
+            f.events()
+        );
+
+        // A model that takes no effort setting at all: the row keeps its place and says
+        // so, and there is no rail to offer rungs it does not have.
+        f.act(cx, |window, cx| {
+            f.set_agent(&state_running("stub-c"), cx);
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("drawer-effort").label(),
+                Some(format!("Effort {NO_EFFORT}").as_str()),
+                "the row states it"
+            );
+            assert!(
+                window.try_find("composer-effort").is_none(),
+                "and offers no rail"
+            );
+        });
+    }
+
     /// A catalog longer than the drawer may draw puts the models in a region exactly
     /// seven rows tall that scrolls: the title row above it and the effort row below
     /// it stay put, and the model this box runs is in view from the frame the drawer
@@ -4187,6 +4340,17 @@ mod tests {
     }
 
     /// The x row `index`'s label begins at.
+    /// A press three quarters along the effort rail, in the coordinates the slider's own
+    /// box takes: the rail sits inside it, so the offset is measured from the slider.
+    fn three_quarters_of_the_rail(window: &Window) -> gpui_kit::Point<Pixels> {
+        let slider = window.find("composer-effort").bounds();
+        let rail = window.find("composer-effort-rail-rail").bounds();
+        gpui_kit::point(
+            rail.left() + rail.size.width * 0.75 - slider.left(),
+            rail.center().y - slider.top(),
+        )
+    }
+
     fn label_left(window: &Window, index: usize) -> Pixels {
         window
             .find(format!("completion-label-{index}"))

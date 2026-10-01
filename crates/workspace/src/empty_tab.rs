@@ -2052,13 +2052,16 @@ mod tests {
             "models": [
                 {"id": "deepseek-v4.1-flash", "provider": "acme", "name": "DeepSeek V4.1",
                  "api": "chat-model", "context_window": 200000,
-                 "reasoning": false, "images": false, "ready": true, "reason": null},
+                 "reasoning": false, "effort_levels": [], "images": false,
+                 "ready": true, "reason": null},
                 {"id": "claude-opus-4.5", "provider": "anthropic", "name": "Claude Opus 4.5",
                  "api": "anthropic-messages", "context_window": 1000000,
-                 "reasoning": true, "images": true, "ready": true, "reason": null},
+                 "reasoning": true, "effort_levels": ["low", "medium", "high", "xhigh", "max"],
+                 "images": true, "ready": true, "reason": null},
                 {"id": "claude-sonnet-5", "provider": "proxy", "name": "Claude Sonnet 5",
                  "api": "anthropic-oauth-messages", "context_window": 1000000,
-                 "reasoning": true, "images": true, "ready": false, "reason": "no credential"}
+                 "reasoning": true, "effort_levels": ["low", "high", "max"],
+                 "images": true, "ready": false, "reason": "no credential"}
             ],
             "default_model": {"id": "claude-opus-4.5", "provider": "anthropic"},
             "thinking_levels": ["low", "medium", "high", "xhigh", "max"],
@@ -2616,6 +2619,27 @@ mod tests {
                 .expect("the catalog lists it");
             assert!(!unready.available);
             assert_eq!(unready.detail.as_ref(), "no credential");
+
+            // A card that can run a model draws the catalog's own line for it: the ctx
+            // window, the modalities, and the levels **that** registration takes.
+            let ready = coordinators
+                .iter()
+                .find(|item| item.key.as_ref() == "claude-opus-4.5@anthropic")
+                .expect("the catalog lists it");
+            assert!(ready.available);
+            assert_eq!(
+                ready.detail.as_ref(),
+                "1M ctx · vision · effort low, medium, high, xhigh, max"
+            );
+            let no_effort = coordinators
+                .iter()
+                .find(|item| item.key.as_ref() == "deepseek-v4.1-flash@acme")
+                .expect("the catalog lists it");
+            assert_eq!(
+                no_effort.detail.as_ref(),
+                "200k ctx",
+                "a model that takes no effort setting names none"
+            );
         });
     }
 

@@ -1519,6 +1519,7 @@ impl TabContent {
                 } else {
                     model.ready_reason
                 },
+                effort_levels: model.effort_levels,
                 id: model.id,
                 provider: model.provider,
                 detail: model.detail,
@@ -3079,9 +3080,11 @@ mod tests {
             "models": [
                 {"id": "stub-a", "provider": "OPENAI", "name": "Stub A", "api": "openai-chat",
                  "context_window": 200000, "reasoning": true, "images": true,
+                 "effort_levels": ["low", "medium", "high", "xhigh", "max"],
                  "ready": true, "reason": null},
                 {"id": "stub-b", "provider": "OPENAI", "name": "Stub B", "api": "openai-chat",
                  "context_window": 936000, "reasoning": false, "images": false,
+                 "effort_levels": ["low", "high", "max"],
                  "ready": false, "reason": "no API key"},
             ],
             "thinking_levels": ["low", "medium", "high", "xhigh", "max"],
@@ -3190,6 +3193,12 @@ mod tests {
                 window.find("drawer-model-stub-b").label(),
                 Some("openai · stub-b no API key"),
                 "a registration evo cannot reach is listed with evo's own reason"
+            );
+            assert_eq!(
+                window.find("drawer-model-stub-a").label(),
+                Some("openai · stub-a 200k ctx · vision · effort low, medium, high, xhigh, max"),
+                "and a model it can run is listed with the catalog's own line: the ctx \
+                 window, the modalities, and the levels that registration takes"
             );
         })
         .expect("the page");

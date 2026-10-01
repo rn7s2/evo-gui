@@ -156,6 +156,9 @@ pub struct ModelOption {
     pub provider: String,
     /// The menu's second line: the context window, then what else the catalog says.
     pub detail: String,
+    /// The levels this registration takes, in the catalog's own order, empty when it
+    /// takes no effort setting at all — the ladder a chooser offers for *this* model.
+    pub effort_levels: Vec<String>,
     /// Whether evo can reach it now (`/catalog.models[].ready`).
     pub ready: bool,
     /// Why not, in evo's own words.
@@ -270,6 +273,7 @@ pub fn model_options(catalog: &Value) -> Vec<ModelOption> {
             Some(ModelOption {
                 key: format!("{id}@{provider}"),
                 detail: model_detail(model),
+                effort_levels: effort_levels(model),
                 id,
                 provider,
                 ready,
@@ -342,13 +346,16 @@ pub fn command_options(catalog: &Value) -> Vec<CommandOption> {
         .collect()
 }
 
-/// One model's detail line: as much of the design's as the catalog can fill — the context
-/// window, then the modalities — `200k ctx · vision`.
+/// One model's detail line: the context window, the modalities, and the levels that model
+/// takes — `200k ctx · vision · effort low, high, max`.
 ///
-/// The design's own line ends with that model's effort range (`effort low–max`), which
-/// `/catalog` does not publish: the global `thinking_levels` is the session's ladder, not
-/// this model's. So it is left out rather than invented (`docs/api-gaps.md`); the
-/// `reasoning` flag has no words of its own in the design and prints nothing.
+/// The levels are `/catalog.models[].effort_levels` (§5.6), listed in the catalog's own
+/// order and **in full**: a provider whose ladder is not a run of levels offers
+/// `low, high, max`, and a range written as `low–max` would promise a rung it does not
+/// have. A model that takes no effort at all names none, and then the line ends at the
+/// modalities — the same as a server that predates the field, which is why the empty list
+/// needs no branch of its own. The `reasoning` flag still has no words of its own in the
+/// design and prints nothing.
 fn model_detail(model: &Value) -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Some(window) = model.get("context_window").and_then(Value::as_u64) {
@@ -359,7 +366,28 @@ fn model_detail(model: &Value) -> String {
     if model.get("images").and_then(Value::as_bool) == Some(true) {
         parts.push("vision".to_string());
     }
+    let levels = effort_levels(model);
+    if !levels.is_empty() {
+        parts.push(format!("effort {}", levels.join(", ")));
+    }
     parts.join(" · ")
+}
+
+/// The levels a model takes, as its `effort_levels` names them: the catalog's own order,
+/// and nothing when it names none — a model with no effort parameter at all, and every
+/// model of a catalog written before evo published the field.
+fn effort_levels(model: &Value) -> Vec<String> {
+    model
+        .get("effort_levels")
+        .and_then(Value::as_array)
+        .map(|levels| {
+            levels
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 // --- the empty tab's controls -------------------------------------------------------

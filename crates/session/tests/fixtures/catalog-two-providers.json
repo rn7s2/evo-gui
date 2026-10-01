@@ -2,13 +2,16 @@
   "models": [
     {"id": "stub-a", "provider": "stub", "name": "Stub A",
      "api": "stub-chat", "context_window": 200000,
-     "reasoning": true, "images": true, "ready": true, "reason": null},
+     "reasoning": true, "effort_levels": ["low", "high"],
+     "images": true, "ready": true, "reason": null},
     {"id": "stub-a", "provider": "stub2", "name": "Stub A (second endpoint)",
      "api": "stub-chat", "context_window": 100000,
-     "reasoning": true, "images": true, "ready": true, "reason": null},
+     "reasoning": true, "effort_levels": ["low", "high", "max"],
+     "images": true, "ready": true, "reason": null},
     {"id": "stub-b", "provider": "stub", "name": "Stub B",
      "api": "stub-chat", "context_window": 100000,
-     "reasoning": false, "images": true, "ready": false, "reason": "no credential for provider stub"}
+     "reasoning": false, "effort_levels": [],
+     "images": true, "ready": false, "reason": "no credential for provider stub"}
   ],
   "providers": [
     {"name": "stub", "api": "stub-chat", "has_key": false, "key_env": null},

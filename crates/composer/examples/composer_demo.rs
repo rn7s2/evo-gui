@@ -55,28 +55,37 @@ fn state(busy: bool) -> TopicState {
     }))
 }
 
-/// The models the drawer offers, as `GET /catalog` lists them (§5.6).
+/// The models the drawer offers, as `GET /catalog` lists them (§5.6): the detail line and
+/// the levels beside it are the catalog's own — a model that takes the whole ladder, one
+/// whose provider offers three rungs, and one that takes no effort setting at all.
 fn models() -> Vec<ModelRow> {
     vec![
         ModelRow {
             id: "stub-a".to_string(),
             provider: "openai".to_string(),
-            detail: "200k ctx · vision · effort".to_string(),
+            detail: "200k ctx · vision · effort low, medium, high, xhigh, max".to_string(),
+            effort_levels: rungs(&["low", "medium", "high", "xhigh", "max"]),
             reason: None,
         },
         ModelRow {
             id: "stub-b".to_string(),
             provider: "openai".to_string(),
-            detail: "936k ctx · effort".to_string(),
+            detail: "936k ctx · effort low, high, max".to_string(),
+            effort_levels: rungs(&["low", "high", "max"]),
             reason: None,
         },
         ModelRow {
             id: "stub-c".to_string(),
             provider: "proxy".to_string(),
             detail: "1M ctx".to_string(),
+            effort_levels: Vec::new(),
             reason: Some("no credential".to_string()),
         },
     ]
+}
+
+fn rungs(names: &[&str]) -> Vec<String> {
+    names.iter().map(|name| name.to_string()).collect()
 }
 
 /// The commands the registry lists, as `GET /catalog` would: what a `/word`
