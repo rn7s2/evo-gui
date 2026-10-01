@@ -36,7 +36,7 @@
 //! rendered. The view exposes no numeric scroll offset (only `is_following_tail` and
 //! `is_away_from_latest`), so the reader's place is those numbers plus the painted rows.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -352,6 +352,91 @@ fn record() -> Vec<Item> {
     record.items
 }
 
+/// The folder the link states work in, and a file in it that is really there.
+///
+/// A path in a row's words is a link only when the disk says it is, so a picture of one
+/// needs paths that exist. They are short and under `/tmp` on purpose: what the picture is
+/// for is where the underlined words are, not what the machine's home is called.
+fn links_folder() -> PathBuf {
+    let root = PathBuf::from("/tmp/evo-links");
+    std::fs::create_dir_all(root.join("notes")).expect("a folder to point at");
+    let file = root.join("notes/report.md");
+    if !file.exists() {
+        std::fs::write(&file, "# the report\n").expect("a file to point at");
+    }
+    root
+}
+
+/// A short record whose rows carry addresses and paths in their *own words*: the reader's
+/// turn, an answer's prose with a path in it and one written as code, a notice, a lane's
+/// line, a report's field — and a call, whose arguments and its result are data.
+fn links_record(root: &Path) -> Vec<Item> {
+    let root = root.display().to_string();
+    let file = format!("{root}/notes/report.md");
+    let notes = format!("{root}/notes");
+    let mut record = Record::new();
+    turn(
+        &mut record,
+        &format!("read {file}, then the shape at https://evo.dev/state.json"),
+    );
+    reply(
+        &mut record,
+        &format!(
+            "Written to `{file}` and to notes/report.md — the schema is at \
+             https://evo.dev/state.json, and the notes are in {notes}."
+        ),
+        None,
+    );
+    record.add(|id| {
+        json!({
+            "id": id, "ts": 1, "kind": "notice", "severity": "info", "source": "swarm",
+            "durable": true,
+            "text": format!("lane 3 was restarted by its supervisor; it had written {file}"),
+        })
+    });
+    record.add(|id| {
+        json!({
+            "id": id, "ts": 1, "kind": "lane_event", "lane": 3, "event": "restarted",
+            "severity": "warn",
+            "detail": format!("it could not write {file}; see https://evo.dev/lanes/3"),
+        })
+    });
+    record.add(|id| {
+        json!({
+            "id": id, "ts": 1, "kind": "lane_report", "lane": 3,
+            "done": format!("ported a row's own words, and `{file}` with them"),
+            "evidence": "cargo test -p transcript: 134 passed",
+            "next": "the captures, in both themes", "blocked": "", "requests": "",
+            "goal": "active",
+        })
+    });
+    call(
+        &mut record,
+        "read",
+        json!({ "path": format!("{file}:12") }),
+        format!("# the report\n// {file} was read from https://evo.dev/state.json\n"),
+        false,
+    );
+    record.items
+}
+
+/// The link states, both of them: a tab that runs in the folder the record's relative
+/// paths are measured from, holding a record whose own words carry links.
+fn links_setup(cx: &mut HeadlessAppContext, window: AnyWindowHandle, page: &Entity<Page>) -> usize {
+    let root = links_folder();
+    let view = transcript_of(cx, page);
+    let items = links_record(&root);
+    let rows = items.len();
+    cx.update(|cx| {
+        view.update(cx, |view, cx| {
+            view.set_folder(Some(root), cx);
+            view.replace(items, cx);
+        })
+    });
+    frames(cx, window, 3);
+    rows
+}
+
 // ---------------------------------------------------------------------------
 // The host: the app's own embedding, one cached view in a `flex_1` box.
 // ---------------------------------------------------------------------------
@@ -456,11 +541,12 @@ fn wheel(cx: &mut HeadlessAppContext, window: AnyWindowHandle, dy: f32) {
 
 /// The id of a row of the record, built the way `rows.rs` builds it.
 fn row_id(id: &str) -> ElementId {
-    (
-        ElementId::from(SharedString::from("transcript-row")),
-        id.to_string(),
-    )
-        .into()
+    named_row_id("transcript-row", id)
+}
+
+/// The id of one element of a row, built the way `rows.rs` builds it.
+fn named_row_id(name: &str, id: &str) -> ElementId {
+    (ElementId::from(SharedString::from(name)), id.to_string()).into()
 }
 
 /// The id the record's `n`th item was given.
@@ -470,10 +556,10 @@ fn item_id(n: usize) -> String {
 
 /// Which rows of the record the last frame built: the list builds the rows the pane
 /// reaches, so this is the pane's own window onto the journal.
-fn painted(window: &Window) -> (Option<usize>, Option<usize>) {
+fn painted(window: &Window, rows: usize) -> (Option<usize>, Option<usize>) {
     let mut first = None;
     let mut last = None;
-    for n in 0..ITEMS {
+    for n in 0..rows {
         if window.try_find(row_id(&item_id(n))).is_some() {
             first.get_or_insert(n);
             last = Some(n);
@@ -499,7 +585,7 @@ fn painted_in(
     cx: &mut HeadlessAppContext,
     window: AnyWindowHandle,
 ) -> (Option<usize>, Option<usize>) {
-    cx.update_window(window, |_, window, _| painted(window))
+    cx.update_window(window, |_, window, _| painted(window, ITEMS))
         .expect("the capture window is open")
 }
 
@@ -523,6 +609,7 @@ fn run_animation(cx: &mut HeadlessAppContext, window: AnyWindowHandle, budget: D
 struct Report {
     size: (f32, f32),
     page: (f32, f32),
+    rows: usize,
     pane: Bounds<Pixels>,
     built: (Option<usize>, Option<usize>),
     head: Option<f32>,
@@ -538,7 +625,12 @@ struct Report {
 }
 
 /// One frame of its own, with the row counter reset, and the state read off it.
-fn measure(cx: &mut HeadlessAppContext, window: AnyWindowHandle, page: &Entity<Page>) -> Report {
+fn measure(
+    cx: &mut HeadlessAppContext,
+    window: AnyWindowHandle,
+    page: &Entity<Page>,
+    rows: usize,
+) -> Report {
     #[cfg(feature = "test-support")]
     counted::reset();
     frames(cx, window, 1);
@@ -556,7 +648,7 @@ fn measure(cx: &mut HeadlessAppContext, window: AnyWindowHandle, page: &Entity<P
         // registration can be a frame older than the window around it.
         let page = window.find("page").bounds();
         let pane = window.find("transcript-box").bounds();
-        let built = painted(window);
+        let built = painted(window, rows);
         let top = built
             .0
             .and_then(|n| window.try_find(row_id(&item_id(n))))
@@ -571,6 +663,7 @@ fn measure(cx: &mut HeadlessAppContext, window: AnyWindowHandle, page: &Entity<P
                 f32::from(window.bounds().size.height),
             ),
             page: (f32::from(page.size.width), f32::from(page.size.height)),
+            rows,
             pane,
             built,
             head: top,
@@ -599,6 +692,7 @@ fn renders(_view: &TranscriptView) -> Option<u64> {
 }
 
 fn say(name: &str, report: &Report) {
+    let rows_of_the_record = report.rows;
     let rows = match report.rows_built {
         Some(rows) => rows.to_string(),
         None => "n/a (build with --features test-support)".to_string(),
@@ -609,7 +703,7 @@ fn say(name: &str, report: &Report) {
     };
     let place = match report.built {
         (Some(first), Some(last)) => format!(
-            "{}..={last} of {ITEMS}",
+            "{}..={last} of {rows_of_the_record}",
             item_id(first).trim_start_matches("e_")
         ),
         _ => "none".to_string(),
@@ -706,13 +800,16 @@ fn main() {
     // The states, in the order they are read: the list's own places, then the pill and
     // the walk back, then a message growing, then the scrollback's quiet line, then the
     // reader's zoom, then a window that changes shape.
-    type Setup = fn(&mut HeadlessAppContext, AnyWindowHandle, &Entity<Page>);
-    let states: [(&str, f32, Setup); 13] = [
-        ("bottom", 1., |_, _, _| {}),
+    // A state says how many rows the record it opened holds: the link states replace the
+    // long record with a short one whose rows carry links.
+    type Setup = fn(&mut HeadlessAppContext, AnyWindowHandle, &Entity<Page>) -> usize;
+    let states: [(&str, f32, Setup); 15] = [
+        ("bottom", 1., |_, _, _| ITEMS),
         ("scrolled-up", 1., |cx, window, _| {
             for _ in 0..3 {
                 wheel(cx, window, SCREEN);
             }
+            ITEMS
         }),
         ("top", 1., |cx, window, _| {
             match wheel_to_the_head(cx, window) {
@@ -722,6 +819,7 @@ fn main() {
                 ),
                 None => println!("[states] top: the head was never reached"),
             }
+            ITEMS
         }),
         ("jump-back", 1., |cx, window, page| {
             for _ in 0..3 {
@@ -732,9 +830,11 @@ fn main() {
             println!("[states] jump-back: away before the press={away}");
             click(cx, window, "transcript-jump");
             run_animation(cx, window, Duration::from_millis(240));
+            ITEMS
         }),
         ("streaming", 1., |cx, window, page| {
             stream(cx, window, page);
+            ITEMS
         }),
         ("loading-older", 1., |cx, window, page| {
             let view = transcript_of(cx, page);
@@ -746,27 +846,33 @@ fn main() {
                 ),
                 None => println!("[states] loading-older: the head was never reached"),
             }
+            ITEMS
         }),
         ("zoom-150-bottom", 1.5, |cx, window, _| {
             frames(cx, window, 3);
+            ITEMS
         }),
         ("zoom-75-bottom", 0.75, |cx, window, _| {
             frames(cx, window, 3);
+            ITEMS
         }),
         ("mid", 1., |cx, window, _| {
             for _ in 0..2 {
                 wheel(cx, window, SCREEN);
             }
+            ITEMS
         }),
         ("zoom-150-mid", 1.5, |cx, window, _| {
             for _ in 0..2 {
                 wheel(cx, window, SCREEN);
             }
+            ITEMS
         }),
         ("zoom-75-mid", 0.75, |cx, window, _| {
             for _ in 0..2 {
                 wheel(cx, window, SCREEN);
             }
+            ITEMS
         }),
         ("resize", 1., |cx, window, _| {
             cx.update_window(window, |_, window, _| {
@@ -774,6 +880,7 @@ fn main() {
             })
             .expect("the capture window is open");
             frames(cx, window, 3);
+            ITEMS
         }),
         ("resize-back", 1., |cx, window, _| {
             cx.update_window(window, |_, window, _| {
@@ -786,6 +893,22 @@ fn main() {
             })
             .expect("the capture window is open");
             frames(cx, window, 3);
+            ITEMS
+        }),
+        // The links: every row that draws a reader's or an agent's own words — a turn, an
+        // answer's prose, a notice, a lane's line, a report's field — with the addresses
+        // and paths in them underlined. The call below it is the contrast: its arguments
+        // and its result hold the same kinds of words, and none of them is a link.
+        ("links", 1., links_setup),
+        // The same record with the call opened: what a call carried is drawn as data.
+        ("links-call", 1., |cx, window, page| {
+            let rows = links_setup(cx, window, page);
+            cx.update_window(window, |_, window, cx| {
+                window.click(named_row_id("transcript-tool", &item_id(rows - 1)), cx);
+            })
+            .expect("the capture window is open");
+            frames(cx, window, 3);
+            rows
         }),
     ];
 
@@ -799,7 +922,7 @@ fn main() {
         // scale it draws at rather than inheriting the last state's.
         set_zoom(&mut cx, scale);
         frames(&mut cx, window, 3);
-        setup(&mut cx, window, &page);
+        let rows = setup(&mut cx, window, &page);
         // Let anything the state set in motion come to rest before the picture is taken:
         // an animation's steps, and the formulas the app lays out off the frame — a
         // formula a frame first meets draws its source, and the picture lands once the
@@ -810,7 +933,7 @@ fn main() {
             frames(&mut cx, window, 2);
         }
 
-        let report = measure(&mut cx, window, &page);
+        let report = measure(&mut cx, window, &page, rows);
         say(name, &report);
 
         for (mode, suffix) in [(ThemeMode::Light, "light"), (ThemeMode::Dark, "dark")] {

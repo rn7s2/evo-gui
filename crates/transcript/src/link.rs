@@ -32,8 +32,8 @@ fn opens_on(event: &ClickEvent) -> bool {
 }
 
 /// What the app does with a link when nobody said otherwise: the browser for an
-/// address, the platform's own application for a file, and Finder for a folder.
-fn open_with_the_platform(href: &str, cx: &mut App) {
+/// address, and the platform's own application — Finder, for a folder — for a path.
+fn open_with_platform(href: &str, cx: &mut App) {
     match linkify::target(href) {
         Some(Target::Web(url)) => cx.open_url(&url),
         Some(Target::Path(path)) => cx.open_with_system(&path),
@@ -54,11 +54,6 @@ pub(crate) fn on_click(
             None => open_with_platform(href, cx),
         }
     }
-}
-
-/// The same, for a caller with nothing of its own to say.
-pub(crate) fn open_with_platform(href: &str, cx: &mut App) {
-    open_with_the_platform(href, cx)
 }
 
 #[cfg(test)]

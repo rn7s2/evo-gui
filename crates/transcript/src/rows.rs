@@ -167,9 +167,20 @@ pub(crate) fn row_id(name: impl Into<SharedString>, id: &str) -> ElementId {
     (ElementId::from(name.into()), id.to_string()).into()
 }
 
-/// The name each piece of a row's own text is kept under. They are the element names of
-/// the rows themselves, so a document is found where the row that draws it looks.
+// The name each piece of a row's own text is kept under. One name per row: the same
+// string keys the document the words are read from and names the line the row draws, so
+// the two cannot drift apart.
 pub(crate) const USER_TEXT: &str = "transcript-user-text";
+const NOTICE_TEXT: &str = "transcript-notice";
+const LANE_EVENT_TEXT: &str = "transcript-lane-event";
+const RUN_OUTCOME_TEXT: &str = "transcript-run-outcome";
+const RETRY_TEXT: &str = "transcript-retry";
+const UNKNOWN_TEXT: &str = "transcript-unknown";
+const ACTION_TEXT: &str = "transcript-action-text";
+const RECOVERY_TEXT: &str = "transcript-recovery-text";
+const CONTEXT_TEXT: &str = "transcript-context-text";
+const GOAL_TEXT: &str = "transcript-goal-text";
+const COMMAND_TEXT: &str = "transcript-command-text";
 
 /// The text a row draws in its own words, and the name each piece is kept under: a
 /// user's message, a notice's line, and the body of a quiet row the reader has opened.
@@ -181,32 +192,22 @@ pub(crate) fn plain_texts(item: &Item, expanded: bool) -> Vec<(&'static str, Str
     let mut texts = Vec::new();
     match &item.kind {
         ItemKind::User(user) => texts.push((USER_TEXT, user.text.clone())),
-        ItemKind::Notice(notice) => texts.push(("transcript-notice", notice.text.clone())),
-        ItemKind::LaneEvent(event) => {
-            texts.push(("transcript-lane-event", lane_event_line(event)))
-        }
-        ItemKind::RunOutcome(outcome) => {
-            texts.push(("transcript-run-outcome", outcome.text()))
-        }
-        ItemKind::ProviderRetry(retry) => {
-            texts.push(("transcript-retry", retry_line(retry)));
-        }
+        ItemKind::Notice(notice) => texts.push((NOTICE_TEXT, notice.text.clone())),
+        ItemKind::LaneEvent(event) => texts.push((LANE_EVENT_TEXT, lane_event_line(event))),
+        ItemKind::RunOutcome(outcome) => texts.push((RUN_OUTCOME_TEXT, outcome.text())),
+        ItemKind::ProviderRetry(retry) => texts.push((RETRY_TEXT, retry_line(retry))),
         ItemKind::Unknown { kind, text } => {
-            texts.push(("transcript-unknown", unknown_line(kind, text)));
+            texts.push((UNKNOWN_TEXT, unknown_line(kind, text)));
         }
         ItemKind::HumanAction(action) if expanded => {
-            texts.push(("transcript-action-text", action.action.clone()))
+            texts.push((ACTION_TEXT, action.action.clone()))
         }
         ItemKind::Recovery(recovery) if expanded => {
-            texts.push(("transcript-recovery-text", recovery.status.clone()))
+            texts.push((RECOVERY_TEXT, recovery.status.clone()))
         }
-        ItemKind::Context(context) if expanded => {
-            texts.push(("transcript-context-text", context.text.clone()))
-        }
-        ItemKind::Goal(goal) if expanded => texts.push(("transcript-goal-text", goal_text(goal))),
-        ItemKind::CommandNote(note) if expanded => {
-            texts.push(("transcript-command-text", note.text.clone()))
-        }
+        ItemKind::Context(context) if expanded => texts.push((CONTEXT_TEXT, context.text.clone())),
+        ItemKind::Goal(goal) if expanded => texts.push((GOAL_TEXT, goal_text(goal))),
+        ItemKind::CommandNote(note) if expanded => texts.push((COMMAND_TEXT, note.text.clone())),
         _ => {}
     }
     texts
@@ -240,15 +241,17 @@ fn unknown_line(kind: &str, text: &str) -> String {
 /// own frame — draws the words as plain text rather than not at all.
 fn linked_text(
     id: &ItemId,
-    name: &'static str,
+    line: impl Into<SharedString>,
+    key: &'static str,
     text: &str,
     data: &TranscriptData,
     ink: gpui_kit::Hsla,
     cx: &App,
 ) -> AnyElement {
-    match data.plain_document(id, name) {
+    let line: SharedString = line.into();
+    match data.plain_document(id, key) {
         Some(document) => div()
-            .id(row_id(name, id))
+            .id(row_id(line, id))
             .w_full()
             .min_w_0()
             .test_support()
@@ -258,7 +261,7 @@ fn linked_text(
                     .on_link_click(link::on_click(data.open_link())),
             )
             .into_any_element(),
-        None => SelectableText::new(row_id(name, id), text.to_string()).into_any_element(),
+        None => SelectableText::new(row_id(line, id), text.to_string()).into_any_element(),
     }
 }
 
@@ -500,10 +503,15 @@ pub(crate) fn render_row(
 
     stack = stack.child(match &item.kind {
         ItemKind::User(user) => user_row(item.id.clone(), user, data, view, &palette, cx),
-        ItemKind::Context(context) => context_row(
-            item.id.clone(),
-            &context.key,
-            &context.text,
+        ItemKind::Context(context) => quiet_row(
+            QuietRow {
+                id: item.id.clone(),
+                header: "transcript-context",
+                head: format!("Context · {}", context_label(&context.key)),
+                trailing: None,
+                text: &context.text,
+                block: CONTEXT_TEXT,
+            },
             data.expanded.contains(&item.id),
             view,
             &palette,
@@ -523,10 +531,15 @@ pub(crate) fn render_row(
             data,
             cx,
         ),
-        ItemKind::CommandNote(note) => command_note_row(
-            item.id.clone(),
-            &note.command,
-            &note.text,
+        ItemKind::CommandNote(note) => quiet_row(
+            QuietRow {
+                id: item.id.clone(),
+                header: "transcript-command",
+                head: format!("Command · {}", note.command),
+                trailing: None,
+                text: &note.text,
+                block: COMMAND_TEXT,
+            },
             data.expanded.contains(&item.id),
             view,
             &palette,
@@ -543,7 +556,7 @@ pub(crate) fn render_row(
                 },
                 trailing: None,
                 text: &action.action,
-                block: "transcript-action-text",
+                block: ACTION_TEXT,
             },
             data.expanded.contains(&item.id),
             view,
@@ -566,7 +579,7 @@ pub(crate) fn render_row(
                 },
                 trailing: recovery.code.clone(),
                 text: &recovery.status,
-                block: "transcript-recovery-text",
+                block: RECOVERY_TEXT,
             },
             data.expanded.contains(&item.id),
             view,
@@ -576,7 +589,7 @@ pub(crate) fn render_row(
         ),
         ItemKind::ProviderRetry(retry) => quiet_line(
             item.id.clone(),
-            "transcript-retry",
+            RETRY_TEXT,
             &retry_line(retry),
             palette.info,
             &palette,
@@ -585,7 +598,7 @@ pub(crate) fn render_row(
         ),
         ItemKind::Unknown { kind, text } => quiet_line(
             item.id.clone(),
-            "transcript-unknown",
+            UNKNOWN_TEXT,
             &unknown_line(kind, text),
             palette.muted_foreground,
             &palette,
@@ -746,12 +759,7 @@ fn user_row(
         .line_height(palette.scaled(USER_LINE))
         .text_color(text_color)
         .child(linked_text(
-            &id,
-            "transcript-user-text",
-            &user.text,
-            data,
-            text_color,
-            cx,
+            &id, USER_TEXT, USER_TEXT, &user.text, data, text_color, cx,
         ));
 
     if !user.images.is_empty() {
@@ -995,63 +1003,6 @@ fn quiet_row(
     row.into_any_element()
 }
 
-/// Content an extension injected (`evo:inject-context`): one quiet line saying what it
-/// is and where it came from, which opens onto the text itself.
-fn context_row(
-    id: ItemId,
-    key: &str,
-    text: &str,
-    expanded: bool,
-    view: &WeakEntity<TranscriptView>,
-    palette: &Palette,
-    data: &TranscriptData,
-    cx: &App,
-) -> AnyElement {
-    quiet_row(
-        QuietRow {
-            id,
-            header: "transcript-context",
-            head: format!("Context · {}", context_label(key)),
-            trailing: None,
-            text,
-            block: "transcript-context-text",
-        },
-        expanded,
-        view,
-        palette,
-        data,
-        cx,
-    )
-}
-
-/// A command the reader ran, answered with instructions for the agent.
-fn command_note_row(
-    id: ItemId,
-    command: &str,
-    text: &str,
-    expanded: bool,
-    view: &WeakEntity<TranscriptView>,
-    palette: &Palette,
-    data: &TranscriptData,
-    cx: &App,
-) -> AnyElement {
-    quiet_row(
-        QuietRow {
-            id,
-            header: "transcript-command",
-            head: format!("Command · {command}"),
-            trailing: None,
-            text,
-            block: "transcript-command-text",
-        },
-        expanded,
-        view,
-        palette,
-        data,
-        cx,
-    )
-}
-
 /// What a context row calls its key.
 pub(crate) fn context_label(key: &str) -> String {
     match key {
@@ -1102,7 +1053,7 @@ fn goal_row(
             head,
             trailing,
             text: &text,
-            block: "transcript-goal-text",
+            block: GOAL_TEXT,
         },
         expanded,
         view,
@@ -1149,7 +1100,7 @@ fn lane_event_row(
 ) -> AnyElement {
     quiet_source_line(
         id,
-        "transcript-lane-event",
+        LANE_EVENT_TEXT,
         Some(&format!("Lane {}", event.lane)),
         palette.muted_foreground,
         &lane_event_line(event),
@@ -1171,7 +1122,7 @@ fn notice_row(
 ) -> AnyElement {
     quiet_source_line(
         id,
-        "transcript-notice",
+        NOTICE_TEXT,
         notice.source.label(),
         palette.muted_foreground,
         &notice.text,
@@ -1196,7 +1147,7 @@ fn run_outcome_row(
     };
     quiet_line(
         id,
-        "transcript-run-outcome",
+        RUN_OUTCOME_TEXT,
         &outcome.text(),
         color,
         palette,
@@ -1313,7 +1264,15 @@ fn quiet_block(
                 .w_full()
                 .min_w_0()
                 .test_support()
-                .child(linked_text(&id, name, text, data, palette.foreground, cx)),
+                .child(linked_text(
+                    &id,
+                    format!("{name}-text"),
+                    name,
+                    text,
+                    data,
+                    palette.foreground,
+                    cx,
+                )),
         )
         .test_support()
         .into_any_element()
@@ -2233,7 +2192,7 @@ fn quiet_source_line(
         .line_height(palette.scaled(QUIET_LINE))
         .text_color(color)
         .aria_label(full.clone());
-    let words = linked_text(&id, name, text, data, color, cx);
+    let words = linked_text(&id, format!("{name}-text"), name, text, data, color, cx);
     if let Some(source) = source {
         line = line
             .flex()
@@ -2359,6 +2318,7 @@ fn report_row(
             Some(document) => TextView::new(document)
                 .style(report_text_style(cx))
                 .selectable(true)
+                .on_link_click(link::on_click(data.open_link()))
                 .markdown_extensions(markdown::extensions())
                 .into_any_element(),
             None => div().child(value.to_string()).into_any_element(),

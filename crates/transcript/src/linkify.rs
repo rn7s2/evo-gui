@@ -97,7 +97,9 @@ impl Default for Paths {
 impl Paths {
     pub(crate) fn new() -> Self {
         Paths {
-            home: std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default(),
+            home: std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_default(),
             folder: Mutex::new(None),
             seen: Mutex::new(HashMap::new()),
         }
@@ -106,7 +108,10 @@ impl Paths {
     /// The folder relative paths are measured from. Returns whether it changed: a
     /// transcript that has just learned its folder has to be read again.
     pub(crate) fn set_folder(&self, folder: Option<PathBuf>) -> bool {
-        let mut held = self.folder.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut held = self
+            .folder
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if *held == folder {
             return false;
         }
@@ -153,7 +158,10 @@ impl Paths {
         }
         let now = Instant::now();
         {
-            let seen = self.seen.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let seen = self
+                .seen
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             if let Some(seen) = seen.get(token) {
                 if now.saturating_duration_since(seen.at) < TTL {
                     return seen.path.clone();
@@ -161,7 +169,10 @@ impl Paths {
             }
         }
         let path = self.look(token);
-        let mut seen = self.seen.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut seen = self
+            .seen
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if seen.len() >= REMEMBERED {
             seen.clear();
         }
@@ -695,13 +706,6 @@ mod tests {
             .collect()
     }
 
-    fn plain_links(text: &str, disk: &Disk) -> Vec<(String, String)> {
-        scan(text, false, &disk.paths)
-            .into_iter()
-            .map(|span| (text[span.start..span.end].to_string(), span.href))
-            .collect()
-    }
-
     /// A path that is there is a link; one that is not stays text.
     #[test]
     fn a_path_is_a_link_only_when_it_is_there() {
@@ -938,7 +942,10 @@ mod tests {
         assert!(paths.set_folder(Some(dir.clone())));
         assert_eq!(paths.resolve("evo"), Some(dir.join("evo")));
         assert_eq!(paths.resolve("no-such-entry"), None);
-        assert!(!paths.set_folder(Some(dir.clone())), "the same folder again");
+        assert!(
+            !paths.set_folder(Some(dir.clone())),
+            "the same folder again"
+        );
         paths.set_folder(Some(PathBuf::from("/")));
         assert_eq!(paths.resolve("evo"), None, "another folder, another answer");
         let _ = std::fs::remove_dir_all(dir);

@@ -2,7 +2,9 @@
 //! rows a reader can act on, and the panel helpers that do not need a window.
 
 use std::cell::RefCell;
+use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use gpui_kit::base::TextViewState;
 use gpui_kit::test::TestWindowExt as _;
@@ -1709,7 +1711,18 @@ fn a_reports_field_is_rendered_as_markdown(cx: &mut TestAppContext) {
 
     // A report that goes takes its fields' documents with it.
     view.update(cx, |view, cx| view.replace(vec![user("u_2", "gone")], cx));
-    cx.read(|cx| assert!(view.read(cx).data.read(cx).field_documents.is_empty()));
+    cx.read(|cx| {
+        assert!(
+            !view
+                .read(cx)
+                .data
+                .read(cx)
+                .field_documents
+                .keys()
+                .any(|(id, _)| id == "r_1"),
+            "the report's fields go with the report"
+        )
+    });
 }
 
 /// A reader's own wheel takes the list off its tail: the list scrolls, the pin lets go,
@@ -2538,4 +2551,257 @@ fn thinking_behind_the_window_still_counts(cx: &mut TestAppContext) {
         view.replace(vec![user("u_9999", "a fresh session")], cx)
     });
     assert!(!cx.read(|cx| view.read(cx).has_thinking(cx)));
+}
+
+// --- links (`linkify`, `link`) -------------------------------------------------------
+
+/// A real folder with a real file in it, for the rows whose paths have to be there to be
+/// pressed. It is thrown away when the test that made it ends.
+///
+/// The name has to be the test's own: two tests run at once, and `Paths` remembers what
+/// the disk said for three seconds.
+struct Disk {
+    root: PathBuf,
+}
+
+impl Disk {
+    fn new(name: &str) -> Self {
+        let root = std::env::temp_dir().join(format!(
+            "evo-transcript-links-{name}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("notes")).expect("a folder to point at");
+        std::fs::write(root.join("notes/report.md"), "the report").expect("a file to point at");
+        Disk { root }
+    }
+
+    /// The folder's path, as a row's words would carry it.
+    fn folder(&self) -> String {
+        self.root.join("notes").display().to_string()
+    }
+
+    /// The file's path, as a row's words would carry it.
+    fn file(&self) -> String {
+        self.root.join("notes/report.md").display().to_string()
+    }
+
+    /// A path under the folder that is not there.
+    fn gone(&self) -> String {
+        self.root.join("gone.md").display().to_string()
+    }
+}
+
+impl Drop for Disk {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+/// What the reader pressed, without opening anything: the app hands every link to the
+/// handler its owner put on the view, so a test can hold them.
+fn presses(view: &Entity<TranscriptView>, cx: &mut TestAppContext) -> Arc<Mutex<Vec<String>>> {
+    let pressed = Arc::new(Mutex::new(Vec::new()));
+    let held = pressed.clone();
+    view.update(cx, |view, cx| {
+        view.on_open_link(
+            move |href, _window, _cx| held.lock().unwrap().push(href.to_string()),
+            cx,
+        )
+    });
+    pressed
+}
+
+/// Press the words of a row, at their first glyph: a link that starts a line is under the
+/// pointer there, and nothing else in the line is a link.
+fn press(window: &mut Window, id: gpui_kit::ElementId, cx: &mut App) {
+    window.click_at(id, gpui_kit::point(px(4.), px(8.)), cx);
+}
+
+/// A row's own words are where a reader's links are: the address of a page, a file that
+/// is there, and a folder that is there all open where they point. What is opened is the
+/// absolute path the words named, not the words themselves.
+#[gpui_kit::test]
+fn a_link_in_a_rows_own_words_opens_where_it_points(cx: &mut TestAppContext) {
+    let disk = Disk::new("opens");
+    let (view, cx) = open!(
+        cx,
+        vec![
+            user("u_1", "https://evo.dev/state.json is the shape"),
+            user("u_2", &format!("{} is where it went", disk.file())),
+            user("u_3", &format!("{} holds it", disk.folder())),
+        ]
+    );
+    let pressed = presses(&view, cx);
+    for _ in 0..2 {
+        cx.update(|window, cx| window.render_frame(cx));
+    }
+    cx.update(|window, cx| {
+        press(window, row_id("transcript-user-text", "u_1"), cx);
+        press(window, row_id("transcript-user-text", "u_2"), cx);
+        press(window, row_id("transcript-user-text", "u_3"), cx);
+    });
+    assert_eq!(
+        *pressed.lock().unwrap(),
+        [
+            "https://evo.dev/state.json".to_string(),
+            disk.file(),
+            disk.folder(),
+        ],
+        "an address opens as it was written, and a path opens as the file it names"
+    );
+}
+
+/// An answer's prose is links too — a bare path on its own line, and a path written as
+/// code — and a report's field is the same kind of prose.
+#[gpui_kit::test]
+fn a_link_in_prose_and_in_a_report_field_opens_where_it_points(cx: &mut TestAppContext) {
+    let disk = Disk::new("prose");
+    let (view, cx) = open!(
+        cx,
+        vec![
+            assistant("a_1", &disk.file(), "final"),
+            item(json!({
+                "id": "r_1", "ts": 2, "kind": "lane_report", "lane": 3,
+                "done": format!("`{}`", disk.file()), "evidence": "none",
+                "next": "", "blocked": "", "requests": ""
+            })),
+        ]
+    );
+    let pressed = presses(&view, cx);
+    for _ in 0..2 {
+        cx.update(|window, cx| window.render_frame(cx));
+    }
+    cx.update(|window, cx| {
+        // The message is the path: its own first glyph is inside the link.
+        press(window, row_id("transcript-message", "a_1"), cx);
+    });
+    cx.update(|window, cx| {
+        // The field's words are in its value column; the label beside it is not prose.
+        let value: gpui_kit::ElementId = (row_id("transcript-report-done", "r_1"), "value").into();
+        press(window, value, cx);
+    });
+    assert_eq!(
+        *pressed.lock().unwrap(),
+        [disk.file(), disk.file()],
+        "the message and the field both open the file they name"
+    );
+}
+
+/// A path that is not there is not a link, and neither is anything that is not a path or
+/// an address: pressing what is left of the row opens nothing, and the words are still
+/// exactly what was said.
+#[gpui_kit::test]
+fn words_that_name_nothing_to_open_stay_words(cx: &mut TestAppContext) {
+    let disk = Disk::new("nothing");
+    let text = format!("{} was never written", disk.gone());
+    let (view, cx) = open!(cx, vec![user("u_1", &text)]);
+    let pressed = presses(&view, cx);
+    for _ in 0..2 {
+        cx.update(|window, cx| window.render_frame(cx));
+    }
+    // The words are drawn exactly as they came: what a path that is not there gets is
+    // its own characters back, with nothing under the pointer.
+    cx.read(|cx| {
+        let drawn = view
+            .read(cx)
+            .data
+            .read(cx)
+            .plain_document(&"u_1".to_string(), crate::rows::USER_TEXT)
+            .expect("the row's words are read from a document")
+            .read(cx)
+            .rendered_text();
+        assert_eq!(
+            drawn.as_str().trim_end(),
+            text,
+            "a path that is not there is drawn as it was written"
+        );
+    });
+    cx.update(|window, cx| press(window, row_id("transcript-user-text", "u_1"), cx));
+    assert!(
+        pressed.lock().unwrap().is_empty(),
+        "a path that is not there opens nothing"
+    );
+}
+
+/// A tool call's arguments and its result are data, not prose: the addresses and paths in
+/// them are drawn exactly as they came, and pressing them opens nothing.
+#[gpui_kit::test]
+fn a_tool_calls_arguments_and_result_are_not_links(cx: &mut TestAppContext) {
+    let disk = Disk::new("tool");
+    let url = "https://evo.dev/state.json";
+    let spec = json!({
+        "id": "t_1", "ts": 1, "kind": "tool", "call_id": "c1", "name": "bash",
+        "args": { "url": url },
+        "status": "ok",
+        "result": { "text": format!("{} was written", disk.file()), "chars": 40, "truncated": false },
+    });
+    // Nothing of a call is read as prose, so there is nothing in it to press.
+    assert!(
+        crate::rows::plain_texts(&item(spec.clone()), true).is_empty(),
+        "a call's words are data, not prose"
+    );
+    let (view, cx) = open!(cx, vec![item(spec)]);
+    let pressed = presses(&view, cx);
+    cx.update(|window, cx| window.render_frame(cx));
+    // The call's body is behind the head, and is where a path in a call would show.
+    cx.update(|window, cx| window.click(row_id("transcript-tool", "t_1"), cx));
+    for _ in 0..2 {
+        cx.update(|window, cx| window.render_frame(cx));
+    }
+    cx.update(|window, cx| {
+        let args = row_id("transcript-tool-arguments", "t_1");
+        let first: gpui_kit::ElementId = (args, "0").into();
+        // Both lines begin with what would be a link, were a call prose.
+        let command: gpui_kit::ElementId = (first, "value").into();
+        let result: gpui_kit::ElementId = (row_id("transcript-tool-result", "t_1"), "text").into();
+        // Both are drawn — the call's body is open, and the words are its own.
+        assert!(window.try_find(command.clone()).is_some());
+        assert!(window.try_find(result.clone()).is_some());
+        press(window, command, cx);
+        press(window, result, cx);
+    });
+    assert!(
+        pressed.lock().unwrap().is_empty(),
+        "a call's arguments and its result open nothing"
+    );
+    cx.read(|cx| {
+        assert!(
+            !view
+                .read(cx)
+                .data
+                .read(cx)
+                .field_documents
+                .keys()
+                .any(|(id, _)| id == "t_1"),
+            "a call's words are read as text, never as prose with links in it"
+        )
+    });
+}
+
+/// A relative path is measured from the folder the tab works in, and a tab that moves
+/// reads its rows again: the same words name a file in one folder and nothing in none.
+#[gpui_kit::test]
+fn a_relative_path_is_measured_from_the_tabs_folder(cx: &mut TestAppContext) {
+    let disk = Disk::new("folder");
+    let (view, cx) = open!(cx, vec![user("u_1", "notes/report.md is where it went")]);
+    let pressed = presses(&view, cx);
+    view.update(cx, |view, cx| view.set_folder(Some(disk.root.clone()), cx));
+    for _ in 0..2 {
+        cx.update(|window, cx| window.render_frame(cx));
+    }
+    cx.update(|window, cx| press(window, row_id("transcript-user-text", "u_1"), cx));
+    assert_eq!(*pressed.lock().unwrap(), [disk.file()]);
+
+    // The tab moves to a folder where the same words name nothing.
+    view.update(cx, |view, cx| view.set_folder(None, cx));
+    for _ in 0..2 {
+        cx.update(|window, cx| window.render_frame(cx));
+    }
+    cx.update(|window, cx| press(window, row_id("transcript-user-text", "u_1"), cx));
+    assert_eq!(
+        *pressed.lock().unwrap(),
+        [disk.file()],
+        "a relative path with no folder to measure it from opens nothing"
+    );
 }
