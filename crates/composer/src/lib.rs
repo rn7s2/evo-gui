@@ -1473,6 +1473,9 @@ impl Render for Composer {
         let strip = self.todo_strip(palette, cx);
         let drawer = self.drawer_panel(palette, window, cx, strip.is_none());
         let foot = self.foot(palette, cx);
+        // With neither fold-out open the input's wrapper is the box's first child:
+        // its own top corners are the box's, and it is the only child painting there.
+        let body_at_top = strip.is_none() && drawer.is_none();
 
         // Where the box was painted: the page asks this against the press it sees, so
         // that a press in the box and a press outside it are told apart by where they
@@ -1521,13 +1524,17 @@ impl Render for Composer {
                     .child(
                         // Everything under the strip: the input and the foot, on the
                         // box's own surface, curved with the box's inner radius so the
-                        // bottom corners are that colour up to the border whatever the
-                        // box's clip does with a square child.
+                        // box's own fill reaches the border on every corner it meets. A
+                        // child of the box is not clipped to the box's rounded bounds
+                        // (gpui's clip is the rectangle), so a square corner here paints
+                        // its own colour over the corner's wedge and the box reads as a
+                        // square with a rounded hairline through it.
                         v_flex()
                             .w_full()
                             .flex_none()
                             .bg(paint::color(palette.input))
                             .rounded_b(BOX_INNER_RADIUS)
+                            .when(body_at_top, |this| this.rounded_t(BOX_INNER_RADIUS))
                             .child(
                                 // The input's own box: the design's padding, and the
                                 // design's 62px floor under it (`INPUT_PAD`, `INPUT_MIN`).
