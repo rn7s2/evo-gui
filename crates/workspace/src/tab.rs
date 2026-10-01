@@ -403,6 +403,10 @@ struct Live {
     pending: BTreeMap<String, Pending>,
     /// The one stream's state, for the `reconnecting` badge (§5.3, §9.7).
     stream: StreamStatus,
+    /// Whether this tab runs a swarm or one `evo-agent` (§7.2), taken from the launch
+    /// it started with: a resumed `evo-agent` journal is that agent's, whatever the
+    /// workers card's switch says now.
+    swarm: bool,
     /// True once this tab's session has been recorded as a recent (§9.5).
     recorded: bool,
     /// True while that recording is out on its thread, so the `/state` resyncs
@@ -1130,6 +1134,9 @@ impl TabContent {
         coordinator.update(cx, |view, cx| view.set_agent(AgentKey::Coordinator, cx));
         self.transcripts
             .insert(AgentKey::Coordinator, coordinator.clone());
+        // Which program this tab just started: the launch said so, and the page, the
+        // column and the box all read it from here (§7.2).
+        let swarm = self.swarm(cx);
         self.live = Some(Live {
             engine: Rc::new(started.engine),
             model: TabModel::new(),
@@ -1137,6 +1144,7 @@ impl TabContent {
             tab_dir: started.tab_dir,
             pending: BTreeMap::new(),
             stream: StreamStatus::Connected,
+            swarm,
             recorded: false,
             recording: false,
             pid: None,
@@ -1533,8 +1541,11 @@ impl TabContent {
         let empty = session::TopicState::default();
         let state = live.model.state(selected).unwrap_or(&empty).clone();
         let busy = swarm_is_busy(&live.model);
+        // What the drawer calls the agent it is showing: a swarm is coordinated, one
+        // agent is not (§7.2).
         let name = match selected {
-            AgentKey::Coordinator => "Coordinator".to_string(),
+            AgentKey::Coordinator if live.swarm => "Coordinator".to_string(),
+            AgentKey::Coordinator => "Main".to_string(),
             AgentKey::Lane(n) => format!("lane {n}"),
         };
         let settable = selected == AgentKey::Coordinator;
@@ -1542,9 +1553,11 @@ impl TabContent {
         // set to, kept where the page can reach it (the drawer's own copy is the
         // composer's).
         self.thinking_level = state.thinking.clone();
+        let swarm = live.swarm;
         self.composer.update(cx, |composer, cx| {
             composer.set_agent(&state, &name, settable, cx);
             composer.set_swarm_busy(busy, cx);
+            composer.set_swarm(swarm, cx);
         });
     }
 
@@ -1589,6 +1602,11 @@ impl TabContent {
     /// Feed the agent list from the model: the rows, the coordinator's status and step
     /// clock, the selection, and why each down lane is down (§7.3, §9.7).
     fn sync_agents(&mut self, cx: &mut Context<Self>) {
+        // Which program the column is showing is the tab's own knowledge, not the
+        // model's: a swarm's first row is its coordinator and one agent's is `Main`,
+        // and only a swarm has lanes to count (§7.2).
+        let swarm = self.swarm(cx);
+        self.agents.update(cx, |list, cx| list.set_swarm(swarm, cx));
         let Some(snapshot) = self.agents_snapshot() else {
             return;
         };
@@ -2253,6 +2271,51 @@ mod tests {
             })
             .expect("tab window")
         })
+    }
+
+    /// §7.2: which program a tab is. Before it launches, the workers card's switch is
+    /// the answer — that is what the page would start — and once it has launched, what
+    /// it launched with is: a swarm keeps running as a swarm even if the switch moves
+    /// under it, because its pages, its column and its box are all the swarm's.
+    #[gpui_kit::test]
+    fn a_tabs_program_is_the_one_it_launched_with(cx: &mut TestAppContext) {
+        let (_window, tab) = running_tab(cx);
+        cx.update(|cx| assert!(tab.read(cx).swarm(cx), "a swarm until told otherwise"));
+
+        tab.update(cx, |tab, cx| tab.set_use_swarm(false, cx));
+        cx.update(|cx| {
+            assert!(
+                !tab.read(cx).swarm(cx),
+                "an unlaunched tab is whatever the switch would start"
+            )
+        });
+
+        tab.update(cx, |tab, _| {
+            tab.last_launch = Some(Launch::New {
+                folder: PathBuf::from("/tmp/proj"),
+                plan: LaunchPlan {
+                    swarm: true,
+                    ..LaunchPlan::default()
+                },
+            });
+        });
+        cx.update(|cx| {
+            assert!(
+                tab.read(cx).swarm(cx),
+                "a launch fixes it: this tab is the swarm it started"
+            )
+        });
+
+        // And a resumed single agent's tab is that agent's, whatever the switch says.
+        tab.update(cx, |tab, cx| {
+            tab.last_launch = Some(Launch::Resume {
+                folder: PathBuf::from("/tmp/proj"),
+                session: PathBuf::from("/tmp/proj/session.sexp"),
+                swarm: false,
+            });
+            tab.set_use_swarm(true, cx);
+        });
+        cx.update(|cx| assert!(!tab.read(cx).swarm(cx)));
     }
 
     /// §7.3: the reveal is offered before any thinking has arrived, to an agent whose

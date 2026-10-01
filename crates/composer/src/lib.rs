@@ -284,6 +284,9 @@ pub enum ActionFace {
     Send,
     /// The swarm is busy or held while its lanes work: the one action that stops it all.
     StopSwarm,
+    /// The same button in a single-agent session (§7.2), where there is no swarm to
+    /// stop: it stops this agent's own run, which is the only run there is.
+    Stop,
 }
 
 impl ActionFace {
@@ -294,6 +297,7 @@ impl ActionFace {
         match self {
             Self::Send => "\u{2191} Send",
             Self::StopSwarm => "\u{25a0} Stop swarm",
+            Self::Stop => "\u{25a0} Stop",
         }
     }
 
@@ -303,6 +307,7 @@ impl ActionFace {
         match self {
             Self::Send => "Send",
             Self::StopSwarm => "Stop swarm",
+            Self::Stop => "Stop",
         }
     }
 }
@@ -458,6 +463,9 @@ pub struct Composer {
     chevron_turns: u64,
     /// The swarm's own busy flag: what the action button's face follows.
     busy: bool,
+    /// Whether this box is a swarm's (§7.2): what the button says while it is busy, and
+    /// therefore what a click on it stops.
+    swarm: bool,
     /// True while this composer's own request is in flight — the only reason the
     /// button is disabled.
     in_flight: bool,
@@ -628,6 +636,7 @@ impl Composer {
             effort_motion: Rc::new(Motion::new()),
             box_bounds: Rc::new(Cell::new(Bounds::default())),
             effort_focus: cx.focus_handle(),
+            swarm: true,
             _subscriptions: vec![subscription, interceptor],
         }
     }
@@ -1056,6 +1065,17 @@ impl Composer {
         }
     }
 
+    /// Whether this box belongs to a swarm (§7.2). One agent has no swarm behind it: the
+    /// button says `Stop` rather than `Stop swarm`, and it stops that agent's own run —
+    /// the session-scoped interrupt, which is the only one an `evo-agent` server knows.
+    /// A swarm is what the box opens as.
+    pub fn set_swarm(&mut self, swarm: bool, cx: &mut Context<Self>) {
+        if self.swarm != swarm {
+            self.swarm = swarm;
+            cx.notify();
+        }
+    }
+
     /// Report the outcome of this composer's own request.
     ///
     /// `ok` clears the draft — the input is emptied only after the server took the
@@ -1092,10 +1112,10 @@ impl Composer {
     /// (CONTRACT §7.5). The per-lane Stop lives in the lane column, where a lane is
     /// named.
     pub fn face(&self) -> ActionFace {
-        if self.busy {
-            ActionFace::StopSwarm
-        } else {
-            ActionFace::Send
+        match (self.busy, self.swarm) {
+            (false, _) => ActionFace::Send,
+            (true, true) => ActionFace::StopSwarm,
+            (true, false) => ActionFace::Stop,
         }
     }
 
@@ -2236,6 +2256,14 @@ impl Composer {
                     cx.emit(ComposerEvent::StopSwarm);
                     cx.notify();
                 }
+                // The same click in a single-agent session: there is no swarm behind
+                // this box, so the one thing to stop is the agent's own run — the
+                // session-scoped interrupt, `run.interrupt{scope:session}` (§7.2).
+                ActionFace::Stop => {
+                    this.in_flight = true;
+                    cx.emit(ComposerEvent::Interrupt);
+                    cx.notify();
+                }
             }))
             // One button, the design's own: primary in both faces, because it is the
             // same button with a different word on it (`.composer-send`). The design
@@ -3097,6 +3125,46 @@ mod tests {
         assert_eq!(ActionFace::StopSwarm.label(), "\u{25a0} Stop swarm");
         assert_eq!(ActionFace::Send.name(), "Send");
         assert_eq!(ActionFace::StopSwarm.name(), "Stop swarm");
+        // The single-agent face says what it stops: one agent's own run, not a swarm's.
+        assert_eq!(ActionFace::Stop.label(), "\u{25a0} Stop");
+        assert_eq!(ActionFace::Stop.name(), "Stop");
+    }
+
+    /// §7.2: a single-agent session's box. Busy, the button says `Stop` — there is no
+    /// swarm behind it to stop — and the click is the session-scoped interrupt, which is
+    /// the only scope an `evo-agent` server knows. The same click in a swarm's box stops
+    /// the whole swarm, as it always has.
+    #[gpui_kit::test]
+    fn a_single_agents_box_stops_its_own_run(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            // A button reports the name a reader hears, not the glyph it leads with
+            // (`each_face_reads_as_the_design_writes_it` is where the drawn label is
+            // pinned).
+            assert_eq!(
+                window.find(BUTTON_ID).label(),
+                Some(ActionFace::Send.name()),
+                "nothing is going on"
+            );
+
+            f.composer.update(cx, |composer, cx| {
+                composer.set_swarm(false, cx);
+                composer.set_swarm_busy(true, cx);
+            });
+            window.render_frame(cx);
+            assert_eq!(
+                window.find(BUTTON_ID).label(),
+                Some(ActionFace::Stop.name())
+            );
+
+            window.click(BUTTON_ID, cx);
+        });
+        assert_eq!(
+            f.events(),
+            vec![ComposerEvent::Interrupt],
+            "the scope is the session's own"
+        );
     }
 
     #[gpui_kit::test]
