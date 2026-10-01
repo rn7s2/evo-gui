@@ -2383,10 +2383,7 @@ mod tests {
                 "claude-sonnet-5@proxy",
                 "the field shows what the check resolved, ready or not"
             );
-            assert_eq!(
-                shown(state, Card::Lanes, cx),
-                "deepseek-v4.1-flash@acme"
-            );
+            assert_eq!(shown(state, Card::Lanes, cx), "deepseek-v4.1-flash@acme");
             // …which is a registration this card cannot launch on as it stands: the field
             // still shows it, and the check's own line under the cards explains it.
             let model = state.launcher.chosen(Card::Coordinator).expect("a model");
@@ -2403,15 +2400,13 @@ mod tests {
         f.set_catalog(cx, &catalog_body());
         f.render(cx);
         let state = f.state(cx);
-        // The person picks the ark registration in the coordinator's field: the event the
+        // The person picks the acme registration in the coordinator's field: the event the
         // select itself emits when a row is clicked.
         f.act(cx, |window, cx| {
             state.update(cx, |state, cx| {
                 state.on_choose(
                     Card::Coordinator,
-                    &SelectEvent::Confirm(Some(SharedString::from(
-                        "deepseek-v4.1-flash@acme",
-                    ))),
+                    &SelectEvent::Confirm(Some(SharedString::from("deepseek-v4.1-flash@acme"))),
                     window,
                     cx,
                 )

@@ -214,10 +214,7 @@ fn the_index_and_the_apps_recents_become_one_list() {
     assert_eq!(first.folder, PathBuf::from("/Users/x/coding/evo"));
     assert_eq!(first.lanes, 6);
     assert_eq!(first.models.coordinator.as_deref(), Some("claude-opus-5"));
-    assert_eq!(
-        first.models.lanes.as_deref(),
-        Some("deepseek-v4.1-flash")
-    );
+    assert_eq!(first.models.lanes.as_deref(), Some("deepseek-v4.1-flash"));
     assert_eq!(first.source, history::HistorySource::Index);
     assert!(first.open_at_quit, "only the app can say this");
     // Newest first. A row is named by its folder, and the index's own `title`s in
@@ -277,10 +274,7 @@ fn check_json_answers_about_the_launch_it_is_given() {
     let stub = Stub::new("check");
     let mut launch = LaunchSpec::new(Program::Swarm, stub.dir.clone());
     launch.model = Some(catalog::ModelRef::new("claude-opus-5", Some("anthropic")));
-    launch.lane_model = Some(catalog::ModelRef::new(
-        "deepseek-v4.1-flash",
-        Some("acme"),
-    ));
+    launch.lane_model = Some(catalog::ModelRef::new("deepseek-v4.1-flash", Some("acme")));
     launch.workers = Some(4);
 
     let report = CheckReport::from_json(&cli::run_json(&stub.bin(), &launch.check_argv()).unwrap());
@@ -363,10 +357,7 @@ fn a_launchs_argv_is_the_contracts_flags() {
     ));
     launch.model = Some(catalog::ModelRef::new("claude-opus-5", Some("anthropic")));
     launch.thinking = Some("high".to_owned());
-    launch.lane_model = Some(catalog::ModelRef::new(
-        "deepseek-v4.1-flash",
-        Some("acme"),
-    ));
+    launch.lane_model = Some(catalog::ModelRef::new("deepseek-v4.1-flash", Some("acme")));
     launch.lane_thinking = Some("medium".to_owned());
     launch.workers = Some(6);
     launch.agent_bin = Some(PathBuf::from("/usr/local/bin/evo-agent"));

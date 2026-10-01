@@ -2,16 +2,21 @@
 //!
 //! The screens in `docs/screens.md` are the app's states: a tab, a lane at work,
 //! a report arriving. They never fold out what the box holds of its own, which is
-//! where the design puts the goal's objective, the todo list and the model drawer
-//! — so this takes those pictures, from the composer the app builds, in both themes.
+//! where the design puts the goal's objective, the todo list, the model drawer and
+//! the completion popup — so this takes those pictures, from the composer the app
+//! builds, in both themes.
 //!
 //! ```sh
 //! cargo run -p composer --example composer_states -- --capture /tmp/composer
 //! ```
 //!
 //! Nothing here pokes a widget's fields: the states are the topic's own
-//! (`set_agent` / `set_catalog` / `set_swarm_busy`) and the fold-outs are opened
-//! by clicking the same rows and chips a person clicks.
+//! (`set_agent` / `set_catalog` / `set_swarm_busy`), the fold-outs are opened by
+//! clicking the same rows and chips a person clicks, and a word is completed by
+//! putting the caret in the input and typing — the popup is raised the way a reader
+//! raises it. The one thing a picture cannot do for itself is the image's answer
+//! about a symbol, so the `/eval` state hands the popup the rows a real
+//! `evo.eval:completions-for` returns for the token it is showing.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -32,11 +37,12 @@ use composer::{Candidate, Composer, ModelRow};
 /// gives it, so the box is docked on the reading measure it is drawn on.
 const WINDOW_SIZE: (f32, f32) = (1000., 720.);
 
-/// The topic's own state, as a server would publish it (`GET /snapshot`).
-fn state(busy: bool) -> TopicState {
+/// The topic's own state, as a server would publish it (`GET /snapshot`), run on
+/// one of the catalog's registrations.
+fn state(busy: bool, model: &str) -> TopicState {
     TopicState::from_json(&serde_json::json!({
         "status": if busy { "running" } else { "idle" },
-        "model": {"id": "stub-a", "provider": "openai", "ready": true},
+        "model": {"id": model, "provider": "openai", "ready": true},
         "thinking": "high",
         "context": {"tokens": 48000, "window": 936000, "source": "usage"},
         "goal": {"goal_id": "a1b2c3d4", "objective": "Ship the redesign: every screen taken \
@@ -48,7 +54,7 @@ fn state(busy: bool) -> TopicState {
             {"text": "re-take the screens", "status": "pending"},
         ],
         "segments": [
-            {"name": "model", "order": 100, "side": "left", "text": "stub-a", "data": {}},
+            {"name": "model", "order": 100, "side": "left", "text": model, "data": {}},
             {"name": "thinking", "order": 200, "side": "left", "text": "high", "data": {}},
             {"name": "context", "order": 300, "side": "left",
              "text": "ctx 48k/936k (5%)", "data": {}},
@@ -58,6 +64,14 @@ fn state(busy: bool) -> TopicState {
              "text": "goal a1b2c3d4 (active) 12k/50k", "data": {}},
         ],
     }))
+}
+
+/// The effort ladder evo's own registration declares (`/catalog.thinking_levels`).
+fn levels() -> Vec<String> {
+    ["low", "medium", "high", "xhigh", "max"]
+        .iter()
+        .map(|level| level.to_string())
+        .collect()
 }
 
 /// The models the drawer offers, as `GET /catalog` lists them (§5.6): one chosen,
@@ -78,24 +92,55 @@ fn models() -> Vec<ModelRow> {
         },
         ModelRow {
             id: "stub-c".to_string(),
-            provider: "ark".to_string(),
+            provider: "acme".to_string(),
             detail: "1M ctx".to_string(),
             reason: Some("no credential".to_string()),
         },
     ]
 }
 
-/// The commands the registry lists, as `GET /catalog` would: what a `/word`
-/// completes against.
+/// A catalog long enough to need the drawer's region: ten registrations, so the
+/// list scrolls inside its seven rows whatever the window's height. The state that
+/// runs it is on `stub-j` — the last row, which is the one a region of seven rows
+/// would not show without the reveal.
+fn many_models() -> Vec<ModelRow> {
+    (0..10u8)
+        .map(|n| ModelRow {
+            id: format!("stub-{}", char::from(b'a' + n)),
+            provider: ["openai", "proxy", "acme"][n as usize % 3].to_string(),
+            detail: format!("{}k ctx · effort low–max", (n as u32 + 1) * 100),
+            reason: (n % 5 == 2).then(|| "no credential".to_string()),
+        })
+        .collect()
+}
+
+/// The commands the registry lists, as `GET /catalog` would: evo's own command
+/// table, its own words, in its own order — what a `/word` completes against.
 fn commands() -> Vec<Candidate> {
     [
-        ("help", "commands and keys"),
-        ("image", "attach an image"),
-        ("lore", "durable guidance"),
-        ("memory", "what is remembered"),
-        ("reload", "reload the image's own code"),
-        ("theme", "switch the light/dark theme"),
-        ("eval", "evaluate one form in the live image"),
+        ("compact", "compact the context now"),
+        ("eval", "evaluate one sexpr in the live image"),
+        ("export", "export the transcript as markdown"),
+        ("fork", "fork this session at the current leaf"),
+        ("global-lore", "show lore, or add user-scope guidance"),
+        (
+            "global-memory",
+            "show global user memory or ask the agent to refine it",
+        ),
+        ("goal", "show, create, refine, pause, or resume the goal"),
+        ("lang", "language of the system prompt and replies"),
+        ("lore", "show lore, or add project guidance"),
+        (
+            "memory",
+            "show project memory or ask the agent to refine it",
+        ),
+        ("model", "pick the model from a list, or set it directly"),
+        ("new", "start a new session in this folder"),
+        (
+            "reload",
+            "re-evaluate init files, extensions and post-init files",
+        ),
+        ("thinking", "set the effort level of the next turn"),
     ]
     .iter()
     .map(|(name, description)| Candidate {
@@ -103,6 +148,50 @@ fn commands() -> Vec<Candidate> {
         description: description.to_string(),
     })
     .collect()
+}
+
+/// What `evo.eval:completions-for` answers for `evo.eval:` — the package's own
+/// exported names, which is what the image offers a qualified token, each with what
+/// it is.
+fn eval_package_symbols() -> Vec<Candidate> {
+    [
+        ("*eval-package-name*", "variable"),
+        ("completions-for", "function"),
+        ("eval-form", "function"),
+        ("eval-package", "function"),
+        ("single-form", "function"),
+        ("symbol-kind", "function"),
+        ("token-start", "function"),
+    ]
+    .iter()
+    .map(|(name, description)| Candidate {
+        name: format!("evo.eval:{name}"),
+        description: description.to_string(),
+    })
+    .collect()
+}
+
+/// Put the caret in the box and type, as a reader does: the popup is raised by the
+/// word being typed, not by a state being set.
+fn type_into(
+    cx: &mut HeadlessAppContext,
+    window: AnyWindowHandle,
+    page: &Entity<Page>,
+    text: &str,
+) {
+    let composer = composer_of(cx, page);
+    cx.update_window(window, |_, window, cx| {
+        composer.update(cx, |composer, cx| composer.focus_input(window, cx));
+        window.render_frame(cx);
+        window.input(text, cx);
+    })
+    .unwrap();
+}
+
+/// Move the caret within the box by pressing a key, as a reader does.
+fn press(cx: &mut HeadlessAppContext, window: AnyWindowHandle, key: &str) {
+    cx.update_window(window, |_, window, cx| window.press(key, cx))
+        .unwrap();
 }
 
 /// The column the box is docked at the foot of: what the app renders above it.
@@ -115,19 +204,8 @@ impl Page {
         let composer = cx.new(|cx| Composer::new(window, cx));
         composer.update(cx, |composer, cx| {
             composer.set_pane_height(px(WINDOW_SIZE.1 - 200.), cx);
-            composer.set_agent(&state(false), "Coordinator", true, cx);
-            composer.set_catalog(
-                vec![
-                    "low".to_string(),
-                    "medium".to_string(),
-                    "high".to_string(),
-                    "xhigh".to_string(),
-                    "max".to_string(),
-                ],
-                models(),
-                commands(),
-                cx,
-            );
+            composer.set_agent(&state(false, "stub-a"), "Coordinator", true, cx);
+            composer.set_catalog(levels(), models(), commands(), cx);
         });
         Self { composer }
     }
@@ -212,10 +290,14 @@ fn main() {
     std::fs::create_dir_all(&dir).expect("the capture directory");
 
     // The states, in the order the design reads them: the goal's objective folded
-    // out, then the todo list, then the model drawer, then the one button's other
-    // face, then a lane's own box — which changes nothing, and says so.
+    // out, then the todo list, then the model drawer — the catalog's own three
+    // models, and a catalog long enough that the models scroll — then the one
+    // button's other face, then a lane's own box, which changes nothing, and says so.
+    // Then the completion popup, one picture per thing it does: the commands over
+    // the word at the message's start, the same list walked down its own rows, a word
+    // mid-prose, and the image's own symbols inside `/eval`.
     type Setup = fn(&mut HeadlessAppContext, AnyWindowHandle, &Entity<Page>);
-    let states: [(&str, Setup); 5] = [
+    let states: [(&str, Setup); 10] = [
         ("goal-open", |cx, window, _| {
             click(cx, window, "goal-strip-row")
         }),
@@ -225,6 +307,18 @@ fn main() {
         ("model-drawer", |cx, window, _| {
             click(cx, window, "composer-chip-model")
         }),
+        ("model-drawer-many", |cx, window, page| {
+            let composer = composer_of(cx, page);
+            cx.update(|cx| {
+                composer.update(cx, |composer, cx| {
+                    // The last registration, so the drawer opens on the row that
+                    // only the region's own scroll can show.
+                    composer.set_agent(&state(false, "stub-j"), "Coordinator", true, cx);
+                    composer.set_catalog(levels(), many_models(), commands(), cx);
+                })
+            });
+            click(cx, window, "composer-chip-model");
+        }),
         ("busy", |cx, _window, page| {
             let composer = composer_of(cx, page);
             cx.update(|cx| composer.update(cx, |composer, cx| composer.set_swarm_busy(true, cx)));
@@ -233,10 +327,44 @@ fn main() {
             let composer = composer_of(cx, page);
             cx.update(|cx| {
                 composer.update(cx, |composer, cx| {
-                    composer.set_agent(&state(false), "lane 1", false, cx)
+                    composer.set_agent(&state(false, "stub-a"), "lane 1", false, cx)
                 })
             });
             click(cx, window, "composer-chip-model");
+        }),
+        // The registry's fourteen commands over the word being started at the
+        // message's own start: the first row highlighted, the list's own counter
+        // saying how many there are, and the long descriptions cut at the row's edge.
+        ("completion-command", |cx, window, page| {
+            type_into(cx, window, page, "/");
+        }),
+        // The same list walked: three rows down, so the highlight — and the list
+        // under it — is somewhere other than the first row.
+        ("completion-walked", |cx, window, page| {
+            type_into(cx, window, page, "/");
+            for _ in 0..3 {
+                press(cx, window, "down");
+            }
+        }),
+        // A word mid-prose: the caret is at the end of `/he`, and the popup stands
+        // over that line, not over the line's end.
+        ("completion-mid-prose", |cx, window, page| {
+            type_into(cx, window, page, "please run /he now");
+            // Four lefts put the caret at the end of `/he`.
+            for _ in 0..4 {
+                press(cx, window, "left");
+            }
+        }),
+        // `/eval` content completes against the live image: here the package's own
+        // exported names, as `evo.eval:completions-for` answers for `evo.eval:`.
+        ("completion-symbols", |cx, window, page| {
+            type_into(cx, window, page, "/eval (evo.eval:");
+            let composer = composer_of(cx, page);
+            cx.update(|cx| {
+                composer.update(cx, |composer, cx| {
+                    composer.set_symbols("evo.eval:", eval_package_symbols(), cx)
+                })
+            });
         }),
     ];
 
