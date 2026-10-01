@@ -216,6 +216,10 @@ pub enum TabContentEvent {
     /// conversation (§7.3): the column goes back to the width it starts at. The
     /// window owns the width, so the gesture is reported rather than acted on.
     ResetPane,
+    /// Someone flipped the workers card's own switch (§7.2): a swarm from here on,
+    /// or one `evo-agent`. One value for the app — every tab and the next launch
+    /// open with it — so the window owns it, and the page reports the intent.
+    UseSwarm(bool),
 }
 
 /// Which of the two screens a [`TabContent`] opens on (§7.1, §7.2): a New Swarm

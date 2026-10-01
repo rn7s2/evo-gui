@@ -34,10 +34,11 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::list::{ListDelegate, ListItem, ListState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
+use gpui_kit::component::switch::Switch;
 use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::{
-    h_flex, v_flex, ActiveTheme as _, Icon, IconName, IndexPath, Sizable as _, StyledExt as _,
-    Theme,
+    h_flex, v_flex, ActiveTheme as _, Icon, IconName, IndexPath, Sizable as _, Size,
+    StyledExt as _, Theme,
 };
 use gpui_kit::prelude::*;
 use gpui_kit::{
@@ -168,6 +169,14 @@ const COUNT_BOX_ID: &str = "workers-count-box";
 const COUNT_FIELD_ID: &str = "workers-count-field";
 const COUNT_MINUS_ID: &str = "workers-count-minus";
 const COUNT_PLUS_ID: &str = "workers-count-plus";
+/// The workers card's own switch and the kit's control behind it (§7.2): a swarm from
+/// here, or one `evo-agent`.
+pub(crate) const SWARM_TOGGLE_ID: &str = "workers-use-swarm";
+pub(crate) const SWARM_SWITCH_ID: &str = "workers-use-swarm-switch";
+/// How far the switch greys what it turned off: the count, the lanes' model and its
+/// effort. In place — the card keeps every box where it is, so flipping the switch moves
+/// nothing under the pointer that flipped it.
+const OFF_OPACITY: f32 = 0.55;
 
 /// The history region and its states.
 const HISTORY_ID: &str = "history";
@@ -198,6 +207,7 @@ const WORKERS_TITLE: &str = "Workers";
 const MODEL_LABEL: &str = "Model";
 const EFFORT_LABEL: &str = "Effort";
 const COUNT_LABEL: &str = "Count";
+const USE_SWARM_LABEL: &str = "Use swarm";
 const FOLDER_LABEL: &str = "Select folder…";
 const HISTORY_TITLE: &str = "History";
 
@@ -721,6 +731,33 @@ impl EmptyTabState {
         cx.notify();
     }
 
+    /// The workers card's switch (§7.2): a swarm from here, or one `evo-agent`.
+    ///
+    /// The value is the window's — one for the app, remembered in `app.json`, so the next
+    /// tab opens with it too — and this is the window handing it back. What the page does
+    /// with it is everything the switch is for: the lanes' controls grey and go inert, and
+    /// the launch is asked about itself again, which off is no `check` at all.
+    fn set_use_swarm(&mut self, swarm: bool, cx: &mut Context<Self>) {
+        if !self.launcher.set_swarm(swarm) {
+            return;
+        }
+        // The two fields resolved differently — a check's answer dropped, or one asked for
+        // again — so the selects showing them are rebuilt on the next frame, which is
+        // where a window is ([`EmptyTabState::fields_stale`]).
+        self.fields_stale = true;
+        self.run_check(cx);
+        cx.notify();
+    }
+
+    /// What a single-agent launch has to say about itself: nothing evo-swarm's own words
+    /// would cover — a single agent has no lanes to report on, and no `check` behind it.
+    fn probe_single_agent(&mut self, cx: &mut Context<Self>) {
+        if !self.problems.is_empty() {
+            self.problems.clear();
+        }
+        cx.notify();
+    }
+
     /// The swarm binary a check runs: the app's own path, from Settings (§13).
     fn set_swarm_bin(&mut self, bin: PathBuf, cx: &mut Context<Self>) {
         if self.swarm_bin == bin {
@@ -738,18 +775,29 @@ impl EmptyTabState {
         self.run_check(cx);
     }
 
-    /// Ask `evo-swarm check --json` about the launch the controls describe (§9), off the
-    /// thread that draws: are the models resolvable, can a lane reach its API, is the key
-    /// there. The answer is both the lines under the cards and what the fields resolve to.
+    /// Ask the launch the controls describe about itself (§9), off the thread that
+    /// draws: are the models resolvable, can a lane reach its API, is the key there. The
+    /// answer is both the lines under the cards and what the fields resolve to.
     ///
-    /// A check that cannot run at all — the binary is not there, or is not one that runs —
-    /// is one more line of the same kind: it wears evo's own shape, says which path it
-    /// tried, and a click on it opens Settings, which is where a path is fixed (§13).
+    /// With the workers card's switch on that is `evo-swarm check --json` — a check that
+    /// cannot run at all, because the binary is not there or is not one that runs, is one
+    /// more line of the same kind: it wears evo's own shape, says which path it tried, and
+    /// a click on it opens Settings, which is where a path is fixed (§13).
+    ///
+    /// Off, there is nothing to ask: `evo-agent` has no `check` subcommand, and
+    /// `--workers` and `--lane-model` are not flags it takes. The lines under the cards
+    /// come from its catalog instead ([`EmptyTabState::probe`]).
     fn run_check(&mut self, cx: &mut Context<Self>) {
-        let plan = self.launcher.plan();
-        let spec = crate::launch::check_spec(&plan);
+        // The revision moves whatever happens next: an answer to a question this page has
+        // stopped asking is dropped, not rendered.
         self.check_revision += 1;
         let revision = self.check_revision;
+        if !self.launcher.swarm() {
+            self.probe_single_agent(cx);
+            return;
+        }
+        let plan = self.launcher.plan();
+        let spec = crate::launch::check_spec(&plan);
 
         if let CheckProbe::Fixed(report) = self.check_probe.clone() {
             self.fields_stale |= self.launcher.set_check(&check_body(&report));
@@ -846,6 +894,16 @@ impl EmptyTabState {
         cx.notify();
     }
 
+    /// The switch was flipped on this page: the value is the app's and every tab's, so
+    /// the window is asked for it rather than this page deciding alone. The window hands
+    /// it straight back — [`EmptyTabState::set_use_swarm`] — and writes it down for the
+    /// next launch.
+    fn set_swarm(&mut self, swarm: bool, cx: &mut Context<Self>) {
+        let _ = self
+            .tab
+            .update(cx, |tab, cx| tab.request_use_swarm(swarm, cx));
+    }
+
     /// A folder pick, synchronously: what a test injects in place of the dialog.
     #[allow(dead_code)]
     fn set_picker(&mut self, picker: FolderPicker, cx: &mut Context<Self>) {
@@ -914,9 +972,11 @@ impl EmptyTabState {
             )
     }
 
-    /// One role card: its title, the count control when it has one, and the two fields.
+    /// One role card: its title, the switch and the count control when it has them, and
+    /// the two fields.
     fn role_card(&self, role: Card, window: &Window, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
+        let off = self.card_off(role);
         let (title, id) = match role {
             Card::Coordinator => (COORDINATOR_TITLE, COORDINATOR_CARD_ID),
             Card::Lanes => (WORKERS_TITLE, WORKERS_CARD_ID),
@@ -950,10 +1010,11 @@ impl EmptyTabState {
                             .child(title),
                     )
                     .when(role == Card::Lanes, |heading| {
-                        heading.child(
+                        heading.child(self.swarm_toggle(cx)).child(
                             div()
                                 .w(FIELD_COLUMN)
                                 .flex_none()
+                                .when(off, |count| count.opacity(OFF_OPACITY))
                                 .child(self.count_box(window, cx)),
                         )
                     }),
@@ -964,6 +1025,7 @@ impl EmptyTabState {
                     .min_w_0()
                     .gap(FIELD_GAP)
                     .items_end()
+                    .when(off, |fields| fields.opacity(OFF_OPACITY))
                     .child(self.model_field(role, cx))
                     .child(
                         div()
@@ -974,9 +1036,54 @@ impl EmptyTabState {
             )
     }
 
+    /// The workers card's own switch (§7.2): a whole swarm behind this launch, or one
+    /// `evo-agent`.
+    ///
+    /// The design's card is a title, a count and two fields; running a single agent needs
+    /// one more control, and this is it — the kit's own switch, checked in the palette's
+    /// primary, with the page's label beside it. It sits in the heading row, left of the
+    /// count, and what it turns off is greyed **in place**: the card keeps its shape, so
+    /// nothing on the page moves under the pointer that flipped it.
+    fn swarm_toggle(&self, cx: &Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        h_flex()
+            .id(SWARM_TOGGLE_ID)
+            .test_support()
+            .flex_none()
+            .items_center()
+            .gap(px(8.))
+            .child(
+                div()
+                    .text_size(SMALL)
+                    .line_height(SMALL_LINE)
+                    .text_color(theme.muted_foreground)
+                    .child(USE_SWARM_LABEL),
+            )
+            .child(
+                // The text above is the label a reader sees; the switch carries the same
+                // words as its accessible name, because the two are separate elements.
+                Switch::new(SWARM_SWITCH_ID)
+                    .checked(self.launcher.swarm())
+                    .with_size(Size::Small)
+                    .accessibility_label(USE_SWARM_LABEL)
+                    .on_change(cx.listener(|this, on, _window, cx| this.set_swarm(*on, cx))),
+            )
+    }
+
+    /// Whether one card's controls are greyed and inert — the workers card with its switch
+    /// off, where the lanes' model, their effort and their count are not this launch's: a
+    /// single `evo-agent` runs no lanes.
+    fn card_off(&self, role: Card) -> bool {
+        role == Card::Lanes && !self.launcher.swarm()
+    }
+
     /// The model field: the design's `.field` — a label, then the select's own box.
+    ///
+    /// A field the workers card's switch turned off keeps its box, its label and its
+    /// value, and takes nothing: the kit's own disabled face, and no tab stop to land on.
     fn model_field(&self, role: Card, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
+        let off = self.card_off(role);
         let (id, field, label) = match role {
             Card::Coordinator => (COORDINATOR_MODEL_ID, &self.coordinator, "Coordinator model"),
             Card::Lanes => (WORKERS_MODEL_ID, &self.workers, "Workers model"),
@@ -990,9 +1097,8 @@ impl EmptyTabState {
         let border = theme.border;
         let primary = theme.primary;
         let muted = theme.muted;
-        let untouched = self.untouched;
-        // A field that resolved no model says so in the box, in evo's own words: the click
-        // still opens the menu, which is where another registration would come from.
+        let untouched = self.untouched; // A field that resolved no model says so in the box, in evo's own words: the click
+                                        // still opens the menu, which is where another registration would come from.
         let note = self
             .launcher
             .unresolved_note(role)
@@ -1025,7 +1131,7 @@ impl EmptyTabState {
                     .border_1()
                     .border_color(border)
                     .bg(theme.background)
-                    .track_focus(&handle)
+                    .when(!off, |box_| box_.track_focus(&handle))
                     // `.shad-select-wrap:focus-within .select-summary{border-color:
                     // var(--primary);box-shadow:0 0 0 2px var(--muted)}`. Painted by the
                     // element that carries the handle, so it follows the keyboard without a
@@ -1036,7 +1142,7 @@ impl EmptyTabState {
                     // has touched the page, and the design shows nothing until someone
                     // does. So the ring is attached only once a person has been here
                     // (`EmptyTabState::untouched`).
-                    .when(!untouched, |box_| {
+                    .when(!untouched && !off, |box_| {
                         box_.focus(move |style| {
                             style.border_color(primary).shadow(vec![ring(2., muted)])
                         })
@@ -1061,6 +1167,9 @@ impl EmptyTabState {
                             .id(id)
                             .appearance(false)
                             .focus_ring(false)
+                            // The switch turned this card off: the kit's own disabled face,
+                            // which is also what keeps the menu shut.
+                            .disabled(off)
                             // A field that resolved no model says so in the box, in evo's
                             // own words: the click still opens the menu, which is where
                             // another registration would come from.
@@ -1129,11 +1238,15 @@ impl EmptyTabState {
     ///
     /// `--thinking` / `--lane-thinking` take the levels the catalog lists, so the slider
     /// offers exactly those — the caller owns the label, the widget the rail.
+    ///
+    /// A slider the workers card's switch turned off is drawn where it is and hands the
+    /// widget nothing: no arrow, no drag, no click, and no tab stop.
     fn effort_slider(&self, role: Card, window: &Window, cx: &Context<Self>) -> AnyElement {
         let id = match role {
             Card::Coordinator => COORDINATOR_EFFORT_ID,
             Card::Lanes => WORKERS_EFFORT_ID,
         };
+        let off = self.card_off(role);
         let levels: Vec<SharedString> = self
             .launcher
             .levels()
@@ -1143,7 +1256,7 @@ impl EmptyTabState {
         let weak = cx.entity().downgrade();
         // The slider is named with the page's own id: it registers `<id>`, `<id>-rail`,
         // `<id>-thumb` and `<id>-fill` itself, which is what a test finds them by.
-        widgets::EffortSlider::with_levels(
+        let slider = widgets::EffortSlider::with_levels(
             id,
             levels,
             self.launcher.effort(role),
@@ -1151,27 +1264,33 @@ impl EmptyTabState {
         )
         .palette(design::palette(cx.theme().is_dark()))
         .reduce_motion(cx.reduce_motion())
-        .focus(self.effort_focus[slot(role)].clone())
-        .notify({
-            let weak = weak.clone();
-            move |cx: &mut App| {
-                let _ = weak.update(cx, |_, cx| cx.notify());
-            }
-        })
-        .on_change(move |level, _window, cx| {
-            let _ = weak.update(cx, |state, cx| {
-                if state.launcher.set_effort(role, level) {
-                    cx.notify();
+        .disabled(off);
+        if off {
+            return slider.render(window);
+        }
+        slider
+            .focus(self.effort_focus[slot(role)].clone())
+            .notify({
+                let weak = weak.clone();
+                move |cx: &mut App| {
+                    let _ = weak.update(cx, |_, cx| cx.notify());
                 }
-            });
-        })
-        .render(window)
+            })
+            .on_change(move |level, _window, cx| {
+                let _ = weak.update(cx, |state, cx| {
+                    if state.launcher.set_effort(role, level) {
+                        cx.notify();
+                    }
+                });
+            })
+            .render(window)
     }
 
     /// The count control: `.worker-count` — a label, then the box the `−`/`+` steppers and
     /// the field share.
     fn count_box(&self, _window: &Window, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
+        let off = self.card_off(Card::Lanes);
         let handle = self.count.read(cx).focus_handle(cx);
         let border = theme.border;
         let primary = theme.primary;
@@ -1193,7 +1312,9 @@ impl EmptyTabState {
                 .line_height(px(design::FONT_BASE * 1.5))
                 .child(label)
                 // The design's own `onClick`: a click steps, and a focused button's
-                // `Enter` or `Space` is a click too.
+                // `Enter` or `Space` is a click too. A stepper the workers card's switch
+                // turned off takes neither.
+                .disabled(off)
                 .on_click(cx.listener(move |this, _, window, cx| this.step_count(up, window, cx)))
         };
         h_flex()
@@ -1227,9 +1348,13 @@ impl EmptyTabState {
                     // gpui paints one under the element, so without a surface of its own
                     // the focus ring's `muted` filled the whole field.
                     .bg(theme.background)
-                    .track_focus(&handle)
+                    .when(!off, |box_| box_.track_focus(&handle))
                     // `.number-input:focus-within{border-color:var(--primary);box-shadow:0 0 0 2px var(--muted)}`
-                    .focus(move |style| style.border_color(primary).shadow(vec![ring(2., muted)]))
+                    .when(!off, |box_| {
+                        box_.focus(move |style| {
+                            style.border_color(primary).shadow(vec![ring(2., muted)])
+                        })
+                    })
                     .child(step(COUNT_MINUS_ID, "−", false, cx))
                     .child(
                         div()
@@ -1251,6 +1376,7 @@ impl EmptyTabState {
                                 // the box's own height and centres its one line in it.
                                 Input::new(&self.count)
                                     .appearance(false)
+                                    .disabled(off)
                                     .bg(theme.transparent)
                                     .h_full()
                                     .px(px(0.))
@@ -1854,6 +1980,19 @@ impl TabContent {
         cx.notify();
     }
 
+    /// The workers card's switch, as the window holds it (§7.2): one value for the app,
+    /// remembered in `app.json`, so every tab and the next launch open with it.
+    pub fn set_use_swarm(&mut self, swarm: bool, cx: &mut Context<Self>) {
+        let state = self.choosers.state.clone();
+        state.update(cx, |state, cx| state.set_use_swarm(swarm, cx));
+        cx.notify();
+    }
+
+    /// Whether this tab would start a swarm or one agent.
+    pub fn swarm(&self, cx: &App) -> bool {
+        self.choosers.state.read(cx).launcher.swarm()
+    }
+
     /// The catalog could not be learned: say so under the cards, where the check's own
     /// lines are.
     pub fn set_catalog_error(&mut self, error: Option<String>, cx: &mut Context<Self>) {
@@ -1923,6 +2062,13 @@ impl TabContent {
     /// `--thinking`, `--workers`, and the lanes' `--lane-model` and `--lane-thinking`.
     pub fn launch_plan(&self, cx: &App) -> LaunchPlan {
         self.choosers.plan(cx)
+    }
+
+    /// Ask the window for a different program: whether a launch from here is a swarm or
+    /// one agent is the app's own setting, so this page reports the intent like every
+    /// other control that belongs to the window.
+    pub fn request_use_swarm(&mut self, swarm: bool, cx: &mut Context<Self>) {
+        cx.emit(TabContentEvent::UseSwarm(swarm));
     }
 
     /// A folder is chosen: hand the window the launch it asked for — the models, the
@@ -3141,6 +3287,89 @@ mod tests {
                 coordinator.origin.x + coordinator.size.width + FIELD_GAP
             );
         });
+    }
+
+    /// §7.2: the workers card's own switch, and what it turns off. It opens checked — a
+    /// swarm is what this app starts — and flipping it greys the card's other controls
+    /// **in place**: the model box, the effort slider and the count keep every box exactly
+    /// where they were, so nothing moves under the pointer that flipped it, and none of
+    /// them takes anything. The intent itself is the window's, which owns the value for
+    /// every tab and for `app.json`.
+    #[gpui_kit::test]
+    fn the_workers_switch_turns_the_cards_controls_off_in_place(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.set_catalog(cx, &catalog_body());
+        f.render(cx);
+        let state = f.state(cx);
+        let model_box = ElementId::Name(format!("{WORKERS_MODEL_ID}-box").into());
+        let where_they_are = |window: &mut Window| {
+            (
+                window.find(model_box.clone()).bounds(),
+                window.find(WORKERS_EFFORT_ID).bounds(),
+                window.find(COUNT_BOX_ID).bounds(),
+            )
+        };
+        let before = f.act(cx, |window, _| {
+            assert!(
+                window.find(SWARM_TOGGLE_ID).visible(),
+                "the workers card carries the switch"
+            );
+            assert_eq!(
+                window.find(SWARM_SWITCH_ID).checked(),
+                Some(true),
+                "and it opens on a swarm"
+            );
+            assert_eq!(
+                window.find(SWARM_SWITCH_ID).label(),
+                Some(USE_SWARM_LABEL),
+                "with the page's own words on it"
+            );
+            where_they_are(window)
+        });
+
+        f.act(cx, |window, cx| window.click(SWARM_SWITCH_ID, cx));
+        assert_eq!(
+            f.events().last(),
+            Some(&TabContentEvent::UseSwarm(false)),
+            "the switch asks the window, which owns the value"
+        );
+        // What the window answers with comes back through `set_use_swarm`; the fixture has
+        // no window of its own to answer, so this is that answer.
+        let tab = f.tab.clone();
+        f.act(cx, |_, cx| {
+            tab.update(cx, |tab, cx| tab.set_use_swarm(false, cx))
+        });
+        f.render(cx);
+
+        let after = f.act(cx, |window, cx| {
+            assert!(!state.read(cx).launcher.swarm(), "the launch is one agent");
+            assert_eq!(
+                window.find(SWARM_SWITCH_ID).checked(),
+                Some(false),
+                "and the switch says so"
+            );
+            let after = where_they_are(window);
+            // The count's own stepper and the lanes' slider are the two controls a person
+            // reaches for by hand: off, neither of them moves anything.
+            let count = state.read(cx).launcher.workers();
+            window.click(COUNT_PLUS_ID, cx);
+            window.click(WORKERS_EFFORT_ID, cx);
+            assert_eq!(
+                state.read(cx).launcher.workers(),
+                count,
+                "a greyed stepper steps nothing"
+            );
+            assert_eq!(
+                state.read(cx).launcher.level(Card::Lanes),
+                Some("medium"),
+                "a greyed slider stays on the rung it was showing"
+            );
+            after
+        });
+        assert_eq!(
+            after, before,
+            "and every box on the card is exactly where it was"
+        );
     }
 
     /// The sliders are the shared widget, named with this page's own ids, so a test — or a

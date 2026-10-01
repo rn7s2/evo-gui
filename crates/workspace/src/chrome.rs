@@ -351,6 +351,10 @@ pub struct WorkspaceView {
     /// The tab page's side columns (§7.3): one pair of widths for the whole
     /// window, shared by every tab's page and remembered in `app.json`.
     panes: Panes,
+    /// Whether a new session is a swarm or one `evo-agent` (§7.2): the New Swarm
+    /// page's own switch, one value for the app like the splits, remembered in
+    /// `app.json` and handed to every tab's page.
+    use_swarm: bool,
     /// The drag machinery behind those widths (`gpui_base`'s resizable panels).
     /// One state for every page, so a split dragged in one tab is dragged in all
     /// of them — the pages are the same three columns.
@@ -409,14 +413,15 @@ impl WorkspaceView {
             strip_reveal: false,
             strip_content: None,
             panes: Panes::default(),
+            use_swarm: true,
             pane_state: cx.new(|_| ResizableState::default()),
             pane_resized: None,
         };
-        // The columns the app was left with (§7.3), before any page is built.
-        view.panes = panes::fit(
-            store::app_state::AppState::load(&view.config.root).panes,
-            window.bounds().size.width.into(),
-        );
+        // The columns the app was left with (§7.3), before any page is built — and
+        // whether the last session this app started was a swarm or one agent (§7.2).
+        let stored = store::app_state::AppState::load(&view.config.root);
+        view.use_swarm = stored.use_swarm;
+        view.panes = panes::fit(stored.panes, window.bounds().size.width.into());
         // Where a resized split ends up: the panels tell the state, the state
         // tells the window, and the window is what remembers it (§7.3).
         view.pane_resized = Some(cx.subscribe_in(
@@ -489,6 +494,35 @@ impl WorkspaceView {
             return;
         }
         state.panes = self.panes;
+        let _ = state.save(&self.config.root);
+    }
+
+    /// The workers card's switch (§7.2): a swarm from here on, or one `evo-agent`.
+    ///
+    /// One value for the window, like the column widths beside it: every tab's page is
+    /// told, and `app.json` remembers it, so the next launch opens with the program this
+    /// one was last asked for.
+    fn set_use_swarm(&mut self, use_swarm: bool, cx: &mut Context<Self>) {
+        if self.use_swarm == use_swarm {
+            return;
+        }
+        self.use_swarm = use_swarm;
+        for tab in &self.tabs {
+            let tab = tab.clone();
+            tab.update(cx, |tab, cx| tab.set_use_swarm(use_swarm, cx));
+        }
+        self.remember_use_swarm();
+        cx.notify();
+    }
+
+    /// `app.json`'s own switch, in place: the file is read, changed and written back
+    /// whole, the way the app's other remembered facts are (§6).
+    fn remember_use_swarm(&self) {
+        let mut state = store::app_state::AppState::load(&self.config.root);
+        if state.use_swarm == self.use_swarm {
+            return;
+        }
+        state.use_swarm = self.use_swarm;
         let _ = state.save(&self.config.root);
     }
 
@@ -811,9 +845,14 @@ impl WorkspaceView {
             tab.set_pane_state(pane_state, cx);
             tab.set_panes(panes, cx);
         });
-        // A tab opened now shows what the app already learned (§9.4, §9.5).
+        // A tab opened now shows what the app already learned (§9.4, §9.5) — and
+        // starts on the program the switch names (§7.2).
         let launcher = self.launcher.clone();
-        tab.update(cx, |tab, cx| tab.set_launcher_data(&launcher, window, cx));
+        let use_swarm = self.use_swarm;
+        tab.update(cx, |tab, cx| {
+            tab.set_launcher_data(&launcher, window, cx);
+            tab.set_use_swarm(use_swarm, cx);
+        });
         // The tab being shown is where the keyboard goes (§7.1): `select_tab` above
         // moved it, and it matters beyond typing — GPUI resolves a keystroke against
         // the *focused* element's place in the frame, so a keyboard left on a tab
@@ -1312,6 +1351,7 @@ impl WorkspaceView {
                     state.resize_panel(0, px(store::app_state::LEFT_DEFAULT), window, cx)
                 });
             }
+            TabContentEvent::UseSwarm(swarm) => self.set_use_swarm(swarm, cx),
             TabContentEvent::ScreenChanged => {
                 // The screen changed under the keyboard. GPUI resolves a keystroke
                 // against the focused element's place in the frame, so a keyboard
@@ -1575,6 +1615,29 @@ mod tests {
             )
             .expect("the workspace window")
         })
+    }
+
+    /// A window on the New Swarm page: one empty tab, over an app root of the
+    /// test's own — where the workers card's own switch is drawn (§7.2).
+    fn empty_page_window(
+        cx: &mut TestAppContext,
+        root: std::path::PathBuf,
+        window_size: (f32, f32),
+    ) -> (Entity<WorkspaceView>, &mut VisualTestContext) {
+        cx.update(gpui_kit::init);
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            WorkspaceView::with_config(
+                Arc::new(LaunchEnv {
+                    root: store::paths::Root::at(root),
+                    ..LaunchEnv::default()
+                }),
+                window,
+                cx,
+            )
+        });
+        cx.simulate_resize(size(px(window_size.0), px(window_size.1)));
+        cx.update(|window, cx| window.render_frame(cx));
+        (view, cx)
     }
 
     /// A window with a page on it: one tab, driving a swarm in a folder that does
@@ -2055,6 +2118,54 @@ mod tests {
         assert!(
             (saved.left - panes.left).abs() < 0.01,
             "app.json remembers the split: {saved:?} against {panes:?}"
+        );
+    }
+
+    /// §7.2: the workers card's own switch is the app's value — one for every tab,
+    /// remembered in `app.json` — so flipping it in the tab that is open is what the
+    /// next tab and the next launch start with.
+    #[gpui_kit::test]
+    fn the_workers_switch_is_one_value_for_the_window_and_for_app_json(cx: &mut TestAppContext) {
+        let root = test_root("use-swarm");
+        let (view, cx) = empty_page_window(cx, root.clone(), (1280., 800.));
+        let root = store::paths::Root::at(root);
+        let switch = crate::empty_tab::SWARM_SWITCH_ID;
+        assert_eq!(
+            cx.update(|window, _| window.find(switch).checked()),
+            Some(true),
+            "a tab opens on a swarm"
+        );
+
+        cx.update(|window, cx| window.click(switch, cx));
+        cx.update(|window, cx| window.render_frame(cx));
+
+        assert!(
+            !cx.update(|_, cx| view.read(cx).use_swarm),
+            "the window's own value follows the switch"
+        );
+        assert!(
+            !store::app_state::AppState::load(&root).use_swarm,
+            "and `app.json` remembers it for the next launch"
+        );
+        let page = cx.update(|_, cx| view.read(cx).selected_tab().clone());
+        assert!(
+            !cx.update(|_, cx| page.read(cx).swarm(cx)),
+            "the page that was open starts one agent now"
+        );
+        // The switch is one value for the window, so a tab opened now opens with it.
+        let second =
+            cx.update(|window, cx| view.update(cx, |view, cx| view.open_empty_tab(window, cx)));
+        assert!(
+            !cx.update(|_, cx| second.read(cx).swarm(cx)),
+            "and so does the next tab"
+        );
+        assert_eq!(
+            cx.update(|window, cx| {
+                window.render_frame(cx);
+                window.find(switch).checked()
+            }),
+            Some(false),
+            "drawn where it was, saying what the window holds"
         );
     }
 

@@ -220,6 +220,79 @@ fn what_the_check_resolved_is_what_the_fields_show() {
     );
 }
 
+/// §7.2: the workers card's own switch. A tab opens on a swarm; off, the check's answer
+/// is dropped — `--workers` and `--lane-model` are questions a single agent does not ask
+/// — and the coordinator's field falls back to what the catalog resolves. Back on, the
+/// check is asked again and resolves the fields the swarm's way.
+#[test]
+fn the_workers_switch_off_drops_the_checks_own_answer() {
+    let mut launcher = Launcher::new();
+    assert!(launcher.swarm(), "a tab opens on a swarm");
+    launcher.set_catalog(&fixture("catalog.json"));
+    launcher.set_check(&json!({
+        "ok": false,
+        "model": {"id": "claude-sonnet-5", "provider": "proxy", "ok": false,
+                  "reason": "no credential"},
+        "lane_model": {"id": "claude-opus-5", "provider": "anthropic", "ok": true},
+        "thinking": "xhigh",
+        "lane_thinking": "low",
+        "workers": 12,
+        "problems": []
+    }));
+    assert_eq!(
+        launcher.chosen_key(Role::Coordinator),
+        Some("claude-sonnet-5@proxy"),
+        "the check resolved the coordinator, unusable or not"
+    );
+    assert_eq!(launcher.workers(), 12);
+
+    assert!(launcher.set_swarm(false));
+    assert!(!launcher.swarm());
+    assert!(
+        !launcher.set_swarm(false),
+        "setting it where it already is changes nothing"
+    );
+    // What the catalog resolves on its own: no check to read, and no lane judgement to
+    // consult, so the coordinator is the catalog's own default registration.
+    assert_eq!(
+        launcher.chosen_key(Role::Coordinator),
+        Some("deepseek-v4.1-flash@acme"),
+        "the check's answer is gone with the swarm"
+    );
+    assert_eq!(
+        launcher.workers(),
+        DEFAULT_WORKERS,
+        "and the count it resolved too"
+    );
+    // A check that arrives after the switch moved — the answer to a question asked
+    // before it — is dropped rather than resolved against.
+    assert!(!launcher.set_check(&json!({
+        "ok": true,
+        "model": {"id": "claude-sonnet-5", "provider": "proxy", "ok": true},
+        "lane_model": {"id": "deepseek-v4.1-flash", "provider": "acme", "ok": true},
+        "workers": 12,
+        "problems": []
+    })));
+    assert_eq!(
+        launcher.chosen_key(Role::Coordinator),
+        Some("deepseek-v4.1-flash@acme")
+    );
+
+    // Back on: the swarm's own answer resolves the fields again.
+    assert!(launcher.set_swarm(true));
+    assert!(launcher.set_check(&json!({
+        "ok": true,
+        "model": {"id": "claude-sonnet-5", "provider": "proxy", "ok": false},
+        "workers": 4,
+        "problems": []
+    })));
+    assert_eq!(
+        launcher.chosen_key(Role::Coordinator),
+        Some("claude-sonnet-5@proxy")
+    );
+    assert_eq!(launcher.workers(), 4);
+}
+
 /// §2: `check --json` resolves the two efforts and the count as a launch with no flags
 /// would — evo's own chains, including a resumed swarm's record — so the controls open on
 /// those rather than on a rung or a count this app picked.

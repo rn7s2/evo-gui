@@ -379,6 +379,10 @@ fn model_detail(model: &Value) -> String {
 /// resolved are left to evo.
 #[derive(Clone, Debug, Default)]
 pub struct Launcher {
+    /// Whether this launch is a swarm (`evo-swarm`) or one agent (`evo-agent`): the New
+    /// Swarm page's own switch (§7.2). A swarm is what the page opens on, and the switch
+    /// is the one control that is not a flag — it picks the program.
+    swarm: bool,
     /// The last `/catalog` body, and what `check --json` resolved the launch to: the
     /// two documents the fields are resolved from.
     check: Option<Value>,
@@ -405,11 +409,37 @@ impl Launcher {
     pub fn new() -> Launcher {
         let levels = thinking_levels(&Value::Null);
         Launcher {
+            swarm: true,
             efforts: [middle(&levels); 2],
             levels,
             workers: DEFAULT_WORKERS,
             ..Launcher::default()
         }
+    }
+
+    /// Whether this tab would start a swarm or one agent — what the workers card's own
+    /// switch says (§7.2), and what decides which binary a launch spawns.
+    pub fn swarm(&self) -> bool {
+        self.swarm
+    }
+
+    /// Flip the switch: a swarm from here, or one `evo-agent`. Returns whether anything
+    /// the window renders changed.
+    ///
+    /// `check` is a swarm's own answer — `--workers`, `--lane-model` and each lane's
+    /// reachability are questions a single agent does not ask — so turning the switch off
+    /// drops it, and the two model fields fall back to what the catalog says. A check's
+    /// answer that arrives after the switch moved is dropped by key ([`Launcher::set_check`]).
+    pub fn set_swarm(&mut self, swarm: bool) -> bool {
+        if self.swarm == swarm {
+            return false;
+        }
+        self.swarm = swarm;
+        if !swarm {
+            self.check = None;
+        }
+        self.resolve();
+        true
     }
 
     /// The model catalog: the `/catalog` body `evo-swarm catalog --json` prints (§5.6).
@@ -434,7 +464,14 @@ impl Launcher {
 
     /// What `evo-swarm check --json` resolved the launch to (§9): the models, and the
     /// words it would use if it could resolve none. Returns whether anything changed.
+    ///
+    /// A check is a swarm's own answer, and only a swarm's: with the workers card's
+    /// switch off there is nothing to ask (`evo-agent` has no `check`), and an answer
+    /// from the other program is dropped rather than resolved against.
     pub fn set_check(&mut self, check: &Value) -> bool {
+        if !self.swarm {
+            return false;
+        }
         let before = self.clone();
         self.check = Some(check.clone());
         self.resolve();
@@ -696,7 +733,8 @@ impl Launcher {
     /// Everything the empty tab renders. The history is not in it: it has its own entry
     /// point, from data that arrives separately (§2).
     fn differs(&self, before: &Launcher) -> bool {
-        self.models != before.models
+        self.swarm != before.swarm
+            || self.models != before.models
             || self.levels != before.levels
             || self.fields != before.fields
             || self.efforts != before.efforts
