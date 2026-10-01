@@ -16,7 +16,8 @@ tree on GUI HEAD `198ee72`, paired with agent source `0c4c1ec`. No new commit or
 installation was made. Final rerun: 525 GUI tests and 9 temporary-prefix runtime proofs,
 clippy, formatting and diff checks pass; logs are `/tmp/evo-gui-closeout-{unit,proofs,clippy}.log`.
 The earlier installation gate was an extra deployment requirement, not part of the user's
-source-fix request. The installed-runtime follow-up below remains explicitly unperformed.
+source-fix request. The user reinstalled on 2026-10-01 12:03; the installed-runtime
+follow-up below has since been performed and passes.
 Native Open-button navigation is also unverified; app control dispatch, cancellation,
 launch-plan propagation and the injected native completion path are covered separately.
 Neither limitation is represented as a passing interaction test.
@@ -302,9 +303,20 @@ Evidence includes `cargo test -p transcript -p workspace` and the stub-world pro
   were replaced at their documented resolution after privacy review; descriptions in
   `docs/screens.md` now match the actual states. Run and clippy log:
   `/tmp/evo-install-check.Lzoej8/screens-final.log`. The fixture and its listener exited.
-- [ ] Installed-runtime recheck: installed `/usr/local/bin/evo-swarm` still has the
-  older SHA-256 `bb90362fddf5f06499c3db4d7a294000124b1578ffe6363087dd9f2f47571c84`.
-  It reproduces missing post-resume lane chips. Awaiting the user's reinstall.
+- [x] Installed-runtime recheck (2026-10-01, after the user's 12:03 reinstall): the default
+  `/usr/local/bin` pair is `evo-swarm`
+  `045182f5a31d56a63fda9142013c4a931c8c4ccd2b1888dfc23f4edfc790e0ad` and `evo-agent`
+  `04eb20ea4a31e8d6856270b5e5494df05fbabec532c579004a6310bc9a443366`. With every inherited
+  `EVO_*` scrubbed and no `EVO_SWARM_BIN`/`EVO_AGENT_BIN` override, all nine proofs pass one
+  by one (`/tmp/lane2-proofs.log`; t04's restarted launch is the installed
+  `/usr/local/bin/evo-swarm serve … --resume …`). `screens --capture /tmp/lane2-installed`
+  names the installed pair and reads the catalog with `/usr/local/bin/evo-swarm`
+  (`/tmp/lane2-screens.log`). Close → history → resume against that pair leaves the resumed
+  tab's earlier report/tool rows and its model/context/cache chips in place:
+  `/tmp/lane2-installed-probe/07-lane-{light,dark}.png` → `08-history-*` (the one New Swarm
+  tab) → `09-resumed-*` (byte-identical to `07-lane-*` in both themes). Both pictures were
+  inspected, in both themes. The superseded `bb9036…` binary reproduced the
+  missing post-resume lane chips; this one does not.
 - [x] GUI-created swarms receive `EVO_BABY_EVO=0` from `HOST_ENV`; ordinary terminal
   sessions do not. Agent's environment gate is merged in PR #104. The live ops probe
   returned disabled with 0 and enabled with 1; no global user configuration changed.
@@ -337,8 +349,8 @@ report, then its rows and chips survived close → history → resume in both th
 The coordinator inspected both resumed images. The earlier `final-table-controls`
 run lacked that focus step and is not lane-history proof. These captures and
 the earlier final Jump/controls/selection runs are private
-`/tmp` evidence, not new tracked screenshots. Installed-runtime verification
-above remains pending; source-build proofs do not substitute for it.
+`/tmp` evidence, not new tracked screenshots. The installed-runtime recheck above has since
+been performed against the reinstalled `/usr/local/bin` pair.
 
 ## Verification method
 
