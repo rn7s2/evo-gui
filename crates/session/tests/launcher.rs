@@ -39,7 +39,7 @@ fn every_registration_is_an_option_named_by_id_and_provider() {
         keys_of(&options),
         vec![
             "claude-opus-5@anthropic",
-            "ark-deepseek-v4.1-flash@aiden",
+            "deepseek-v4.1-flash@acme",
             "claude-sonnet-5@proxy"
         ],
         "the catalog's own order"
@@ -162,11 +162,11 @@ fn the_controls_open_on_the_catalogs_own_resolution() {
     // The catalog's own `default_model`, which both cards can run.
     assert_eq!(
         launcher.chosen_key(Role::Coordinator),
-        Some("ark-deepseek-v4.1-flash@aiden")
+        Some("deepseek-v4.1-flash@acme")
     );
     assert_eq!(
         launcher.chosen_key(Role::Lanes),
-        Some("ark-deepseek-v4.1-flash@aiden")
+        Some("deepseek-v4.1-flash@acme")
     );
     assert_eq!(launcher.unresolved_note(Role::Coordinator), None);
 }
@@ -229,8 +229,8 @@ fn a_check_opens_the_sliders_and_the_count_on_what_it_resolved() {
     launcher.set_catalog(&fixture("catalog.json"));
     launcher.set_check(&json!({
         "ok": true,
-        "model": {"id": "ark-deepseek-v4.1-flash", "provider": "aiden", "ok": true},
-        "lane_model": {"id": "ark-deepseek-v4.1-flash", "provider": "aiden", "ok": true},
+        "model": {"id": "deepseek-v4.1-flash", "provider": "acme", "ok": true},
+        "lane_model": {"id": "deepseek-v4.1-flash", "provider": "acme", "ok": true},
         "thinking": "xhigh",
         "lane_thinking": "low",
         "workers": 12,
@@ -424,7 +424,7 @@ fn the_plan_carries_only_what_a_person_set() {
     launcher.set_check(&json!({
         "ok": true,
         "model": {"id": "claude-opus-5", "provider": "anthropic", "ok": true},
-        "lane_model": {"id": "ark-deepseek-v4.1-flash", "provider": "aiden", "ok": true},
+        "lane_model": {"id": "deepseek-v4.1-flash", "provider": "acme", "ok": true},
         "thinking": "low",
         "lane_thinking": "medium",
         "workers": 9,
@@ -470,12 +470,12 @@ fn the_plan_carries_only_what_a_person_set() {
     assert_eq!(plan.workers, Some(4));
     assert_eq!(plan.lanes_model, None, "still nobody's pick");
 
-    launcher.choose(Role::Lanes, "ark-deepseek-v4.1-flash@aiden");
+    launcher.choose(Role::Lanes, "deepseek-v4.1-flash@acme");
     launcher.set_effort(Role::Coordinator, 2);
     let plan = launcher.plan();
     assert_eq!(
         plan.lanes_model,
-        Some(("ark-deepseek-v4.1-flash".to_string(), "aiden".to_string()))
+        Some(("deepseek-v4.1-flash".to_string(), "acme".to_string()))
     );
     assert_eq!(plan.thinking.as_deref(), Some("high"));
     assert!(!plan.is_default());
@@ -487,15 +487,15 @@ fn the_plan_carries_only_what_a_person_set() {
     );
     assert_eq!(
         LaunchPlan::spec(plan.lanes_model.as_ref().unwrap()),
-        "ark-deepseek-v4.1-flash@aiden"
+        "deepseek-v4.1-flash@acme"
     );
 
     // A person's pick stays theirs: a later check moves what it resolved and leaves the
     // four flags where they were put.
     launcher.set_check(&json!({
         "ok": true,
-        "model": {"id": "ark-deepseek-v4.1-flash", "provider": "aiden"},
-        "lane_model": {"id": "ark-deepseek-v4.1-flash", "provider": "aiden"},
+        "model": {"id": "deepseek-v4.1-flash", "provider": "acme"},
+        "lane_model": {"id": "deepseek-v4.1-flash", "provider": "acme"},
         "thinking": "low",
         "workers": 9
     }));

@@ -198,7 +198,7 @@ fn the_index_and_the_apps_recents_become_one_list() {
         when: "2026-09-30T08:00:00Z".to_owned(),
         models: store::TabModels {
             coordinator: Some("claude-opus-5".to_owned()),
-            lanes: Some("ark-deepseek-v4.1-flash".to_owned()),
+            lanes: Some("deepseek-v4.1-flash".to_owned()),
         },
         lanes: 6,
         open_at_quit: true,
@@ -216,7 +216,7 @@ fn the_index_and_the_apps_recents_become_one_list() {
     assert_eq!(first.models.coordinator.as_deref(), Some("claude-opus-5"));
     assert_eq!(
         first.models.lanes.as_deref(),
-        Some("ark-deepseek-v4.1-flash")
+        Some("deepseek-v4.1-flash")
     );
     assert_eq!(first.source, history::HistorySource::Index);
     assert!(first.open_at_quit, "only the app can say this");
@@ -278,8 +278,8 @@ fn check_json_answers_about_the_launch_it_is_given() {
     let mut launch = LaunchSpec::new(Program::Swarm, stub.dir.clone());
     launch.model = Some(catalog::ModelRef::new("claude-opus-5", Some("anthropic")));
     launch.lane_model = Some(catalog::ModelRef::new(
-        "ark-deepseek-v4.1-flash",
-        Some("aiden"),
+        "deepseek-v4.1-flash",
+        Some("acme"),
     ));
     launch.workers = Some(4);
 
@@ -292,7 +292,7 @@ fn check_json_answers_about_the_launch_it_is_given() {
     assert_eq!(report.workers, Some(6));
     assert_eq!(
         stub.argvs().last().unwrap(),
-        "check --json --workers 4 --model claude-opus-5@anthropic --lane-model ark-deepseek-v4.1-flash@aiden"
+        "check --json --workers 4 --model claude-opus-5@anthropic --lane-model deepseek-v4.1-flash@acme"
     );
 
     // The same launch, with a model the fixture says a lane cannot register:
@@ -364,8 +364,8 @@ fn a_launchs_argv_is_the_contracts_flags() {
     launch.model = Some(catalog::ModelRef::new("claude-opus-5", Some("anthropic")));
     launch.thinking = Some("high".to_owned());
     launch.lane_model = Some(catalog::ModelRef::new(
-        "ark-deepseek-v4.1-flash",
-        Some("aiden"),
+        "deepseek-v4.1-flash",
+        Some("acme"),
     ));
     launch.lane_thinking = Some("medium".to_owned());
     launch.workers = Some(6);
@@ -390,7 +390,7 @@ fn a_launchs_argv_is_the_contracts_flags() {
             "--workers",
             "6",
             "--lane-model",
-            "ark-deepseek-v4.1-flash@aiden",
+            "deepseek-v4.1-flash@acme",
             "--lane-thinking",
             "medium",
         ]

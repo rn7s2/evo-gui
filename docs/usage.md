@@ -87,7 +87,7 @@ Choose how it runs, then select a project folder.
 
 ┌─ Coordinator ──────────────────────────┐   ┌────────────────────────┐
 │ Model                                  │   │   [folder icon]        │
-│ [ aiden · ark-deepseek-v4.1-flash   ▾ ]│   │   Select folder…       │
+│ [ acme · deepseek-v4.1-flash        ▾ ]│   │   Select folder…       │
 │ Effort                          medium │   │   The swarm starts in  │
 │ ──●─────────────────────────────────── │   │   the folder you pick  │
 └────────────────────────────────────────┘   └────────────────────────┘

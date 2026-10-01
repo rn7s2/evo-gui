@@ -2458,13 +2458,13 @@ mod tests {
             &serde_json::json!({"state": {
                 "id": "sw", "workers": 9,
                 "status": {"busy": 0, "waiting_on_lanes": false},
-                "config": {"lane_model": {"id": "ark-deepseek-v4.1-flash",
-                                          "provider": "aiden"}}
+                "config": {"lane_model": {"id": "deepseek-v4.1-flash",
+                                          "provider": "acme"}}
             }}),
         );
         let (models, lanes) = recorded_facts(&model, None);
         assert_eq!(models.coordinator.as_deref(), Some("claude-opus-5-5"));
-        assert_eq!(models.lanes.as_deref(), Some("ark-deepseek-v4.1-flash"));
+        assert_eq!(models.lanes.as_deref(), Some("deepseek-v4.1-flash"));
         assert_eq!(lanes, 9);
 
         // Before the server has said anything, a person's own picks are all there is:

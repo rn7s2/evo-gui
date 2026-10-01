@@ -45,7 +45,7 @@ Neither limitation is represented as a passing interaction test.
   - the app asks `check` with its own guesses as flags (`--workers 6`, `--model <first
     ready>` …) before evo answered, so `check` echoes the guess back: real HOME shows
     `super_relay · seed-evolving` / 6 workers where evo resolves `claude-opus-5-5`, 9
-    workers, lanes `ark-deepseek-v4.1-flash@aiden`. Only a control a person changed may
+    workers, lanes `deepseek-v4.1-flash@acme`. Only a control a person changed may
     become a flag (check and launch alike).
   - `evo-swarm check`/`catalog` judge a provider ready only by a literal key or an env var;
     the OAuth extension keeps its token in `~/.evo/claude-oauth/token.sexp`, so every
@@ -67,7 +67,7 @@ Neither limitation is represented as a passing interaction test.
   Final controls evidence: `/tmp/probe/final-controls-current/01-defaults-{light,dark}.png`,
   `02-focused`, `03-stepped`, `04-menu`, `05-dismissed`, `06-scroll`, `07-rest` and
   `08-tooltip`. These show actual
-  HOME defaults: `anthropic-oauth · claude-opus-5-5`, `aiden · ark-deepseek-v4.1-flash`,
+  HOME defaults: `anthropic-oauth · claude-opus-5-5`, `acme · deepseek-v4.1-flash`,
   high/high and 9 workers, no false credential warning. Current agent HEAD `0c4c1ec`
   `check --json` agrees, with `ok:true` and `problems:[]`. Only by-hand choices enter
   `Launcher::plan()`; the probe's `launch` convenience step does not exercise those

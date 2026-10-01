@@ -323,7 +323,7 @@ mod tests {
         let mut launch = spec(Program::Swarm);
         launch.model = Some(ModelRef::new("claude-opus-5", Some("anthropic")));
         launch.thinking = Some("High".to_owned());
-        launch.lane_model = Some(ModelRef::new("ark-deepseek-v4.1-flash", Some("aiden")));
+        launch.lane_model = Some(ModelRef::new("deepseek-v4.1-flash", Some("acme")));
         launch.lane_thinking = Some("medium".to_owned());
         launch.workers = Some(4);
         assert_eq!(
@@ -344,7 +344,7 @@ mod tests {
                 "--workers",
                 "4",
                 "--lane-model",
-                "ark-deepseek-v4.1-flash@aiden",
+                "deepseek-v4.1-flash@acme",
                 "--lane-thinking",
                 "medium"
             ]
@@ -378,7 +378,7 @@ mod tests {
     #[test]
     fn lane_flags_belong_to_the_swarm_only() {
         let mut launch = spec(Program::Agent);
-        launch.lane_model = Some(ModelRef::new("lane", Some("aiden")));
+        launch.lane_model = Some(ModelRef::new("lane", Some("acme")));
         launch.lane_thinking = Some("low".to_owned());
         launch.workers = Some(3);
         let argv = launch.argv();
@@ -399,8 +399,8 @@ mod tests {
     #[test]
     fn the_check_argv_asks_about_this_launch() {
         let mut launch = spec(Program::Swarm);
-        launch.model = Some(ModelRef::new("m", Some("aiden")));
-        launch.lane_model = Some(ModelRef::new("l", Some("aiden")));
+        launch.model = Some(ModelRef::new("m", Some("acme")));
+        launch.lane_model = Some(ModelRef::new("l", Some("acme")));
         launch.workers = Some(2);
         assert_eq!(
             launch.check_argv(),
@@ -410,9 +410,9 @@ mod tests {
                 "--workers",
                 "2",
                 "--model",
-                "m@aiden",
+                "m@acme",
                 "--lane-model",
-                "l@aiden"
+                "l@acme"
             ]
         );
         // A plain launch still asks.

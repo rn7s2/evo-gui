@@ -85,7 +85,7 @@ fn each_of_the_four_files_accepts_its_own_shape() {
             ";;; the coordinator and its lanes\n\
              (evo:set-setting :model \"claude-opus-5\")\n\
              (evo.swarm:set-setting :swarm-workers 4)\n\
-             (evo.swarm:in-lanes (evo:set-setting :model \"ark-deepseek-v4.1-flash\"))\n",
+             (evo.swarm:in-lanes (evo:set-setting :model \"deepseek-v4.1-flash\"))\n",
         ),
         (
             ConfigFile::Memory,
@@ -248,7 +248,7 @@ fn a_valid_text_is_written_atomically() {
 
     let edited = ";;; two lanes on the flash model\n\
                   (evo.swarm:set-setting :swarm-workers 2)\n\
-                  (evo.swarm:in-lanes (evo:set-setting :model \"ark-deepseek-v4.1-flash\"))\n";
+                  (evo.swarm:in-lanes (evo:set-setting :model \"deepseek-v4.1-flash\"))\n";
     config_file::save(&path, edited, Some(base)).expect("a seen file saves");
 
     assert_eq!(fs::read_to_string(&path).unwrap(), edited);
