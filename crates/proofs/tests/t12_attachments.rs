@@ -49,8 +49,7 @@ fn last_user(session: &Value) -> Value {
         .as_array()
         .expect("items")
         .iter()
-        .filter(|item| item["kind"] == json!("user"))
-        .next_back()
+        .rfind(|item| item["kind"] == json!("user"))
         .cloned()
         .expect("a user item")
 }
