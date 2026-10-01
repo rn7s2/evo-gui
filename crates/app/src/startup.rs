@@ -96,7 +96,7 @@ fn load_history(cx: &mut App, bin: PathBuf) {
         .name("evo-desktop-history".to_owned())
         .spawn(move || {
             let read =
-                history::fetch(&bin, &SessionsQuery::swarms()).map_err(|error| error.summary());
+                history::fetch(&bin, &SessionsQuery::resumable()).map_err(|error| error.summary());
             if let Err(message) = &read {
                 thread_log.warn(format!("history: {message}"));
             }

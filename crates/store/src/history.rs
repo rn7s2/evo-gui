@@ -34,6 +34,20 @@ use crate::paths::Root;
 use crate::tab::TabModels;
 use crate::time;
 
+/// Whether a session index entry is one a tab can open (§2, §7.2).
+///
+/// The index records the program that wrote each journal: `evo-swarm` for a
+/// coordinator's, `evo-agent` for a single agent's, and `lane` for a lane's own —
+/// a lane's session belongs to the swarm that started it and is not a row of its
+/// own. A record written before programs were recorded names none, and reads as a
+/// swarm, which is what this app started then.
+fn a_tab_can_open(program: &str) -> bool {
+    let program = program.trim();
+    program.is_empty()
+        || program.eq_ignore_ascii_case("evo-swarm")
+        || program.eq_ignore_ascii_case("evo-agent")
+}
+
 /// One session, as `evo-agent sessions --json` writes it (§2).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Session {
@@ -98,16 +112,23 @@ pub struct SessionsQuery {
     /// `--cwd DIR`: that folder's sessions.
     pub cwd: Option<PathBuf>,
     /// `--program P`: only sessions of that program (`evo-swarm`, `evo-agent`).
+    /// Nothing asks for one program any more: a tab can open either, and the index is
+    /// read in one document (§2).
     pub program: Option<String>,
 }
 
 impl SessionsQuery {
-    /// The resumable swarms, wherever they ran: what the empty tab lists.
-    pub fn swarms() -> SessionsQuery {
+    /// The resumable sessions, wherever they ran and whichever program wrote them:
+    /// what the empty tab lists.
+    ///
+    /// Every program, in one read: `evo-swarm`'s coordinators, `evo-agent`'s single
+    /// agents — and the lanes' own journals, which [`merge`] drops, since a lane is
+    /// the swarm's and the swarm's own session is the row for it.
+    pub fn resumable() -> SessionsQuery {
         SessionsQuery {
             all: true,
             cwd: None,
-            program: Some("evo-swarm".to_owned()),
+            program: None,
         }
     }
 
@@ -179,6 +200,9 @@ pub struct HistoryEntry {
     pub lanes: u32,
     /// The models the session ran with, as far as the app remembers.
     pub models: TabModels,
+    /// Whether this session is a swarm's or one agent's, which is what a resume opens
+    /// it with: only the program that wrote a journal can run it again.
+    pub swarm: bool,
     pub source: HistorySource,
     /// The session was still open as a tab when the app last quit (§9.5).
     ///
@@ -212,6 +236,8 @@ pub fn from_session(session: &Session) -> HistoryEntry {
         workers: 0,
         lanes: 0,
         models: TabModels::default(),
+        swarm: session.program.trim().is_empty()
+            || !session.program.eq_ignore_ascii_case("evo-agent"),
         source: HistorySource::Index,
         open_at_quit: false,
     }
@@ -227,6 +253,11 @@ pub fn merge(indexed: Vec<Session>, recents: &[Recent]) -> Vec<HistoryEntry> {
         // `--resume` on a file that is not there is a launch that cannot come
         // back.
         if !session.is_resumable() {
+            continue;
+        }
+        // Nor is a lane's own session: a lane is the swarm's, and the swarm's own
+        // journal is the row for it.
+        if !a_tab_can_open(&session.program) {
             continue;
         }
         entries.push(from_session(&session));
@@ -274,6 +305,7 @@ fn entry_from_recent(recent: &Recent) -> HistoryEntry {
         workers: recent.lanes,
         lanes: recent.lanes,
         models: recent.models.clone(),
+        swarm: recent.swarm,
         source: HistorySource::Recent,
         open_at_quit: recent.open_at_quit,
     }
@@ -413,8 +445,9 @@ mod tests {
     #[test]
     fn the_query_becomes_the_cli_arguments() {
         assert_eq!(
-            SessionsQuery::swarms().argv(),
-            ["sessions", "--json", "--all", "--program", "evo-swarm"]
+            SessionsQuery::resumable().argv(),
+            ["sessions", "--json", "--all"],
+            "one read, every program: which rows to keep is the list's own business"
         );
         assert_eq!(
             SessionsQuery {
@@ -440,6 +473,7 @@ mod tests {
                 lanes: Some("deepseek-v4.1-flash".to_owned()),
             },
             lanes: 4,
+            swarm: true,
             open_at_quit: true,
         }];
         let entries = merge(sessions, &recents);

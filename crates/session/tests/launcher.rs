@@ -25,9 +25,36 @@ fn entry(path: &str, folder: &str) -> HistoryEntry {
         lanes: None,
         coordinator_model: None,
         lanes_model: None,
+        swarm: true,
         source: HistorySource::Index,
         open_at_quit: false,
     }
+}
+
+/// A single agent's own session, as the history list takes it.
+fn agent_entry(path: &str, folder: &str) -> HistoryEntry {
+    HistoryEntry {
+        swarm: false,
+        ..entry(path, folder)
+    }
+}
+
+/// §2, §7.2: which program a listed session is decides what a row's glyph says and what
+/// resuming it opens — `evo-agent` for one agent, `evo-swarm` for a swarm — so the row
+/// keeps it, whatever else it says.
+#[test]
+fn a_row_says_which_program_wrote_the_session() {
+    let rows = history_rows(
+        &[
+            entry("/s/1.sexp", "/Users/you/coding/foo"),
+            agent_entry("/s/2.sexp", "/Users/you/coding/bar"),
+        ],
+        0,
+        0,
+        Some("/Users/you"),
+    );
+    assert_eq!(rows.len(), 2);
+    assert!(rows[0].swarm && !rows[1].swarm, "{rows:?}");
 }
 
 // --- the registrations ---------------------------------------------------------------
@@ -325,6 +352,42 @@ fn the_workers_switch_off_drops_the_checks_own_answer() {
         Some("claude-sonnet-5@proxy")
     );
     assert_eq!(launcher.workers(), 4);
+}
+
+/// §7.2: the workers card's switch is part of the plan — which binary runs — and none of
+/// the five flags: a single agent takes the coordinator's `--model` and `--thinking`
+/// exactly as a swarm does, and no lane flag at all.
+#[test]
+fn the_plan_carries_the_program_the_switch_picked() {
+    let mut launcher = Launcher::new();
+    launcher.set_catalog(&fixture("catalog.json"));
+    assert!(launcher.plan().swarm, "a tab opens on a swarm");
+    assert!(launcher.plan().is_default(), "which is still nobody's hand");
+
+    launcher.set_swarm(false);
+    assert!(
+        !launcher.plan().swarm,
+        "and the switch is the plan's program"
+    );
+    assert!(
+        launcher.plan().is_default(),
+        "a switch is not one of the five: a check is asked about the same bare launch"
+    );
+
+    launcher.choose(Role::Coordinator, "claude-opus-5@anthropic");
+    launcher.set_workers(3);
+    let agent = launcher.plan();
+    assert!(!agent.swarm);
+    assert_eq!(
+        agent.model,
+        Some(("claude-opus-5".to_string(), "anthropic".to_string())),
+        "the coordinator's own pick is passed either way"
+    );
+    assert_eq!(
+        agent.workers,
+        Some(3),
+        "and what the person typed is the plan's"
+    );
 }
 
 /// §2: `check --json` resolves the two efforts and the count as a launch with no flags

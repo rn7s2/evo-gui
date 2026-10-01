@@ -188,11 +188,13 @@ pub enum TabContentEvent {
     /// The user chose a folder, and the models and worker count to start with:
     /// this tab should boot a swarm there (§7.2).
     Launch { folder: PathBuf, plan: LaunchPlan },
-    /// The user picked a past swarm: this tab resumes that session in its own
-    /// folder (§7.2, §9.5).
+    /// The user picked a past session: this tab resumes that journal in its own
+    /// folder (§7.2, §9.5), with the program that wrote it — an `evo-agent` journal
+    /// is a single agent's, and a swarm cannot run it.
     Resume {
         session_path: PathBuf,
         folder: PathBuf,
+        swarm: bool,
     },
     /// The user chose a folder and left every chooser at Default (§7.2).
     ///
@@ -264,8 +266,8 @@ pub struct TabContent {
     /// The swarm this tab is driving, once one has started.
     live: Option<Live>,
     /// The last launch, so a failed boot's Retry can ask for the same thing again
-    /// (§9.7).
-    last_launch: Option<Launch>,
+    /// (§9.7) — and so a tab knows which program it started with (§7.2).
+    pub(crate) last_launch: Option<Launch>,
     /// Why the tab's swarm is gone, when it went away on its own.
     gone: Option<SharedString>,
     /// What the server last refused, until it ages out (§4, §9.2).
@@ -468,6 +470,7 @@ impl TabContent {
                     cx.emit(TabContentEvent::Resume {
                         session_path: row.session_path,
                         folder: row.folder,
+                        swarm: row.swarm,
                     });
                 }
             },
@@ -1067,12 +1070,23 @@ impl TabContent {
     /// never journalled cannot be opened, and that tab falls back to a fresh
     /// launch.
     pub fn retry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // The retry resumes in the program this tab has been running all along: a
+        // `--resume` is a journal only the program that wrote it can open (§7.2).
+        let swarm = self
+            .last_launch
+            .as_ref()
+            .map(Launch::swarm)
+            .unwrap_or_else(|| self.swarm(cx));
         let resume = self
             .session
             .clone()
             .filter(|session| session.is_file())
             .zip(self.folder().map(Path::to_path_buf))
-            .map(|(session, folder)| Launch::Resume { folder, session });
+            .map(|(session, folder)| Launch::Resume {
+                folder,
+                session,
+                swarm,
+            });
         if let Some(launch) = resume.or_else(|| self.last_launch.clone()) {
             self.launch(launch, window, cx);
         }

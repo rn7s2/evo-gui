@@ -1842,6 +1842,8 @@ impl EmptyTabState {
         let fill = row_hover_fill(cx.theme().mode.is_dark());
         let session = PathBuf::from(&row.session_path);
         let folder = PathBuf::from(&row.folder);
+        // What a click opens: the program that wrote this journal (§7.2, §9.5).
+        let swarm = row.swarm;
         let badge = row.open_at_quit.then(|| {
             div()
                 .id(ElementId::NamedInteger(OPEN_AT_QUIT_ID.into(), ix as u64))
@@ -1897,7 +1899,7 @@ impl EmptyTabState {
             })
             .on_click(cx.listener(move |this, _, _, cx| {
                 let _ = this.tab.update(cx, |tab, cx| {
-                    tab.request_resume(session.clone(), folder.clone(), cx)
+                    tab.request_resume(session.clone(), folder.clone(), swarm, cx)
                 });
             }))
             .child(
@@ -2217,9 +2219,14 @@ impl TabContent {
         cx.notify();
     }
 
-    /// Whether this tab would start a swarm or one agent.
+    /// Whether this tab is a swarm or one agent (§7.2): what it launched, once it has —
+    /// a running tab keeps the program it started with — and the workers card's switch
+    /// until then.
     pub fn swarm(&self, cx: &App) -> bool {
-        self.choosers.state.read(cx).launcher.swarm()
+        self.last_launch
+            .as_ref()
+            .map(crate::launch::Launch::swarm)
+            .unwrap_or_else(|| self.choosers.state.read(cx).launcher.swarm())
     }
 
     /// The catalog could not be learned: say so under the cards, where the check's own
@@ -2319,16 +2326,19 @@ impl TabContent {
         self.emit_launch(folder, plan, cx);
     }
 
-    /// A history row is clicked: resume that session in the folder it ran in (§2).
+    /// A history row is clicked: resume that session in the folder it ran in, with the
+    /// program that wrote it (§2).
     pub(crate) fn request_resume(
         &mut self,
         session_path: PathBuf,
         folder: PathBuf,
+        swarm: bool,
         cx: &mut Context<Self>,
     ) {
         cx.emit(TabContentEvent::Resume {
             session_path,
             folder,
+            swarm,
         });
     }
 
@@ -2620,6 +2630,7 @@ mod tests {
             lanes: Some(4),
             coordinator_model: Some("claude-opus-4.5@anthropic".to_string()),
             lanes_model: None,
+            swarm: true,
             source: session::HistorySource::Index,
             open_at_quit: open,
         }
@@ -3474,6 +3485,7 @@ mod tests {
             vec![TabContentEvent::Resume {
                 session_path: PathBuf::from("/j/2.sexp"),
                 folder: PathBuf::from("/Users/you/coding/bar"),
+                swarm: true,
             }]
         );
     }

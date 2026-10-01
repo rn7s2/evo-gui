@@ -61,13 +61,9 @@ fn t06_history_resume() {
     println!("{NOTE} stopped {path} ({stopped:?})");
 
     // --- the index lists it -----------------------------------------------------
-    // No `--program evo-swarm` here: this proof's session is a lone agent's, and
-    // the empty tab's own query is `SessionsQuery::swarms()`.
-    let query = SessionsQuery {
-        all: true,
-        cwd: None,
-        program: None,
-    };
+    // No `--program` at all, which is the empty tab's own query: every program in
+    // one read, and a lane's journal is the only kind the list drops.
+    let query = SessionsQuery::resumable();
     let entries = history::load(&fixture.root, &fixture.bins.agent, &query)
         .expect("evo-agent sessions --json answered");
     let listed = entries

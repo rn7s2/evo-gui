@@ -58,14 +58,24 @@ impl Default for LaunchEnv {
     }
 }
 
-/// What starting a tab means: a new swarm in a folder, or a recorded session
+/// What starting a tab means: a new session in a folder, or a recorded session
 /// resumed in its own folder (§7.2, §2).
+///
+/// Every launch is one of the two programs, and which one is decided before it is
+/// built: by the workers card's switch for a new session (§7.2), and by what the
+/// session on disk was for a resumed one (§9.5) — an `evo-agent` journal is a
+/// single agent's, and `evo-swarm` cannot run it.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Launch {
     /// The user chose a folder and (optionally) models and a worker count.
     New { folder: PathBuf, plan: LaunchPlan },
-    /// The user picked a past swarm: that session, in the folder it ran in.
-    Resume { folder: PathBuf, session: PathBuf },
+    /// The user picked a past session: that journal, in the folder it ran in, and the
+    /// program that wrote it.
+    Resume {
+        folder: PathBuf,
+        session: PathBuf,
+        swarm: bool,
+    },
 }
 
 impl Launch {
@@ -90,6 +100,14 @@ impl Launch {
             Launch::Resume { .. } => None,
         }
     }
+
+    /// Whether this launch is a swarm or one `evo-agent` (§7.2, §9.5).
+    pub fn swarm(&self) -> bool {
+        match self {
+            Launch::New { plan, .. } => plan.swarm,
+            Launch::Resume { swarm, .. } => *swarm,
+        }
+    }
 }
 
 /// The flags one tab's swarm is launched with (§1) — a pure function of the tab's
@@ -100,21 +118,34 @@ impl Launch {
 /// the pipe.
 pub fn launch_spec(env: &LaunchEnv, launch: &Launch, id: &store::paths::TabId) -> LaunchSpec {
     let tab_dir = env.root.tab_dir(id);
-    let mut spec = LaunchSpec::tab(Program::Swarm, launch.folder().clone(), &tab_dir);
-    // A new swarm asks the child to pick a port and report it in the ready file
+    let swarm = launch.swarm();
+    let program = if swarm {
+        Program::Swarm
+    } else {
+        Program::Agent
+    };
+    let mut spec = LaunchSpec::tab(program, launch.folder().clone(), &tab_dir);
+    // A new session asks the child to pick a port and report it in the ready file
     // (§1): nothing has bound one yet, and the supervisor keeps the port it got.
     spec.port = Some(0);
-    // The lanes run this app's own `evo-agent`; `evo-swarm` takes it as `--evo`.
-    spec.agent_bin = Some(env.agent_bin.clone());
     spec.resume = launch.session().cloned();
+    if swarm {
+        // The lanes run this app's own `evo-agent`; `evo-swarm` takes it as `--evo`.
+        // `LaunchSpec::argv` passes no lane flag of any kind for one agent, so the
+        // spec's own program is the only thing that has to be right here.
+        spec.agent_bin = Some(env.agent_bin.clone());
+    }
     if let Some(plan) = launch.plan() {
+        // The coordinator's own flags, which both programs take.
         spec.model = plan.model.as_ref().map(model_ref);
         // The coordinator's own ladder rung: the empty tab resolves one and shows it, so
         // the launch passes it (§7.2) rather than leaving the level to evo.
         spec.thinking = plan.thinking.clone();
-        spec.lane_model = plan.lanes_model.as_ref().map(model_ref);
-        spec.lane_thinking = plan.lane_thinking.clone();
-        spec.workers = plan.workers;
+        if swarm {
+            spec.lane_model = plan.lanes_model.as_ref().map(model_ref);
+            spec.lane_thinking = plan.lane_thinking.clone();
+            spec.workers = plan.workers;
+        }
     }
     spec
 }
@@ -179,10 +210,17 @@ pub fn start(env: &LaunchEnv, launch: &Launch) -> std::io::Result<Started> {
 
     // The spawn is `swarm_client`'s, and `tab_engine` is what drives it: the config
     // says which binary, which flags, where to run, where the ready file and the log
-    // go, and what environment a hermetic run needs. Every flag comes from the spec.
-    let mut config =
-        swarm_client::ServerConfig::swarm(env.swarm_bin.clone(), launch.folder().clone(), &tab_dir)
-            .with_argv(spec.argv());
+    // go, and what environment a hermetic run needs. Every flag comes from the spec —
+    // and so does which binary: `evo-swarm` for a swarm, `evo-agent` for one agent,
+    // over the same app root, the same tab directory, the same ready file and log,
+    // and the same protocol behind them (§1, §7.2).
+    let bin = if launch.swarm() {
+        env.swarm_bin.clone()
+    } else {
+        env.agent_bin.clone()
+    };
+    let mut config = swarm_client::ServerConfig::swarm(bin, launch.folder().clone(), &tab_dir)
+        .with_argv(spec.argv());
     debug_assert_eq!(
         config.ready_file,
         spec.ready_file.clone().unwrap_or_default(),
@@ -215,6 +253,7 @@ mod tests {
         workers: Option<u16>,
     ) -> LaunchPlan {
         LaunchPlan {
+            swarm: true,
             model: model.map(|(id, provider)| (id.to_string(), provider.to_string())),
             thinking: None,
             workers,
@@ -323,6 +362,7 @@ mod tests {
         let launch = Launch::Resume {
             folder: PathBuf::from("/Users/you/coding/foo"),
             session: PathBuf::from("/Users/you/.evo/sessions/a/1.sexp"),
+            swarm: true,
         };
         let spec = launch_spec(&env, &launch, &id);
         let argv = spec.argv();
@@ -330,6 +370,107 @@ mod tests {
         assert_eq!(argv[at + 1], "/Users/you/.evo/sessions/a/1.sexp");
         assert!(!argv.iter().any(|flag| flag == "--model"));
         assert_eq!(launch.plan(), None);
+    }
+
+    /// §7.2: one agent's launch. The same `serve --ready-file … --watch-stdin --port 0`
+    /// as a swarm's, with the coordinator's own `--model` and `--thinking` and
+    /// **nothing** that belongs to lanes: no `--evo`, no `--workers`, no `--lane-model`,
+    /// no `--lane-thinking`.
+    #[test]
+    fn an_agent_launch_is_an_agent_and_no_lane_flags() {
+        let env = LaunchEnv {
+            root: Root::at("/tmp/evo-desktop"),
+            swarm_bin: PathBuf::from("/opt/evo/evo-swarm"),
+            agent_bin: PathBuf::from("/opt/evo/evo-agent"),
+            ..LaunchEnv::default()
+        };
+        let id = store::paths::TabId::parse("t3").unwrap();
+        let launch = Launch::New {
+            folder: PathBuf::from("/Users/you/coding/foo"),
+            plan: LaunchPlan {
+                swarm: false,
+                thinking: Some("high".to_string()),
+                lane_thinking: Some("low".to_string()),
+                ..plan(
+                    Some(("claude-opus-5", "anthropic")),
+                    Some(("deepseek-v4.1-flash", "acme")),
+                    Some(4),
+                )
+            },
+        };
+        let spec = launch_spec(&env, &launch, &id);
+        assert_eq!(spec.program, Some(Program::Agent), "one agent, not a swarm");
+        assert_eq!(
+            spec.folder(),
+            Path::new("/Users/you/coding/foo"),
+            "the folder is the child's cwd"
+        );
+        assert_eq!(
+            spec.ready_file,
+            Some(PathBuf::from("/tmp/evo-desktop/tabs/t3/ready.json")),
+            "the same handshake a swarm's launch waits on"
+        );
+        assert_eq!(
+            spec.agent_bin, None,
+            "there are no lanes to point elsewhere"
+        );
+        assert_eq!(
+            spec.argv(),
+            vec![
+                "serve",
+                "--ready-file",
+                "/tmp/evo-desktop/tabs/t3/ready.json",
+                "--watch-stdin",
+                "--port",
+                "0",
+                "--model",
+                "claude-opus-5@anthropic",
+                "--thinking",
+                "high",
+            ]
+        );
+    }
+
+    /// §9.5: a resumed session runs in the program that wrote it — an `evo-agent`
+    /// journal is a single agent's, and its `--resume` goes to `evo-agent`.
+    #[test]
+    fn a_resumed_session_runs_in_the_program_that_wrote_it() {
+        let env = LaunchEnv {
+            root: Root::at("/tmp/evo-desktop"),
+            ..LaunchEnv::default()
+        };
+        let id = store::paths::TabId::parse("t4").unwrap();
+        for (swarm, program) in [(false, Program::Agent), (true, Program::Swarm)] {
+            let launch = Launch::Resume {
+                folder: PathBuf::from("/Users/you/coding/foo"),
+                session: PathBuf::from("/Users/you/.evo/sessions/a/1.sexp"),
+                swarm,
+            };
+            let spec = launch_spec(&env, &launch, &id);
+            assert_eq!(spec.program, Some(program), "the program that wrote it");
+            let mut argv: Vec<String> = vec![
+                "serve",
+                "--ready-file",
+                "/tmp/evo-desktop/tabs/t4/ready.json",
+                "--watch-stdin",
+                "--port",
+                "0",
+                "--resume",
+                "/Users/you/.evo/sessions/a/1.sexp",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+            if swarm {
+                // A swarm names the binary its lanes run; one agent has no lanes.
+                argv.extend(["--evo".to_string(), env.agent_bin.display().to_string()]);
+            }
+            assert_eq!(
+                spec.argv(),
+                argv,
+                "a resume passes no model or level of its own: the journal has them"
+            );
+        }
     }
 
     /// §5.6: one agent's own catalog is one subcommand — there is no `check`, and

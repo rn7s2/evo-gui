@@ -267,6 +267,10 @@ pub struct TabRecord {
     pub store_id: Option<store::paths::TabId>,
     pub folder: Option<PathBuf>,
     pub session: Option<PathBuf>,
+    /// Whether this tab is a swarm or one `evo-agent` (§7.2): the app writes it into its
+    /// own record of the session, which is what a history row reads when the session
+    /// index cannot say it.
+    pub swarm: bool,
 }
 
 /// What [`QuitHook`] is handed.
@@ -706,6 +710,7 @@ impl WorkspaceView {
                     session: (!tab.is_terminating())
                         .then(|| tab.session_path().map(Path::to_path_buf))
                         .flatten(),
+                    swarm: tab.swarm(cx),
                 }
             })
             .collect()
@@ -1294,6 +1299,7 @@ impl WorkspaceView {
             TabContentEvent::Resume {
                 session_path,
                 folder,
+                swarm,
             } => {
                 // A session another tab already has open is shown, not started a
                 // second time: two swarms on one journal would fork it (§7.1).
@@ -1324,6 +1330,7 @@ impl WorkspaceView {
                         Launch::Resume {
                             folder,
                             session: session_path,
+                            swarm,
                         },
                         window,
                         cx,

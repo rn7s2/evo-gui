@@ -173,6 +173,10 @@ pub struct Recent {
     pub models: TabModels,
     /// Lane count, as the swarm was started.
     pub lanes: u32,
+    /// Whether the session was a swarm's or one agent's (§7.2). Absent in a file
+    /// written before a tab could start one agent: a swarm, which is what this app
+    /// started then.
+    pub swarm: bool,
     /// The tab was still open when the app last quit (§6, §9.5).
     ///
     /// The session scan cannot know this: a swarm that is still up has not
@@ -190,6 +194,7 @@ impl Default for Recent {
             when: crate::time::now_rfc3339(),
             models: TabModels::default(),
             lanes: 0,
+            swarm: true,
             open_at_quit: false,
         }
     }
@@ -203,6 +208,7 @@ impl Recent {
             when: crate::time::now_rfc3339(),
             models: TabModels::default(),
             lanes,
+            swarm: true,
             open_at_quit: false,
         }
     }
