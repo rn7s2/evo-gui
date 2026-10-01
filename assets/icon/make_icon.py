@@ -12,27 +12,28 @@ Writes, next to this file (or in `--out`):
 
 Everything is drawn from the fractions in `GRID` and `MARK` below, so every
 size is rendered at its own resolution and then box-filtered down (`SS`): the
-16 px icon is a 16 px drawing, not a thumbnail of the 1024. Below `MARK["small_size"]`
-the four lanes become three, which is the difference between four grey hairlines
-and three legible strokes at 16 and 32 px.
+16 px icon is a 16 px drawing, not a thumbnail of the 1024. Below
+`MARK["small_size"]` the strokes thicken, which is the difference between grey
+hairlines and a legible letter at 16 and 32 px.
 
 The shape is Apple's Big Sur icon grid: a squircle 824/1024 of the canvas,
 drawn as a superellipse (a plain rounded rectangle reads as a circle-cornered
-square next to real macOS icons). The mark is a coordinator node feeding four
-parallel lanes, like a river delta: one path per lane leaves the node
-horizontally, splays over ~44% of the mark's width and arrives horizontally at
-that lane's start, then runs straight to a round-capped tip — a single stroke of
-one colour, so there is no seam where the curve becomes a lane. The lanes are a
-little longer and shorter than each other, and their tips fade slightly, so the
-mark reads as lanes at work rather than as a bulleted list.
+square next to real macOS icons). The mark is a lowercase e drawn as a taiji
+(☯): a round bowl, open at the lower right, whose crossbar is the wave that
+divides yin from yang. The crossbar and the half of the bowl above it are
+yang, solid white; the half below is yin, the same white at low opacity. Both
+are round-capped strokes of one width, and the bowl's upper half ends in the
+crossbar's right-hand cap, so the letter reads as one continuous line.
 
-Needs Python 3 with Pillow and NumPy, and `iconutil` (macOS) for the .icns.
+Needs Python 3 with Pillow and NumPy. The .icns is packed by `iconutil` on
+macOS, and by `write_icns` below anywhere else.
 """
 
 from __future__ import annotations
 
 import argparse
 import math
+import struct
 import subprocess
 import sys
 from pathlib import Path
@@ -63,33 +64,28 @@ SHADOW_ALPHA = 0.16
 EDGE_ALPHA = 0.20
 RIM_ALPHA = 0.10
 
-# The mark is white: one colour for the node and every lane, a soft halo around
-# the node, and a soft shadow under the whole thing.
-MARK_ALPHA = 1.0
-GLOW_ALPHA = 0.14
+# The mark is white: yang solid, yin translucent, and a soft shadow under the
+# whole thing.
+YANG_ALPHA = 1.0
+YIN_ALPHA = 0.45
 MARK_SHADOW_ALPHA = 0.16
 
 # --- the mark ---------------------------------------------------------------
 # Every number is a fraction of the squircle's side, except where noted.
 MARK = {
-    "node_radius": 0.065,   # small: the lanes are the subject, the node the source
-    "fan_span": 0.260,      # how far the curves splay before the lanes start
-    "departure": 0.55,      # how far out the curve leaves the node horizontally
-    "arrival": 0.55,        # …and how far back it starts flattening into its lane
-    "lane_height": 0.058,   # stroke thickness
-    "lane_gap": 0.054,      # between strokes
-    "lanes": 4,
-    # Each lane's length: a coordinator hands out work, and the lanes are not
-    # all at the same point. Longest first, then trimmed to the lane count.
-    "lane_lengths": (0.260, 0.235, 0.235, 0.210),
-    # A lane's tip is slightly translucent; the fade suggests the lanes moving.
-    "tip_fade": 0.88,
-    # Below this many pixels four strokes stop resolving; three hold.
-    "small_lanes": 3,
+    "radius": 0.30,         # the bowl's outer edge
+    "stroke": 0.095,        # one width for the bowl and the crossbar
+    # The crossbar's wave, as a fraction of the bowl's centre-line radius: it
+    # dips on the left and rises on the right, the way the taiji's S does, but
+    # as a sine rather than two semicircles, whose vertical join would read as
+    # a kink in a crossbar.
+    "wave": 0.30,
+    # Where the bowl stops, in degrees clockwise from 3 o'clock: the e's mouth
+    # runs from the crossbar's right-hand end (0) down to here.
+    "mouth": 50.0,
+    # Below this many pixels the strokes thicken to this, or they go grey.
     "small_size": 48,
-    # Optical centring: the mass (node plus the splayed trunk) sits left of the
-    # mark's bounding box, so the box is nudged right.
-    "shift": 0.008,
+    "small_stroke": 0.12,
 }
 
 
@@ -145,21 +141,6 @@ def canvas(size: int) -> tuple[np.ndarray, np.ndarray]:
     return rgb, alpha
 
 
-def bezier(p0, p1, p2, p3, steps=140) -> list[tuple[float, float]]:
-    """Points along a cubic Bézier, P0…P3."""
-    out = []
-    for i in range(steps + 1):
-        t = i / steps
-        u = 1 - t
-        out.append(
-            (
-                u**3 * p0[0] + 3 * u * u * t * p1[0] + 3 * u * t * t * p2[0] + t**3 * p3[0],
-                u**3 * p0[1] + 3 * u * u * t * p1[1] + 3 * u * t * t * p2[1] + t**3 * p3[1],
-            )
-        )
-    return out
-
-
 def stamp_path(mask: Image.Image, path: list[tuple[float, float]], radius: float) -> None:
     """Draw a round-capped stroke by stamping circles along `path`.
 
@@ -176,68 +157,52 @@ def stamp_path(mask: Image.Image, path: list[tuple[float, float]], radius: float
             draw.ellipse([x - radius, y - radius, x + radius, y + radius], fill=255)
 
 
-def lanes_for(size: int) -> int:
-    """How many lanes this size gets: four, or three when four stop resolving."""
-    return MARK["lanes"] if size >= MARK["small_size"] else MARK["small_lanes"]
+def stroke_for(size: int) -> float:
+    """The stroke width for this size, as a fraction of the squircle's side."""
+    return MARK["stroke"] if size >= MARK["small_size"] else MARK["small_stroke"]
 
 
-def lane_path(fan_span, node, lane_y, tip_x) -> list[tuple[float, float]]:
-    """One lane's whole path: out of the node, through the splay, on to its tip.
-
-    Horizontal at both ends — it leaves the node the way water leaves a delta
-    and arrives at the lane already flat — which is what keeps the lanes
-    parallel while the part near the node fans out.
-    """
-    (nx, ny) = node
-    end = (nx + fan_span, lane_y)
-    distance = math.hypot(end[0] - nx, end[1] - ny)
-    depart = (nx + MARK["departure"] * distance, ny)
-    arrive = (end[0] - MARK["arrival"] * fan_span, lane_y)
-    return bezier((nx, ny), depart, arrive, end) + [(tip_x, lane_y)]
+def wave_y(x, radius: float, amplitude: float):
+    """The crossbar's height at `x` (relative to the centre): a sine across the
+    bowl, below the axis on the left and above it on the right."""
+    return amplitude * np.sin(-np.pi * np.clip(x, -radius, radius) / radius)
 
 
 def mark_masks(size: int) -> tuple[Image.Image, Image.Image]:
-    """`(node, lanes)` coverage masks for one supersampled canvas."""
+    """`(yang, yin)` coverage masks for one supersampled canvas."""
     s = size * SS
     side = s * GRID
-    lanes = lanes_for(size)
-    node_r = MARK["node_radius"] * side
-    lane_h = MARK["lane_height"] * side
-    lane_gap = MARK["lane_gap"] * side
-    fan_span = MARK["fan_span"] * side
+    c = s / 2
+    stroke = stroke_for(size) * side
+    # The strokes' centre line: the bowl's outer edge is at MARK["radius"].
+    r = MARK["radius"] * side - stroke / 2
+    amplitude = MARK["wave"] * r
 
-    lengths = [MARK["lane_lengths"][i] * side for i in range(min(lanes, len(MARK["lane_lengths"])))]
-    while len(lengths) < lanes:
-        lengths.append(lengths[-1])
+    steps = 720
+    bar = [(c + x, c + float(wave_y(x, r, amplitude))) for x in np.linspace(-r, r, steps)]
+    # From the crossbar's right-hand end, anticlockwise over the top and round
+    # the bottom to the mouth.
+    sweep = np.radians(np.linspace(0.0, -(360.0 - MARK["mouth"]), steps))
+    bowl = [(c + r * math.cos(a), c + r * math.sin(a)) for a in sweep]
 
-    block = lanes * lane_h + (lanes - 1) * lane_gap
-    mark_w = node_r + fan_span + max(lengths)
-    origin = s / 2 - mark_w / 2 + MARK["shift"] * side
-    node_cx, node_cy = origin + node_r, s / 2
+    bar_img = Image.new("L", (s, s), 0)
+    stamp_path(bar_img, bar, stroke / 2)
+    bowl_img = Image.new("L", (s, s), 0)
+    stamp_path(bowl_img, bowl, stroke / 2)
 
-    node = Image.new("L", (s, s), 0)
-    ImageDraw.Draw(node).ellipse(
-        [node_cx - node_r, node_cy - node_r, node_cx + node_r, node_cy + node_r],
-        fill=round(255 * MARK_ALPHA),
+    # Yang is the crossbar and whatever of the bowl lies above it; yin is the
+    # rest of the bowl. Splitting along the wave, rather than at the bowl's
+    # stroke ends, is what makes the two halves meet the way the taiji's do.
+    y, x = np.mgrid[0:s, 0:s].astype(np.float32)
+    above = (y - c) < wave_y(x - c, r, amplitude)
+    bar_a = np.asarray(bar_img) > 127
+    bowl_a = np.asarray(bowl_img) > 127
+    yang = bar_a | (bowl_a & above)
+    yin = bowl_a & ~yang
+    return (
+        Image.fromarray((yang * round(255 * YANG_ALPHA)).astype(np.uint8)),
+        Image.fromarray((yin * round(255 * YIN_ALPHA)).astype(np.uint8)),
     )
-
-    lanes_img = Image.new("L", (s, s), 0)
-    top = s / 2 - block / 2
-    for i, length in enumerate(lengths):
-        cy = top + i * (lane_h + lane_gap) + lane_h / 2
-        # The whole lane — curve and straight run — is one stroked path, so the
-        # two halves cannot show a seam. Its start is hidden under the node.
-        path = lane_path(fan_span, (node_cx, node_cy), cy, node_cx + fan_span + length)
-        stamp_path(lanes_img, path, lane_h / 2)
-
-    if MARK["tip_fade"] < 1.0:
-        # Fade towards the tips as one ramp over the finished mask: fading each
-        # stamp separately would band where the stamps overlap.
-        _, x = np.mgrid[0:s, 0:s].astype(np.float32)
-        t = np.clip((x - (node_cx + fan_span)) / max(1.0, max(lengths)), 0, 1)
-        ramp = 1.0 - t * (1.0 - MARK["tip_fade"])
-        lanes_img = Image.fromarray((np.asarray(lanes_img, np.float32) * ramp).astype(np.uint8))
-    return node, lanes_img
 
 
 def to_unit(image: Image.Image) -> np.ndarray:
@@ -252,11 +217,11 @@ def render(size: int) -> Image.Image:
     """Draw the icon at `size` pixels, anti-aliased."""
     s = size * SS
     rgb, alpha = canvas(size)
-    node_img, lanes_img = mark_masks(size)
+    yang_img, yin_img = mark_masks(size)
 
     # A soft shadow under the mark, so the mark sits on the surface rather than
     # being painted into it. It is only ever visible inside the squircle.
-    shadow = blurred(node_img, s, 0.030) + blurred(lanes_img, s, 0.030)
+    shadow = blurred(yang_img, s, 0.030) + blurred(yin_img, s, 0.030)
     shadow = np.roll(shadow, int(s * 0.006), axis=0)
     shadow = np.roll(shadow, int(s * 0.004), axis=1)
     rgb = rgb * (1 - (shadow * MARK_SHADOW_ALPHA)[..., None])
@@ -264,9 +229,7 @@ def render(size: int) -> Image.Image:
     rgba = np.zeros((s, s, 4), np.float32)
     rgba[..., :3] = rgb
     rgba[..., 3] = alpha
-    # A halo under the node, then the lanes, then the node on top.
-    glow = blurred(node_img, s, 0.035) * GLOW_ALPHA
-    for coverage in (glow, to_unit(lanes_img), to_unit(node_img)):
+    for coverage in (to_unit(yin_img), to_unit(yang_img)):
         rgba[..., :3] = rgba[..., :3] * (1 - coverage[..., None]) + coverage[..., None]
     rgba[..., 3] *= alpha
 
@@ -289,11 +252,36 @@ ICONSET = [
 ]
 
 
+# The .icns entry for each iconset file, as `iconutil` writes them.
+ICNS_TYPES = {
+    "icon_16x16.png": b"ic04",
+    "icon_16x16@2x.png": b"ic11",
+    "icon_32x32.png": b"ic05",
+    "icon_32x32@2x.png": b"ic12",
+    "icon_128x128.png": b"ic07",
+    "icon_128x128@2x.png": b"ic13",
+    "icon_256x256.png": b"ic08",
+    "icon_256x256@2x.png": b"ic14",
+    "icon_512x512.png": b"ic09",
+    "icon_512x512@2x.png": b"ic10",
+}
+
+
+def write_icns(icns: Path, iconset: Path) -> None:
+    """Pack `iconset` into `icns` without `iconutil`: an .icns is a header and
+    one (type, length, PNG) record per size, all lengths big-endian."""
+    records = b""
+    for name, _ in ICONSET:
+        png = (iconset / name).read_bytes()
+        records += ICNS_TYPES[name] + struct.pack(">I", 8 + len(png)) + png
+    icns.write_bytes(b"icns" + struct.pack(">I", 8 + len(records)) + records)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     default_out = Path(__file__).resolve().parent
     parser.add_argument("--out", type=Path, default=default_out, help=f"where to write (default {default_out})")
-    parser.add_argument("--no-icns", action="store_true", help="skip iconutil (not on macOS)")
+    parser.add_argument("--no-icns", action="store_true", help="skip the .icns")
     args = parser.parse_args()
     out: Path = args.out
     out.mkdir(parents=True, exist_ok=True)
@@ -328,8 +316,8 @@ def main() -> int:
             capture_output=True,
         )
     except FileNotFoundError:
-        print("make_icon: iconutil not found; skipped the .icns", file=sys.stderr)
-        return 1
+        # Not on macOS: pack the iconset ourselves.
+        write_icns(icns, iconset)
     except subprocess.CalledProcessError as e:
         print(f"make_icon: iconutil failed: {e.stderr.decode(errors='replace').strip()}", file=sys.stderr)
         return 1
