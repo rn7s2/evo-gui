@@ -1314,14 +1314,11 @@ impl TabContent {
             Some(live) => {
                 let (request, pending) = match event {
                     ComposerEvent::Send(text) => {
-                        // A run in flight takes the words at its next boundary; an idle
-                        // coordinator runs them now (§5.5).
-                        let queue = if live.model.activity() == Status::Idle {
-                            Queue::Now
-                        } else {
-                            Queue::AfterRun
-                        };
-                        (live.model.send_input(&text, queue), Pending::Send)
+                        // An idle coordinator runs the words now; a run in flight takes
+                        // them at its next step boundary (§5.5) — `queue: now` either
+                        // way. `after_run` would hold them until the whole run ends,
+                        // which for a working coordinator can be a very long time.
+                        (live.model.send_input(&text, Queue::Now), Pending::Send)
                     }
                     ComposerEvent::StopSwarm => (live.model.interrupt_swarm(), Pending::Interrupt),
                     ComposerEvent::Interrupt => {

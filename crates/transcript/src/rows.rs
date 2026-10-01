@@ -26,7 +26,7 @@ use gpui_kit::{
 use serde_json::Value;
 use session::{
     AssistantItem, Compaction, GoalEventKind, Item, ItemId, ItemKind, LaneEvent, LaneReport,
-    Notice, NoticeSeverity, RunOutcome, ToolItem, UserItem, UserStatus,
+    Notice, NoticeSeverity, QueuePosition, RunOutcome, ToolItem, UserItem, UserStatus,
 };
 
 use crate::imgcheck::picture;
@@ -595,7 +595,7 @@ fn user_row(
             palette,
         ));
     } else if queued {
-        card = card.child(queued_footer(id, palette, view));
+        card = card.child(queued_footer(id, user, palette, view));
     }
 
     card.test_support().into_any_element()
@@ -691,7 +691,18 @@ fn placeholder(id: ElementId, text: &str, palette: &Palette) -> AnyElement {
 
 /// What a queued turn says under itself, and the one thing that can be done about it: the
 /// status line, and the cancel button that takes the words back before evo has them.
-fn queued_footer(id: ItemId, palette: &Palette, view: &WeakEntity<TranscriptView>) -> AnyElement {
+fn queued_footer(
+    id: ItemId,
+    user: &UserItem,
+    palette: &Palette,
+    view: &WeakEntity<TranscriptView>,
+) -> AnyElement {
+    // `now` is drained at the run's next step; `after_run` waits for the run to end
+    // (a stop the swarm queued, an input from another client).
+    let caption = match user.queue {
+        Some(QueuePosition::AfterRun) => "queued · sent when the run ends",
+        _ => "queued · sent at the next step",
+    };
     let caption_id = row_id("transcript-queued", &id);
     let view = view.clone();
     let button_id = id.clone();
@@ -703,7 +714,8 @@ fn queued_footer(id: ItemId, palette: &Palette, view: &WeakEntity<TranscriptView
                 .id(caption_id)
                 .text_size(CAPTION_SIZE)
                 .text_color(palette.muted_foreground)
-                .child("queued · sent at the next step")
+                .aria_label(caption)
+                .child(caption)
                 .test_support(),
         )
         .child(

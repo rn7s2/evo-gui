@@ -13,3 +13,7 @@ serde_json = { workspace = true }
 async-channel = "2"
 libc = "0.2"
 
+
+[dev-dependencies]
+# t09 folds the stream through the app's own model, as a tab does.
+session = { path = "../session" }

@@ -329,6 +329,48 @@ fn a_turn_opens_a_boundary_and_a_queued_turn_does_not(cx: &mut TestAppContext) {
     });
 }
 
+/// A queued turn says when it goes, and reads as a sent turn once evo takes it.
+#[gpui_kit::test]
+fn a_queued_turn_becomes_a_sent_turn(cx: &mut TestAppContext) {
+    let after_run = item(json!({
+        "id": "e_4", "ts": 1, "kind": "user", "text": "once it ends",
+        "status": "queued", "queue": "after_run"
+    }));
+    let now = item(json!({
+        "id": "e_3", "ts": 1, "kind": "user", "text": "and then",
+        "status": "queued", "queue": "now"
+    }));
+    let (view, cx) = open!(cx, vec![user("e_1", "go"), now, after_run]);
+    cx.update(|window, cx| window.render_frame(cx));
+    cx.update(|window, _| {
+        assert_eq!(
+            window.find(row_id("transcript-queued", "e_3")).label(),
+            Some("queued · sent at the next step")
+        );
+        assert_eq!(
+            window.find(row_id("transcript-queued", "e_4")).label(),
+            Some("queued · sent when the run ends")
+        );
+    });
+
+    // evo drained it: `item.patch {status: "sent"}`.
+    view.update(cx, |view, cx| {
+        view.upsert(user("e_3", "and then"), cx);
+    });
+    cx.update(|window, cx| window.render_frame(cx));
+    cx.update(|window, _| {
+        assert!(window
+            .try_find(row_id("transcript-queued", "e_3"))
+            .is_none());
+        assert!(window
+            .try_find(row_id("transcript-cancel", "e_3"))
+            .is_none());
+        assert!(window
+            .try_find(row_id("transcript-queued", "e_4"))
+            .is_some());
+    });
+}
+
 #[gpui_kit::test]
 fn the_cancel_button_asks_the_owner_to_take_the_words_back(cx: &mut TestAppContext) {
     let (view, cx) = open!(cx, vec![queued("e_3", "and then")]);
