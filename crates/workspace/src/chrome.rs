@@ -535,7 +535,11 @@ impl WorkspaceView {
                     window_id: tab.id(),
                     store_id: tab.store_id().cloned(),
                     folder: tab.folder().map(Path::to_path_buf),
-                    session: tab.session_path().map(Path::to_path_buf),
+                    // A tab closed while its swarm was still exiting was closed by the
+                    // person: its session is not one that was open at quit (§9.5).
+                    session: (!tab.is_terminating())
+                        .then(|| tab.session_path().map(Path::to_path_buf))
+                        .flatten(),
                 }
             })
             .collect()
