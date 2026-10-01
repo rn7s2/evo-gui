@@ -123,9 +123,8 @@ fn t13_images_resume() {
     });
     let (session, user) = after.clone();
     println!("{NOTE} resumed: {user}");
-    assert_eq!(
+    assert!(
         user["text"].as_str().unwrap_or_default().contains(TURN),
-        true,
         "the turn's words are back: {user}"
     );
     let resumed_images = user["images"].as_array().cloned().unwrap_or_default();

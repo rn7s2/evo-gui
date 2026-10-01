@@ -860,7 +860,7 @@ fn main() {
     // One entry per state: what it is called, the zoom it draws at, how wide its
     // window is (the reading measure's own bound is the pane, so a picture of the
     // measure needs a pane wider than it), and how it is reached.
-    let states: [(&str, f32, f32, Setup); 23] = [
+    let states: [(&str, f32, f32, Setup); 24] = [
         ("bottom", 1., WINDOW_SIZE.0, |_, _, _| ITEMS),
         ("tool-hover", 1., WINDOW_SIZE.0, |cx, window, _| {
             // A folded card under the pointer: the head's hover ink is the whole of
@@ -908,6 +908,43 @@ fn main() {
                     if let Some(frame) = transcript::decode_image(&shot) {
                         view.set_image("e_image", 0, frame, cx);
                     }
+                })
+            });
+            settle(cx, window);
+            ITEMS
+        }),
+        // A turn that carried three pictures, at the reader's own zoom: two of them
+        // fetched and drawn as thumbnails, the third one the server could not answer —
+        // which is a line saying so, not a hole. This is the state a session resumed
+        // from history reaches as its fetches land, one item at a time.
+        ("images", 1.5, WINDOW_SIZE.0, |cx, window, page| {
+            let view = transcript_of(cx, page);
+            let shot = picture_bytes();
+            cx.update(|cx| {
+                view.update(cx, |view, cx| {
+                    view.upsert(
+                        session::Item::from_json(&json!({
+                            "id": "e_images", "ts": 1, "kind": "user", "status": "sent",
+                            "text": "three shots from the run",
+                            "images": [
+                                { "name": "pane.png", "media_type": "image/png",
+                                  "bytes": shot.len(), "href": "/media/e_images/0" },
+                                { "name": "lane.png", "media_type": "image/png",
+                                  "bytes": shot.len(), "href": "/media/e_images/1" },
+                                { "name": "gone.png", "media_type": "image/png",
+                                  "bytes": 512, "href": "/media/e_images/2" }
+                            ]
+                        }))
+                        .expect("an image turn"),
+                        cx,
+                    );
+                    if let Some(frame) = transcript::decode_image(&shot) {
+                        view.set_image("e_images", 0, frame.clone(), cx);
+                        view.set_image("e_images", 1, frame, cx);
+                    }
+                    // The fetch that came back 404: the row says what it is instead of
+                    // leaving the reader with a gap.
+                    view.set_image_failed("e_images", 2, cx);
                 })
             });
             settle(cx, window);
