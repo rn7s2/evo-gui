@@ -652,6 +652,17 @@ impl TabContent {
         if self.state != state {
             self.state = state;
             cx.emit(TabContentEvent::ScreenChanged);
+            self.sync_folder(cx);
+        }
+    }
+
+    /// Tell every transcript the folder its swarm runs in, so a relative path in a
+    /// row's text is measured from the project (`crates/transcript/src/lib.rs`) and
+    /// not from wherever the app was started (§7.3).
+    fn sync_folder(&mut self, cx: &mut Context<Self>) {
+        let folder = self.folder().map(Path::to_path_buf);
+        for view in self.transcripts.values() {
+            view.update(cx, |view, cx| view.set_folder(folder.clone(), cx));
         }
     }
 
@@ -1124,10 +1135,14 @@ impl TabContent {
         };
         let topic = agent.topic();
         let engine = live.engine.clone();
+        let folder = self.folder().map(Path::to_path_buf);
         let page_topic = topic.clone();
         let item_topic = topic.clone();
         let cancel_topic = topic;
         view.update(cx, |view, cx| {
+            // A relative path in a row's text is measured from the project the tab
+            // works in (§7.3).
+            view.set_folder(folder, cx);
             view.on_load_older(
                 move |oldest, _window, _cx| {
                     engine.page(&page_topic, Some(oldest), session::PAGE_ITEMS);
