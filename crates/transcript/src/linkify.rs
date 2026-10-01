@@ -442,12 +442,14 @@ fn trim_url_end(text: &str, start: usize, mut end: usize) -> usize {
         let Some(last) = text[start..end].chars().next_back() else {
             return end;
         };
+        let unbalanced = |open: char, close: char| {
+            let body = &text[start..end];
+            body.matches(close).count() > body.matches(open).count()
+        };
         let drop = match last {
             '.' | ',' | ':' | ';' | '!' | '?' | '\'' | '*' | '_' | '~' => true,
-            ')' => {
-                let body = &text[start..end];
-                body.matches(')').count() > body.matches('(').count()
-            }
+            ')' => unbalanced('(', ')'),
+            ']' => unbalanced('[', ']'),
             _ => false,
         };
         if !drop {
@@ -473,19 +475,23 @@ fn path_at(text: &str, i: usize, paths: &Paths) -> Option<(usize, String)> {
     if end == i {
         return None;
     }
-    // The line and the column are part of what the reader sees, never of the path.
-    let label_end = line_suffix(text, end);
-    let mut token = &text[i..end];
+    // A folder said with its own step on the end (`…/notes/.`) is that folder: the words
+    // name a place, and the place is the folder. A `..` names the parent instead, so it
+    // stays where the reader put it.
+    let mut token = text[i..end].strip_suffix("/.").unwrap_or(&text[i..end]);
     loop {
         if !looks_like_a_path(token) {
             return None;
         }
+        // What the reader sees is the token itself, plus the `:line` (or `:line:col`)
+        // written after it: the line is part of the words, never of the path.
+        let span_end = line_suffix(text, i + token.len());
         if let Some(path) = paths.resolve(token) {
-            return Some((label_end, path.to_string_lossy().into_owned()));
+            return Some((span_end, path.to_string_lossy().into_owned()));
         }
         // A sentence's punctuation may have been swallowed by the token: give it back
-        // and look again.
-        let trimmed = token.trim_end_matches(['.', ',', ';', ':', '!', '?', ')', '\'']);
+        // — to look with, and to draw with.
+        let trimmed = token.trim_end_matches(['.', ',', ';', ':', '!', '?', ')', ']', '"', '\'']);
         if trimmed.len() == token.len() || trimmed.is_empty() {
             return None;
         }
@@ -749,6 +755,78 @@ mod tests {
             links("see crates/transcript/src/lib.rs:42:7", &disk)[0].1,
             "/work/project/crates/transcript/src/lib.rs"
         );
+    }
+
+    /// What ends a sentence is not part of the place it names — for a file, for a folder
+    /// and for an address alike, and in the drawn words as much as in the href. A path
+    /// said with its own step on the end (`…/notes/.`) is the folder it names, and one
+    /// that steps up (`…/notes/..`) is the parent it names, left where the reader put it.
+    #[test]
+    fn the_mark_that_ends_a_sentence_is_not_part_of_the_link() {
+        let disk = Disk::new();
+        disk.has("/tmp/evo/report.md");
+        disk.has("/tmp/evo/notes");
+        // The folder stepped up out of is a place too — the parent, which is there
+        // because the folder is.
+        disk.has("/tmp/evo/notes/..");
+        let file = "/tmp/evo/report.md";
+        let folder = "/tmp/evo/notes";
+        for (text, drawn) in [
+            (format!("wrote {file}."), file.to_string()),
+            (format!("wrote {file}, and more"), file.to_string()),
+            (format!("wrote ({file})"), file.to_string()),
+            (format!("wrote {file}: the rest"), file.to_string()),
+            (format!("the folder is {folder}."), folder.to_string()),
+            (
+                format!("the folder is {folder}, and more"),
+                folder.to_string(),
+            ),
+            (format!("the folder is ({folder})"), folder.to_string()),
+            (
+                format!("the folder is {folder}: the rest"),
+                folder.to_string(),
+            ),
+            // A line (or a line and a column) is part of the words, not of the file.
+            (format!("read {file}:12."), format!("{file}:12")),
+            (format!("read {file}:12:7."), format!("{file}:12:7")),
+            // A folder said with its own step, or stepped up out of.
+            (format!("the folder is {folder}/."), folder.to_string()),
+            (format!("out of it: {folder}/.."), format!("{folder}/..")),
+        ] {
+            let found = links(&text, &disk);
+            assert_eq!(found.len(), 1, "in {text:?}: {found:?}");
+            assert_eq!(found[0].0, drawn, "in {text:?}");
+        }
+        for (text, drawn) in [
+            (
+                "the shape is at https://evo.dev/state.json.",
+                "https://evo.dev/state.json",
+            ),
+            (
+                "the shape is at https://evo.dev/state.json, and more",
+                "https://evo.dev/state.json",
+            ),
+            (
+                "the shape is at (https://evo.dev/state.json)",
+                "https://evo.dev/state.json",
+            ),
+            (
+                "the shape is at https://evo.dev/state.json: the rest",
+                "https://evo.dev/state.json",
+            ),
+            (
+                "the shape is at [https://evo.dev/state.json]",
+                "https://evo.dev/state.json",
+            ),
+            (
+                "the shape is at \"https://evo.dev/state.json\"",
+                "https://evo.dev/state.json",
+            ),
+        ] {
+            let found = links(text, &disk);
+            assert_eq!(found.len(), 1, "in {text:?}: {found:?}");
+            assert_eq!(found[0].0, drawn, "in {text:?}");
+        }
     }
 
     /// A bare name is not looked up and a sentence's punctuation is not swallowed.
