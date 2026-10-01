@@ -30,16 +30,20 @@
 //! tab.select(AgentKey::Lane(2))         the center column shows another agent
 //! ```
 
+mod completion;
 mod format;
 mod item;
 mod launcher;
 mod op;
 mod state;
 mod swarm;
-mod symbols;
 mod tab;
 mod topic;
 
+pub use completion::{
+    byte_offset, char_offset, complete_request, completion, Completion, CompletionItem,
+    CompletionKind,
+};
 pub use format::{
     clip, k_tokens, lane_task_label, merge_patch, plural, round_div_half_even, short_duration,
 };
@@ -60,7 +64,6 @@ pub use state::{
     Segment, SessionInfo, Side, Status, SwarmLane, SwarmState, Todo, TodoStatus, TopicState,
 };
 pub use swarm::{lane_list, LaneList, LaneRow, LaneStatus, SwarmInfo};
-pub use symbols::{symbol_options, symbol_request, SymbolOption};
 pub use tab::{AgentKey, Changes, ItemChange, StreamStatus, TabModel, TopicChanges};
 pub use topic::Topic;
 

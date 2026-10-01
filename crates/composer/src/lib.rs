@@ -56,8 +56,8 @@ use widgets::{paint, Chip, EffortSlider};
 
 mod complete;
 
-pub use complete::Candidate;
-use complete::{Kind, Popup};
+use complete::Popup;
+pub use complete::{Answer, Candidate, CompletionKind, Question};
 
 /// The input grows from the design's two lines to as much as half the conversation
 /// pane, and scrolls inside itself past that (`AutoTextarea.tsx`).
@@ -176,10 +176,13 @@ const POPUP_MAX_W: f32 = 560.;
 /// the row's, and the popup's hairline.
 const POPUP_LABEL_INSET: f32 = POPUP_PAD + POPUP_ROW_PAD + 1.;
 
-/// How long the caret has to rest on a token before the image is asked about it:
-/// a keystroke in the middle of a word is not a question, and one round trip per
-/// word is enough — the same debounce a code editor waits.
-const SYMBOL_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(80);
+/// How long the caret rests before the server is asked what it is on.
+///
+/// The op is the read an input box asks on every keystroke — evo's own words for it
+/// — but a keystroke is not a question until the caret has stopped for it, and a
+/// question is asked once: this is about a frame, and it is what keeps a burst of
+/// typing from being a burst of round trips.
+const COMPLETE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(16);
 
 /// The input's own type: `.composer-box textarea{font-size:14px;line-height:20px}`
 /// — a size of its own, not the theme's base, and the line the autogrow counts in.
@@ -268,10 +271,11 @@ pub enum ComposerEvent {
     /// message that is one command from its start is the command's, not the
     /// agent's — `/eval` included, whose content is a form for the image.
     Command { name: String, args: String },
-    /// Ask the image what its own symbols complete to, for a token the reader is
-    /// typing inside `/eval` (`eval` op). The answer comes back through
-    /// [`Composer::set_symbols`], labelled with this same token.
-    Symbols { token: String },
+    /// Ask what the caret is on, and what could fill it (`complete`, §5.6). The
+    /// question is the text the caret is in and where it is in it — a byte offset —
+    /// and the answer comes back through [`Composer::set_completion`], named by the
+    /// same pair: an answer is only ever an answer about the text it was asked about.
+    Complete { text: String, cursor: usize },
 }
 
 /// What the one button says — and therefore what clicking it does.
@@ -436,9 +440,9 @@ pub struct Composer {
     /// has put the popup away for: it comes back when the word moves on.
     popup_scroll: ScrollHandle,
     dismissed: Option<String>,
-    /// The symbols the image last answered about, while `/eval` content is
-    /// being typed (see [`Symbols`]).
-    symbols: Symbols,
+    /// What the caret is on: the question out, and the server's last answer
+    /// (see [`Completion`]).
+    completion: Completion,
     /// Whether the model drawer is folded out, as the model chip folds it.
     model_open: bool,
     /// Whether the goal strip's objective is unfolded.
@@ -515,21 +519,25 @@ pub struct ModelRow {
     pub reason: Option<String>,
 }
 
-/// The `/eval` content's symbols, as the image last answered for one token.
+/// What the caret is on, as the server last said: the question it is waiting on, and
+/// the answer to the last one.
 ///
-/// The image is asked on a debounce — a keystroke in the middle of a word is not
-/// a question — and one question is out at a time. The answer carries the token
-/// it belongs to, so an answer the caret has already left can only ever fill the
-/// cache, never the popup: what is drawn is drawn for the caret's own token.
+/// The word is the server's (`complete`); what the popup does with it is
+/// [`Composer::refresh`]. Two things this keeps straight:
+///
+/// * **one question at a time.** A keystroke while one is out is not a second
+///   question: the answer asks again for the text as it stands then, so the
+///   question is always about the caret as it is, and never twice about the same
+///   text ([`Composer::ask`] is what decides);
+/// * **the answer belongs to its question.** An answer names a word in the text it
+///   was asked about, so it is held against that text ([`complete::held`]) and
+///   never against whatever is in the box a keystroke later.
 #[derive(Default)]
-struct Symbols {
-    /// The token the rows belong to, and the rows themselves.
-    token: String,
-    rows: Vec<Candidate>,
-    /// The token a question is out for, while one is. Cleared by the answer
-    /// ([`Composer::set_symbols`]) whether it found anything or not, so a token
-    /// is never left unanswerable.
-    asked: Option<String>,
+struct Completion {
+    /// The question a reply is owed for, while one is out.
+    asked: Option<Question>,
+    /// The last answer, and the question it answers.
+    answer: Option<(Question, Answer)>,
     /// The debounce itself. Held so the next keystroke can drop it — a dropped
     /// task is a cancelled timer.
     timer: Option<Task<()>>,
@@ -599,7 +607,7 @@ impl Composer {
             popup_width: None,
             popup_scroll: ScrollHandle::new(),
             dismissed: None,
-            symbols: Symbols::default(),
+            completion: Completion::default(),
             model_open: false,
             goal_open: false,
             todos_open: false,
@@ -701,62 +709,90 @@ impl Composer {
         }
     }
 
-    /// The image's answer about one token: the symbols `/eval` content completes
-    /// to, as `evo.eval:completions-for` returned them.
+    /// The server's answer to the question this box asked: what the caret is on, and
+    /// what could fill it.
     ///
-    /// Empty is an answer like any other — the token matched nothing, or the op
-    /// that asked could not be run — and it is the answer that releases the
-    /// question, so the next token can be asked about.
-    pub fn set_symbols(&mut self, token: &str, rows: Vec<Candidate>, cx: &mut Context<Self>) {
-        if self.symbols.asked.as_deref() == Some(token) {
-            self.symbols.asked = None;
+    /// `text` and `cursor` are the question the answer belongs to — the pair that went
+    /// out through [`ComposerEvent::Complete`] — and the answer is stored against
+    /// them, so the popup can tell a word the caret has merely typed into from a text
+    /// this answer says nothing about.
+    ///
+    /// An answer with no word in it is an answer like any other — a caret on prose, a
+    /// server that does not offer the op, a tab whose engine is gone — and it is what
+    /// releases the question, so the next one can be asked.
+    pub fn set_completion(
+        &mut self,
+        text: &str,
+        cursor: usize,
+        answer: Answer,
+        cx: &mut Context<Self>,
+    ) {
+        let question = Question {
+            text: text.to_string(),
+            cursor,
+        };
+        if self.completion.asked.as_ref() == Some(&question) {
+            self.completion.asked = None;
         }
-        self.symbols.token = token.to_string();
-        self.symbols.rows = rows;
+        self.completion.answer = Some((question, answer));
         self.refresh(cx);
     }
 
     /// The word under the caret, read again: what the popup shows, and what it
     /// hides.
     ///
-    /// Every edit lands here, and so does every key that may have moved the
-    /// caret. Nothing else decides what the popup holds, so what is drawn is
-    /// always the caret's own word.
+    /// Every edit lands here, and so does every key that may have moved the caret, so
+    /// the popup is always drawn from the caret's own word — the server's answer to
+    /// the last question, held against the text as it stands now. An edit also asks
+    /// ([`Composer::ask`]): a word with no answer yet is a word with no popup, for the
+    /// one round trip it takes.
     fn refresh(&mut self, cx: &mut Context<Self>) {
         let (text, caret) = {
             let input = self.input.read(cx);
             (input.value().to_string(), input.cursor())
         };
+        self.ask(&text, caret, cx);
         // A prompt recalled from the history is not the reader's input: what the
         // caret sits on raises no popup until it is edited. Sending from the popup
         // would be worse than an absent suggestion — the list would capture the
         // ↑/↓ the history walks with.
-        let target = if self.walking.is_none() {
-            complete::target(&text, caret)
-        } else {
-            None
-        };
-        let Some(target) = target else {
+        let held = self
+            .completion
+            .answer
+            .as_ref()
+            .and_then(|(question, answer)| {
+                if self.walking.is_some() {
+                    return None;
+                }
+                complete::held(answer, question, &text, caret)
+            });
+        let Some(held) = held else {
             self.popup = None;
             self.popup_width = None;
             return;
         };
         // Esc puts the popup away for the word it was on: a word that has moved
         // on is a new one, and asks again.
-        if self.dismissed.as_deref() == Some(target.prefix.as_str()) {
+        if self.dismissed.as_deref() == Some(held.prefix.as_str()) {
             self.popup = None;
             self.popup_width = None;
             return;
         }
         self.dismissed = None;
-        let rows = match target.kind {
-            Kind::Command => complete::matches(&self.commands, &target.prefix),
-            Kind::Symbol => self.symbol_rows(&target.prefix, cx),
+        // A command word ranks the *catalog's* own commands — the list is drawn with
+        // the names it begins first and the ones it is a subsequence of, which is
+        // what a `/lo` finding `/reload` is for. The server's own answer to the same
+        // word is the prefix-matched half of that same catalog (§5.6), so the rows
+        // are its document either way; a symbol can only come from the answer, since
+        // only the image knows its own names.
+        let rows = match held.kind {
+            CompletionKind::Command => complete::matches(&self.commands, &held.prefix),
+            CompletionKind::Symbol => complete::prefix_matches(held.items, &held.prefix),
         };
         // Nothing to offer, or nothing left to choose: a popup whose only
         // candidate is the word already typed shows the reader their own input
         // back, and would capture the ↑/↓ that browse the history with it.
-        if rows.is_empty() || complete::settled(&target.prefix, &rows) {
+        if rows.is_empty() || complete::settled(&held.prefix, &rows) {
             self.popup = None;
             self.popup_width = None;
             return;
@@ -764,55 +800,67 @@ impl Composer {
         // The highlight stays where it was while the same word is still being
         // typed; a new word starts at the top of its own list.
         let index = match &self.popup {
-            Some(popup) if popup.prefix == target.prefix && popup.kind == target.kind => {
-                popup.index
-            }
+            Some(popup) if popup.prefix == held.prefix && popup.kind == held.kind => popup.index,
             _ => 0,
         };
-        let mut popup = Popup::new(&target, rows);
+        let mut popup = Popup::new(&held, rows);
         popup.index = index.min(popup.rows.len() - 1);
         self.popup = Some(popup);
         // New rows, and a new width to measure: the popup is as wide as what it holds.
         self.popup_width = None;
     }
 
-    /// What the image has to say for a token being typed, asking it if it has not
-    /// been asked about this one.
+    /// Ask what the caret is on, unless the answer already in hand is about exactly
+    /// this text and caret.
     ///
-    /// Until the answer lands, the rows that stood for the token's own beginning
-    /// stand in — a name is typed forwards, so the last answer is almost always
-    /// the current list, one keystroke short.
-    fn symbol_rows(&mut self, token: &str, cx: &mut Context<Self>) -> Vec<Candidate> {
-        let rows = if self.symbols.token == token {
-            self.symbols.rows.clone()
-        } else if token.starts_with(self.symbols.token.as_str()) {
-            complete::prefix_matches(&self.symbols.rows, token)
-        } else {
-            Vec::new()
-        };
-        // One question at a time, and only one per word: the token the caret is
-        // on now is what the answer has to be about.
-        if self.symbols.token != token && self.symbols.asked.is_none() {
-            self.ask(token.to_string(), cx);
+    /// Three things keep this from being a request per keystroke per frame:
+    ///
+    /// * an answer that is *current* — the same text, the same caret — is not asked
+    ///   about again, so the answer to a question does not raise its own question;
+    /// * one question is out at a time: a keystroke while one is out asks nothing, and
+    ///   the answer asks again for the text as it stands then, which is the newest one
+    ///   worth asking;
+    /// * the debounce is reset by every keystroke, so a burst of typing is one
+    ///   question.
+    fn ask(&mut self, text: &str, caret: usize, cx: &mut Context<Self>) {
+        let current = self
+            .completion
+            .answer
+            .as_ref()
+            .is_some_and(|(question, _)| question.text == text && question.cursor == caret);
+        if current || self.completion.asked.is_some() {
+            return;
         }
-        rows
-    }
-
-    /// Put a question about a token to the image, after the caret has rested on
-    /// it for [`SYMBOL_DEBOUNCE`].
-    fn ask(&mut self, token: String, cx: &mut Context<Self>) {
-        self.symbols.asked = Some(token.clone());
-        self.symbols.timer = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(SYMBOL_DEBOUNCE).await;
+        self.completion.timer = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(COMPLETE_DEBOUNCE).await;
             let _ = this.update(cx, |composer, cx| {
-                composer.symbols.timer = None;
-                // The caret may have left the token while the timer ran: the
-                // question follows the caret, not the keystroke that raised it.
-                if composer.symbols.asked.as_deref() == Some(token.as_str()) {
-                    cx.emit(ComposerEvent::Symbols { token });
-                }
+                composer.completion.timer = None;
+                // The caret may have moved while the timer ran: the question follows
+                // the caret, not the keystroke that raised it.
+                composer.ask_now(cx);
             });
         }));
+    }
+
+    /// Put the question to the server now: the caret's own text, and where it is.
+    ///
+    /// Nothing is asked while a question is out — the answer comes back through
+    /// [`Composer::set_completion`], which reads the caret again — and the question is
+    /// remembered as asked, so a tab that cannot send it can answer it with nothing
+    /// and leave the popup answering again.
+    fn ask_now(&mut self, cx: &mut Context<Self>) {
+        if self.completion.asked.is_some() {
+            return;
+        }
+        let (text, cursor) = {
+            let input = self.input.read(cx);
+            (input.value().to_string(), input.cursor())
+        };
+        self.completion.asked = Some(Question {
+            text: text.clone(),
+            cursor,
+        });
+        cx.emit(ComposerEvent::Complete { text, cursor });
     }
 
     /// Move the popup's highlight by `delta` rows, wrapping at both ends.
@@ -1634,7 +1682,7 @@ impl Composer {
                         // A symbol is Lisp being typed into the image: code, drawn in
                         // the theme's monospace face as an editor draws its completions.
                         // A command is a word of the UI, in the UI's own face.
-                        .when(popup.kind == Kind::Symbol, |label| {
+                        .when(popup.kind == CompletionKind::Symbol, |label| {
                             label.font_family(cx.theme().mono_font_family.clone())
                         })
                         .child(StyledText::new(label).with_highlights(highlights)),
@@ -1737,7 +1785,8 @@ impl Composer {
         let Some(popup) = self.popup.as_ref() else {
             return px(POPUP_MIN_W);
         };
-        let mono = (popup.kind == Kind::Symbol).then(|| cx.theme().mono_font_family.clone());
+        let mono =
+            (popup.kind == CompletionKind::Symbol).then(|| cx.theme().mono_font_family.clone());
         let widest = popup
             .rows
             .iter()
@@ -2675,6 +2724,29 @@ mod tests {
         fn type_draft(&self, text: &str, window: &mut Window, cx: &mut App) {
             window.click(self.input_frame(cx), cx);
             window.input(text, cx);
+        }
+
+        /// The tab's half of a completion, for the tests that are about the popup: let
+        /// the debounce run so the composer asks, then answer the question it asked.
+        ///
+        /// The rule here is the *test's* stand-in for a server, and it is the plain one
+        /// these tests are written in. What a server really answers — the `/eval`
+        /// content's symbols, a path that is not a command, a caret in the middle of a
+        /// word — is asserted in `session::completion` and against a real `evo-agent`;
+        /// a test that is about one of those hands the composer its own [`Answer`].
+        fn answer(&self, cx: &mut TestAppContext) {
+            cx.executor().advance_clock(COMPLETE_DEBOUNCE);
+            cx.run_until_parked();
+            cx.update(|cx| {
+                let Some(ComposerEvent::Complete { text, cursor }) = self.events().last().cloned()
+                else {
+                    return;
+                };
+                let answer = stand_in_answer(&text, cursor, &catalog_commands());
+                self.composer.update(cx, |composer, cx| {
+                    composer.set_completion(&text, cursor, answer, cx)
+                });
+            });
         }
 
         /// The composer's caret, as the input reports it (a byte offset).
@@ -4358,6 +4430,41 @@ mod tests {
             .left()
     }
 
+    /// Whether an event is the box asking what the caret is on: a question, not
+    /// something the box did to the message.
+    fn is_a_question(event: &ComposerEvent) -> bool {
+        matches!(event, ComposerEvent::Complete { .. })
+    }
+
+    /// Whether an event is the box sending its draft as a message: what a key that the
+    /// popup owns must never do.
+    fn sends_the_message(event: &ComposerEvent) -> bool {
+        matches!(
+            event,
+            ComposerEvent::Send(_) | ComposerEvent::Command { .. }
+        )
+    }
+
+    /// What the stand-in server answers for `text` at `cursor`: the caret's `/command`
+    /// word — the whitespace-delimited word it is in, when that word starts with a
+    /// slash — with the catalog's commands as candidates, and nothing otherwise.
+    fn stand_in_answer(text: &str, cursor: usize, items: &[Candidate]) -> Answer {
+        let start = text[..cursor]
+            .rfind(char::is_whitespace)
+            .map_or(0, |index| index + 1);
+        let end = text[cursor..]
+            .find(char::is_whitespace)
+            .map_or(text.len(), |index| cursor + index);
+        match text[start..end].starts_with('/') {
+            true => Answer {
+                kind: Some(CompletionKind::Command),
+                name: start + 1..end,
+                items: items.to_vec(),
+            },
+            false => Answer::none(),
+        }
+    }
+
     /// The popup's own width.
     fn popup_width(window: &Window) -> Pixels {
         window.find("completion-popup").bounds().size.width
@@ -4433,6 +4540,7 @@ mod tests {
         let f = open_footer(cx);
         f.act(cx, |_window, cx| f.set_catalog(cx));
         f.act(cx, |window, cx| f.type_draft("/", window, cx));
+        f.answer(cx);
 
         f.act(cx, |window, cx| {
             window.render_frame(cx);
@@ -4485,6 +4593,7 @@ mod tests {
         let f = open_footer(cx);
         f.act(cx, |_window, cx| f.set_catalog(cx));
         f.act(cx, |window, cx| f.type_draft(text, window, cx));
+        f.answer(cx);
         f
     }
 
@@ -4511,13 +4620,20 @@ mod tests {
             );
         });
 
-        // Mid-prose, with the caret at the end of the word rather than the message.
-        let g = typed_footer(cx, "please run /he now");
+        // Mid-prose, with the caret at the end of the word rather than the message:
+        // the caret settles where the reader put it, and *then* the server is asked —
+        // a caret that has moved is a question about the text it moved in.
+        let g = open_footer(cx);
+        g.act(cx, |_window, cx| g.set_catalog(cx));
+        g.act(cx, |window, cx| {
+            g.type_draft("please run /he now", window, cx)
+        });
         g.act(cx, |window, cx| {
             for _ in 0..4 {
                 window.press("left", cx);
             }
         });
+        g.answer(cx);
         g.act(cx, |window, cx| {
             window.render_frame(cx);
             let word = word_left(&g, cx);
@@ -4529,16 +4645,22 @@ mod tests {
             );
         });
 
-        // Inside `/eval`: the word is the token, not the command word before it.
+        // Inside `/eval`: the word is the token, not the command word before it — a
+        // symbol answer, which is the image's own.
         let h = typed_footer(cx, "/eval (evo.eval:");
         h.act(cx, |_window, cx| {
             h.composer.update(cx, |composer, cx| {
-                composer.set_symbols(
-                    "evo.eval:",
-                    vec![Candidate {
-                        name: "evo.eval:completions-for".to_string(),
-                        description: "function".to_string(),
-                    }],
+                composer.set_completion(
+                    "/eval (evo.eval:",
+                    16,
+                    Answer {
+                        kind: Some(CompletionKind::Symbol),
+                        name: 7..16,
+                        items: vec![Candidate {
+                            name: "evo.eval:completions-for".to_string(),
+                            description: "function".to_string(),
+                        }],
+                    },
                     cx,
                 )
             })
@@ -4703,6 +4825,7 @@ mod tests {
         let f = open(cx);
         f.act(cx, |_window, cx| f.set_catalog(cx));
         f.act(cx, |window, cx| f.type_draft("/", window, cx));
+        f.answer(cx);
 
         f.act(cx, |window, cx| {
             window.render_frame(cx);
@@ -4728,6 +4851,7 @@ mod tests {
         let f = open(cx);
         f.act(cx, |_window, cx| f.set_catalog(cx));
         f.act(cx, |window, cx| f.type_draft("/he", window, cx));
+        f.answer(cx);
         f.act(cx, |window, cx| {
             window.render_frame(cx);
             assert_eq!(popup_labels(&f, cx), vec!["/help"]);
@@ -4741,14 +4865,21 @@ mod tests {
             6,
             "the caret is past the word it took"
         );
-        assert!(f.events().is_empty(), "taking a row is not sending");
+        assert!(
+            !f.events().iter().any(sends_the_message),
+            "taking a row is not sending: {:?}",
+            f.events()
+        );
 
         // Enter sends it, and one slash command from the message's start is the
         // command layer's, not the coordinator's.
         f.act(cx, |window, cx| window.press("enter", cx));
         assert_eq!(
-            f.events(),
-            vec![ComposerEvent::Command {
+            f.events()
+                .iter()
+                .filter(|event| !is_a_question(event))
+                .collect::<Vec<_>>(),
+            vec![&ComposerEvent::Command {
                 name: "help".to_string(),
                 args: String::new(),
             }]
@@ -4760,6 +4891,7 @@ mod tests {
         let f = open(cx);
         f.act(cx, |_window, cx| f.set_catalog(cx));
         f.act(cx, |window, cx| f.type_draft("/lo", window, cx));
+        f.answer(cx);
         f.act(cx, |window, cx| {
             window.render_frame(cx);
             assert_eq!(
@@ -4772,7 +4904,7 @@ mod tests {
         f.act(cx, |window, cx| window.press("enter", cx));
         assert_eq!(f.draft_now(cx), "/lore ", "Enter took the highlighted row");
         assert!(
-            f.events().is_empty(),
+            !f.events().iter().any(sends_the_message),
             "and the draft was not sent instead: {:?}",
             f.events()
         );
@@ -4785,6 +4917,7 @@ mod tests {
         // popup up, it walks rows instead.
         f.send_prompt("an earlier prompt", cx);
         f.act(cx, |window, cx| f.type_draft("/", window, cx));
+        f.answer(cx);
 
         f.act(cx, |window, cx| {
             window.render_frame(cx);
@@ -4806,6 +4939,7 @@ mod tests {
         let f = open(cx);
         f.act(cx, |_window, cx| f.set_catalog(cx));
         f.act(cx, |window, cx| f.type_draft("/", window, cx));
+        f.answer(cx);
         f.act(cx, |window, cx| {
             window.render_frame(cx);
             assert!(window.find("completion-popup").visible());
@@ -4816,14 +4950,15 @@ mod tests {
             window.render_frame(cx);
             assert!(!popup_drawn(window), "Esc puts the popup away");
         });
-        assert_eq!(
-            f.events(),
-            Vec::<ComposerEvent>::new(),
-            "closing the popup is not the coordinator's interrupt"
+        assert!(
+            !f.events().iter().any(sends_the_message),
+            "closing the popup is not the coordinator's interrupt: {:?}",
+            f.events()
         );
 
         // The word moving on is a new word, and asks again.
         f.act(cx, |window, cx| f.type_draft("h", window, cx));
+        f.answer(cx);
         f.act(cx, |window, cx| {
             window.render_frame(cx);
             assert!(popup_drawn(window));
@@ -4832,96 +4967,19 @@ mod tests {
     }
 
     /// `/rewind` is the command that hands a message back: the text it took out of the
-    /// session lands in the input, ready to be edited and resubmitted — not cleared.
+    /// The question is the caret's own text and where it is in it, asked once, after
+    /// the caret has rested — and an answer about a text the caret has left is not a
+    /// row here, however many candidates it carries.
     #[gpui_kit::test]
-    fn a_command_that_hands_a_message_back_puts_it_in_the_input(cx: &mut TestAppContext) {
-        let f = open(cx);
+    fn the_caret_is_asked_about_once_and_a_stale_answer_raises_no_row(cx: &mut TestAppContext) {
+        let f = open_footer(cx);
         f.act(cx, |_window, cx| f.set_catalog(cx));
-        f.act(cx, |window, cx| {
-            f.type_draft("half a thought", window, cx);
-            // What the reply to `/rewind` carries on its own `data.draft`.
-            f.composer.update(cx, |composer, cx| {
-                composer.set_draft("what I asked for", window, cx)
-            });
-        });
-        assert_eq!(
-            f.draft_now(cx),
-            "what I asked for",
-            "the message the command took out of the session is the draft now"
-        );
-        assert_eq!(
-            cx.read(|cx| f.caret(cx)),
-            "what I asked for".len(),
-            "the caret is at the end of it, where the next word is typed"
-        );
-        assert!(
-            f.events().is_empty(),
-            "handing a message back is not sending it: {:?}",
-            f.events()
-        );
-    }
-
-    #[gpui_kit::test]
-    fn a_whole_word_shows_no_popup_and_a_message_that_mentions_one_stays_a_message(
-        cx: &mut TestAppContext,
-    ) {
-        let f = open(cx);
-        f.act(cx, |_window, cx| f.set_catalog(cx));
-        f.act(cx, |window, cx| f.type_draft("/help", window, cx));
-        f.act(cx, |window, cx| {
-            window.render_frame(cx);
-            assert!(
-                !popup_drawn(window),
-                "the only candidate is the word already typed"
-            );
-        });
-        f.act(cx, |window, cx| window.press("enter", cx));
-        assert_eq!(
-            f.events(),
-            vec![ComposerEvent::Command {
-                name: "help".to_string(),
-                args: String::new(),
-            }]
-        );
-
-        // A message that mentions a command is the reader's words — and its `/`
-        // word completes all the same, with the caret anywhere in it.
-        let g = open(cx);
-        g.act(cx, |_window, cx| g.set_catalog(cx));
-        g.act(cx, |window, cx| {
-            g.type_draft("run /he now", window, cx);
-            // Four lefts put the caret at the end of `/he`, mid-message.
-            for _ in 0..4 {
-                window.press("left", cx);
-            }
-        });
-        g.act(cx, |window, cx| {
-            window.render_frame(cx);
-            assert_eq!(popup_labels(&g, cx), vec!["/help"]);
-        });
-        // Esc means the line rather than the row; Enter then sends the message whole.
-        g.act(cx, |window, cx| {
-            window.press("escape", cx);
-            window.press("enter", cx);
-        });
-        assert_eq!(
-            g.events(),
-            vec![ComposerEvent::Send("run /he now".to_string())],
-            "one command from the message's *start* is what goes to command.run"
-        );
-    }
-
-    #[gpui_kit::test]
-    fn the_images_symbols_are_asked_for_a_word_and_a_stale_answer_cannot_raise_a_row(
-        cx: &mut TestAppContext,
-    ) {
-        let f = open(cx);
         f.act(cx, |window, cx| f.type_draft("/eval (zz", window, cx));
         f.act(cx, |window, cx| {
             window.render_frame(cx);
             assert!(
                 popup_labels(&f, cx).is_empty(),
-                "the image has not answered yet"
+                "the server has not answered yet"
             );
         });
         assert!(
@@ -4929,25 +4987,39 @@ mod tests {
             "and nothing has been asked yet: the caret has to rest on the word"
         );
 
-        // The debounce is what asks, once, for the word the caret is on.
-        cx.executor().advance_clock(SYMBOL_DEBOUNCE);
+        // The debounce is what asks, once: the caret's text, and where it is in it.
+        cx.executor().advance_clock(COMPLETE_DEBOUNCE);
         cx.run_until_parked();
         assert_eq!(
             f.events(),
-            vec![ComposerEvent::Symbols {
-                token: "zz".to_string(),
+            vec![ComposerEvent::Complete {
+                text: "/eval (zz".to_string(),
+                cursor: 9,
             }]
         );
+        // Nothing more is asked while that question is out.
+        f.act(cx, |_window, cx| {
+            f.composer.update(cx, |composer, cx| composer.refresh(cx))
+        });
+        cx.executor().advance_clock(COMPLETE_DEBOUNCE);
+        cx.run_until_parked();
+        assert_eq!(f.events().len(), 1, "one question at a time");
 
-        // The image's answer is the popup's rows: names it owns, and what they are.
+        // The answer names the token, and its rows are the popup's: what the image
+        // calls them, and what they are.
         f.act(cx, |_window, cx| {
             f.composer.update(cx, |composer, cx| {
-                composer.set_symbols(
-                    "zz",
-                    vec![Candidate {
-                        name: "zzz".to_string(),
-                        description: "function".to_string(),
-                    }],
+                composer.set_completion(
+                    "/eval (zz",
+                    9,
+                    Answer {
+                        kind: Some(CompletionKind::Symbol),
+                        name: 7..9,
+                        items: vec![Candidate {
+                            name: "zzz".to_string(),
+                            description: "function".to_string(),
+                        }],
+                    },
                     cx,
                 )
             })
@@ -4961,16 +5033,21 @@ mod tests {
             );
         });
 
-        // An answer for a token the caret has left behind is not a row here: the
-        // caret's word is `zz`, and nothing that does not begin with it is offered.
+        // An answer about a text this is not — the caret has left that one — raises
+        // nothing, and leaves the word it *is* about alone.
         f.act(cx, |_window, cx| {
             f.composer.update(cx, |composer, cx| {
-                composer.set_symbols(
-                    "z",
-                    vec![Candidate {
-                        name: "car".to_string(),
-                        description: "function".to_string(),
-                    }],
+                composer.set_completion(
+                    "/eval (z",
+                    8,
+                    Answer {
+                        kind: Some(CompletionKind::Symbol),
+                        name: 7..8,
+                        items: vec![Candidate {
+                            name: "car".to_string(),
+                            description: "function".to_string(),
+                        }],
+                    },
                     cx,
                 )
             })
@@ -4979,7 +5056,7 @@ mod tests {
             window.render_frame(cx);
             assert!(
                 popup_labels(&f, cx).is_empty(),
-                "a stale answer raises no row: {:?}",
+                "an answer about another text raises no row: {:?}",
                 popup_labels(&f, cx)
             );
         });
@@ -4993,6 +5070,7 @@ mod tests {
         // `he` mid-message. It is sent with Esc first, which is what a reader does
         // when they mean the line rather than the row.
         f.act(cx, |window, cx| f.type_draft("please /he", window, cx));
+        f.answer(cx);
         f.act(cx, |window, cx| {
             window.press("escape", cx);
             window.press("enter", cx);

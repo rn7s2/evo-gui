@@ -361,9 +361,18 @@ enum Pending {
     /// session's `notice` items, which the transcript draws; this reply says only
     /// whether the command was taken at all.
     Command,
-    /// The `eval` op behind one half-typed symbol, carried with the token it asked
-    /// about: the answer is only an answer for that token.
-    Symbols(String),
+    /// The `complete` op behind one half-typed word, carried with the question it
+    /// asked about: what the server says is only ever an answer about *that* text, at
+    /// *that* caret.
+    Complete(Completing),
+}
+
+/// One question about a half-typed word: the text the caret was in, and where it was
+/// in it (a byte offset), as the composer asked it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Completing {
+    text: String,
+    cursor: usize,
 }
 
 /// One tab's live swarm: the engine, the model its updates land in, and the pump
@@ -1700,7 +1709,7 @@ impl TabContent {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let mut unanswered: Option<String> = None;
+        let mut unanswered: Option<Completing> = None;
         let sent = match self.live.as_mut() {
             Some(live) => {
                 let (request, pending) = match event {
@@ -1731,10 +1740,15 @@ impl TabContent {
                         session::OpRequest::command_run(&name, &args),
                         Pending::Command,
                     ),
-                    // The popup's question about a symbol being typed inside `/eval`:
-                    // the one op that can ask the image about its own symbols.
-                    ComposerEvent::Symbols { token } => {
-                        (session::symbol_request(&token), Pending::Symbols(token))
+                    // The popup's question about the word being typed: what the caret
+                    // is on and what could fill it, which is evo's own answer — the
+                    // client does not decide what a word is, and does not evaluate
+                    // anything to read a name list.
+                    ComposerEvent::Complete { text, cursor } => {
+                        let question = Completing { text, cursor };
+                        let request = session::complete_request(&question.text, question.cursor);
+                        // The op counts characters; the box works in bytes.
+                        (request, Pending::Complete(question))
                     }
                 };
                 // The engine mints the request's id, and the reply comes back tagged
@@ -1745,11 +1759,11 @@ impl TabContent {
                         true
                     }
                     // The engine is gone — the tab is stopping. A question about a
-                    // symbol would leave the popup waiting for an answer that cannot
+                    // word would leave the popup waiting for an answer that cannot
                     // come, so it is answered with nothing.
                     None => {
-                        if let Pending::Symbols(token) = pending {
-                            unanswered = Some(token);
+                        if let Pending::Complete(question) = pending {
+                            unanswered = Some(question);
                         }
                         false
                     }
@@ -1761,9 +1775,14 @@ impl TabContent {
         };
         if !sent {
             match unanswered {
-                Some(token) => {
+                Some(question) => {
                     self.composer.update(cx, |composer, cx| {
-                        composer.set_symbols(&token, Vec::new(), cx)
+                        composer.set_completion(
+                            &question.text,
+                            question.cursor,
+                            composer::Answer::none(),
+                            cx,
+                        )
                     });
                 }
                 None => {
@@ -1932,25 +1951,32 @@ impl TabContent {
                         None => composer.request_finished(reply.ok, window, cx),
                     });
                 }
-                Pending::Symbols(token) => {
-                    // The image's answer, read off the op's own output: one
-                    // `name<TAB>description` line per candidate. A refusal — an image
-                    // with no `--http-eval`, a token that matched nothing — is no rows,
-                    // which is an answer like any other.
-                    let rows: Vec<Candidate> = reply
-                        .result
-                        .get("output")
-                        .and_then(serde_json::Value::as_str)
-                        .map(session::symbol_options)
-                        .unwrap_or_default()
-                        .into_iter()
-                        .map(|symbol| Candidate {
-                            name: symbol.name,
-                            description: symbol.description,
-                        })
-                        .collect();
-                    self.composer
-                        .update(cx, |composer, cx| composer.set_symbols(&token, rows, cx));
+                Pending::Complete(question) => {
+                    // What the caret is on, and what could fill it, read off the op's
+                    // own result: the kind, the range a candidate's name replaces, and
+                    // the candidates. A refusal — a server that does not offer the op, a
+                    // reply that never came — reads as nothing to complete, which is an
+                    // answer like any other: the popup has none to draw, and the
+                    // question is released so the next word can be asked about.
+                    let completion = session::completion(&question.text, &reply.result);
+                    let answer = composer::Answer {
+                        kind: completion.kind.map(|kind| match kind {
+                            session::CompletionKind::Command => composer::CompletionKind::Command,
+                            session::CompletionKind::Symbol => composer::CompletionKind::Symbol,
+                        }),
+                        name: completion.start..completion.end,
+                        items: completion
+                            .items
+                            .into_iter()
+                            .map(|item| Candidate {
+                                name: item.name,
+                                description: item.description,
+                            })
+                            .collect(),
+                    };
+                    self.composer.update(cx, |composer, cx| {
+                        composer.set_completion(&question.text, question.cursor, answer, cx)
+                    });
                 }
                 // A stop's reply only re-arms the button; the draft is untouched.
                 _ => {
@@ -3114,8 +3140,25 @@ mod tests {
     /// §7.3, §5.6: the catalog's own `commands` are what a `/word` completes against, in a
     /// tab that is already running — evo's registry, never a list this client keeps.
     #[gpui_kit::test]
+    /// The word a reader types is asked about (`complete`) and the answer comes back to
+    /// the popup; the candidates a `/word` is *ranked* against are the catalog's own
+    /// commands, which is what this test is about: the registry evo published reaches
+    /// the box, in its own words.
+    ///
+    /// A running tab with no server under it has nothing to ask — its question is
+    /// answered with nothing, and drawn as nothing. So the tab's own half of the round
+    /// trip is what this test plays, with the question the box asked.
+    #[gpui_kit::test]
     fn the_catalogs_commands_reach_a_running_tabs_popup(cx: &mut TestAppContext) {
         let (window, tab) = running_tab(cx);
+        let composer = cx.update(|cx| tab.read(cx).composer.clone());
+        let asked: Rc<RefCell<Vec<ComposerEvent>>> = Rc::new(RefCell::new(Vec::new()));
+        let recorded = asked.clone();
+        let _subscription = cx.update(|cx| {
+            cx.subscribe(&composer, move |_, event: &ComposerEvent, _| {
+                recorded.borrow_mut().push(event.clone())
+            })
+        });
 
         cx.update_window(window, |_, window, cx| {
             let data = LauncherData {
@@ -3133,6 +3176,30 @@ mod tests {
             window.input("/lo", cx);
         })
         .expect("the page");
+
+        // The debounce, and then the answer to the question the box asked: the caret is
+        // on the command word `/lo`, whose name replaces the two characters after the
+        // slash — what `complete` answers, and what the popup is drawn from.
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(50));
+        cx.run_until_parked();
+        let Some(ComposerEvent::Complete { text, cursor }) = asked.borrow().last().cloned() else {
+            panic!("the box asked nothing about the word it is typing");
+        };
+        cx.update(|cx| {
+            composer.update(cx, |composer, cx| {
+                composer.set_completion(
+                    &text,
+                    cursor,
+                    composer::Answer {
+                        kind: Some(composer::CompletionKind::Command),
+                        name: 1..cursor,
+                        items: Vec::new(),
+                    },
+                    cx,
+                )
+            })
+        });
 
         cx.update_window(window, |_, window, cx| {
             window.render_frame(cx);

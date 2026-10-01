@@ -133,9 +133,9 @@ impl Demo {
                     ComposerEvent::Command { name, args } => {
                         println!("command.run: {name} {args:?} — /help to see the registry")
                     }
-                    ComposerEvent::Symbols { token } => {
-                        println!("eval: the image's symbols for {token:?}")
-                    }
+                    ComposerEvent::Complete { text, cursor } => println!(
+                        "complete: what is at {cursor} in {text:?} — the popup's own question"
+                    ),
                 }
             },
         )
