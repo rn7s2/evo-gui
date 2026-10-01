@@ -31,7 +31,7 @@ use session::{
     Notice, NoticeSeverity, QueuePosition, RunOutcome, ToolItem, UserItem, UserStatus,
 };
 
-use crate::imgcheck::picture;
+use crate::imgcheck::{picture, MIN_PICTURE};
 use crate::ImageState;
 
 use crate::style::{mix, text_style, Palette, BLOCK_GAP, GROUP_GAP, TIGHT_GAP, TURN_GAP};
@@ -813,8 +813,8 @@ fn image_row(
                     .overflow_hidden()
                     // A frame is a box a reader can see and click whatever the picture's
                     // own size: a 1×1 screenshot is not a dot in the middle of nothing.
-                    // Wide and tall pictures are their own size — a minimum only bites
-                    // where the picture is smaller than it.
+                    // The floor is a floor, not a size, so a wide picture keeps the frame
+                    // it had, and `decode_image` bakes a small one up to meet it.
                     .min_w(palette.scaled(MIN_PICTURE))
                     .min_h(palette.scaled(MIN_PICTURE))
                     .flex()
@@ -876,14 +876,6 @@ const THUMBNAIL: f32 = 120.;
 const FULL_IMAGE: f32 = 340.;
 /// How wide one may be drawn (`imgcheck::picture`'s own cap at 100%).
 const IMAGE_WIDTH: f32 = 520.;
-/// The smallest frame a picture is drawn in, whatever the picture's own size: a 1×1
-/// screenshot, or an 8×8 icon, is a box a reader can see and click to open rather than a
-/// dot in the middle of nothing.
-///
-/// The picture is *not* scaled up to fill it. GPUI paints a scaled image through its own
-/// filter and offers no nearest-neighbour one, and a blurred 8×8 icon is worse than the
-/// icon at its own size, centred on the frame's surface.
-const MIN_PICTURE: f32 = 48.;
 
 /// One image the transcript is not showing: a muted line saying what it is and where it
 /// got to, in place of a hole.

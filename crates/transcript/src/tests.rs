@@ -1114,17 +1114,21 @@ fn an_image_that_arrives_off_screen_is_measured_when_it_comes_back(cx: &mut Test
 
 /// A picture smaller than its frame is a box, not a dot.
 ///
-/// The frame carries a minimum (`MIN_PICTURE`, scaled by the reader's zoom like the rest of
-/// the row) and the picture is centred in it at its own size — not blown up to fill it,
-/// because GPUI has no nearest-neighbour draw and a blurred 8×8 icon is worse than a small
-/// one on a surface a reader can see. A picture larger than the minimum is its own size,
-/// exactly as before.
+/// `decode_image` bakes a small picture up by whole pixels, and the frame floors its own
+/// size at `MIN_PICTURE` (scaled by the reader's zoom like the rest of the row), so a 1×1
+/// screenshot or an 8×8 icon is something a reader can see and click: a 48×48 block in a
+/// 48px box, centred. A picture that is large enough to fill the box is untouched.
 #[gpui_kit::test]
 fn a_picture_smaller_than_its_frame_is_a_box_not_a_dot(cx: &mut TestAppContext) {
-    let (view, cx) = open_in(cx, 1200., vec![user_with_image("u_1", 3)]);
+    let (view, cx) = open_in(cx, 1200., vec![user_with_image("u_1", 4)]);
     view.update(cx, |view, cx| view.on_fetch_image(|_, _, _, _| {}, cx));
     frames(cx, 2);
-    for (n, (w, h)) in [(0u32, (1u32, 1u32)), (1, (8, 8)), (2, (1000, 600))] {
+    for (n, (w, h)) in [
+        (0u32, (1u32, 1u32)),
+        (1, (8, 8)),
+        (2, (20, 10)),
+        (3, (1000, 600)),
+    ] {
         let picture = crate::decode_image(&transcript_png_sized(w, h)).expect("a decodable PNG");
         view.update(cx, |view, cx| view.set_image("u_1", n, picture, cx));
     }
@@ -1143,82 +1147,148 @@ fn a_picture_smaller_than_its_frame_is_a_box_not_a_dot(cx: &mut TestAppContext) 
             (
                 "x",
                 f32::from(picture.origin.x - frame.origin.x),
-                slack(
-                    f32::from(frame.size.width),
-                    f32::from(picture.size.width),
-                ),
+                slack(f32::from(frame.size.width), f32::from(picture.size.width)),
             ),
             (
                 "y",
                 f32::from(picture.origin.y - frame.origin.y),
-                slack(
-                    f32::from(frame.size.height),
-                    f32::from(picture.size.height),
-                ),
+                slack(f32::from(frame.size.height), f32::from(picture.size.height)),
             ),
         ] {
             assert!(
                 (gap - want).abs() <= 0.5,
-                "{axis}: a {n}'s picture sits at {gap}, not centred ({want})"
+                "{axis}: picture {n} sits at {gap}, not centred ({want})"
             );
         }
     };
 
-    // The floor: a 1×1 or an 8×8 screenshot is a box, and the picture in it is the size it
-    // is — a dot in the middle, never stretched to fill the frame.
-    for (n, own) in [(0u32, 1.), (1, 8.)] {
-        assert_eq!(
-            frame(cx, n).size,
-            gpui_kit::size(px(48.), px(48.)),
-            "`MIN_PICTURE` is the frame a tiny picture is drawn in"
-        );
+    // Baked up to the box: a 1×1 and an 8×8 are both a 48×48 block of whole pixels, in a
+    // frame 48 wide inside its 1px border.
+    for n in 0..2 {
         assert_eq!(
             drawn(cx, n).size,
-            gpui_kit::size(px(own), px(own)),
-            "and the picture keeps its own size"
+            gpui_kit::size(px(48.), px(48.)),
+            "a picture too small for the box is baked up to it"
+        );
+        assert_eq!(
+            frame(cx, n).size,
+            gpui_kit::size(px(50.), px(50.)),
+            "which is the frame's 48 plus the border it carries"
         );
         centred(cx, n);
     }
 
+    // A 20×10 bakes to 40×20 — a whole number of pixels, not a stretch to the box — so the
+    // floor is what a reader sees: the frame is still the 48px box, the picture centred in
+    // it.
+    assert_eq!(drawn(cx, 2).size, gpui_kit::size(px(40.), px(20.)));
+    assert_eq!(
+        frame(cx, 2).size,
+        gpui_kit::size(px(48.), px(48.)),
+        "the floor"
+    );
+    centred(cx, 2);
+
     // A picture with the pixels to fill the frame is unchanged: the caps, and its own
     // corners inside the rounded one.
     assert_eq!(
-        frame(cx, 2).size,
+        frame(cx, 3).size,
         gpui_kit::size(px(522.), px(122.)),
         "`IMAGE_WIDTH` 520 by `THUMBNAIL` 120, inside the frame's 1px border"
     );
-    assert_eq!(drawn(cx, 2).size, gpui_kit::size(px(520.), px(120.)));
-    centred(cx, 2);
+    assert_eq!(drawn(cx, 3).size, gpui_kit::size(px(520.), px(120.)));
+    centred(cx, 3);
 
-    // The floor follows the reader's zoom like everything else in the row (§7.2).
+    // The floor follows the reader's zoom like everything else in the row (§7.2). What is
+    // baked is baked — a 48px picture stays a crisp 48px in the larger box.
     set_zoom(cx, 1.5);
     assert_eq!(
         frame(cx, 0).size,
         gpui_kit::size(px(72.), px(72.)),
         "half again as large at 150%"
     );
-    assert_eq!(drawn(cx, 0).size, gpui_kit::size(px(1.), px(1.)));
-    assert_eq!(frame(cx, 2).size, gpui_kit::size(px(782.), px(182.)));
+    assert_eq!(drawn(cx, 0).size, gpui_kit::size(px(48.), px(48.)));
+    assert_eq!(frame(cx, 3).size, gpui_kit::size(px(782.), px(182.)));
     set_zoom(cx, 1.0);
 
-    // Opened, a tiny picture is a box as well — the full cap does not change what a 1×1
-    // is — while one with the pixels to spare opens into them.
+    // Opened, a tiny picture is a box as well — the full cap does not change what a 48px
+    // block is — while one with the pixels to spare opens into them.
     cx.update(|window, cx| window.click(row_id("transcript-image-0", "u_1"), cx));
     frames(cx, 2);
     assert_eq!(
         frame(cx, 0).size,
-        gpui_kit::size(px(48.), px(48.)),
+        gpui_kit::size(px(50.), px(50.)),
         "a 1×1 opens into the same box"
     );
+    assert_eq!(drawn(cx, 0).size, gpui_kit::size(px(48.), px(48.)));
     centred(cx, 0);
-    cx.update(|window, cx| window.click(row_id("transcript-image-2", "u_1"), cx));
+    cx.update(|window, cx| window.click(row_id("transcript-image-3", "u_1"), cx));
     frames(cx, 2);
     assert_eq!(
-        frame(cx, 2).size,
+        frame(cx, 3).size,
         gpui_kit::size(px(522.), px(342.)),
         "and a 1000×600 opens to `FULL_IMAGE`'s 340"
     );
-    centred(cx, 2);
+    assert_eq!(drawn(cx, 3).size, gpui_kit::size(px(520.), px(340.)));
+    centred(cx, 3);
+}
+
+/// A picture too small for its box is blown up **by whole pixels**, and nothing else is
+/// touched: no interpolation between them (which is what a scaled draw would give), and no
+/// enlargement at all for a picture that already reaches the box.
+#[test]
+fn a_picture_too_small_for_its_box_is_baked_up_by_whole_pixels() {
+    for (width, height, want) in [
+        (1u32, 1u32, (48u32, 48u32)),
+        (8, 8, (48, 48)),
+        (20, 10, (40, 20)),
+        (24, 24, (48, 48)),
+        // Already the box's size, or longer than it: its own pixels, one for one.
+        (48, 48, (48, 48)),
+        (100, 8, (100, 8)),
+        (1000, 600, (1000, 600)),
+    ] {
+        let bytes = transcript_png_sized(width, height);
+        let decoded = crate::decode_image(&bytes).expect("a decodable PNG");
+        let size = decoded.size(0);
+        assert_eq!(
+            (size.width.0, size.height.0),
+            (want.0 as i32, want.1 as i32),
+            "a {width}×{height} picture bakes to {want:?}"
+        );
+
+        // Every pixel of the bake is a whole copy of the one it came from: the block an
+        // 8×8 makes is 6×6 of the same ink, with no blend at its edge. The copy is in the
+        // order GPUI carries a picture in — BGRA, its own decoders swap the red and blue —
+        // so the expectation is the file's pixel with its outer two bytes exchanged.
+        let factor = (want.0 / width).max(1);
+        let source = image::load_from_memory(&bytes)
+            .expect("the same PNG")
+            .into_rgba8();
+        let baked = decoded.as_bytes(0).expect("one frame");
+        let stride = want.0 as usize * 4;
+        let carried = |rgba: [u8; 4]| [rgba[2], rgba[1], rgba[0], rgba[3]];
+        for y in 0..want.1 {
+            for x in 0..want.0 {
+                let at = y as usize * stride + x as usize * 4;
+                assert_eq!(
+                    &baked[at..at + 4],
+                    carried(source.get_pixel(x / factor, y / factor).0),
+                    "({x}, {y}) of the bake is ({}, {}) of the picture, pixel for pixel",
+                    x / factor,
+                    y / factor
+                );
+            }
+        }
+        // And the order itself, said once where a reader can see it: the fixture's ink is
+        // `Rgba([10, 20, 30, 255])` and the frame carries it blue-first, which is the whole
+        // of "a `RenderImage` is BGRA".
+        assert_eq!(
+            &baked[0..4],
+            &[30, 20, 10, 255],
+            "a `RenderImage` is BGRA, not the RGBA the file holds"
+        );
+    }
 }
 
 /// A one-pixel PNG, made here rather than embedded: the test is about the path from
