@@ -24,13 +24,26 @@
 //! symbols the running image answers with. Nothing here invents one; what the popup
 //! does with what comes back is [`complete`].
 //!
-//! The composer does no I/O. It emits [`ComposerEvent`] and the owner posts the
+//! What a message carries beside its words is the box's own too: the `+` at the foot
+//! asks the system's picker for files, `⌘V` with an image on the clipboard attaches it,
+//! and a drop on the box attaches what was dragged onto it. All three land in one
+//! strip — the third of the box's strips, below the goal and the plan — and all three
+//! go out through [`ComposerEvent::Send`]'s `attachments` ([`attachments`]). The picker
+//! is injectable, so a test can answer it without a dialog.
+//!
+//! The composer does no I/O of its own but one read: telling an image from a file, by
+//! the file's first bytes as well as its name, happens when an attachment is added
+//! rather than on every frame. It emits [`ComposerEvent`] and the owner posts the
 //! request, then reports the outcome with [`Composer::request_finished`]: that is what
-//! keeps a failed send's draft alive, and what keeps the button disabled only while
-//! its own request is in flight.
+//! keeps a failed send's draft alive — its attachments with it — and what keeps the
+//! button disabled only while its own request is in flight.
 
 use std::cell::Cell;
+use std::collections::HashMap;
+use std::io::Read as _;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui_kit::base::input::Position;
 use gpui_kit::base::TextSelection;
@@ -43,11 +56,12 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    anchored, deferred, div, point, px, radians, AbsoluteLength, Anchor, Animation,
-    AnimationExt as _, AnyElement, App, Bounds, BoxShadow, ClickEvent, ClipboardItem, Context,
-    ElementId, Entity, EventEmitter, FocusHandle, FontWeight, Global, HighlightStyle, IntoElement,
-    KeyBinding, Keystroke, KeystrokeEvent, Pixels, Point, Render, ScrollHandle, SharedString,
-    StyledText, Subscription, Task, TestSupportExt as _, WeakEntity, Window,
+    anchored, deferred, div, img, point, px, radians, AbsoluteLength, Anchor, Animation,
+    AnimationExt as _, AnyElement, App, AsyncApp, Bounds, BoxShadow, ClickEvent, ClipboardEntry,
+    ClipboardItem, Context, ElementId, Entity, EventEmitter, ExternalPaths, FocusHandle,
+    FontWeight, Global, HighlightStyle, ImageSource, IntoElement, KeyBinding, Keystroke,
+    KeystrokeEvent, ObjectFit, PathPromptOptions, Pixels, Point, Render, RenderImage, ScrollHandle,
+    SharedString, StyledText, Subscription, Task, TestSupportExt as _, WeakEntity, Window,
 };
 use session::{ordered_segments, GoalInfo, Segment, Todo, TodoStatus, TopicState};
 use store::design::{self, Palette, INSET, MEASURE, RADIUS};
@@ -131,6 +145,34 @@ const TODO_BOX_RADIUS: Pixels = px(3.);
 const TODO_BOX_INSET: Pixels = px(6.);
 /// The chevron's turn when a strip is folded: `.chev{transition:transform .12s ease}`.
 const CHEVRON_TURN: std::time::Duration = std::time::Duration::from_millis(120);
+
+/// One attachment's tile: a 112px thumbnail 72px tall, the name on one line under it,
+/// and the row of them 10px apart.
+///
+/// The numbers are chosen against the todo list's own 156px cap (`STRIP_LIST_MAX`),
+/// which the panel keeps: a tile is 92px tall and a row of them 102, so the cap shows
+/// one row whole and half of the next — a reader can see there is more without the
+/// panel taking the box.
+const TILE: Pixels = px(112.);
+const TILE_GAP: Pixels = px(10.);
+const THUMB: Pixels = px(72.);
+const THUMB_RADIUS: Pixels = px(6.);
+/// How many canvas pixels a tile's own pixel is worth: the thumbnail is decoded once and
+/// drawn from that canvas, so it is made twice the tile's size and is crisp on a display
+/// whose pixels are points.
+const THUMB_SCALE: u32 = 2;
+const TILE_NAME: Pixels = px(16.);
+/// The mark that takes an attachment off the message: an 18px round control at the
+/// tile's top-right, 4px inside it.
+const REMOVE: Pixels = px(18.);
+const REMOVE_INSET: Pixels = px(4.);
+/// The extensions §5.5's `images` takes. A file with one of these names is an image of
+/// the turn whatever its bytes say — and a file whose bytes say image is one whatever
+/// its name says.
+const IMAGE_EXTENSIONS: [&str; 5] = ["png", "jpg", "jpeg", "gif", "webp"];
+/// The name a pasted image is given, with the format it arrived in for its extension:
+/// the clipboard has no file name to offer.
+const PASTED_NAME: &str = "pasted image";
 
 /// The drawer's rows and its model items.
 const DRAWER_ROW: Pixels = px(32.);
@@ -226,6 +268,33 @@ const HISTORY_LIMIT: usize = 64;
 
 /// The action button's element id: one button, addressed by name.
 pub const BUTTON_ID: &str = "composer-action";
+/// The `+` beside it: what a test clicks to open the picker.
+pub const ATTACH_ID: &str = "composer-attach";
+
+/// The system's file picker, as the composer asks for one: the files the reader chose,
+/// `None` when they put the dialog away — or when the platform could not open one.
+///
+/// Injectable ([`Composer::set_picker`]) so a test never opens a real dialog, and so a
+/// capture can be of what the picker's own answer makes of the box.
+pub type PathPicker =
+    Arc<dyn Fn(&mut Window, &mut App) -> Task<Option<Vec<PathBuf>>> + Send + Sync>;
+
+/// The platform's own picker: files, any number of them, and no folders — an attachment
+/// is something evo can carry, and a folder is not.
+fn system_picker(_window: &mut Window, cx: &mut App) -> Task<Option<Vec<PathBuf>>> {
+    let dialog = cx.prompt_for_paths(PathPromptOptions {
+        files: true,
+        directories: false,
+        multiple: true,
+        prompt: None,
+    });
+    cx.spawn(async move |_cx: &mut AsyncApp| match dialog.await {
+        Ok(Ok(paths)) => paths,
+        // A dialog that was put away, or one that could not be opened at all: nothing
+        // was chosen, and nothing is attached.
+        _ => None,
+    })
+}
 
 gpui_kit::actions!(composer, [Interrupt]);
 
@@ -382,6 +451,133 @@ fn is_copy_shortcut(keystroke: &Keystroke) -> bool {
     }
 }
 
+/// Whether a keystroke is this platform's paste shortcut, the chord the input's own
+/// paste is bound to.
+fn is_paste_shortcut(keystroke: &Keystroke) -> bool {
+    if keystroke.key != "v" || keystroke.modifiers.shift || keystroke.modifiers.alt {
+        return false;
+    }
+    if cfg!(target_os = "macos") {
+        keystroke.modifiers.platform
+    } else {
+        keystroke.modifiers.control
+    }
+}
+
+/// The name a tile says under its thumbnail: the file's own, and the whole path when it
+/// has none (`/`), because a tile with no name is a tile nobody can tell from another.
+fn name_of(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    )
+}
+
+/// What one path is, as an attachment: an **image** of the turn when its name says so or
+/// its own first bytes do, and a **file** — a path the agent is handed — otherwise.
+///
+/// Both signals, because either one can be missing. A screenshot's name is whatever took
+/// it chose (`Screenshot 2026-10-02 at 14.03.11.png` ✓, `shot-2026-10-02` ✗), so the
+/// magic is read; and a name is what the reader sees, so a `.png` that is not one is
+/// still an image here — it is what they meant, and the refusal that comes back names
+/// the file (§5.5).
+fn kind_of(path: &Path) -> AttachmentKind {
+    if has_image_extension(path) || looks_like_an_image(path) {
+        AttachmentKind::ImageFile(path.to_path_buf())
+    } else {
+        AttachmentKind::File(path.to_path_buf())
+    }
+}
+
+/// One attachment's thumbnail: the picture the bytes are, scaled to fit a tile and
+/// centred on a canvas of the tile's own shape.
+///
+/// The canvas is the tile, which is the whole point: gpui fits a picture into whatever box
+/// its element is, and a picture that the box cannot hold is not fitted the way the tile
+/// means it to be — a tall one comes out stretched to the box's shape rather than lettered
+/// inside it (measured: a 40×400 picture in a 112×72 box fills it). A thumbnail drawn on a
+/// canvas of the tile's own shape needs no fitting at all: the picture is already where it
+/// belongs, and what is not picture is transparent, so the frame's own fill shows in the
+/// letterbox and the picture's corners are the only corners in the tile.
+///
+/// `None` when the bytes are not a picture evo (or a tile) can draw: the tile then says
+/// what the file is with its own glyph.
+fn prepare_thumbnail(bytes: &[u8]) -> Option<Arc<RenderImage>> {
+    let (canvas_w, canvas_h) = (
+        (f32::from(TILE) * THUMB_SCALE as f32) as u32,
+        (f32::from(THUMB) * THUMB_SCALE as f32) as u32,
+    );
+    let picture = ::image::load_from_memory(bytes).ok()?.into_rgba8();
+    let (w, h) = picture.dimensions();
+    if w == 0 || h == 0 {
+        return None;
+    }
+    // The least scale that holds the whole picture — both ways, so nothing is cropped and
+    // nothing is squashed.
+    let fit = (canvas_w as f32 / w as f32).min(canvas_h as f32 / h as f32);
+    let (fitted_w, fitted_h) = (
+        ((w as f32 * fit).round() as u32).max(1),
+        ((h as f32 * fit).round() as u32).max(1),
+    );
+    let fitted_picture = ::image::imageops::resize(
+        &picture,
+        fitted_w,
+        fitted_h,
+        ::image::imageops::FilterType::Triangle,
+    );
+    let mut canvas = ::image::RgbaImage::new(canvas_w, canvas_h);
+    ::image::imageops::overlay(
+        &mut canvas,
+        &fitted_picture,
+        i64::from((canvas_w - fitted_w) / 2),
+        i64::from((canvas_h - fitted_h) / 2),
+    );
+    Some(Arc::new(RenderImage::new(vec![::image::Frame::new(
+        canvas,
+    )])))
+}
+
+/// Whether the path's own name ends in one of the five image extensions.
+fn has_image_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            IMAGE_EXTENSIONS
+                .iter()
+                .any(|image| extension.eq_ignore_ascii_case(image))
+        })
+}
+
+/// Whether the file's first bytes are one of the five formats' own magic numbers.
+///
+/// A file that cannot be opened, or is too short to say, is not an image by this
+/// reading: the picker's answer is a path, and a path that is not there is something the
+/// reader finds out about when the message is sent.
+fn looks_like_an_image(path: &Path) -> bool {
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut head = [0u8; 12];
+    let Ok(read) = file.read(&mut head) else {
+        return false;
+    };
+    image_magic(&head[..read])
+}
+
+/// The magic number PNG, JPEG, GIF and WebP all lead with — the sniff behind
+/// [`kind_of`], and the same five extensions [`IMAGE_EXTENSIONS`] names.
+fn image_magic(head: &[u8]) -> bool {
+    /// `\x89PNG\r\n\x1a\n`.
+    const PNG: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    head.starts_with(&PNG)
+        // JPEG's start of image, then the first marker.
+        || head.starts_with(&[0xFF, 0xD8, 0xFF])
+        || head.starts_with(b"GIF87a")
+        || head.starts_with(b"GIF89a")
+        // WebP is a RIFF container whose form type is `WEBP` at offset 8.
+        || (head.len() >= 12 && &head[0..4] == b"RIFF" && &head[8..12] == b"WEBP")
+}
+
 /// Whether one-shot bindings have been installed (the keys are global to the app).
 struct KeysBound;
 impl Global for KeysBound {}
@@ -463,6 +659,10 @@ pub struct Composer {
     goal_open: bool,
     /// Whether the todo list is unfolded.
     todos_open: bool,
+    /// Whether the attachments strip is unfolded: the reader's own choice, kept per
+    /// composer, and — like the other two strips — not something a press outside the box
+    /// folds (`Composer::close_drawer_at`).
+    attachments_open: bool,
     /// Whether each strip's chevron was drawn pointing up the last time it was drawn,
     /// and how many times it has turned: `.chev{transition:transform .12s ease}` needs
     /// to know what it is turning from, and a new id to turn under.
@@ -470,6 +670,8 @@ pub struct Composer {
     goal_chevron_turns: u64,
     chevron_up: bool,
     chevron_turns: u64,
+    attachments_chevron_up: bool,
+    attachments_chevron_turns: u64,
     /// The swarm's own busy flag: what the action button's face follows.
     busy: bool,
     /// Whether this box is a swarm's (§7.2): what the button says while it is busy, and
@@ -499,6 +701,19 @@ pub struct Composer {
     /// The drawer's model list, when the catalog is long enough to scroll it: the
     /// region's own position, kept per composer like the strips'.
     models_scroll: ScrollHandle,
+    /// The tile panel's own scroll position, per composer like the todo list's.
+    attachments_scroll: ScrollHandle,
+    /// What the draft carries beside its words, in the order they were added, and the id
+    /// the next one takes — the composer's own counter, so a tile can be taken off while
+    /// others are added around it ([`Attachment::id`]).
+    attachments: Vec<Attachment>,
+    next_attachment: u64,
+    /// Each image attachment's own thumbnail, decoded once when it was added: the picture
+    /// scaled to fit a tile, on a canvas of the tile's own shape, so drawing it is one
+    /// blit and never a fit gpui does per frame. Keyed by attachment id, like the tiles —
+    /// an attachment that is not here (a file, a picture that could not be read) draws the
+    /// file's own glyph.
+    thumbs: HashMap<u64, Arc<RenderImage>>,
     /// The effort slider's own motion: the level's move along the rail, the press,
     /// the hover and the focus fades. One per composer, handed back every render.
     effort_motion: Rc<Motion>,
@@ -507,6 +722,13 @@ pub struct Composer {
     box_bounds: Rc<Cell<Bounds<Pixels>>>,
     /// The rail's keyboard focus, so the arrows move the effort while it is held.
     effort_focus: FocusHandle,
+    /// The file picker the `+` asks: the platform's own dialog, or one a test or the
+    /// capture example put here.
+    picker: PathPicker,
+    /// The picker's own request, while the reader is choosing: held so that the answer
+    /// still lands when the update that asked is over — a dropped task is a cancelled
+    /// one.
+    picking: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -628,10 +850,13 @@ impl Composer {
             model_open: false,
             goal_open: false,
             todos_open: false,
+            attachments_open: false,
             goal_chevron_up: false,
             goal_chevron_turns: 0,
             chevron_up: false,
             chevron_turns: 0,
+            attachments_chevron_up: false,
+            attachments_chevron_turns: 0,
             busy: false,
             in_flight: false,
             history: Vec::new(),
@@ -642,9 +867,15 @@ impl Composer {
             todos_scroll: ScrollHandle::new(),
             goal_scroll: ScrollHandle::new(),
             models_scroll: ScrollHandle::new(),
+            attachments_scroll: ScrollHandle::new(),
+            attachments: Vec::new(),
+            next_attachment: 1,
+            thumbs: HashMap::new(),
             effort_motion: Rc::new(Motion::new()),
             box_bounds: Rc::new(Cell::new(Bounds::default())),
             effort_focus: cx.focus_handle(),
+            picker: Arc::new(system_picker),
+            picking: None,
             swarm: true,
             _subscriptions: vec![subscription, interceptor],
         }
@@ -725,6 +956,21 @@ impl Composer {
             self.refresh(cx);
             cx.notify();
         }
+    }
+
+    /// Have the `+` ask `picker` for files instead of the platform's own dialog.
+    ///
+    /// Tests and the capture example inject one: a dialog is a window nobody in a
+    /// headless run could answer, and what the box does with the answer — image or file,
+    /// tile, count, removal — is what those runs are about.
+    pub fn set_picker(&mut self, picker: PathPicker, cx: &mut Context<Self>) {
+        self.picker = picker;
+        cx.notify();
+    }
+
+    /// What the draft carries beside its words, in the order they were added.
+    pub fn attachments(&self) -> &[Attachment] {
+        &self.attachments
     }
 
     /// The server's answer to the question this box asked: what the caret is on, and
@@ -964,6 +1210,113 @@ impl Composer {
         cx.notify();
     }
 
+    /// Unfold or fold the attachments, which is also that strip's chevron turn.
+    fn toggle_attachments(&mut self, cx: &mut Context<Self>) {
+        self.attachments_chevron_up = self.attachments_open;
+        self.attachments_chevron_turns = self.attachments_chevron_turns.wrapping_add(1);
+        self.attachments_open = !self.attachments_open;
+        cx.notify();
+    }
+
+    /// Ask the picker for files and attach what the reader chose — the `+`'s whole work.
+    ///
+    /// The dialog is asked for in this update (a platform dialog is opened by the
+    /// platform, and its answer arrives whenever the reader gives it), and the answer
+    /// lands in a task of its own: the box does not block on a reader who is still
+    /// choosing, and the composer holds that task so the answer is still delivered.
+    fn pick_attachments(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let picker = self.picker.clone();
+        let chosen = picker(window, cx);
+        self.picking = Some(cx.spawn_in(window, async move |this, cx| {
+            let Some(paths) = chosen.await else {
+                return;
+            };
+            this.update_in(cx, |composer, _window, cx| composer.attach(paths, cx))
+                .ok();
+        }));
+    }
+
+    /// Attach the files at `paths`, in the order they were chosen.
+    fn attach(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        if paths.is_empty() {
+            return;
+        }
+        for path in paths {
+            let name = name_of(&path);
+            let kind = kind_of(&path);
+            // The picture's own bytes, read once: the tile is drawn on every keystroke,
+            // and the file is what the message will carry anyway.
+            let thumb = match &kind {
+                AttachmentKind::ImageFile(path) => std::fs::read(path)
+                    .ok()
+                    .and_then(|bytes| prepare_thumbnail(&bytes)),
+                _ => None,
+            };
+            self.push_attachment(name, kind, thumb);
+        }
+        cx.notify();
+    }
+
+    /// Attach the image the clipboard is holding, if it holds one, and answer whether it
+    /// did — `⌘V`'s own work.
+    ///
+    /// One image entry, whichever comes first: a clipboard can carry several
+    /// representations of what was copied, and the one the reader copied is the one they
+    /// mean. Nothing else in a clipboard is an attachment here — text is the input's own
+    /// paste, untouched, and a copied file is what the picker and a drop are for.
+    fn attach_pasted_image(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(image) = cx.read_from_clipboard().and_then(|item| {
+            item.entries().iter().find_map(|entry| match entry {
+                ClipboardEntry::Image(image) => Some(image.clone()),
+                _ => None,
+            })
+        }) else {
+            return false;
+        };
+        let name = format!("{PASTED_NAME}.{}", image.format.extension());
+        let thumb = prepare_thumbnail(&image.bytes);
+        let kind = AttachmentKind::ImageBytes {
+            media_type: image.format.mime_type().to_string(),
+            bytes: Arc::new(image.bytes.clone()),
+        };
+        self.push_attachment(name, kind, thumb);
+        cx.notify();
+        true
+    }
+
+    /// Put one attachment on the draft, giving it the next id: where all three ways of
+    /// adding one land — the picker, a paste, a drop — so the strip's own rule is written
+    /// once.
+    ///
+    /// It also unfolds the strip on the *first* attachment: the tiles are where a reader
+    /// checks what they just picked, and where a file picked by mistake is taken back, so
+    /// a strip that appeared shut would hide the answer to the dialog they had just
+    /// answered. After that the strip is theirs — adding a fourth does not re-open one
+    /// they folded.
+    fn push_attachment(
+        &mut self,
+        name: String,
+        kind: AttachmentKind,
+        thumb: Option<Arc<RenderImage>>,
+    ) {
+        let id = self.next_attachment;
+        self.next_attachment += 1;
+        if let Some(thumb) = thumb {
+            self.thumbs.insert(id, thumb);
+        }
+        if self.attachments.is_empty() {
+            self.attachments_open = true;
+        }
+        self.attachments.push(Attachment { id, name, kind });
+    }
+
+    /// Take one attachment off the message — the tile's own `×`.
+    fn remove_attachment(&mut self, id: u64, cx: &mut Context<Self>) {
+        self.attachments.retain(|attachment| attachment.id != id);
+        self.thumbs.remove(&id);
+        cx.notify();
+    }
+
     /// A strip's chevron: the design's one glyph — an up chevron — drawn at 12px and
     /// turned over the design's 120ms when the strip is folded (`open` is 0°, the
     /// folded state the 180° the CSS rotates it to). `key` and `drawn` are the strip's
@@ -1098,12 +1451,17 @@ impl Composer {
     /// Report the outcome of this composer's own request.
     ///
     /// `ok` clears the draft — the input is emptied only after the server took the
-    /// text. A failed send (or an interrupt) leaves it alone.
+    /// text. A failed send (or an interrupt) leaves it alone, and leaves what it carries
+    /// attached: a refusal names what was wrong (`image could not be read: …`), so the
+    /// reader fixes that and sends the same message again.
     pub fn request_finished(&mut self, ok: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.in_flight = false;
         if ok {
             self.input
                 .update(cx, |input, cx| input.set_value("", window, cx));
+            // The attachments went with the message, so the next one starts empty.
+            self.attachments.clear();
+            self.thumbs.clear();
         }
         cx.notify();
     }
@@ -1154,27 +1512,44 @@ impl Composer {
         self.input.update(cx, |input, cx| input.focus(window, cx));
     }
 
-    /// Emit `Send` for a non-blank draft, unless a request is already in flight.
+    /// Emit `Send` for a message — its words, or what it carries — unless a request is
+    /// already in flight.
+    ///
+    /// A draft with attachments and no text is a message: the files are what it says
+    /// (§5.5), and a blank box with a picture attached is not a blank box.
     fn send(&mut self, draft: String, cx: &mut Context<Self>) {
-        if self.in_flight || draft.trim().is_empty() {
+        if self.in_flight || (draft.trim().is_empty() && self.attachments.is_empty()) {
             return;
         }
         self.in_flight = true;
         // A prompt is remembered the moment it is sent, not when the server takes
         // it: the reader's ↑ should bring back what they just sent even if the
-        // request is still on its way.
-        self.remember(&draft);
+        // request is still on its way. A message with no words is not a prompt —
+        // there is nothing for ↑ to bring back.
+        if !draft.trim().is_empty() {
+            self.remember(&draft);
+        }
         self.walking = None;
         // A message that *is* a slash command is the command's, not the agent's:
         // it goes to `command.run`, and the server decides — including whether
         // the command exists at all. Anything else, `/` and all, is the reader's
-        // words to the coordinator.
-        let event = match complete::command_message(&draft) {
+        // words to the coordinator. A message carrying attachments is not a
+        // command: a command has nowhere to put a file, and the reader attached
+        // one to what they wrote.
+        let event = match self
+            .attachments
+            .is_empty()
+            .then(|| complete::command_message(&draft))
+            .flatten()
+        {
             Some((name, args)) => ComposerEvent::Command {
                 name: name.to_string(),
                 args: args.to_string(),
             },
-            None => ComposerEvent::Send(Outgoing::from(draft)),
+            None => ComposerEvent::Send(Outgoing {
+                text: draft,
+                attachments: self.attachments.clone(),
+            }),
         };
         cx.emit(event);
         cx.notify();
@@ -1271,6 +1646,15 @@ impl Composer {
                 "escape" => return self.dismiss(cx),
                 _ => {}
             }
+        }
+
+        // `⌘V` with an image on the clipboard attaches it rather than pasting it: the
+        // input can draw nothing of a picture, and the reader means to send it. Text on
+        // the clipboard is the input's own paste, and this leaves it alone — it is taken
+        // only when there is an image to take.
+        if is_paste_shortcut(keystroke) && self.attach_pasted_image(cx) {
+            cx.stop_propagation();
+            return;
         }
 
         // A plain `Enter` submits, but the input submits at the end of this update:
@@ -1576,6 +1960,244 @@ impl Composer {
             );
         }
         Some(strip.into_any_element())
+    }
+
+    /// The attachments strip: the title row, always, and the tiles under it while it is
+    /// open.
+    ///
+    /// It is the third of the box's strips and stands below the other two, because it is
+    /// the *draft's* own state where those are the topic's: the goal and the plan are
+    /// what the agent is working on, and this is what the message being written carries
+    /// — so it stands closest to the input the message is written in, and the drawer,
+    /// which folds out of a chip in the foot rather than standing as state, comes after
+    /// all three of them.
+    ///
+    /// An empty draft has no strip: there is nothing to say, and a row of chrome saying
+    /// `Attachments 0` is worse than none.
+    fn attachments_strip(
+        &self,
+        palette: &'static Palette,
+        cx: &Context<Self>,
+        top: bool,
+    ) -> Option<AnyElement> {
+        if self.attachments.is_empty() {
+            return None;
+        }
+        let open = self.attachments_open;
+        // The design's own count, in the ink over the row's muted words
+        // (`.todo-strip-count`), spelled as the user's own reading of it:
+        // `Attachments 3`.
+        let count = SharedString::from(format!("Attachments {}", self.attachments.len()));
+        let mut strip = v_flex()
+            .id("attachments-strip")
+            .test_support()
+            .w_full()
+            .flex_none()
+            .bg(paint::color(palette.sidebar))
+            .when(top, |this| this.rounded_t(BOX_INNER_RADIUS))
+            .border_b_1()
+            .border_color(paint::color(palette.border))
+            .child(self.strip_row(
+                "attachments-strip-row",
+                count.clone(),
+                vec![div()
+                    .flex_none()
+                    .font_weight(widgets::text::MEDIUM)
+                    .text_color(paint::color(palette.fg))
+                    .child(count)
+                    .into_any_element()],
+                self.chevron(
+                    open,
+                    "attachments-chevron",
+                    self.attachments_chevron_up,
+                    self.attachments_chevron_turns,
+                ),
+                palette,
+                cx.listener(|this, _, _, cx| this.toggle_attachments(cx)),
+            ));
+        if open {
+            // The panel scrolls past the todo list's own cap, on the same host-and-bar
+            // shape and with a handle of its own, so two tabs' panels do not share a
+            // scroll position.
+            strip = strip.child(
+                div()
+                    .id(("attachments-host", cx.entity_id()))
+                    .relative()
+                    .w_full()
+                    .flex_none()
+                    .child(
+                        div()
+                            .id("attachments-panel")
+                            .test_support()
+                            .w_full()
+                            .max_h(STRIP_LIST_MAX)
+                            .overflow_y_scroll()
+                            .track_scroll(&self.attachments_scroll)
+                            .px(px(14.))
+                            .pb(px(4.))
+                            .child(
+                                h_flex()
+                                    .w_full()
+                                    .items_start()
+                                    .flex_wrap()
+                                    .gap(TILE_GAP)
+                                    .children(self.attachments.iter().enumerate().map(
+                                        |(index, attachment)| {
+                                            self.attachment_tile(index, attachment, palette, cx)
+                                        },
+                                    )),
+                            ),
+                    )
+                    .vertical_scrollbar(&self.attachments_scroll),
+            );
+        }
+        Some(strip.into_any_element())
+    }
+
+    /// One attachment, as a tile: its thumbnail, the name under it, and the `×` that
+    /// takes it off the message.
+    ///
+    /// The name is one line with an ellipsis (`truncate`) and the whole of it on hover,
+    /// because a name is what a reader tells two files apart by and the tile is narrower
+    /// than most names. The `×` is drawn always rather than under the pointer: it is the
+    /// one way back from a file picked by mistake, and a control that is only there for a
+    /// reader who already knows it is there is not a control.
+    fn attachment_tile(
+        &self,
+        index: usize,
+        attachment: &Attachment,
+        palette: &'static Palette,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let id = attachment.id;
+        let name = SharedString::from(attachment.name.clone());
+        v_flex()
+            .id(ElementId::from(format!("attachment-{index}")))
+            .test_support()
+            .aria_label(name.clone())
+            .w(TILE)
+            .flex_none()
+            .gap(px(4.))
+            .child(
+                div()
+                    .id(ElementId::from(format!("attachment-thumb-{index}")))
+                    .test_support()
+                    .relative()
+                    .w(TILE)
+                    .h(THUMB)
+                    .flex_none()
+                    // The frame, and the picture's own curve with it: a child is not
+                    // clipped to a rounded parent (gpui's clip is the rectangle), so a
+                    // picture left square paints its corners over the frame's curve —
+                    // the same wedge the box's own children would leave on the box.
+                    .rounded(THUMB_RADIUS)
+                    .overflow_hidden()
+                    .bg(paint::color(palette.input))
+                    .child(self.thumbnail(index, attachment, palette))
+                    .child(
+                        div()
+                            .id(ElementId::from(format!("attachment-remove-{index}")))
+                            .test_support()
+                            .aria_label(SharedString::from(format!("Remove {name}")))
+                            // Over the picture, at the tile's top-right: a card of the
+                            // input surface with the chips' own hairline, so the mark is
+                            // legible on any picture in either mode.
+                            .absolute()
+                            .top(REMOVE_INSET)
+                            .right(REMOVE_INSET)
+                            .size(REMOVE)
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(f32::from(REMOVE) / 2.))
+                            .bg(paint::color(palette.input))
+                            .border_1()
+                            .border_color(paint::color(palette.border))
+                            .hover(move |mark| mark.border_color(paint::color(palette.muted_fg)))
+                            .tooltip(|window, cx| {
+                                widgets::tooltip::text(
+                                    "attachment-remove-tooltip",
+                                    "Remove",
+                                    px(240.),
+                                    window,
+                                    cx,
+                                )
+                            })
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| this.remove_attachment(id, cx)),
+                            )
+                            .child(
+                                Icon::new(IconName::Close)
+                                    .size(px(10.))
+                                    .text_color(paint::color(palette.fg)),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .id(ElementId::from(format!("attachment-name-{index}")))
+                    .test_support()
+                    .w_full()
+                    .min_w_0()
+                    .truncate()
+                    .h(TILE_NAME)
+                    .text_size(DETAIL_FONT)
+                    .text_color(paint::color(palette.muted_fg))
+                    .tooltip({
+                        let name = name.clone();
+                        move |window, cx| {
+                            widgets::tooltip::text(
+                                ElementId::from(format!("attachment-name-tooltip-{index}")),
+                                name.clone(),
+                                px(320.),
+                                window,
+                                cx,
+                            )
+                        }
+                    })
+                    .child(name),
+            )
+            .into_any_element()
+    }
+
+    /// A tile's picture: the attachment's own thumbnail, or the file's own glyph when it
+    /// has none.
+    ///
+    /// The thumbnail *is* the tile's box ([`prepare_thumbnail`]), so the picture covers the
+    /// frame exactly and gpui's `object_fit` has nothing left to decide: it is a picture of
+    /// the tile's own shape being drawn into the tile. The curve is the frame's
+    /// ([`THUMB_RADIUS`]), carried by the picture itself — a picture left square would
+    /// paint its own corners over the frame's curve.
+    fn thumbnail(
+        &self,
+        index: usize,
+        attachment: &Attachment,
+        palette: &'static Palette,
+    ) -> AnyElement {
+        match self.thumbs.get(&attachment.id) {
+            Some(thumb) => img(ImageSource::Render(thumb.clone()))
+                .id(ElementId::from(format!("attachment-picture-{index}")))
+                .w(TILE)
+                .h(THUMB)
+                .flex_none()
+                .object_fit(ObjectFit::Fill)
+                .rounded(THUMB_RADIUS)
+                // Last: `test_support` wraps the element, and the wrapper is not an image
+                // to gpui — the style has to be on the `Img` itself.
+                .test_support()
+                .into_any_element(),
+            None => div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    Icon::new(IconName::File)
+                        .size(px(24.))
+                        .text_color(paint::color(palette.muted_fg)),
+                )
+                .into_any_element(),
+        }
     }
 
     /// The drawer the model chip opened, folded out inside the box under the strips.
@@ -2244,7 +2866,46 @@ impl Composer {
             row = row.child(slot);
         }
         row.child(div().flex_1())
+            // The `+`, immediately left of the one action button, and nothing between
+            // them but the row's own gap.
+            .child(self.attach_button(palette, cx))
             .child(self.action_button(cx))
+            .into_any_element()
+    }
+
+    /// The `+` of the foot row: the chip's own language — a 26px pill one step of the
+    /// ink into the input surface, its glyph in the ink — instead of a second action
+    /// button, because it is not the row's action: what it opens is a dialog, and what it
+    /// makes is an attachment the action then carries.
+    ///
+    /// The design has no `+` to copy (`doc.tsx`'s `.composer-foot` is the chips and the
+    /// one button), so it is drawn as what the row already has: the chips' height, their
+    /// pill, their three fills, and their rest ink — with the muted spelling of it, since
+    /// the `+` is a way in rather than a fact.
+    fn attach_button(&self, palette: &'static Palette, cx: &Context<Self>) -> AnyElement {
+        let hover = widgets::chip::fill(palette, true, false);
+        div()
+            .id(ATTACH_ID)
+            .test_support()
+            .flex_none()
+            .aria_label("Add attachments")
+            .flex()
+            .items_center()
+            .justify_center()
+            .h(px(widgets::chip::HEIGHT))
+            .px(px(widgets::chip::PAD))
+            .rounded(px(widgets::chip::RADIUS))
+            .bg(widgets::chip::fill(palette, false, false))
+            .text_color(paint::color(palette.muted_fg))
+            // The row's controls keep the arrow the window draws
+            // (`.chip{cursor:default}`), and this one is one of them.
+            .cursor_default()
+            .hover(move |button| button.bg(hover).text_color(paint::color(palette.fg)))
+            .tooltip(|window, cx| {
+                widgets::tooltip::text("attach-tooltip", "Add attachments", px(240.), window, cx)
+            })
+            .on_click(cx.listener(|this, _, window, cx| this.pick_attachments(window, cx)))
+            .child(Icon::new(IconName::Plus).size(px(14.)))
             .into_any_element()
     }
 
@@ -2422,16 +3083,22 @@ impl Render for Composer {
         }
 
         // The strips stand over the input in the box's own order: the goal first, then
-        // the plan, then the drawer a chip folded out. The first of them is the box's
-        // first child and takes the box's top corners.
+        // the plan, then what the draft carries, then the drawer a chip folded out. The
+        // first of them is the box's first child and takes the box's top corners.
         let goal = self.goal_strip(palette, cx, true);
         let strip = self.todo_strip(palette, cx, goal.is_none());
-        let drawer = self.drawer_panel(palette, window, cx, goal.is_none() && strip.is_none());
+        let attach = self.attachments_strip(palette, cx, goal.is_none() && strip.is_none());
+        let drawer = self.drawer_panel(
+            palette,
+            window,
+            cx,
+            goal.is_none() && strip.is_none() && attach.is_none(),
+        );
         let foot = self.foot(palette, cx);
         // With neither strip nor drawer open the input's wrapper is the box's first
         // child: its own top corners are the box's, and it is the only child painting
         // there.
-        let body_at_top = goal.is_none() && strip.is_none() && drawer.is_none();
+        let body_at_top = goal.is_none() && strip.is_none() && attach.is_none() && drawer.is_none();
 
         // The completion popup floats at the caret, out of the box's own clipping: a
         // deferred draw is painted after its ancestors, so neither the box's fold nor
@@ -2532,8 +3199,17 @@ impl Render for Composer {
                     // own interrupt (the TUI's).
                     .key_context(KEY_CONTEXT)
                     .on_action(cx.listener(Self::interrupt_action))
+                    // Files dragged onto the box are attachments, the same as the
+                    // picker's own answer: the third way a reader adds one, and the one
+                    // that needs no dialog at all. Nothing else is dropped on: what a
+                    // drag carries may be anything, and only paths are a file.
+                    .can_drop(|dragged, _, _| dragged.is::<ExternalPaths>())
+                    .on_drop(cx.listener(|this, paths: &ExternalPaths, _window, cx| {
+                        this.attach(paths.0.iter().cloned().collect(), cx)
+                    }))
                     .children(goal)
                     .children(strip)
+                    .children(attach)
                     .children(drawer)
                     .child(
                         // Everything under the strip: the input and the foot, on the
@@ -2762,6 +3438,31 @@ mod tests {
 
         fn input_frame(&self, cx: &App) -> (&'static str, EntityId) {
             ("input", self.composer.read(cx).input.entity_id())
+        }
+
+        /// Answer the `+` with these paths, as the platform's dialog would: the stand-in
+        /// these tests inject so that no dialog is ever opened where nobody could answer
+        /// it.
+        fn use_picker(&self, paths: Vec<PathBuf>, cx: &mut App) {
+            let picker: PathPicker = Arc::new(move |_, _| Task::ready(Some(paths.clone())));
+            self.composer
+                .update(cx, |composer, cx| composer.set_picker(picker, cx));
+        }
+
+        /// Shape the picker's answer, press the `+`, and let the answer land: the whole of
+        /// what a reader does to attach files.
+        fn pick_files(&self, paths: Vec<PathBuf>, cx: &mut TestAppContext) {
+            cx.update(|cx| self.use_picker(paths, cx));
+            self.act(cx, |window, cx| {
+                window.render_frame(cx);
+                window.click(ATTACH_ID, cx);
+            });
+            cx.run_until_parked();
+        }
+
+        /// What the draft is carrying, as the box holds it.
+        fn attached(&self, cx: &TestAppContext) -> Vec<Attachment> {
+            cx.read(|cx| self.composer.read(cx).attachments().to_vec())
         }
 
         fn busy(&self, busy: bool, cx: &mut App) {
@@ -4107,6 +4808,739 @@ mod tests {
                 "the box is still there"
             );
         });
+    }
+
+    // -----------------------------------------------------------------------
+    // What the message carries: the picker, the tiles, the paste, the drop
+    // -----------------------------------------------------------------------
+
+    /// A directory of the test's own, removed when the test ends.
+    ///
+    /// The picker's answer is real paths and telling an image from a file reads the file
+    /// itself, so these tests need files that are there.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Scratch {
+            let dir = std::env::temp_dir().join(format!(
+                "composer-attachments-{}-{name}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("a scratch directory");
+            Scratch(dir)
+        }
+
+        /// A file of these bytes, answering the path it is at.
+        fn write(&self, name: &str, bytes: &[u8]) -> PathBuf {
+            let path = self.0.join(name);
+            std::fs::write(&path, bytes).expect("a scratch file");
+            path
+        }
+
+        /// A file of this name and no file behind it: the path a picker answers with for
+        /// something that has since gone, or for a name read without the bytes.
+        fn path(&self, name: &str) -> PathBuf {
+            self.0.join(name)
+        }
+
+        /// A real PNG of that size — the bytes an image of the turn really is, magic
+        /// number and all.
+        fn png(&self, name: &str, width: u32, height: u32) -> PathBuf {
+            let image = image::RgbaImage::from_fn(width, height, |x, y| {
+                image::Rgba([(x * 6) as u8, (y * 6) as u8, 0x40, 0xFF])
+            });
+            let mut bytes = std::io::Cursor::new(Vec::new());
+            image
+                .write_to(&mut bytes, image::ImageFormat::Png)
+                .expect("encode a PNG");
+            self.write(name, &bytes.into_inner())
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Every extension §5.5's images take, a name that lies, a file with no name to go
+    /// by, and the two things that are not images at all: what `kind_of` reads, and why
+    /// it reads both signals.
+    #[test]
+    fn an_image_is_told_from_a_file_by_its_name_and_by_its_own_bytes() {
+        let scratch = Scratch::new("kinds");
+        // A real PNG, and the four other formats' magic numbers, written where their
+        // names say nothing at all.
+        let png = scratch.png("shot.png", 24, 12);
+        let unnamed_png = scratch.write("shot-2026-10-02", &std::fs::read(&png).unwrap());
+        let webp = scratch.write("a.webp", b"RIFF\x24\x00\x00\x00WEBPVP8 \x00\x00\x00\x00");
+        let gif = scratch.write("b.gif", b"GIF89a\x01\x00\x01\x00\x00");
+        let jpeg = scratch.write("c", &[0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]);
+        // A name that lies, and a name that knows: extension is what the reader sees, and
+        // the refusal that comes back names the file (§5.5).
+        let lying = scratch.write("screenshot.png", b"this is not a picture\n");
+        let text = scratch.write("notes.txt", b"plain words, no magic in them\n");
+        // A file that is not there: a path, and nothing to sniff — the name decides.
+        let gone = scratch.path("gone.png");
+        let gone_text = scratch.path("gone.txt");
+
+        for (path, image) in [
+            (&png, true),
+            (&unnamed_png, true),
+            (&webp, true),
+            (&gif, true),
+            (&jpeg, true),
+            (&lying, true),
+            (&gone, true),
+            (&text, false),
+            (&gone_text, false),
+        ] {
+            let kind = kind_of(path);
+            assert_eq!(
+                matches!(kind, AttachmentKind::ImageFile(_)),
+                image,
+                "{path:?} as an attachment: {kind:?}"
+            );
+            assert_eq!(
+                matches!(kind, AttachmentKind::File(_)),
+                !image,
+                "and it is one or the other: {kind:?}"
+            );
+        }
+    }
+
+    /// A thumbnail is the whole picture fitted onto a canvas of the tile's own shape: the
+    /// picture's own proportions, inside the tile, centred — with the letterbox left
+    /// transparent so the frame's own fill shows through, and never the picture stretched
+    /// to the tile's shape.
+    #[test]
+    fn a_thumbnail_is_the_whole_picture_fitted_to_the_tile() {
+        let scratch = Scratch::new("thumbs");
+        let canvas = (
+            (f32::from(TILE) as u32) * THUMB_SCALE,
+            (f32::from(THUMB) as u32) * THUMB_SCALE,
+        );
+        // A tall picture, a wide one, and one of the tile's own shape: the three cases a
+        // fit has to get right.
+        for (name, width, height) in [
+            ("tall.png", 40u32, 400u32),
+            ("wide.png", 400, 40),
+            ("square.png", 96, 96),
+        ] {
+            let bytes = std::fs::read(scratch.png(name, width, height)).expect("the picture");
+            let thumb = prepare_thumbnail(&bytes).expect("a thumbnail");
+            let drawn_size = thumb.size(0);
+            assert_eq!(
+                (drawn_size.width.0, drawn_size.height.0),
+                (canvas.0 as i32, canvas.1 as i32),
+                "{name}: the canvas is the tile"
+            );
+
+            let pixels = thumb.as_bytes(0).expect("the frame's pixels");
+            let opaque = |x: u32, y: u32| pixels[((y * canvas.0 + x) * 4 + 3) as usize] == 255;
+            let columns: Vec<u32> = (0..canvas.0)
+                .filter(|x| (0..canvas.1).any(|y| opaque(*x, y)))
+                .collect();
+            let rows: Vec<u32> = (0..canvas.1)
+                .filter(|y| (0..canvas.0).any(|x| opaque(x, *y)))
+                .collect();
+            let drawn = (
+                columns[columns.len() - 1] - columns[0] + 1,
+                rows[rows.len() - 1] - rows[0] + 1,
+            );
+            // The picture's own shape …
+            let fit = (canvas.0 as f32 / width as f32).min(canvas.1 as f32 / height as f32);
+            let expected = (
+                (width as f32 * fit).round() as u32,
+                (height as f32 * fit).round() as u32,
+            );
+            assert!(
+                drawn.0.abs_diff(expected.0) <= 1 && drawn.1.abs_diff(expected.1) <= 1,
+                "{name}: {drawn:?} is not the picture's own {expected:?}"
+            );
+            // … inside the tile, using up one of its two ways, and centred on it.
+            assert!(
+                drawn.0 <= canvas.0 && drawn.1 <= canvas.1,
+                "{name}: {drawn:?} inside {canvas:?}"
+            );
+            assert!(
+                drawn.0 == canvas.0 || drawn.1 == canvas.1,
+                "{name}: {drawn:?} is fitted to {canvas:?}, not adrift in it"
+            );
+            let left = columns[0];
+            let right = canvas.0 - 1 - columns[columns.len() - 1];
+            assert!(
+                left.abs_diff(right) <= 1,
+                "{name}: centred ({left} vs {right})"
+            );
+        }
+
+        // Bytes that are not a picture have no thumbnail: the tile says `file` instead.
+        assert!(
+            prepare_thumbnail(b"not a picture at all, however it is named").is_none(),
+            "and nothing is invented for bytes that are not one"
+        );
+    }
+
+    /// The `+` is the foot row's own control — a chip's pill, a chip's height, a chip's
+    /// three fills — standing immediately left of the one action button, and what it asks
+    /// the picker for is what the draft then carries.
+    #[gpui_kit::test]
+    fn the_plus_asks_the_picker_and_the_draft_carries_what_it_answers(cx: &mut TestAppContext) {
+        let scratch = Scratch::new("plus");
+        let shot = scratch.png("shot.png", 40, 24);
+        let notes = scratch.write("notes.txt", b"plain words\n");
+        let f = open(cx);
+
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            let plus = window.find(ATTACH_ID);
+            assert_eq!(
+                plus.bounds().size.height,
+                px(widgets::chip::HEIGHT),
+                "the chips' own height"
+            );
+            assert_eq!(
+                plus.bounds().size.width,
+                px(2. * widgets::chip::PAD + 14.),
+                "a pill around one glyph, with the chips' own padding"
+            );
+            assert_eq!(plus.label(), Some("Add attachments"), "and its name");
+            let button = window.find(BUTTON_ID).bounds();
+            assert!(
+                plus.bounds().right() <= button.left(),
+                "left of the one button: {:?} vs {button:?}",
+                plus.bounds()
+            );
+            assert_eq!(
+                plus.bounds().center().y,
+                button.center().y,
+                "on the button's own line"
+            );
+        });
+
+        f.pick_files(vec![shot.clone(), notes.clone()], cx);
+
+        let attached = f.attached(cx);
+        assert_eq!(attached.len(), 2, "both files are on the draft");
+        assert_eq!(attached[0].name, "shot.png");
+        assert!(
+            matches!(&attached[0].kind, AttachmentKind::ImageFile(path) if *path == shot),
+            "the picture is an image of the turn: {:?}",
+            attached[0].kind
+        );
+        assert!(attached[0].is_image());
+        assert_eq!(attached[1].name, "notes.txt");
+        assert!(
+            matches!(&attached[1].kind, AttachmentKind::File(path) if *path == notes),
+            "the text file is a file: {:?}",
+            attached[1].kind
+        );
+        assert!(!attached[1].is_image());
+        assert_ne!(
+            attached[0].id, attached[1].id,
+            "each has its own id, so one can be taken off around the other"
+        );
+    }
+
+    /// With no picker injected the `+` asks the platform's own dialog: files, several of
+    /// them, and no folders — an attachment is something evo can carry, and a folder is
+    /// not.
+    #[gpui_kit::test]
+    fn the_plus_asks_the_platform_for_files_when_no_picker_is_injected(cx: &mut TestAppContext) {
+        let scratch = Scratch::new("platform");
+        let shot = scratch.png("shot.png", 8, 8);
+        let f = open(cx);
+
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            window.click(ATTACH_ID, cx);
+        });
+        assert!(
+            cx.did_prompt_for_paths(),
+            "the platform's own dialog was opened"
+        );
+        cx.simulate_path_prompt_response(move |options| {
+            assert!(options.files, "files are what it offers");
+            assert!(!options.directories, "and not folders");
+            assert!(options.multiple, "any number of them");
+            Some(vec![shot])
+        });
+        cx.run_until_parked();
+
+        assert_eq!(f.attached(cx).len(), 1, "the dialog's answer is attached");
+    }
+
+    /// The strip states the count, opens on the first attachment — the tiles are where a
+    /// reader checks the answer they just gave a dialog — and folds and unfolds from its
+    /// own row. It stands under the goal's and the plan's strips, closest to the input
+    /// the message is written in.
+    #[gpui_kit::test]
+    fn the_attachments_strip_counts_them_and_folds_out_under_the_other_strips(
+        cx: &mut TestAppContext,
+    ) {
+        let scratch = Scratch::new("strip");
+        let f = open(cx);
+        f.act(cx, |window, cx| {
+            let state = state_with(&["model"]);
+            f.set_agent(&state, cx);
+            window.render_frame(cx);
+            assert!(
+                window.try_find("attachments-strip-row").is_none(),
+                "an empty draft has no strip"
+            );
+        });
+
+        f.pick_files(
+            vec![
+                scratch.png("shot.png", 40, 24),
+                scratch.write("notes.txt", b"plain words\n"),
+            ],
+            cx,
+        );
+
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+
+            let row = window.find("attachments-strip-row");
+            assert_eq!(row.label(), Some("Attachments 2"), "the count is the row");
+            let goal = window.find("goal-strip-row").bounds();
+            let todos = window.find("todo-strip-row").bounds();
+            let attach = row.bounds();
+            let input = window.find(f.input_frame(cx)).bounds();
+            assert!(
+                goal.bottom() <= todos.top()
+                    && todos.bottom() <= attach.top()
+                    && attach.bottom() <= input.top(),
+                "the box's own order: the goal, then the plan, then what the draft \
+                 carries, then the input: {goal:?} {todos:?} {attach:?} {input:?}"
+            );
+            assert!(
+                window.find("attachment-0").visible() && window.find("attachment-1").visible(),
+                "and the panel is open: the reader sees what they picked"
+            );
+            assert_eq!(
+                window.find("attachment-0").label(),
+                Some("shot.png"),
+                "a tile is the file's name"
+            );
+            assert_eq!(window.find("attachment-1").label(), Some("notes.txt"));
+
+            // The tile's own numbers: a 112px thumbnail 72px tall, the name under it, and
+            // a panel that caps at the todo list's own 156px — a row of tiles and a half,
+            // so a reader can see there is more.
+            let thumb = window.find("attachment-thumb-0");
+            assert_eq!(thumb.bounds().size.width, TILE);
+            assert_eq!(thumb.bounds().size.height, THUMB);
+            // The picture is the frame's own box, not the picture's own shape: gpui reads
+            // an image element's aspect ratio off the image it is about to draw, so a
+            // `size_full` picture lays out taller than the frame and is then cut by the
+            // frame's *rectangle* rather than its curve — a square corner in the wedge
+            // the curve leaves. Both are the frame's numbers here, so neither can happen.
+            let picture = window.find("attachment-picture-0");
+            assert_eq!(
+                picture.bounds().size,
+                thumb.bounds().size,
+                "the picture is the frame: {:?} vs {:?}",
+                picture.bounds(),
+                thumb.bounds()
+            );
+            assert!(
+                window.try_find("attachment-picture-1").is_none(),
+                "and the text file draws a glyph rather than a picture"
+            );
+            let name = window.find("attachment-name-0");
+            assert!(
+                name.bounds().top() >= thumb.bounds().bottom(),
+                "the name is under the thumbnail: {name:?} vs {:?}",
+                thumb.bounds()
+            );
+            let panel = window.find("attachments-panel").bounds();
+            let first = window.find("attachment-0").bounds();
+            let second = window.find("attachment-1").bounds();
+            assert_eq!(
+                first.top(),
+                second.top(),
+                "two tiles are one row: {first:?} vs {second:?}"
+            );
+            assert!(
+                panel.size.height <= STRIP_LIST_MAX,
+                "the panel is inside the todo list's own cap: {panel:?}"
+            );
+            assert!(
+                panel.bottom() <= window.find(f.input_frame(cx)).bounds().top(),
+                "and it is above the input: {panel:?}"
+            );
+
+            // Folded and unfolded from the row itself.
+            window.click("attachments-strip-row", cx);
+            window.render_frame(cx);
+            assert!(
+                window.try_find("attachments-panel").is_none(),
+                "the row folds the panel away"
+            );
+            assert_eq!(
+                window.find("attachments-strip-row").label(),
+                Some("Attachments 2"),
+                "and the count stays on the row"
+            );
+            window.click("attachments-strip-row", cx);
+            window.render_frame(cx);
+            assert!(window.find("attachments-panel").visible());
+        });
+    }
+
+    /// More tiles than the panel shows at once: it keeps the todo list's own 156px cap
+    /// and the tiles move under it, so a draft with a dozen attachments is one panel and
+    /// not a box that grows past the conversation.
+    #[gpui_kit::test]
+    fn a_long_row_of_tiles_caps_and_scrolls(cx: &mut TestAppContext) {
+        let scratch = Scratch::new("cap");
+        let f = open(cx);
+        let paths: Vec<PathBuf> = (0..12)
+            .map(|n| scratch.png(&format!("shot-{n:02}.png"), 32, 20))
+            .collect();
+        f.pick_files(paths, cx);
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            let panel = window.find("attachments-panel").bounds();
+            assert_eq!(
+                panel.size.height, STRIP_LIST_MAX,
+                "the panel stops at the todo list's own cap: {panel:?}"
+            );
+            let first = window.find("attachment-0").bounds().top();
+            window.scroll(
+                "attachments-panel",
+                gpui_kit::ScrollDelta::Pixels(point(px(0.), px(-60.))),
+                cx,
+            );
+            window.render_frame(cx);
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("attachments-panel").bounds().size.height,
+                panel.size.height,
+                "scrolling does not grow the panel"
+            );
+            assert!(
+                window.find("attachment-0").bounds().top() < first,
+                "the tiles move under the cap: {} was {first:?}",
+                window.find("attachment-0").bounds().top()
+            );
+        });
+    }
+
+    /// A tile's own `×` takes that one attachment off the message — and only that one, so
+    /// a file picked by mistake does not cost the files picked with it.
+    #[gpui_kit::test]
+    fn a_tiles_x_takes_one_attachment_off_the_message(cx: &mut TestAppContext) {
+        let scratch = Scratch::new("remove");
+        let f = open(cx);
+        f.pick_files(
+            vec![
+                scratch.png("one.png", 24, 16),
+                scratch.write("two.txt", b"two\n"),
+                scratch.png("three.png", 24, 16),
+            ],
+            cx,
+        );
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("attachments-strip-row").label(),
+                Some("Attachments 3")
+            );
+
+            window.click("attachment-remove-1", cx);
+            window.render_frame(cx);
+
+            let names: Vec<String> = [window.find("attachment-0"), window.find("attachment-1")]
+                .iter()
+                .map(|tile| tile.label().unwrap_or_default().to_string())
+                .collect();
+            assert_eq!(
+                names,
+                vec!["one.png".to_string(), "three.png".to_string()],
+                "the middle one is gone, the others are where they were"
+            );
+            assert_eq!(
+                window.find("attachments-strip-row").label(),
+                Some("Attachments 2"),
+                "and the count follows"
+            );
+
+            // The last one off leaves no strip at all: an empty draft has nothing to say.
+            window.click("attachment-remove-0", cx);
+            window.render_frame(cx);
+            window.click("attachment-remove-0", cx);
+            window.render_frame(cx);
+            assert!(
+                window.try_find("attachments-strip-row").is_none(),
+                "nothing attached, no strip"
+            );
+        });
+    }
+
+    /// A press outside the box folds the model drawer and nothing else: the strips are
+    /// where a reader reads, and the tiles stand until they are taken off.
+    #[gpui_kit::test]
+    fn a_press_outside_the_box_leaves_the_attachments_open(cx: &mut TestAppContext) {
+        let scratch = Scratch::new("outside");
+        let f = open(cx);
+        f.pick_files(vec![scratch.png("shot.png", 24, 16)], cx);
+        f.act(cx, |window, cx| {
+            f.set_catalog(cx);
+            let state = state_with(&["model"]);
+            f.set_agent(&state, cx);
+            window.render_frame(cx);
+            window.click(chip_id("model"), cx);
+            window.render_frame(cx);
+            assert!(window.find("composer-drawer").visible());
+
+            f.composer.update(cx, |composer, cx| {
+                composer.close_drawer_at(point(px(-4.), px(-4.)), cx)
+            });
+            window.render_frame(cx);
+            assert!(
+                window.try_find("composer-drawer").is_none(),
+                "the drawer is what a press outside folds"
+            );
+            assert!(
+                window.find("attachments-panel").visible(),
+                "the tiles are still there"
+            );
+        });
+    }
+
+    /// `⌘V` with an image on the clipboard attaches it and leaves the input alone: a
+    /// picture is not text, and the reader means to send it. Text on the clipboard is the
+    /// input's own paste, untouched.
+    #[gpui_kit::test]
+    fn a_pasted_image_is_an_attachment_and_pasted_text_is_still_text(cx: &mut TestAppContext) {
+        let scratch = Scratch::new("paste");
+        let shot = scratch.png("shot.png", 32, 20);
+        let png = std::fs::read(&shot).expect("the PNG's own bytes");
+        let f = open(cx);
+
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            window.click(f.input_frame(cx), cx);
+        });
+        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_image(
+            &gpui_kit::Image::from_bytes(gpui_kit::ImageFormat::Png, png),
+        ));
+        f.act(cx, |window, cx| window.press("cmd-v", cx));
+
+        let attached = f.attached(cx);
+        assert_eq!(attached.len(), 1, "the picture is attached");
+        assert_eq!(
+            attached[0].name, "pasted image.png",
+            "and named for what it is"
+        );
+        assert!(
+            matches!(
+                &attached[0].kind,
+                AttachmentKind::ImageBytes { media_type, bytes }
+                    if media_type == "image/png" && !bytes.is_empty()
+            ),
+            "as bytes with their own media type: {:?}",
+            attached[0].kind
+        );
+        assert_eq!(f.draft_now(cx), "", "and none of it went into the draft");
+
+        // The same key with text on the clipboard is the input's own paste.
+        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string("words\n".to_string()));
+        f.act(cx, |window, cx| window.press("cmd-v", cx));
+        assert_eq!(f.draft_now(cx), "words\n", "text pastes as text");
+        assert_eq!(f.attached(cx).len(), 1, "and text is not an attachment");
+    }
+
+    /// Files dropped on the box are attachments: the third way in, and the one that needs
+    /// no dialog at all.
+    #[gpui_kit::test]
+    fn files_dropped_on_the_box_are_attachments(cx: &mut TestAppContext) {
+        let scratch = Scratch::new("drop");
+        let shot = scratch.png("shot.png", 24, 16);
+        let notes = scratch.write("notes.txt", b"plain words\n");
+        let f = open(cx);
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            let at = window.find("composer-box").bounds().center();
+            // The drag carries the paths the platform read off the drop; the collection
+            // is the platform's own, built the way it builds one.
+            let mut paths = ExternalPaths::default();
+            paths.0.extend([shot.clone(), notes.clone()]);
+            window.dispatch_event(
+                gpui_kit::PlatformInput::FileDrop(gpui_kit::FileDropEvent::Entered {
+                    position: at,
+                    paths,
+                }),
+                cx,
+            );
+            window.dispatch_event(
+                gpui_kit::PlatformInput::FileDrop(gpui_kit::FileDropEvent::Submit { position: at }),
+                cx,
+            );
+            window.render_frame(cx);
+        });
+
+        let attached = f.attached(cx);
+        assert_eq!(attached.len(), 2, "the drop is two attachments");
+        assert!(
+            matches!(&attached[0].kind, AttachmentKind::ImageFile(path) if *path == shot)
+                && matches!(&attached[1].kind, AttachmentKind::File(path) if *path == notes),
+            "read like the picker's own answer: {attached:?}"
+        );
+        assert_eq!(
+            f.act(cx, |window, _| window
+                .find("attachments-strip-row")
+                .label()
+                .map(str::to_string)),
+            Some("Attachments 2".to_string())
+        );
+    }
+
+    /// A message with what it carries and no words is a message (§5.5): the files are
+    /// what it says, so `Enter` in an empty box with an attachment on it sends.
+    #[gpui_kit::test]
+    fn an_empty_box_that_carries_an_attachment_is_a_message(cx: &mut TestAppContext) {
+        let scratch = Scratch::new("empty");
+        let f = open(cx);
+        f.pick_files(vec![scratch.write("notes.txt", b"plain words\n")], cx);
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            // The caret is in the box, as it is when a reader who just answered a dialog
+            // presses Enter.
+            window.click(f.input_frame(cx), cx);
+            window.press("enter", cx);
+        });
+
+        assert_eq!(
+            f.events(),
+            vec![ComposerEvent::Send(Outgoing {
+                text: String::new(),
+                attachments: f.attached(cx),
+            })],
+            "an empty box with a file on it is not a blank box"
+        );
+        assert_eq!(
+            f.act(cx, |window, _| window
+                .find(BUTTON_ID)
+                .label()
+                .map(str::to_string)),
+            Some(ActionFace::Send.name().to_string()),
+            "and the one button is still Send"
+        );
+    }
+
+    /// The send carries them, and only the server's own `ok` takes them off: a refusal
+    /// that names what it did not like (`image could not be read: …`) leaves the message
+    /// whole — the words and what they carry — for the reader to fix and send again.
+    #[gpui_kit::test]
+    fn a_send_carries_the_attachments_and_only_ok_takes_them_off(cx: &mut TestAppContext) {
+        let scratch = Scratch::new("send");
+        let f = open(cx);
+        f.pick_files(
+            vec![
+                scratch.png("one.png", 24, 16),
+                scratch.write("two.txt", b"two\n"),
+            ],
+            cx,
+        );
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            window.click(f.input_frame(cx), cx);
+            window.input("have a look at these", cx);
+            window.press("enter", cx);
+        });
+
+        // What went out is what the box was holding.
+        let sent = f.attached(cx);
+        assert_eq!(sent.len(), 2);
+        assert_eq!(
+            f.events(),
+            vec![ComposerEvent::Send(Outgoing {
+                text: "have a look at these".to_string(),
+                attachments: sent.clone(),
+            })],
+            "the message carries them"
+        );
+
+        // The refusal: nothing is taken off the draft — neither the words nor the files.
+        f.act(cx, |window, cx| {
+            f.composer.update(cx, |composer, cx| {
+                composer.request_finished(false, window, cx)
+            });
+            window.render_frame(cx);
+        });
+        assert_eq!(f.attached(cx).len(), 2, "a refusal keeps the attachments");
+        assert_eq!(f.draft_now(cx), "have a look at these", "and the words");
+        assert_eq!(
+            f.act(cx, |window, _| window
+                .find("attachments-strip-row")
+                .label()
+                .map(str::to_string)),
+            Some("Attachments 2".to_string()),
+            "with the strip still standing"
+        );
+
+        // Sent again, and taken: the input is cleared, and so is what it carried.
+        f.act(cx, |window, cx| window.press("enter", cx));
+        f.act(cx, |window, cx| {
+            f.composer.update(cx, |composer, cx| {
+                composer.request_finished(true, window, cx)
+            });
+            window.render_frame(cx);
+        });
+        assert!(f.attached(cx).is_empty(), "an accepted send takes them off");
+        assert_eq!(f.draft_now(cx), "", "with the draft");
+        assert!(
+            f.act(cx, |window, _| window
+                .try_find("attachments-strip-row")
+                .is_none()),
+            "and no strip is left over nothing"
+        );
+    }
+
+    /// A message carrying an attachment is not a slash command, whatever its first word
+    /// looks like: a command has nowhere to put a file, and the reader attached one to
+    /// what they wrote.
+    #[gpui_kit::test]
+    fn a_message_that_carries_an_attachment_is_not_a_command(cx: &mut TestAppContext) {
+        let scratch = Scratch::new("command");
+        let f = open(cx);
+        f.pick_files(vec![scratch.write("notes.txt", b"plain words\n")], cx);
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            window.click(f.input_frame(cx), cx);
+            window.input("/compact", cx);
+            window.press("enter", cx);
+        });
+        assert!(
+            matches!(f.events().last(), Some(ComposerEvent::Send(_))),
+            "it goes as a message: {:?}",
+            f.events()
+        );
+
+        // And with nothing attached it is the command it reads as.
+        f.act(cx, |window, cx| {
+            f.composer.update(cx, |composer, cx| {
+                composer.request_finished(true, window, cx)
+            });
+            window.render_frame(cx);
+            window.click(f.input_frame(cx), cx);
+            window.input("/compact", cx);
+            window.press("enter", cx);
+        });
+        assert_eq!(
+            f.events().last(),
+            Some(&ComposerEvent::Command {
+                name: "compact".to_string(),
+                args: String::new(),
+            }),
+            "a bare command is the command's: {:?}",
+            f.events()
+        );
     }
 
     /// The input grows with what is typed and stops at half the pane
