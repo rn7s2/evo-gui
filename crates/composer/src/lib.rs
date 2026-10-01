@@ -848,6 +848,11 @@ impl Composer {
     /// [`Composer::set_completion`], which reads the caret again — and the question is
     /// remembered as asked, so a tab that cannot send it can answer it with nothing
     /// and leave the popup answering again.
+    ///
+    /// Nor is a caret already answered asked about again: the timer this runs from
+    /// belongs to a keystroke that may have been answered since, and asking would be
+    /// both a round trip nobody needs and the loss of the rows on screen — the answer
+    /// in hand is dropped for the one being asked about the same text.
     fn ask_now(&mut self, cx: &mut Context<Self>) {
         if self.completion.asked.is_some() {
             return;
@@ -856,6 +861,14 @@ impl Composer {
             let input = self.input.read(cx);
             (input.value().to_string(), input.cursor())
         };
+        let answered = self
+            .completion
+            .answer
+            .as_ref()
+            .is_some_and(|(question, _)| question.text == text && question.cursor == cursor);
+        if answered {
+            return;
+        }
         self.completion.asked = Some(Question {
             text: text.clone(),
             cursor,
@@ -4966,7 +4979,6 @@ mod tests {
         });
     }
 
-    /// `/rewind` is the command that hands a message back: the text it took out of the
     /// The question is the caret's own text and where it is in it, asked once, after
     /// the caret has rested — and an answer about a text the caret has left is not a
     /// row here, however many candidates it carries.
@@ -5059,6 +5071,53 @@ mod tests {
                 "an answer about another text raises no row: {:?}",
                 popup_labels(&f, cx)
             );
+        });
+    }
+
+    /// An answer can land before the keystroke's own timer is due — the caret's text is
+    /// answered, and the box has no reason to ask again. The timer firing afterwards is
+    /// not a reason either: what is on screen is the answer this caret is waiting for.
+    #[gpui_kit::test]
+    fn an_answer_that_beats_the_debounce_is_kept(cx: &mut TestAppContext) {
+        let f = open_footer(cx);
+        f.act(cx, |_window, cx| f.set_catalog(cx));
+        f.act(cx, |window, cx| f.type_draft("/eval (zz", window, cx));
+        // The answer, before the caret's rest is up — what the tab hands back for a word
+        // the server has already answered, or one it cannot ask about at all.
+        f.act(cx, |_window, cx| {
+            f.composer.update(cx, |composer, cx| {
+                composer.set_completion(
+                    "/eval (zz",
+                    9,
+                    Answer {
+                        kind: Some(CompletionKind::Symbol),
+                        name: 7..9,
+                        items: vec![Candidate {
+                            name: "zzz".to_string(),
+                            description: "function".to_string(),
+                        }],
+                    },
+                    cx,
+                )
+            })
+        });
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            assert_eq!(popup_labels(&f, cx), vec!["zzz"]);
+        });
+
+        // The timer that keystroke left behind comes due: it asks nothing — this caret
+        // has its answer — and the rows stay where they are.
+        cx.executor().advance_clock(COMPLETE_DEBOUNCE * 2);
+        cx.run_until_parked();
+        assert!(
+            f.events().is_empty(),
+            "an answered caret is not asked about twice: {:?}",
+            f.events()
+        );
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            assert_eq!(popup_labels(&f, cx), vec!["zzz"]);
         });
     }
 

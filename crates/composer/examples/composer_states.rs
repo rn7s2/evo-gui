@@ -42,9 +42,14 @@ const WINDOW_SIZE: (f32, f32) = (1000., 720.);
 /// The topic's own state, as a server would publish it (`GET /snapshot`), run on
 /// one of the catalog's registrations.
 fn state(busy: bool, model: &str) -> TopicState {
+    state_at(busy, model, "openai")
+}
+
+/// The same, on a registration another provider owns: `id@provider` is what a model is.
+fn state_at(busy: bool, model: &str, provider: &str) -> TopicState {
     TopicState::from_json(&serde_json::json!({
         "status": if busy { "running" } else { "idle" },
-        "model": {"id": model, "provider": "openai", "ready": true},
+        "model": {"id": model, "provider": provider, "ready": true},
         "thinking": "high",
         "context": {"tokens": 48000, "window": 936000, "source": "usage"},
         "goal": {"goal_id": "a1b2c3d4", "objective": "Ship the redesign: every screen taken \
@@ -242,6 +247,10 @@ fn answer(cx: &mut HeadlessAppContext, page: &Entity<Page>) {
 
 /// Hand the box the answer to the question it asked, as a tab hands it one.
 fn answer_with(cx: &mut HeadlessAppContext, page: &Entity<Page>, answer: Answer) {
+    // The caret rests first: the box asks on that rest, and a tab answers a question it
+    // has been asked — the example is that tab, so it waits for the question too.
+    cx.advance_clock(Duration::from_millis(50));
+    cx.run_until_parked();
     let Some((text, cursor)) = page.read_with(cx, |page, _| page.question()) else {
         return;
     };
@@ -378,13 +387,14 @@ fn main() {
 
     // The states, in the order the design reads them: the goal's objective folded
     // out, then the todo list, then the model drawer — the catalog's own three
-    // models, and a catalog long enough that the models scroll — then the one
+    // models, on a registration whose ladder is a subset and on one that takes no
+    // effort at all, and a catalog long enough that the models scroll — then the one
     // button's other face, then a lane's own box, which changes nothing, and says so.
     // Then the completion popup, one picture per thing it does: the commands over
     // the word at the message's start, the same list walked down its own rows, a word
     // mid-prose, and the image's own symbols inside `/eval`.
     type Setup = fn(&mut HeadlessAppContext, AnyWindowHandle, &Entity<Page>);
-    let states: [(&str, Setup); 11] = [
+    let states: [(&str, Setup); 13] = [
         ("goal-open", |cx, window, _| {
             click(cx, window, "goal-strip-row")
         }),
@@ -402,6 +412,36 @@ fn main() {
                     // only the region's own scroll can show.
                     composer.set_agent(&state(false, "stub-j"), "Coordinator", true, cx);
                     composer.set_catalog(levels(), many_models(), commands(), cx);
+                })
+            });
+            click(cx, window, "composer-chip-model");
+        }),
+        // A model whose provider takes three rungs, not the session's five: the
+        // drawer's rail is the *model's* own ladder, so it is three stops long — and
+        // the chip's own level (`high`) is on it.
+        ("model-drawer-subset", |cx, window, page| {
+            let composer = composer_of(cx, page);
+            cx.update(|cx| {
+                composer.update(cx, |composer, cx| {
+                    composer.set_agent(
+                        &state_at(false, "stub-b", "proxy"),
+                        "Coordinator",
+                        true,
+                        cx,
+                    );
+                    composer.set_catalog(levels(), models(), commands(), cx);
+                })
+            });
+            click(cx, window, "composer-chip-model");
+        }),
+        // A model that takes no effort setting at all: the row keeps its place and says
+        // so, with no rail under it — a fact, rather than a control that vanishes.
+        ("model-drawer-none", |cx, window, page| {
+            let composer = composer_of(cx, page);
+            cx.update(|cx| {
+                composer.update(cx, |composer, cx| {
+                    composer.set_agent(&state_at(false, "stub-c", "acme"), "Coordinator", true, cx);
+                    composer.set_catalog(levels(), models(), commands(), cx);
                 })
             });
             click(cx, window, "composer-chip-model");
