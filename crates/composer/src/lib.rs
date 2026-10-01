@@ -79,6 +79,12 @@ const ROOM_SHARE: f32 = 0.5;
 const PLACEHOLDER: &str =
     "Message the coordinator\u{2026}\n(Enter to send, Shift+Enter for newline)";
 
+/// The same box in a single-agent session (§7.2): one `evo-agent` is the whole
+/// session, so there is no coordinator to address — what is typed here reaches the
+/// agent the page calls `Main`, and the box says so.
+const PLACEHOLDER_AGENT: &str =
+    "Message the agent\u{2026}\n(Enter to send, Shift+Enter for newline)";
+
 /// The box's own furniture: `12px` radius, one hairline, and the shadow under it
 /// (`.composer-box`).
 const BOX_RADIUS: Pixels = px(12.);
@@ -1073,6 +1079,16 @@ impl Composer {
         if self.swarm != swarm {
             self.swarm = swarm;
             cx.notify();
+        }
+    }
+
+    /// What the box says while it is empty: what is typed here goes to the coordinator,
+    /// or to the agent, depending on the program this session is (§7.2).
+    fn placeholder(&self) -> &'static str {
+        if self.swarm {
+            PLACEHOLDER
+        } else {
+            PLACEHOLDER_AGENT
         }
     }
 
@@ -2364,6 +2380,18 @@ impl Render for Composer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = design::palette(cx.theme().mode.is_dark());
 
+        // The box's placeholder follows the program (§7.2). It is set here rather than
+        // where the program arrives because an input state's placeholder is fixed when
+        // it is built — before anyone knows which program the tab will run — and this is
+        // the first moment there is a window to set it with. The comparison is what keeps
+        // it to the once: after this frame the input already says the right thing.
+        let placeholder = self.placeholder();
+        if self.input.read(cx).presentation().placeholder().as_ref() != placeholder {
+            self.input.update(cx, |input, cx| {
+                input.set_placeholder(placeholder, window, cx)
+            });
+        }
+
         // The caret is what "focused" means here: the ring belongs to the box, which
         // the input does not own.
         let focused = self
@@ -3165,6 +3193,38 @@ mod tests {
             vec![ComposerEvent::Interrupt],
             "the scope is the session's own"
         );
+    }
+
+    /// §7.2: the box's placeholder names the agent this session has — a swarm's
+    /// coordinator, or the one agent, which the page calls `Main`. The input state is
+    /// built before anyone knows which program the tab will run, so the box takes the
+    /// words on with the program, at the frame that has a window to set them with.
+    #[gpui_kit::test]
+    fn the_box_names_the_program_it_belongs_to(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find(f.input_frame(cx)).label(),
+                Some(PLACEHOLDER),
+                "a swarm's box is addressed to its coordinator"
+            );
+
+            f.composer
+                .update(cx, |composer, cx| composer.set_swarm(false, cx));
+            window.render_frame(cx);
+            assert_eq!(
+                window.find(f.input_frame(cx)).label(),
+                Some(PLACEHOLDER_AGENT),
+                "one agent's box is addressed to the agent"
+            );
+
+            // And back: the swarm's own words are not lost on the way through.
+            f.composer
+                .update(cx, |composer, cx| composer.set_swarm(true, cx));
+            window.render_frame(cx);
+            assert_eq!(window.find(f.input_frame(cx)).label(), Some(PLACEHOLDER));
+        });
     }
 
     #[gpui_kit::test]

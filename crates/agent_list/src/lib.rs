@@ -711,13 +711,19 @@ impl Render for AgentList {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = design::palette(cx.theme().mode.is_dark());
         let coordinator = self.coordinator_view(palette);
-        let lanes: Vec<RowView> = self
-            .lanes
-            .lanes
-            .clone()
-            .iter()
-            .map(|row| self.lane_view(row, palette))
-            .collect();
+        // §7.2: one agent has no lanes, so the column is its single row. The rows come
+        // from the swarm's own topic, which an `evo-agent` server never publishes, so
+        // this only ever drops what a swarm's snapshot left behind.
+        let lanes: Vec<RowView> = if self.swarm {
+            self.lanes
+                .lanes
+                .clone()
+                .iter()
+                .map(|row| self.lane_view(row, palette))
+                .collect()
+        } else {
+            Vec::new()
+        };
 
         let mut rows = v_flex()
             .id(ROWS_ID)
@@ -1782,7 +1788,12 @@ mod tests {
     /// coordinator, and its count of lanes.
     #[gpui_kit::test]
     fn a_single_agents_column_is_one_row_named_main(cx: &mut TestAppContext) {
-        let f = open(cx, lanes(Vec::new()));
+        // A lane in the list to begin with, so the count and the lane row are both
+        // there to be dropped.
+        let f = open(
+            cx,
+            lanes(vec![lane(1, LaneStatus::Working, Some("the build"))]),
+        );
         f.act(cx, |window, cx| {
             window.render_frame(cx);
             assert_eq!(
@@ -1808,6 +1819,11 @@ mod tests {
             assert!(
                 window.try_find(SUMMARY_ID).is_none(),
                 "and there are no lanes to count"
+            );
+            assert!(
+                window.try_find(row_id(AgentKey::Lane(1))).is_none(),
+                "and no lane rows: whatever a swarm's snapshot left in the list, a \
+                 single agent's column is one row"
             );
             // The row is still the list's own: it is the one a click selects.
             assert!(window.find(row_id(AgentKey::Coordinator)).visible());
