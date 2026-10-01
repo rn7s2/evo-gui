@@ -1402,6 +1402,23 @@ impl Composer {
         )
     }
 
+    /// How tall the popup stands, as its own drawing measures it: the shell's
+    /// padding, the rows it shows at once, and the counter when the list is longer
+    /// than that. What the placement decides with — a couple of pixels either way
+    /// cannot change which side of the caret has the room.
+    fn completion_height(&self) -> Pixels {
+        let Some(popup) = self.popup.as_ref() else {
+            return px(0.);
+        };
+        let shown = popup.rows.len().min(complete::MAX_ROWS) as f32;
+        let counter = if popup.rows.len() > complete::MAX_ROWS {
+            POPUP_COUNTER
+        } else {
+            0.
+        };
+        px(POPUP_PAD * 2. + POPUP_ROW * shown + counter)
+    }
+
     /// The completion popup: the caret's word, and what would finish it (§7.3).
     ///
     /// A drawer's own language — the sidebar surface, one hairline, the box's
@@ -1982,23 +1999,26 @@ impl Render for Composer {
         // is why the anchored element it draws is positioned absolutely — taken out
         // of the flow, it moves nothing.
         let popup = self.completion_popup(palette, cx).map(|popup| {
-            let at = match self.input.read(cx).cursor_layout() {
-                // The caret's own line: the popup stands over it, its bottom edge a
-                // gap above the line the next character goes on.
-                Some((caret, _)) => point(caret.left(), caret.top() - px(POPUP_GAP)),
-                // Nothing laid out yet, or no caret in the input: the box's own left
-                // edge, under the first line of it.
+            // The caret's own line, as the input last laid it out; failing that — an
+            // input not yet laid out, a caret that is not in it — the box's own left
+            // edge, on the first line of it.
+            let caret = self.input.read(cx).cursor_layout().map(|(caret, _)| caret);
+            let (left, top, bottom) = match caret {
+                Some(caret) => (caret.left(), caret.top(), caret.bottom()),
                 None => {
                     let bounds = self.input.read(cx).input_bounds();
-                    point(bounds.left(), bounds.top() + INPUT_LINE)
+                    let line = bounds.top() + INPUT_LINE;
+                    (bounds.left(), line, line)
                 }
             };
-            deferred(
-                anchored()
-                    .anchor(Anchor::BottomLeft)
-                    .position(at)
-                    .child(popup),
-            )
+            // Over the caret's own line, a gap off it — where the room is: under it
+            // when the window runs out above, as it does for a box at the top of one.
+            let (anchor, at) = if top - px(POPUP_GAP) - self.completion_height() >= px(0.) {
+                (Anchor::BottomLeft, point(left, top - px(POPUP_GAP)))
+            } else {
+                (Anchor::TopLeft, point(left, bottom + px(POPUP_GAP)))
+            };
+            deferred(anchored().anchor(anchor).position(at).child(popup))
         });
 
         // Where the box was painted: the page asks this against the press it sees, so
@@ -3696,5 +3716,431 @@ mod tests {
             Some("a draft of my own".to_string()),
             "the input copies its own selection, not the window's"
         );
+    }
+
+    // --- the inline completion popup (§7.3) -------------------------------------
+
+    /// The popup's rows as a reader sees them: each label, in order.
+    fn popup_labels(f: &Fixture, cx: &App) -> Vec<String> {
+        f.composer
+            .read(cx)
+            .popup
+            .as_ref()
+            .map(|popup| {
+                popup
+                    .rows
+                    .iter()
+                    .map(|row| popup.label(row))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Which row the popup has highlighted, out of how many.
+    fn popup_index(f: &Fixture, cx: &App) -> Option<(usize, usize)> {
+        f.composer
+            .read(cx)
+            .popup
+            .as_ref()
+            .map(|popup| (popup.index, popup.rows.len()))
+    }
+
+    /// Whether the popup is drawn in this frame.
+    fn popup_drawn(window: &Window) -> bool {
+        window
+            .try_find("completion-popup")
+            .is_some_and(|popup| popup.visible())
+    }
+
+    /// The composer at the foot of a page, the way §7.3 holds it: the conversation
+    /// above it is what puts the caret's own line low in the window — which is where
+    /// "the popup stands over the caret" is a question with an answer.
+    struct FooterPage {
+        composer: Entity<Composer>,
+    }
+
+    impl Render for FooterPage {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .flex()
+                .flex_col()
+                .size_full()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .child("the conversation the box is docked under"),
+                )
+                .child(self.composer.clone())
+        }
+    }
+
+    fn open_footer(cx: &mut TestAppContext) -> Fixture {
+        cx.update(gpui_kit::init);
+        let (window, page) = cx.update(|cx| {
+            gpui_kit::open_window(window_options(), cx, |window, cx| {
+                let composer = cx.new(|cx| Composer::new(window, cx));
+                cx.new(|_| FooterPage { composer })
+            })
+            .expect("the page's window")
+        });
+        let composer = cx.read(|cx| page.read(cx).composer.clone());
+
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let recorded = events.clone();
+        let subscription = cx.update(|cx| {
+            cx.subscribe(&composer, move |_, event: &ComposerEvent, _| {
+                recorded.borrow_mut().push(event.clone());
+            })
+        });
+        Fixture {
+            window,
+            composer,
+            events,
+            _subscription: subscription,
+        }
+    }
+
+    #[gpui_kit::test]
+    fn a_slash_word_raises_the_registrys_commands_over_the_caret(cx: &mut TestAppContext) {
+        let f = open_footer(cx);
+        f.act(cx, |_window, cx| f.set_catalog(cx));
+        f.act(cx, |window, cx| f.type_draft("/", window, cx));
+
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            assert!(popup_drawn(window), "a slash raises the popup");
+            assert_eq!(
+                popup_labels(&f, cx),
+                vec!["/help", "/lore", "/memory", "/reload", "/eval"],
+                "the registry's own commands, in its own order"
+            );
+
+            // It stands over the caret's own line, a small gap off it, starting where
+            // the word does — and it is a deferred draw, so neither the box it belongs
+            // to nor the page over it can clip it.
+            let (caret, _) = f
+                .composer
+                .read(cx)
+                .input
+                .read(cx)
+                .cursor_layout()
+                .expect("the caret is laid out");
+            let popup = window.find("completion-popup").bounds();
+            assert!(
+                popup.bottom() <= caret.top(),
+                "the popup stands over the line being typed: {popup:?} vs {caret:?}"
+            );
+            assert!(
+                caret.top() - popup.bottom() <= px(POPUP_GAP + 1.),
+                "and a gap off it, not a distance: {popup:?} vs {caret:?}"
+            );
+            assert!(
+                (popup.left() - caret.left()).abs() <= px(1.),
+                "the popup starts where the word does: {popup:?} vs {caret:?}"
+            );
+            assert!(
+                popup.top() >= px(0.) && popup.bottom() <= px(PANE.height.into()),
+                "and the whole of it is inside the window: {popup:?}"
+            );
+        });
+    }
+
+    /// With no room over the caret — the box at the top of the window — the popup goes
+    /// under it instead of hanging off the window's edge.
+    #[gpui_kit::test]
+    fn a_popup_with_no_room_above_stands_under_the_caret(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.act(cx, |_window, cx| f.set_catalog(cx));
+        f.act(cx, |window, cx| f.type_draft("/", window, cx));
+
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            let (caret, _) = f
+                .composer
+                .read(cx)
+                .input
+                .read(cx)
+                .cursor_layout()
+                .expect("the caret is laid out");
+            let popup = window.find("completion-popup").bounds();
+            assert!(
+                popup.top() >= caret.bottom(),
+                "the popup is under the caret when there is nothing over it: \
+                 {popup:?} vs {caret:?}"
+            );
+            assert!(popup.bottom() <= px(PANE.height.into()), "{popup:?}");
+        });
+    }
+
+    #[gpui_kit::test]
+    fn the_word_is_completed_and_only_a_whole_command_is_one(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.act(cx, |_window, cx| f.set_catalog(cx));
+        f.act(cx, |window, cx| f.type_draft("/he", window, cx));
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            assert_eq!(popup_labels(&f, cx), vec!["/help"]);
+        });
+
+        // Tab takes the word — and takes nothing else with it: nothing is sent.
+        f.act(cx, |window, cx| window.press("tab", cx));
+        assert_eq!(f.draft_now(cx), "/help ");
+        assert_eq!(
+            cx.read(|cx| f.caret(cx)),
+            6,
+            "the caret is past the word it took"
+        );
+        assert!(f.events().is_empty(), "taking a row is not sending");
+
+        // Enter sends it, and one slash command from the message's start is the
+        // command layer's, not the coordinator's.
+        f.act(cx, |window, cx| window.press("enter", cx));
+        assert_eq!(
+            f.events(),
+            vec![ComposerEvent::Command {
+                name: "help".to_string(),
+                args: String::new(),
+            }]
+        );
+    }
+
+    #[gpui_kit::test]
+    fn enter_takes_a_row_instead_of_sending_while_the_popup_is_up(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.act(cx, |_window, cx| f.set_catalog(cx));
+        f.act(cx, |window, cx| f.type_draft("/lo", window, cx));
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                popup_labels(&f, cx),
+                vec!["/lore", "/reload"],
+                "the word's own prefix first, then the names it is a subsequence of"
+            );
+        });
+
+        f.act(cx, |window, cx| window.press("enter", cx));
+        assert_eq!(f.draft_now(cx), "/lore ", "Enter took the highlighted row");
+        assert!(
+            f.events().is_empty(),
+            "and the draft was not sent instead: {:?}",
+            f.events()
+        );
+    }
+    #[gpui_kit::test]
+    fn the_arrows_walk_the_rows_and_wrap(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.act(cx, |_window, cx| f.set_catalog(cx));
+        // A prompt this tab sent, so ↑ would have something to recall: with the
+        // popup up, it walks rows instead.
+        f.send_prompt("an earlier prompt", cx);
+        f.act(cx, |window, cx| f.type_draft("/", window, cx));
+
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            assert_eq!(popup_index(&f, cx), Some((0, 5)), "the first row to start");
+            window.press("down", cx);
+            assert_eq!(popup_index(&f, cx), Some((1, 5)));
+            window.press("up", cx);
+            assert_eq!(popup_index(&f, cx), Some((0, 5)));
+            window.press("up", cx);
+            assert_eq!(popup_index(&f, cx), Some((4, 5)), "↑ off the top wraps");
+            window.press("down", cx);
+            assert_eq!(popup_index(&f, cx), Some((0, 5)), "and ↓ off the end");
+        });
+        assert_eq!(f.draft_now(cx), "/", "the caret stayed on its word");
+    }
+
+    #[gpui_kit::test]
+    fn escape_puts_the_popup_away_and_does_not_interrupt(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.act(cx, |_window, cx| f.set_catalog(cx));
+        f.act(cx, |window, cx| f.type_draft("/", window, cx));
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("completion-popup").visible());
+        });
+
+        f.act(cx, |window, cx| window.press("escape", cx));
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            assert!(!popup_drawn(window), "Esc puts the popup away");
+        });
+        assert_eq!(
+            f.events(),
+            Vec::<ComposerEvent>::new(),
+            "closing the popup is not the coordinator's interrupt"
+        );
+
+        // The word moving on is a new word, and asks again.
+        f.act(cx, |window, cx| f.type_draft("h", window, cx));
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            assert!(popup_drawn(window));
+            assert_eq!(popup_labels(&f, cx), vec!["/help"]);
+        });
+    }
+
+    #[gpui_kit::test]
+    fn a_whole_word_shows_no_popup_and_a_message_that_mentions_one_stays_a_message(
+        cx: &mut TestAppContext,
+    ) {
+        let f = open(cx);
+        f.act(cx, |_window, cx| f.set_catalog(cx));
+        f.act(cx, |window, cx| f.type_draft("/help", window, cx));
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            assert!(
+                !popup_drawn(window),
+                "the only candidate is the word already typed"
+            );
+        });
+        f.act(cx, |window, cx| window.press("enter", cx));
+        assert_eq!(
+            f.events(),
+            vec![ComposerEvent::Command {
+                name: "help".to_string(),
+                args: String::new(),
+            }]
+        );
+
+        // A message that mentions a command is the reader's words — and its `/`
+        // word completes all the same, with the caret anywhere in it.
+        let g = open(cx);
+        g.act(cx, |_window, cx| g.set_catalog(cx));
+        g.act(cx, |window, cx| {
+            g.type_draft("run /he now", window, cx);
+            // Four lefts put the caret at the end of `/he`, mid-message.
+            for _ in 0..4 {
+                window.press("left", cx);
+            }
+        });
+        g.act(cx, |window, cx| {
+            window.render_frame(cx);
+            assert_eq!(popup_labels(&g, cx), vec!["/help"]);
+        });
+        // Esc means the line rather than the row; Enter then sends the message whole.
+        g.act(cx, |window, cx| {
+            window.press("escape", cx);
+            window.press("enter", cx);
+        });
+        assert_eq!(
+            g.events(),
+            vec![ComposerEvent::Send("run /he now".to_string())],
+            "one command from the message's *start* is what goes to command.run"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn the_images_symbols_are_asked_for_a_word_and_a_stale_answer_cannot_raise_a_row(
+        cx: &mut TestAppContext,
+    ) {
+        let f = open(cx);
+        f.act(cx, |window, cx| f.type_draft("/eval (zz", window, cx));
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            assert!(
+                popup_labels(&f, cx).is_empty(),
+                "the image has not answered yet"
+            );
+        });
+        assert!(
+            f.events().is_empty(),
+            "and nothing has been asked yet: the caret has to rest on the word"
+        );
+
+        // The debounce is what asks, once, for the word the caret is on.
+        cx.executor().advance_clock(SYMBOL_DEBOUNCE);
+        cx.run_until_parked();
+        assert_eq!(
+            f.events(),
+            vec![ComposerEvent::Symbols {
+                token: "zz".to_string(),
+            }]
+        );
+
+        // The image's answer is the popup's rows: names it owns, and what they are.
+        f.act(cx, |_window, cx| {
+            f.composer.update(cx, |composer, cx| {
+                composer.set_symbols(
+                    "zz",
+                    vec![Candidate {
+                        name: "zzz".to_string(),
+                        description: "function".to_string(),
+                    }],
+                    cx,
+                )
+            })
+        });
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            assert_eq!(popup_labels(&f, cx), vec!["zzz"]);
+            assert!(
+                window.find("completion-row-0").label().is_some(),
+                "the row is drawn, and reads as a row"
+            );
+        });
+
+        // An answer for a token the caret has left behind is not a row here: the
+        // caret's word is `zz`, and nothing that does not begin with it is offered.
+        f.act(cx, |_window, cx| {
+            f.composer.update(cx, |composer, cx| {
+                composer.set_symbols(
+                    "z",
+                    vec![Candidate {
+                        name: "car".to_string(),
+                        description: "function".to_string(),
+                    }],
+                    cx,
+                )
+            })
+        });
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            assert!(
+                popup_labels(&f, cx).is_empty(),
+                "a stale answer raises no row: {:?}",
+                popup_labels(&f, cx)
+            );
+        });
+    }
+
+    #[gpui_kit::test]
+    fn recalled_history_raises_no_popup_until_it_is_edited(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.act(cx, |_window, cx| f.set_catalog(cx));
+        // A prompt this tab sent that *would* raise a popup as new input: the word
+        // `he` mid-message. It is sent with Esc first, which is what a reader does
+        // when they mean the line rather than the row.
+        f.act(cx, |window, cx| f.type_draft("please /he", window, cx));
+        f.act(cx, |window, cx| {
+            window.press("escape", cx);
+            window.press("enter", cx);
+        });
+        assert!(
+            matches!(f.events().last(), Some(ComposerEvent::Send(_))),
+            "the same text is sent as the reader's words: {:?}",
+            f.events()
+        );
+
+        // Recalled, it asks for nothing: a suggestion list is what new input asks
+        // for, and ↑ would have no way back out of a popup that captured it.
+        f.act(cx, |window, cx| window.press("up", cx));
+        assert_eq!(f.draft_now(cx), "please /he", "↑ recalled the prompt");
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            assert!(
+                !popup_drawn(window),
+                "what history put in the input asks for nothing"
+            );
+        });
+
+        // Editing it makes the input the reader's own again, and the word completes.
+        f.act(cx, |window, cx| f.type_draft("l", window, cx));
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            assert!(popup_drawn(window));
+            assert_eq!(popup_labels(&f, cx), vec!["/help"]);
+        });
     }
 }
