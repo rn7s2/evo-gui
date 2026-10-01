@@ -25,3 +25,18 @@ pub use empty_tab::OpenSettings;
 pub use history::{placeholder_history, HistoryRow};
 pub use launch::{check, check_spec, launch_spec, Launch, LaunchEnv};
 pub use tab::{TabContent, TabContentEvent, TabId, TabState};
+
+/// A test's own evo home, for the tests that open the app's Settings pages.
+///
+/// The four files those pages read are then a directory that does not exist — which
+/// is what a machine that has never been configured looks like, and which reading
+/// creates nothing of — rather than whatever the machine running the tests has in
+/// `~/.evo`. Set once for the whole test binary, before any page is made.
+#[cfg(test)]
+pub(crate) fn test_evo_home() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let home = std::env::temp_dir().join(format!("workspace-evo-home-{}", std::process::id()));
+        std::env::set_var("EVO_HOME", home);
+    });
+}

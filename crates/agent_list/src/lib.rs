@@ -74,6 +74,37 @@ const SELECTED_MIX: f32 = 9.;
 /// own ring is `IDLE_OPACITY`, and the two are not the same weight.
 const WORKSPACE_IDLE: f32 = 0.8;
 
+/// The row's own geometry, public because the lane column has one more row than this
+/// list draws: the project's own line at the foot of the column is a row like these,
+/// and it has to be the same row rather than a lookalike (§7.3).
+pub const ROW_HEIGHT: f32 = LANE_ROW;
+/// The gap between a row's own cells.
+pub const ROW_GAP: f32 = LANE_GAP;
+/// A row's own inset.
+pub const ROW_PAD: f32 = LANE_PAD;
+pub const ROW_FONT: Pixels = LANE_FONT;
+/// The column's inset around its rows, and the room between two of them — what the
+/// footer row is aligned by, so it stands in the same column as the lanes.
+pub const LIST_INSET: f32 = LIST_PAD;
+pub const ROW_SPACING: f32 = LIST_GAP;
+
+/// The fill a row of the column wears: its surface while it is the one being shown, and
+/// the sidebar otherwise, with [`row_hover_fill`] under the pointer. The project row at
+/// the foot of the column is drawn in the same two, so "this is the row I am looking at"
+/// reads the same wherever in the column it is.
+pub fn row_fill(selected: bool, palette: &Palette) -> Rgb {
+    if selected {
+        paint::mix(palette.fg, SELECTED_MIX, palette.sidebar)
+    } else {
+        palette.sidebar
+    }
+}
+
+/// What the pointer leaves under a row it is on — the fill a footer row hovers to.
+pub fn row_hover_fill(palette: &Palette) -> Rgb {
+    paint::mix(palette.fg, HOVER_MIX, palette.sidebar)
+}
+
 /// How wide a tooltip line is allowed to get, in characters: about one and a half columns,
 /// which fits a worktree path beside its label and still keeps a long task or a long
 /// failure reason inside the window.

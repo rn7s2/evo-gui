@@ -26,6 +26,7 @@ mod logging;
 mod menus;
 mod quit;
 mod settings;
+mod settings_guard;
 mod startup;
 mod theme;
 
@@ -41,6 +42,9 @@ pub use quit::{
     TabRecord,
 };
 pub use settings::{apply as apply_settings, open as open_settings_panel, DIALOG_CONTENT_ID};
+pub use settings_guard::{
+    asking as asking_about_settings, DISCARD_ID, KEEP_EDITING_ID, SAVING_HELD_LOG,
+};
 pub use startup::{refresh_catalog, start as start_background_loads};
 pub use theme::{follow_appearance, mode_for};
 

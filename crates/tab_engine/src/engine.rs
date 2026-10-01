@@ -87,6 +87,15 @@ impl Fetch {
         }
     }
 
+    /// The topic a page of older items was about, `None` for the other reads: a page is
+    /// the one read whose failure must release the transcript's in-flight state (§5.4).
+    fn page_topic(&self) -> Option<String> {
+        match self {
+            Fetch::Page { topic, .. } => Some(topic.clone()),
+            _ => None,
+        }
+    }
+
     /// Do it. The update carries the server's own body, unread.
     fn run(self, client: &Client) -> Result<Update, swarm_client::Error> {
         match self {
@@ -357,7 +366,9 @@ impl Live {
         commands: &Sender<Inbound>,
     ) -> Option<(Live, Snapshot)> {
         let client = server.client().clone();
-        let snapshot = client.snapshot(topics, None).ok()?;
+        // A whole render window's worth, not the server's smaller default (§5.2): the
+        // tab's live transcript holds `PAGE_ITEMS` items before anything is streamed.
+        let snapshot = client.snapshot(topics, Some(session::PAGE_ITEMS)).ok()?;
         let stream = EventStream::start(
             client.clone(),
             StreamConfig::new(topics.to_vec()).from(snapshot.cursor()),
@@ -493,6 +504,7 @@ fn fetch_off_loop(engine: &Engine, client: &Client, fetch: Fetch) {
     let client = client.clone();
     let updates = engine.updates.clone();
     let what = fetch.what();
+    let page = fetch.page_topic();
     let _ = thread::Builder::new()
         .name("evo-tab-fetch".into())
         .spawn(move || {
@@ -501,6 +513,7 @@ fn fetch_off_loop(engine: &Engine, client: &Client, fetch: Fetch) {
                 Err(error) => Update::FetchFailed {
                     what,
                     reason: error.to_string(),
+                    page,
                 },
             };
             let _ = updates.send_blocking(message);
@@ -582,7 +595,7 @@ impl Engine {
             Some(topic) => vec![topic.clone()],
             None => self.topics.clone(),
         };
-        let snapshot = client.snapshot(&topics, None).ok()?;
+        let snapshot = client.snapshot(&topics, Some(session::PAGE_ITEMS)).ok()?;
         self.topics_of(&snapshot);
         Some(snapshot)
     }

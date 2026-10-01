@@ -265,6 +265,28 @@ fn older_items_page_in_at_the_front() {
     assert_eq!(topic.items().len(), 20);
 }
 
+/// A snapshot carries a whole window and a page asks for a whole window (§5.2, §5.4):
+/// the tab's live transcript and its way back into history are the same size.
+#[test]
+fn a_window_of_items_is_the_same_on_both_sides() {
+    assert_eq!(session::PAGE_ITEMS, 256);
+}
+
+/// A page that adds nothing — an overlap with what is held, or the last page of all —
+/// still says what the server said about the history behind it (§5.4): `has_more` is the
+/// page's own answer, not the count of rows it added.
+#[test]
+fn a_page_that_adds_nothing_still_says_whether_there_is_more() {
+    let mut topic = session_topic();
+    topic.prepend_items(&fixture("items-before.json"));
+
+    let mut same = fixture("items-before.json");
+    same["has_more"] = json!(true);
+    let changes = topic.prepend_items(&same);
+    assert!(changes.is_empty(), "the repeated page added no row");
+    assert!(topic.has_older(), "but the page said there is more");
+}
+
 #[test]
 fn removing_an_item_reindexes_what_follows_it() {
     let mut topic = session_topic();

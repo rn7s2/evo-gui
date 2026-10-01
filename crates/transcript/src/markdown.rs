@@ -44,6 +44,10 @@ pub(crate) fn extensions() -> MarkdownExtensions {
                 .plugin(ImageFallback)
                 .plugin(RawHtml)
                 .plugin(RawHtmlBlock)
+                // TeX math, the two forms the kit's parser already mints nodes
+                // for: `$…$` in a line, `$$…$$` of its own.
+                .plugin(crate::math::Inline)
+                .plugin(crate::math::Display)
         })
         .clone()
 }
@@ -148,7 +152,7 @@ impl MarkdownPlugin for RawHtmlBlock {
 
 /// A run of raw markup: the mono face, muted, so it reads as the markup it is
 /// rather than as something the message said.
-fn markup(source: &str, cx: &App) -> Div {
+pub(crate) fn markup(source: &str, cx: &App) -> Div {
     let palette = Palette::from_app(cx);
     div()
         .font_family(palette.mono.clone())

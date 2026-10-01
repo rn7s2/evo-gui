@@ -25,33 +25,46 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    div, px, AnyElement, App, Context, ElementId, IntoElement, MouseButton, MouseDownEvent, Pixels,
-    SharedString, TestSupportExt as _, Window,
+    div, px, AnyElement, App, Context, ElementId, Entity, IntoElement, MouseButton, MouseDownEvent,
+    Pixels, SharedString, TestSupportExt as _, Window,
 };
 use session::AgentKey;
+use settings::{ConfigEditor, ConfigScope};
 
 use crate::tab::{Notice, NoticeTone, TabContent, TabContentEvent, TabState};
 use store::app_state::{CENTER_MIN, LEFT_MAX, LEFT_MIN};
 use store::design;
 use widgets::paint;
 
-/// How many characters the folder line under the agent list may take before it is
-/// elided in the middle: about what fits under a 260 px column at 11 px text.
-const FOLDER_LINE_CHARS: usize = 34;
-
 /// How many characters a path may take on the boot and failure screens, where the
 /// whole window is the measure.
 const SCREEN_PATH_CHARS: usize = 88;
 
+/// The question a close asks while an editor holds unsaved changes. The words say
+/// what the two answers do, and the element is named so a test can find it.
+const CLOSE_PROMPT_ID: &str = "settings-close-prompt";
+const CLOSE_PROMPT_TEXT_ID: &str = "settings-close-prompt-text";
+const CLOSE_PROMPT_TEXT: &str = "This page has unsaved changes.";
+
+/// The row at the foot of the lane column is the project's own: the whole path it
+/// runs in, and the gear that shows that project's settings. Its name, for a screen
+/// reader and for a test.
+const PROJECT_ROW_ID: &str = "project-row";
+const PROJECT_ROW_LABEL: &str = "Project settings";
+/// How many characters of the path that row shows before it is elided: about what
+/// fits under a 260 px column beside the gear.
+const PROJECT_ROW_CHARS: usize = 34;
+
 impl TabContent {
     /// The content for the tab's current state.
     pub(crate) fn render_for_state(
-        &self,
+        &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let content = match &self.state {
             TabState::Empty => self.render_empty(cx),
+            TabState::Settings => self.render_settings(window, cx),
             TabState::Booting { folder } => self.render_booting(folder, cx),
             TabState::Running { folder } => self.render_page(folder, window, cx),
             TabState::Failed {
@@ -69,14 +82,92 @@ impl TabContent {
                 cx,
             ),
         };
-        if !self.terminating {
+        if !self.terminating && !self.close_prompt {
             return content;
         }
+        // Two layers can be over a page: the freeze a closing tab wears while its
+        // swarm exits, and the question an unsaved editor puts up before it goes.
+        // They are never both up for one tab in practice (a Settings tab drives no
+        // swarm), and the question is drawn last so it is the one being answered.
+        let mut page = div().relative().size_full().child(content);
+        if self.terminating {
+            page = page.child(self.render_terminating(cx));
+        }
+        if self.close_prompt {
+            page = page.child(self.render_close_prompt(cx));
+        }
+        page.into_any_element()
+    }
+
+    /// The Settings tab: the raw editors for the four files evo reads, filling the
+    /// window. What they look like and which file is in front are the editors' own
+    /// business (§13).
+    ///
+    /// A Settings tab is made with its editors, so this finds them; one that somehow
+    /// has none is given them here rather than showing a blank page — there is no
+    /// such thing as a Settings tab with nothing on it.
+    fn render_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let editor = match self.settings_editor().cloned() {
+            Some(editor) => editor,
+            None => {
+                let editor = cx.new(|cx| ConfigEditor::new(ConfigScope::Global, window, cx));
+                self.settings = Some(editor.clone());
+                editor
+            }
+        };
         div()
-            .relative()
+            .id("settings-tab")
+            .test_support()
             .size_full()
-            .child(content)
-            .child(self.render_terminating(cx))
+            .bg(cx.theme().background)
+            .child(editor)
+            .into_any_element()
+    }
+
+    /// The question a close asks while an editor holds unsaved changes: Discard, or
+    /// keep editing. Saving is the editor's own act — this is only about leaving.
+    fn render_close_prompt(&self, cx: &Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        div()
+            .id(CLOSE_PROMPT_ID)
+            .test_support()
+            .absolute()
+            .inset_0()
+            .occlude()
+            .bg(theme.background.opacity(0.72))
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_3()
+            .child(
+                div()
+                    .id(CLOSE_PROMPT_TEXT_ID)
+                    .test_support()
+                    .text_size(px(13.))
+                    .text_color(theme.foreground)
+                    .child(CLOSE_PROMPT_TEXT),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("settings-close-discard")
+                            .label("Discard Changes")
+                            .danger()
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.discard_and_close(window, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("settings-close-keep")
+                            .label("Keep Editing")
+                            .ghost()
+                            .on_click(cx.listener(|this, _, _window, cx| {
+                                this.keep_editing(cx);
+                            })),
+                    ),
+            )
             .into_any_element()
     }
 
@@ -346,7 +437,7 @@ impl TabContent {
             .child(
                 resizable_panel()
                     .size_range(px(CENTER_MIN)..Pixels::MAX)
-                    .child(self.render_conversation_column(window, cx)),
+                    .child(self.render_conversation_column(folder, window, cx)),
             )
     }
 
@@ -398,11 +489,14 @@ impl TabContent {
         })
     }
 
-    /// The lane column: `agent_list`'s own band and rows, with the folder the swarm
-    /// runs in pinned under them.
+    /// The lane column: `agent_list`'s own band and rows, with the project's own row
+    /// — the folder the swarm runs in, and the way into its settings — pinned under
+    /// them.
     ///
-    /// The list takes the room; the folder line keeps its own single row at the bottom,
-    /// so a path can never push the lanes around.
+    /// The list takes the room; the folder row keeps its own single row at the bottom,
+    /// so a path can never push the lanes around, and it is drawn as one of the list's
+    /// own rows: the same height, the same inset, the same fill while it is the one
+    /// being shown or the pointer is on it.
     fn render_lane_column(&self, folder: &Path, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = design::palette(cx.theme().mode.is_dark());
         v_flex()
@@ -414,7 +508,63 @@ impl TabContent {
             .h_full()
             .bg(paint::color(palette.sidebar))
             .child(div().flex_1().min_h_0().child(self.agents.clone()))
-            .child(folder_line(folder, cx))
+            .child(project_row(folder, self.project_settings, cx))
+    }
+
+    /// The project's settings in the conversation area, in place of the selected
+    /// agent's transcript (§7.3).
+    ///
+    /// The composer goes with the transcript: this screen is not a conversation, and
+    /// nothing here is sent anywhere. The lane column stays where it is, which is what
+    /// makes coming back to a transcript a press on a row rather than a tab switch.
+    fn render_project_settings(
+        &self,
+        folder: &Path,
+        editor: &Entity<settings::ConfigEditor>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let palette = design::palette(cx.theme().mode.is_dark());
+        v_flex()
+            .id("project-settings")
+            .test_support()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .bg(cx.theme().background)
+            .child(
+                // The same band the transcript wears, saying which project's files
+                // these are — the folder, which is what tells two `.evo` directories
+                // apart when two tabs are open.
+                h_flex()
+                    .id("project-settings-header")
+                    .test_support()
+                    .w_full()
+                    .flex_none()
+                    .h(px(design::HEADER_HEIGHT))
+                    .items_center()
+                    .gap(px(8.))
+                    .px(px(design::INSET))
+                    .bg(paint::color(palette.sidebar))
+                    .border_b_1()
+                    .border_color(paint::color(palette.border))
+                    .text_color(paint::color(palette.fg))
+                    .child(
+                        div()
+                            .flex_none()
+                            .font_weight(widgets::text::MEDIUM)
+                            .text_size(px(14.))
+                            .child("Project settings"),
+                    )
+                    .child(path_text(
+                        "project-settings-folder",
+                        folder,
+                        SCREEN_PATH_CHARS,
+                        true,
+                        cx,
+                    )),
+            )
+            .child(div().flex_1().min_h_0().child(editor.clone()))
+            .into_any_element()
     }
 
     /// The band over the conversation (`.ws-head`): whose transcript this is, what it
@@ -489,18 +639,28 @@ impl TabContent {
         }
     }
 
-    /// The quiet control the header carries while the shown agent has thinking text to
+    /// The quiet control the header carries while the shown agent has thinking to
     /// reveal.
     ///
-    /// It is the *view's* own state: switching agents shows each transcript the way its
-    /// reader left it.
+    /// Two things offer it: thinking already in the transcript, and an effort the
+    /// agent was set to that *would* think — a step above the quietest rung. The
+    /// second is why the control is there before any text has arrived: an agent doing
+    /// its thinking has nothing to show yet, and a reader who wants it hidden should
+    /// not have to wait for the first answer to say so.
+    ///
+    /// Both are the shown agent's own: the effort is the level its topic state
+    /// carried (the same reading the composer's drawer is given, kept on the tab),
+    /// and whether the reveal was left on is the transcript view's — so switching
+    /// agents shows each one the way its reader left it.
     fn thinking_toggle(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let view = self.transcripts.get(&self.selected_agent())?.clone();
+        let agent = self.selected_agent();
+        let view = self.transcripts.get(&agent)?.clone();
+        let effort = self.thinking_level.clone();
         let (has_thinking, showing) = {
             let view = view.read(cx);
             (view.has_thinking(cx), view.is_showing_thinking(cx))
         };
-        if !has_thinking {
+        if !has_thinking && !effort_thinks(effort.as_deref()) {
             return None;
         }
         // The design's `.ghost`: a bare 12px label in the muted ink — no border,
@@ -539,9 +699,17 @@ impl TabContent {
     /// height of the pane it has to live in.
     fn render_conversation_column(
         &self,
+        folder: &Path,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> AnyElement {
+        // The project's own settings take this column's place, composer and all
+        // (§7.3): they are not a conversation, and nothing typed there is sent.
+        if self.project_settings {
+            if let Some(editor) = self.project_editor.clone() {
+                return self.render_project_settings(folder, &editor, cx);
+            }
+        }
         let palette = design::palette(cx.theme().mode.is_dark());
         let selected = self.selected_agent();
         let view = self.transcripts.get(&selected).cloned();
@@ -574,26 +742,106 @@ impl TabContent {
             // agent.
             .child(div().flex_1().min_h_0().children(view))
             .child(self.composer.clone())
+            .into_any_element()
     }
 }
 
-/// The folder the swarm runs in: one line under the agent list, `~`-shortened
-/// and elided in the middle, with the whole path on hover (§7.3).
-fn folder_line(folder: &Path, cx: &App) -> impl IntoElement {
+/// The project's own row at the foot of the lane column: the folder the swarm runs
+/// in — the whole path, elided in the middle — and the gear that shows that folder's
+/// settings (§7.3).
+///
+/// It is drawn as one of the list's own rows: the lane rows' height, inset, font and
+/// gap, the sidebar's fill, and the same fill under the pointer. Pressing it is what
+/// the conversation area follows: the settings come up in place of the selected
+/// agent's transcript, and picking a lane or the coordinator puts the transcript
+/// back. The row says which of the two it is with the row's own selected fill, the
+/// way the lane list says which agent is shown.
+fn project_row(folder: &Path, showing: bool, cx: &mut Context<TabContent>) -> impl IntoElement {
+    let dark = cx.theme().mode.is_dark();
+    let palette = design::palette(dark);
+    let border = cx.theme().border;
+    let fill = agent_list::row_fill(showing, palette);
+    let hover = agent_list::row_hover_fill(palette);
+    let full = folder.display().to_string();
+    let shown = shorten_path(&full, PROJECT_ROW_CHARS);
+    let label = format!("{PROJECT_ROW_LABEL}: {full}");
     h_flex()
+        .id("project-row-footer")
+        .test_support()
+        // The rule the footer has always had: the row is under the list, not in it.
         .w_full()
-        .flex_shrink_0()
-        .px_3()
-        .py_2()
+        .flex_none()
         .border_t_1()
-        .border_color(cx.theme().border)
-        .child(path_text(
-            "agent-folder",
-            folder,
-            FOLDER_LINE_CHARS,
-            true,
-            cx,
-        ))
+        .border_color(border)
+        .p(px(agent_list::LIST_INSET))
+        .child(
+            h_flex()
+                .id(PROJECT_ROW_ID)
+                .test_support()
+                .w_full()
+                .flex_none()
+                .h(px(agent_list::ROW_HEIGHT))
+                .gap(px(agent_list::ROW_GAP))
+                .px(px(agent_list::ROW_PAD))
+                .rounded(px(design::RADIUS))
+                .bg(paint::color(fill))
+                .when(!showing, |row| {
+                    row.hover(move |row| row.bg(paint::color(hover)))
+                })
+                .text_size(agent_list::ROW_FONT)
+                .text_color(paint::color(palette.fg))
+                .cursor_pointer()
+                .aria_label(label.clone())
+                .aria_selected(showing)
+                .tooltip(move |window, cx| {
+                    widgets::tooltip::text(
+                        "project-row-tooltip",
+                        full.clone(),
+                        px(520.),
+                        window,
+                        cx,
+                    )
+                })
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.show_project_settings(window, cx);
+                }))
+                .child(
+                    div()
+                        .id("project-row-path")
+                        .test_support()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .child(SharedString::from(shown)),
+                )
+                .child(
+                    div()
+                        .id("project-row-gear")
+                        .test_support()
+                        .flex_none()
+                        .text_color(paint::color(palette.muted_fg))
+                        .child(IconName::Settings),
+                ),
+        )
+}
+
+/// Whether an agent whose effort is this is one that thinks — and so one whose
+/// thinking the header offers to reveal even before any of it has arrived.
+///
+/// The rungs evo names are `low medium high xhigh max` (`session::launcher`'s own
+/// ladder, as `/catalog.thinking_levels` publishes it) and `off` is the retired one a
+/// session no longer accepts. Only the quietest rung keeps the reveal away until there
+/// is text; everything above it thinks. An effort that is not known at all — a state
+/// not read yet, a topic that published none — is not guessed at either.
+///
+/// The level word is the whole of the decision: a ladder this app has not been handed
+/// still names the rung the same way, so nothing here depends on a list being present
+/// or on an order invented for rungs evo may add.
+fn effort_thinks(level: Option<&str>) -> bool {
+    match level.map(str::trim).filter(|level| !level.is_empty()) {
+        None => false,
+        Some(level) => !matches!(level, "off" | "low"),
+    }
 }
 
 /// A path as one line of text: elided in the middle to LIMIT characters, with the
@@ -830,6 +1078,29 @@ fn centered_region(
 mod tests {
     use super::*;
 
+    /// An effort that thinks is a rung above the quietest one, by name: the ladder
+    /// this app was handed lists `low medium high xhigh max`, and a session no longer
+    /// accepts the retired `off`. Nothing here depends on a ladder being present, or on
+    /// an order invented for rungs evo may add.
+    #[test]
+    fn only_the_quietest_rungs_wait_for_text() {
+        assert!(!effort_thinks(None));
+        assert!(!effort_thinks(Some("")));
+        assert!(!effort_thinks(Some("   ")));
+        assert!(!effort_thinks(Some("low")));
+        assert!(!effort_thinks(Some("off")));
+        assert!(effort_thinks(Some("medium")));
+        assert!(effort_thinks(Some("high")));
+        assert!(effort_thinks(Some("xhigh")));
+        assert!(effort_thinks(Some("max")));
+        assert!(effort_thinks(Some("ultra")), "a rung evo added later");
+        assert!(
+            !effort_thinks(Some(" low ")),
+            "trimmed before it is read, so a padded rung is the same rung"
+        );
+        assert!(effort_thinks(Some(" medium ")));
+    }
+
     /// A path is elided in the middle: both ends survive, and the tail — the part
     /// that names the folder — gets the longer half.
     #[test]
@@ -863,7 +1134,7 @@ mod tests {
     #[test]
     fn a_folder_line_drops_leading_components_whole() {
         let long = "/var/folders/5d/bgm58_l51j52vqz4v7jrdfch0000gn/T/swarm-client-fixture-88368-screens/project";
-        let shown = shorten_path(long, FOLDER_LINE_CHARS);
+        let shown = shorten_path(long, PROJECT_ROW_CHARS);
         assert_eq!(
             shown, "…/project",
             "nothing above the folder it runs in fits, and the folder is what is kept"
@@ -871,18 +1142,18 @@ mod tests {
 
         // As many whole components as fit, and no more.
         let mixed = "/var/folders/5d/x/T/tmp-1/run/project";
-        let shown = shorten_path(mixed, FOLDER_LINE_CHARS);
+        let shown = shorten_path(mixed, PROJECT_ROW_CHARS);
         assert_eq!(shown, "…/folders/5d/x/T/tmp-1/run/project");
-        assert!(shown.chars().count() <= FOLDER_LINE_CHARS);
+        assert!(shown.chars().count() <= PROJECT_ROW_CHARS);
 
         // A repository under the home directory still shows the path to it, as far
         // as it fits.
         let home = std::env::var("HOME").expect("a home directory");
         let deep = format!("{home}/coding/evo/wt/gui-model/crates/workspace/src");
-        let shown = shorten_path(&deep, FOLDER_LINE_CHARS);
+        let shown = shorten_path(&deep, PROJECT_ROW_CHARS);
         assert!(shown.starts_with("~/"), "{shown}");
         assert!(shown.ends_with("src"), "{shown}");
-        assert!(shown.chars().count() <= FOLDER_LINE_CHARS);
+        assert!(shown.chars().count() <= PROJECT_ROW_CHARS);
 
         // One name longer than the line: the middle of it goes, both ends stay.
         let uuid = "/tmp/0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9-0a1b2c3d-4e5f-6071";

@@ -11,6 +11,9 @@
 //!   its latest item and stays there while the pane changes height, and only the reader's
 //!   own scroll unpins it (the design's `Transcript.tsx`, to the pixel and the
 //!   millisecond);
+//! * the **window** over the record: the whole of the topic is held, so a later op can
+//!   move a row that is off screen, but only [`WINDOW_ITEMS`] of its newest rows are
+//!   built, and "Earlier items" opens the rows behind them a page at a time;
 //! * the tools the reader opened, and the untruncated results fetched for them.
 //!
 //! A caller seeds the whole list with [`TranscriptView::replace`] (a snapshot, a
@@ -29,6 +32,8 @@
 mod imgcheck;
 mod link;
 mod markdown;
+mod math;
+pub mod normalize_math;
 pub mod pin;
 mod rows;
 mod style;
@@ -40,6 +45,7 @@ pub use imgcheck::decode_image;
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -53,7 +59,7 @@ use gpui_kit::{
     ScrollHandle, StatefulInteractiveElement as _, Styled as _, Task, TestSupportExt as _,
     WeakEntity, Window,
 };
-use session::{AgentKey, Item, ItemId, ItemKind};
+use session::{AgentKey, Item, ItemId, ItemKind, PAGE_ITEMS};
 use std::time::Duration;
 use widgets::effort::cubic_bezier;
 use widgets::paint;
@@ -63,8 +69,13 @@ use crate::rows::CopyFeedback;
 use crate::style::Palette;
 use store::design::{palette as design_palette, INSET, MEASURE};
 
-/// How many assistant items keep their parsed document.
-const KEPT_DOCUMENTS: usize = 128;
+/// How many items a live transcript draws: the newest whole page of the record.
+///
+/// The record itself is kept whole — every op works on all of it — but only this many
+/// of its newest items are built into rows, and each "Earlier items" the reader asks
+/// for opens another page behind them. The number is the session's own page size, so a
+/// window and a fetched page are the same handful of rows.
+const WINDOW_ITEMS: usize = PAGE_ITEMS as usize;
 
 /// A handler that names the item it is about: the tool whose whole output is wanted, the
 /// queued input to take back, or the oldest item the scrollback pages back from. Every one
@@ -93,14 +104,29 @@ pub(crate) enum ImageState {
 /// owns them is mid-render, and so a row update never copies the whole transcript into the
 /// renderer closure.
 pub(crate) struct TranscriptData {
+    /// The whole record, exactly as the topic holds it: every op lands here, whether or
+    /// not the row it moves is on screen.
     pub(crate) items: Vec<Item>,
+    /// The rows the list draws: `items[shown]`. Everything in front of it is held, not
+    /// built — older items the reader has not asked for — and everything behind it is a
+    /// row that arrived while they were reading.
+    pub(crate) shown: Range<usize>,
+    /// Where each item is, so an op finds its row without walking the record:
+    /// `items` is the whole topic, and a delta must not cost a scan of it.
+    index: HashMap<ItemId, usize>,
+    /// How many turns have opened by `items[i]`. A turn rule counts from the head of
+    /// the record, so its number does not move when the window does — and does not
+    /// cost a walk of the hidden rows in front of it either.
+    turns: Vec<usize>,
+    /// How many items of the record carry thinking text. Counted as the record changes,
+    /// because the control that reveals it is drawn from the header of every frame and
+    /// the record behind the window is not walked for it.
+    thinking: usize,
     /// Retained markdown documents of assistant items, keyed by item id.
     pub(crate) documents: HashMap<ItemId, Entity<TextViewState>>,
     /// Retained markdown documents of a lane report's own fields, keyed by the
     /// item and the field's label: `.rp-row`'s body is markdown in the design.
     pub(crate) field_documents: HashMap<(ItemId, &'static str), Entity<TextViewState>>,
-    rendered: HashMap<ItemId, u64>,
-    frame: u64,
     /// Items the reader has opened.
     pub(crate) expanded: HashSet<ItemId>,
     /// The whole of a tool call's result, for the calls the server shortened: fetched with
@@ -126,30 +152,95 @@ pub(crate) struct TranscriptData {
 
 impl TranscriptData {
     fn index_of(&self, id: &str) -> Option<usize> {
-        self.items.iter().position(|item| item.id == id)
+        self.index.get(id).copied()
     }
 
-    /// Start a frame: age the documents and drop the ones the reader has left.
-    fn begin_frame(&mut self) {
-        self.frame = self.frame.wrapping_add(1);
-        if self.rendered.len() <= KEPT_DOCUMENTS {
-            return;
-        }
+    /// How many turns have opened by `items[index]` — the number the rule above that
+    /// row is labelled with, counted from the head of the record.
+    pub(crate) fn turn_number(&self, index: usize) -> usize {
+        self.turns.get(index).copied().unwrap_or(0)
+    }
 
-        let mut ages: Vec<(ItemId, u64)> = self
-            .rendered
+    /// How many items are held in front of the window.
+    pub(crate) fn hidden_before(&self) -> usize {
+        self.shown.start
+    }
+
+    /// Restate where every item is and how many turns have opened, after the record
+    /// itself has changed shape (a snapshot, a page, a row dropped, a turn opened).
+    fn reindex(&mut self) {
+        self.index.clear();
+        self.turns.clear();
+        self.index.reserve(self.items.len());
+        self.turns.reserve(self.items.len());
+        let mut turns = 0;
+        let mut thinking = 0;
+        for (index, item) in self.items.iter().enumerate() {
+            self.index.insert(item.id.clone(), index);
+            if rows::opens_a_turn(&item.kind) {
+                turns += 1;
+            }
+            if carries_thinking(&item.kind) {
+                thinking += 1;
+            }
+            self.turns.push(turns);
+        }
+        self.thinking = thinking;
+    }
+
+    /// The cheap half of [`TranscriptData::reindex`]: one item appended at the end,
+    /// which is the only thing a live transcript's record usually does.
+    fn index_last(&mut self) {
+        let index = self.items.len() - 1;
+        let item = &self.items[index];
+        self.index.insert(item.id.clone(), index);
+        let turns =
+            self.turns.last().copied().unwrap_or(0) + usize::from(rows::opens_a_turn(&item.kind));
+        self.turns.push(turns);
+        self.thinking += usize::from(carries_thinking(&item.kind));
+    }
+
+    /// Draw `items[start..end]`, and nothing else.
+    ///
+    /// A row the window has left gives up what belongs to it — its parsed document and
+    /// its decoded images: both are made again if the reader comes back to it, which is
+    /// cheaper than holding one of each for every item of a record that can be tens of
+    /// thousands of rows long.
+    ///
+    /// Returns whether the window moved.
+    fn set_window(&mut self, start: usize, end: usize) -> bool {
+        let end = end.min(self.items.len());
+        let start = start.min(end);
+        if self.shown.start == start && self.shown.end == end {
+            return false;
+        }
+        self.shown = start..end;
+        let ids: HashSet<&str> = self.items[start..end]
             .iter()
-            .map(|(id, frame)| (id.clone(), *frame))
+            .map(|item| item.id.as_str())
             .collect();
-        ages.sort_by_key(|(_, frame)| *frame);
-        for (id, _) in ages.drain(..ages.len() - KEPT_DOCUMENTS) {
-            self.rendered.remove(&id);
-            self.documents.remove(&id);
-        }
+        self.documents.retain(|id, _| ids.contains(id.as_str()));
+        self.field_documents
+            .retain(|(id, _), _| ids.contains(id.as_str()));
+        self.images.retain(|(id, _), _| ids.contains(id.as_str()));
+        self.full_images.retain(|(id, _)| ids.contains(id.as_str()));
+        true
     }
 
-    pub(crate) fn note_rendered(&mut self, id: &str) {
-        self.rendered.insert(id.to_string(), self.frame);
+    /// The window a reader who is following the tail sees: the newest whole page.
+    fn window_to_tail(&mut self, page: usize) -> bool {
+        let end = self.items.len();
+        self.set_window(end.saturating_sub(page), end)
+    }
+
+    /// A window is never empty while the record has rows: every op that could leave one
+    /// empty — a row removed, a page put in front of an empty window — opens the newest
+    /// page instead. Returns whether it moved.
+    fn repair_window(&mut self) -> bool {
+        if self.shown.is_empty() && !self.items.is_empty() {
+            return self.window_to_tail(WINDOW_ITEMS);
+        }
+        false
     }
 
     /// Bring `items[index]`'s document up to date, creating it the first time the row is on
@@ -160,30 +251,34 @@ impl TranscriptData {
             return;
         };
         let id = item.id.clone();
+        // TeX's `\(…\)` and `\[…\]` are made visible to the Markdown parser
+        // here, before the text becomes a document: the pass is a pure function of
+        // the message, so a streamed one settles on the same document it would
+        // have had all at once.
+        let text = normalize_math::normalize(&assistant.text);
         match self.documents.get(&id).cloned() {
-            Some(document) => {
-                let text = assistant.text.as_str();
-                document.update(cx, |state, cx| state.set_text(text, cx))
-            }
+            Some(document) => document.update(cx, |state, cx| state.set_text(&text, cx)),
             None => {
-                let document = cx.new(|cx| {
-                    TextViewState::markdown(&assistant.text, cx).motion(rows::stream_motion())
-                });
+                let document =
+                    cx.new(|cx| TextViewState::markdown(&text, cx).motion(rows::stream_motion()));
                 self.documents.insert(id, document);
             }
         }
     }
 
+    /// Drop what belongs to items the record no longer holds: a snapshot can leave the
+    /// whole of the last one behind, and a row's own documents, its images and the
+    /// whole output the reader had fetched for it go with the row.
     fn retain_documents(&mut self) {
-        let items = &self.items;
-        self.documents
-            .retain(|id, _| items.iter().any(|item| item.id == *id));
+        let held: HashSet<&str> = self.items.iter().map(|item| item.id.as_str()).collect();
+        self.documents.retain(|id, _| held.contains(id.as_str()));
         self.field_documents
-            .retain(|(id, _), _| items.iter().any(|item| item.id == *id));
-        self.rendered
-            .retain(|id, _| items.iter().any(|item| item.id == *id));
-        self.full_results
-            .retain(|id, _| items.iter().any(|item| item.id == *id));
+            .retain(|(id, _), _| held.contains(id.as_str()));
+        self.images.retain(|(id, _), _| held.contains(id.as_str()));
+        self.full_images
+            .retain(|(id, _)| held.contains(id.as_str()));
+        self.full_results.retain(|id, _| held.contains(id.as_str()));
+        self.expanded.retain(|id| held.contains(id.as_str()));
     }
 
     /// Bring one of a report's fields up to date, creating its document the first
@@ -206,10 +301,11 @@ impl TranscriptData {
             return;
         };
         let key = (item.id.clone(), label);
+        let text = normalize_math::normalize(text);
         match self.field_documents.get(&key).cloned() {
-            Some(document) => document.update(cx, |state, cx| state.set_text(text, cx)),
+            Some(document) => document.update(cx, |state, cx| state.set_text(&text, cx)),
             None => {
-                let document = cx.new(|cx| TextViewState::markdown(text, cx));
+                let document = cx.new(|cx| TextViewState::markdown(&text, cx));
                 self.field_documents.insert(key, document);
             }
         }
@@ -229,6 +325,21 @@ pub struct TranscriptView {
     has_older: bool,
     /// Whether the page the reader asked for is still in flight.
     loading_older: bool,
+    /// How many times the reader has scrolled for themselves. A page that lands after
+    /// they have gone on reading is a page they have left behind.
+    scrolls: u64,
+    /// What the last paint left behind: the reader's own scroll count, where the list
+    /// was, and how tall it was.
+    painted: Painted,
+    /// The [`TranscriptView::scrolls`] count when the page in flight was asked for:
+    /// the answer belongs to the reader who asked, and only if they are still there.
+    awaiting: Option<u64>,
+    /// The reader has just been placed at the head of a block they asked for: the next
+    /// paint decides their pin from the layout that block makes.
+    at_head: bool,
+    /// Where the reader's place has to be put back, after rows were opened in front of
+    /// them: the distance from the bottom they had.
+    anchor: Option<f32>,
     /// Whose transcript this is. An empty one says different things to the coordinator's
     /// reader and to a lane's.
     agent: AgentKey,
@@ -240,10 +351,12 @@ impl TranscriptView {
             data: cx.new(|cx| TranscriptData {
                 focus: cx.focus_handle(),
                 items: Vec::new(),
+                shown: 0..0,
+                index: HashMap::new(),
+                turns: Vec::new(),
+                thinking: 0,
                 documents: HashMap::new(),
                 field_documents: HashMap::new(),
-                rendered: HashMap::new(),
-                frame: 0,
                 expanded: HashSet::new(),
                 full_results: HashMap::new(),
                 show_thinking: false,
@@ -261,6 +374,11 @@ impl TranscriptView {
             jump: None,
             has_older: false,
             loading_older: false,
+            scrolls: 0,
+            painted: Painted::default(),
+            awaiting: None,
+            at_head: false,
+            anchor: None,
             agent: AgentKey::Coordinator,
         }
     }
@@ -272,13 +390,18 @@ impl TranscriptView {
 
     /// Show another agent's transcript. The new one opens at its latest item, as a
     /// transcript does when it is first shown — however far up the last one's
-    /// reader had scrolled.
+    /// reader had scrolled, and however many pages they had opened in front of it.
     pub fn set_agent(&mut self, agent: AgentKey, cx: &mut Context<Self>) {
         if self.agent == agent {
             return;
         }
         self.agent = agent;
         self.pin.reset();
+        self.awaiting = None;
+        self.at_head = false;
+        self.anchor = None;
+        self.data
+            .update(cx, |data, _| data.window_to_tail(WINDOW_ITEMS));
         self.scroll.scroll_to_bottom();
         cx.notify();
     }
@@ -400,7 +523,14 @@ impl TranscriptView {
 
     /// The topic has more behind what the view holds (it came with the snapshot), and
     /// whether a page is in flight.
+    ///
+    /// A page that is no longer in flight is a page that has settled — answered, empty,
+    /// or given up on — and the ask it belonged to goes with it: the next prepend is
+    /// somebody else's, and is not the answer to an old press.
     pub fn set_history(&mut self, has_older: bool, loading: bool, cx: &mut Context<Self>) {
+        if !loading {
+            self.awaiting = None;
+        }
         if self.has_older == has_older && self.loading_older == loading {
             return;
         }
@@ -409,37 +539,67 @@ impl TranscriptView {
         cx.notify();
     }
 
-    /// Replace the whole list, as a snapshot or a `topic.reset` does.
+    /// Replace the whole list, as a snapshot or a `topic.reset` does. The window opens
+    /// on the newest page again, as it does on a transcript just shown.
     pub fn replace(&mut self, items: Vec<Item>, cx: &mut Context<Self>) {
         self.data.update(cx, |data, _| {
             data.items = items.into_iter().filter(is_part_of_the_record).collect();
+            data.reindex();
             data.retain_documents();
+            data.window_to_tail(WINDOW_ITEMS);
         });
+        self.awaiting = None;
+        self.at_head = false;
+        self.anchor = None;
         cx.notify();
     }
 
     /// Put older items in front of what is held — the scrollback walking back through
     /// compactions. An item already held is not added twice.
+    ///
+    /// A page the reader asked for and is still waiting for opens in front of them,
+    /// with its own first row at the head of the list. Anything else — a page that
+    /// arrived after they went back to the latest, or after they had read on — is held
+    /// in front of the window without being shown, and their place does not move.
     pub fn prepend(&mut self, items: Vec<Item>, cx: &mut Context<Self>) {
-        let added = self.data.update(cx, |data, _| {
+        let asked_for = self.awaiting.take().is_some_and(|at| at == self.scrolls);
+        let following = self.pin.is_pinned();
+        let moved = self.data.update(cx, |data, _| {
             let fresh: Vec<Item> = items
                 .into_iter()
                 .filter(is_part_of_the_record)
-                .filter(|item| !data.items.iter().any(|held| held.id == item.id))
+                .filter(|item| data.index_of(&item.id).is_none())
                 .collect();
             if fresh.is_empty() {
-                return 0;
+                return None;
             }
             let added = fresh.len();
             let mut next = fresh;
             next.append(&mut data.items);
             data.items = next;
-            data.retain_documents();
-            added
+            data.reindex();
+            if asked_for {
+                // The page they asked for: it is opened in front of them.
+                let end = data.shown.end + added;
+                Some(data.set_window(0, end))
+            } else {
+                // Someone else's page: held in front of the window, not opened under a
+                // reader who is reading.
+                let (start, end) = (data.shown.start, data.shown.end);
+                let moved = data.set_window(start + added, end + added);
+                Some(moved || data.repair_window())
+            }
         });
-        if added > 0 {
-            cx.notify();
+        let Some(moved) = moved else {
+            return;
+        };
+        if asked_for {
+            self.open_at_head(cx);
+        } else if moved && !following {
+            self.hold_anchor();
+            self.pin.settled();
         }
+        cx.notify();
     }
 
     /// Add or replace one item, by its id. Returns whether the view changed.
@@ -452,7 +612,11 @@ impl TranscriptView {
         if !is_part_of_the_record(&item) {
             return false;
         }
-        let changed = self
+        // Whether the reader is following the tail decides what a new item does to the
+        // window: it slides under a follower, and is held behind a reader who is
+        // somewhere else in the record.
+        let following = self.pin.is_pinned();
+        let (changed, moved) = self
             .data
             .update(cx, |data, _| match data.index_of(&item.id) {
                 Some(index) => {
@@ -464,20 +628,44 @@ impl TranscriptView {
                                 && old.thinking == new.thinking
                                 && old.error == new.error
                     );
+                    let opened = rows::opens_a_turn(&data.items[index].kind);
+                    let thought = carries_thinking(&data.items[index].kind);
                     data.items[index] = item;
+                    // A queued input evo has taken opens a turn, and thinking arriving on
+                    // a message is one the reader can reveal: the counts behind it are
+                    // restated.
+                    if rows::opens_a_turn(&data.items[index].kind) != opened
+                        || carries_thinking(&data.items[index].kind) != thought
+                    {
+                        data.reindex();
+                    }
                     // A row whose content is unchanged (a status flip, or an op the view has
                     // already drawn) needs no re-render: only its own cell changed.
-                    if waiting {
-                        return false;
-                    }
-                    true
+                    (!waiting, false)
                 }
                 None => {
                     data.items.push(item);
-                    true
+                    data.index_last();
+                    // Following the tail, the window slides: the newest row is drawn
+                    // and the oldest one it was holding is let go. A reader who has
+                    // opened pages of their own keeps them, and one who is reading
+                    // somewhere else is not moved at all.
+                    let moved = if data.shown.is_empty()
+                        || (following && data.shown.len() <= WINDOW_ITEMS)
+                    {
+                        data.window_to_tail(WINDOW_ITEMS)
+                    } else {
+                        false
+                    };
+                    (true, moved)
                 }
             });
 
+        if moved {
+            // Hiding the oldest row of the window is the view's own doing: the scroll
+            // it causes must not be read as the reader's, whatever they last touched.
+            self.pin.settled();
+        }
         if !changed {
             return false;
         }
@@ -487,18 +675,38 @@ impl TranscriptView {
 
     /// Drop one item the topic no longer has.
     pub fn remove(&mut self, id: &str, cx: &mut Context<Self>) -> bool {
-        let index = self.data.update(cx, |data, _| {
+        let removed = self.data.update(cx, |data, _| {
             let index = data.index_of(id)?;
+            // A row the reader cannot see at all — in front of every row the window
+            // draws — takes its own height off the content above them: their place has
+            // to be put back where it was once the shorter layout is there.
+            let in_front = index < data.shown.start;
             data.items.remove(index);
+            data.reindex();
+            // The window keeps its place around the hole: rows in front of it are one
+            // nearer the head, and a row inside it leaves one fewer.
+            let (start, end) = (data.shown.start, data.shown.end);
+            let (start, end) = if index < start {
+                (start - 1, end - 1)
+            } else if index < end {
+                (start, end - 1)
+            } else {
+                (start, end)
+            };
+            data.set_window(start, end);
+            data.repair_window();
             data.documents.remove(id);
             data.field_documents.retain(|(held, _), _| held != id);
-            data.rendered.remove(id);
             data.expanded.remove(id);
             data.full_results.remove(id);
-            Some(index)
+            Some(in_front)
         });
-        if index.is_none() {
+        let Some(in_front) = removed else {
             return false;
+        };
+        if in_front && !self.pin.is_pinned() {
+            self.hold_anchor();
+            self.pin.settled();
         }
         cx.notify();
         true
@@ -508,13 +716,22 @@ impl TranscriptView {
     pub fn clear(&mut self, cx: &mut Context<Self>) {
         self.data.update(cx, |data, _| {
             data.items.clear();
+            data.shown = 0..0;
+            data.index.clear();
+            data.turns.clear();
+            data.thinking = 0;
             data.documents.clear();
             data.field_documents.clear();
-            data.rendered.clear();
             data.expanded.clear();
             data.full_results.clear();
+            data.images.clear();
+            data.full_images.clear();
         });
         self.pin.reset();
+        self.awaiting = None;
+        self.at_head = false;
+        self.anchor = None;
+        self.jump.take();
         self.scroll.scroll_to_bottom();
         cx.notify();
     }
@@ -524,16 +741,31 @@ impl TranscriptView {
         self.pin.is_pinned()
     }
 
-    /// Whether "↓ Jump to latest" is showing.
-    pub fn is_away_from_latest(&self, _cx: &App) -> bool {
-        self.pin.is_away()
+    /// Whether "↓ Jump to latest" is showing: the reader is away from the bottom, or
+    /// the window is holding newer rows back — output that arrived while they were
+    /// reading, which is below everything on screen.
+    pub fn is_away_from_latest(&self, cx: &App) -> bool {
+        let data = self.data.read(cx);
+        self.pin.is_away() || data.shown.end < data.items.len()
     }
 
     /// Take the reader back to the latest item: follow the tail again, and go
     /// there — not in a jump, which is what the design's `smooth` asks for.
+    ///
+    /// The window collapses to the newest page as it does, and a page the reader had
+    /// asked for is forgotten: an answer that arrives after this is held in front of
+    /// them, not opened under them.
     pub fn scroll_to_latest(&mut self, cx: &mut Context<Self>) {
         self.pin.jumped();
         cx.notify();
+        if self.collapse(cx) {
+            // The window changed: the rows the offset was measured against are gone,
+            // so the list lands on the tail in one step rather than easing through a
+            // layout that is no longer there.
+            self.jump.take();
+            self.scroll.scroll_to_bottom();
+            return;
+        }
         let scroll = self.scroll.clone();
         // gpui's offset grows *negative* as the list scrolls down (`set_offset`: "as
         // you scroll further down the offset becomes more negative"), so the tail is
@@ -560,14 +792,7 @@ impl TranscriptView {
 
     /// Whether this agent has any thinking text to reveal.
     pub fn has_thinking(&self, cx: &App) -> bool {
-        self.data
-            .read(cx)
-            .items
-            .iter()
-            .any(|item| match &item.kind {
-                ItemKind::Assistant(assistant) => !assistant.thinking.is_empty(),
-                _ => false,
-            })
+        self.data.read(cx).thinking > 0
     }
 
     pub fn set_show_thinking(&mut self, show: bool, cx: &mut Context<Self>) {
@@ -629,6 +854,96 @@ impl TranscriptView {
     }
 }
 
+/// The window: how much of the record is built, and how the reader asks for more of it.
+impl TranscriptView {
+    /// The reader did something that scrolls: a wheel, a touch, a key, a pointer press.
+    /// The design's 500ms window opens, and the view remembers that they have moved —
+    /// a page that arrives afterwards is a page they have left behind.
+    fn touched(&mut self) {
+        self.scrolls += 1;
+        self.pin.touched();
+    }
+
+    /// How far the reader is from the bottom, as the pin's rule measures it.
+    fn gap(&self) -> f32 {
+        f32::from(self.scroll.max_offset().y + self.scroll.offset().y)
+    }
+
+    /// The height of everything the list draws, and of the pane it is drawn in.
+    fn sizes(&self) -> (f32, f32) {
+        let pane = f32::from(self.scroll.bounds().size.height);
+        (f32::from(self.scroll.max_offset().y) + pane, pane)
+    }
+
+    /// Put a block of rows the reader asked for at the head of the list: the block's
+    /// own first row is the first row drawn, so the top of the content is its start.
+    /// The pin is re-decided on the next paint, when there is a real distance to
+    /// decide from — the layout at this moment is still the old one.
+    fn open_at_head(&mut self, cx: &mut Context<Self>) {
+        self.anchor = None;
+        self.at_head = true;
+        self.scroll
+            .set_offset(point(self.scroll.offset().x, px(0.)));
+        cx.notify();
+    }
+
+    /// Remember the reader's place, before a page nobody asked for is held in front of
+    /// it: gpui measures the offset from the *head* of the content, so rows added above
+    /// a reader move what they are looking at unless the distance from the bottom is
+    /// put back. A reader already at the bottom has no place to hold.
+    fn hold_anchor(&mut self) {
+        let gap = self.gap();
+        if gap > 0. {
+            self.anchor = Some(gap);
+        }
+    }
+
+    /// Back at the latest: the window is the newest page again, and a page the reader
+    /// had asked for is forgotten — an answer that arrives after this is held in front
+    /// of them rather than opened under them. Returns whether the window moved.
+    fn collapse(&mut self, cx: &mut Context<Self>) -> bool {
+        self.awaiting = None;
+        self.anchor = None;
+        self.at_head = false;
+        self.data
+            .update(cx, |data, _| data.window_to_tail(WINDOW_ITEMS))
+    }
+
+    /// The reader asked for more of the record.
+    ///
+    /// The rows the window is holding back come first: they are already in hand, so
+    /// they open at once, and the topic's own scrollback is not asked for until the
+    /// reader has seen all of them. That ask goes out once, however many times the
+    /// header is pressed while a page is in flight.
+    fn load_older(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.data.read(cx).hidden_before() > 0 {
+            let moved = self.data.update(cx, |data, _| {
+                let start = data.shown.start.saturating_sub(WINDOW_ITEMS);
+                data.set_window(start, data.shown.end)
+            });
+            if moved {
+                self.open_at_head(cx);
+            }
+            return;
+        }
+        if self.loading_older {
+            // A page is on its way: asking again would only duplicate it.
+            return;
+        }
+        let handler = self.data.read(cx).on_load_older.borrow().clone();
+        let Some(handler) = handler else {
+            return;
+        };
+        let oldest = self.data.read(cx).items.first().map(|item| item.id.clone());
+        let Some(oldest) = oldest else {
+            return;
+        };
+        self.awaiting = Some(self.scrolls);
+        self.set_history(true, true, cx);
+        handler(&oldest, window, cx);
+    }
+}
+
 /// Whether an item belongs in the conversation.
 ///
 /// Only one kind is ever dropped: a notice the server itself does not keep
@@ -637,6 +952,14 @@ impl TranscriptView {
 /// record.
 fn is_part_of_the_record(item: &Item) -> bool {
     !matches!(&item.kind, ItemKind::Notice(notice) if !notice.durable)
+}
+
+/// Whether an item carries thinking text a reader could reveal. The view counts these
+/// as the record changes, so the control that reveals them costs no walk of the record
+/// — and a row behind the window still counts, since what it reveals is the transcript,
+/// not the window.
+fn carries_thinking(kind: &ItemKind) -> bool {
+    matches!(kind, ItemKind::Assistant(assistant) if !assistant.thinking.is_empty())
 }
 
 /// What an empty transcript says, per agent.
@@ -694,57 +1017,48 @@ fn empty_state(agent: AgentKey, palette: &Palette) -> AnyElement {
 
 /// The strip above the list: the way back into the history the tab holds only the tail of.
 ///
-/// A topic that came with `has_more` has items older than the oldest one on screen — the
-/// other side of a compaction, usually — and this is how the reader asks for them. It says
-/// how far back it goes rather than how many items are missing: the server counts what it
-/// cut off, which is not a number a reader has a use for.
+/// It stands for two things at once, in this order: the rows the window is holding back,
+/// which open at once, and — once those are all on screen — the items the *topic* still
+/// has behind them, which are a page the owner fetches. It says how far back it goes
+/// rather than how many items are missing: the server counts what it cut off, which is
+/// not a number a reader has a use for.
 fn history_header(
     loading: bool,
-    oldest: Option<String>,
     palette: &Palette,
-    data: &Entity<TranscriptData>,
     view: &WeakEntity<TranscriptView>,
-    cx: &App,
-) -> Option<AnyElement> {
-    let handler = data.read(cx).on_load_older.borrow().clone()?;
-    let oldest = oldest?;
+) -> AnyElement {
     let view = view.clone();
     let label = if loading {
         "Loading earlier items…"
     } else {
         "Earlier items"
     };
-    Some(
-        div()
-            .w_full()
-            .flex()
-            .justify_center()
-            .pb(px(6.))
-            .child(
-                div()
-                    .id("transcript-load-older")
-                    .px_3()
-                    .py(px(2.))
-                    .rounded(palette.radius)
-                    .border_1()
-                    .border_color(palette.border)
-                    .text_size(px(11.))
-                    .line_height(px(16.))
-                    .text_color(palette.muted_foreground)
-                    .cursor_pointer()
-                    .hover(|style| style.text_color(palette.foreground))
-                    .aria_label(label.to_string())
-                    .on_click(move |_, window, cx| {
-                        // The page is in flight from here: the header says so until the
-                        // owner answers (which is a snapshot of the older items).
-                        let _ = view.update(cx, |view, cx| view.set_history(true, true, cx));
-                        handler(&oldest, window, cx)
-                    })
-                    .child(label)
-                    .test_support(),
-            )
-            .into_any_element(),
-    )
+    div()
+        .w_full()
+        .flex()
+        .justify_center()
+        .pb(px(6.))
+        .child(
+            div()
+                .id("transcript-load-older")
+                .px_3()
+                .py(px(2.))
+                .rounded(palette.radius)
+                .border_1()
+                .border_color(palette.border)
+                .text_size(px(11.))
+                .line_height(px(16.))
+                .text_color(palette.muted_foreground)
+                .cursor_pointer()
+                .hover(|style| style.text_color(palette.foreground))
+                .aria_label(label.to_string())
+                .on_click(move |_, window, cx| {
+                    let _ = view.update(cx, |view, cx| view.load_older(window, cx));
+                })
+                .child(label)
+                .test_support(),
+        )
+        .into_any_element()
 }
 
 impl Render for TranscriptView {
@@ -756,15 +1070,14 @@ impl Render for TranscriptView {
             return empty_state(self.agent, &palette).into_any_element();
         }
 
-        self.data.update(cx, |data, _| data.begin_frame());
-
-        // The images on screen, asked for once each: a media fetch per image, and only
-        // for a row somebody is looking at.
+        // The images of the rows the window draws, asked for once each: a media fetch
+        // per image, and only for an image somebody is looking at.
         let wanted = {
             let data = self.data.read(cx);
-            let handler = data.on_fetch_image.borrow().is_some();
-            if handler {
-                data.items
+            if data.on_fetch_image.borrow().is_none() {
+                Vec::new()
+            } else {
+                data.items[data.shown.clone()]
                     .iter()
                     .flat_map(|item| match &item.kind {
                         ItemKind::User(user) => user
@@ -777,8 +1090,6 @@ impl Render for TranscriptView {
                     })
                     .filter(|key| !data.images.contains_key(key))
                     .collect::<Vec<_>>()
-            } else {
-                Vec::new()
             }
         };
         if !wanted.is_empty() {
@@ -797,23 +1108,25 @@ impl Render for TranscriptView {
             }
         }
 
-        let rows_held = self.data.read(cx).items.len();
+        // Only the window is built into rows: the record behind it is held for the ops
+        // that move it, and building the whole of it — as the list did before there was
+        // a window — costs a parse and a layout per item every frame.
+        let shown = self.data.read(cx).shown.clone();
         let before = {
             let data = self.data.clone();
             let view = cx.weak_entity();
-            let mut rows = Vec::with_capacity(rows_held);
-            for index in 0..rows_held {
+            let mut rows = Vec::with_capacity(shown.len());
+            for index in shown {
                 rows.push(data.update(cx, |data, cx| rows::render_row(data, index, &view, cx)));
             }
             rows
         };
 
-        // The way back into older history heads the list: it is what is above the
-        // oldest row held.
-        let header = if self.has_older {
-            let oldest = self.data.read(cx).items.first().map(|item| item.id.clone());
+        // The way back into the record heads the list: the rows the window is holding
+        // back, and then the topic's own scrollback behind them.
+        let header = if self.data.read(cx).hidden_before() > 0 || self.has_older {
             let weak = cx.weak_entity();
-            history_header(self.loading_older, oldest, &palette, &self.data, &weak, cx)
+            Some(history_header(self.loading_older, &palette, &weak))
         } else {
             None
         };
@@ -852,7 +1165,7 @@ impl Render for TranscriptView {
              _: &gpui_kit::ScrollWheelEvent,
              _: &mut Window,
              cx: &mut Context<Self>| {
-                view.pin.touched();
+                view.touched();
                 cx.notify();
             },
         );
@@ -861,7 +1174,7 @@ impl Render for TranscriptView {
              _: &gpui_kit::MouseDownEvent,
              _: &mut Window,
              cx: &mut Context<Self>| {
-                view.pin.touched();
+                view.touched();
                 cx.notify();
             },
         );
@@ -870,7 +1183,7 @@ impl Render for TranscriptView {
              _: &gpui_kit::KeyDownEvent,
              _: &mut Window,
              cx: &mut Context<Self>| {
-                view.pin.touched();
+                view.touched();
                 cx.notify();
             },
         );
@@ -948,7 +1261,7 @@ impl TranscriptView {
     /// ease`, and 6px of lift — which is what the animation's two ids give it: a state
     /// change starts a fresh 160ms run from the other end.
     fn jump_pill(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let away = self.pin.is_away();
+        let away = self.is_away_from_latest(cx);
         let palette = Palette::from_app(cx);
         let jump = cx.listener(
             |view: &mut Self,
@@ -1037,18 +1350,80 @@ impl Drop for TranscriptView {
 /// the reader goes up, and 0 for a list shorter than its pane.
 impl TranscriptView {
     fn on_painted(&mut self, cx: &mut Context<Self>) {
-        let gap = f32::from(self.scroll.max_offset().y + self.scroll.offset().y);
-        let away = self.pin.is_away();
-        match self.pin.on_scroll(gap) {
-            // The layout moved under a reader who is following: pull the list back
-            // rather than letting their place drift.
-            Action::SnapToBottom => self.scroll.scroll_to_bottom(),
-            Action::Leave => {}
+        // Rows were opened in front of the reader: put the offset back on the distance
+        // from the bottom they had, or the page above them slides what they are reading
+        // down the pane.
+        if let Some(gap) = self.anchor.take() {
+            let y = (gap - f32::from(self.scroll.max_offset().y)).min(0.);
+            self.scroll.set_offset(point(self.scroll.offset().x, px(y)));
+            self.pin.settled();
         }
-        if self.pin.is_away() != away {
+
+        // Whose scroll this frame is — if it is a scroll at all. Only a frame in which
+        // the reader's own wheel, key or press arrived, the offset moved, or the list or
+        // its pane changed height is one the design's rule has anything to say about;
+        // between those the reader's flags stand.
+        let now = Painted {
+            scrolls: self.scrolls,
+            offset: f32::from(self.scroll.offset().y),
+            size: self.sizes(),
+        };
+        let before = std::mem::replace(&mut self.painted, now);
+        let by_input = now.scrolls != before.scrolls;
+        let scrolled = (now.offset - before.offset).abs() > 0.5;
+        let resized = moved_size(now.size, before.size);
+
+        let away = self.pin.is_away();
+        if std::mem::take(&mut self.at_head) {
+            // The reader has just been placed at the head of a block they asked for.
+            // Where that leaves them is the pin's business — and only now, with the
+            // block laid out, is there a distance to decide it from.
+            self.pin.placed(self.gap());
+        } else if by_input || scrolled || resized {
+            // A scroll the view saw no input for — a drag of the scroll bar — is still
+            // the reader's if the content did not move under them; everything else that
+            // is not their own wheel is the layout, and the layout never puts the list
+            // back on its tail: the list does not come back to the latest because a row
+            // left the record or a pane grew.
+            let gap = self.gap();
+            let was_pinned = self.pin.is_pinned();
+            let action = if by_input || (scrolled && !resized) {
+                self.pin.on_scroll(gap)
+            } else {
+                self.pin.on_layout(gap)
+            };
+            match action {
+                // The layout moved under a reader who is following: pull the list back
+                // rather than letting their place drift.
+                Action::SnapToBottom => self.scroll.scroll_to_bottom(),
+                Action::Leave => {}
+            }
+            // Back at the latest: the window is the newest page once more, and the list
+            // lands against the shorter layout that leaves.
+            if self.pin.is_pinned() && !was_pinned && self.collapse(cx) {
+                self.scroll.scroll_to_bottom();
+            }
+        }
+        if self.is_away_from_latest(cx) != away {
             cx.notify();
         }
     }
+}
+
+/// Where the list was, and how tall it was, at the last paint — and how many of the
+/// reader's own scrolls had happened by then.
+#[derive(Clone, Copy, Default)]
+struct Painted {
+    scrolls: u64,
+    offset: f32,
+    /// The height of what the list draws, and of the pane it is drawn in.
+    size: (f32, f32),
+}
+
+/// Whether two views of the list's height are the same picture: half a pixel of drift
+/// between frames is layout arithmetic, not a row arriving or a pane growing.
+fn moved_size(now: (f32, f32), before: (f32, f32)) -> bool {
+    (now.0 - before.0).abs() > 0.5 || (now.1 - before.1).abs() > 0.5
 }
 
 /// The return to the latest, step by step: `smooth` in the design's `scrollTo`.

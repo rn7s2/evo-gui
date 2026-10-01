@@ -12,6 +12,15 @@ widgets = { path = "../widgets" }
 # Decoding the bytes an image row fetched. The same major version gpui itself
 # links against, so `image::Frame` is the type `RenderImage::new` wants.
 image = "0.25"
+# TeX math: RaTeX's parser, layout engine and SVG export. `embed-fonts` puts the
+# KaTeX glyph outlines in the document, so a formula is self-contained — no
+# system font, no network, and the same picture on every machine. `ratex-svg`'s
+# own `cli` feature is deliberately off: it only builds that crate's batch
+# exporter binary, and this is a library.
+ratex-svg = { version = "=0.1.14", features = ["embed-fonts"] }
+ratex-layout = "=0.1.14"
+ratex-parser = "=0.1.14"
+ratex-types = "=0.1.14"
 
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }

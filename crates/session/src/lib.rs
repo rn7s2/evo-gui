@@ -65,3 +65,8 @@ pub use topic::Topic;
 /// How a topic is doing, in the vocabulary the status line and the rows use. `Waiting` is
 /// a coordinator that settled but is held while its lanes work.
 pub type Activity = state::Status;
+
+/// How many items a snapshot carries and one page of scrollback asks for
+/// (`GET /snapshot?items=`, `GET /items?before=&limit=`, §5.2/§5.4): a live transcript
+/// holds a whole window, and the way back into older history is another whole window.
+pub const PAGE_ITEMS: u32 = 256;

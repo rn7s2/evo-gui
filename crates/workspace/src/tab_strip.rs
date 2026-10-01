@@ -1,8 +1,9 @@
 //! The tab strip — `design/doc28/TabStrip.tsx` and `TabStrip.css`, drawn in gpui.
 //!
 //! One band, [`STRIP_HEIGHT`](store::design::STRIP_HEIGHT) tall, whose background
-//! is the design's `--tab-strip`, holding a tab per swarm and the `+`. It is the
-//! window's title bar too: the kit's [`TitleBar`] is the host, so dragging moves
+//! is the design's `--tab-strip`, holding a tab per swarm and the `+` — and, past
+//! them and their scroller, the gear that opens the app's own Settings (§13). It is
+//! the window's title bar too: the kit's [`TitleBar`] is the host, so dragging moves
 //! the window, a double click zooms it, and the traffic lights and the
 //! non-macOS window controls stay the system's — the design's own three dots are
 //! a stage prop (the README says so), and the 84px they sit in is
@@ -36,10 +37,13 @@
 //!   design's `.tab-add` as the last sibling in `.tab-row` — and a hovered one
 //!   takes `tab_hover`;
 //! * there is at most one empty tab to add: see
-//!   [`WorkspaceView::add_tab`](crate::WorkspaceView::add_tab).
+//!   [`WorkspaceView::add_tab`](crate::WorkspaceView::add_tab);
+//! * the gear past the tabs' scroller is the app's own Settings — one tab, never
+//!   scrolled away, drawn as the `+` is: see
+//!   [`WorkspaceView::open_settings_tab`](crate::WorkspaceView::open_settings_tab).
 
 use gpui_kit::base::InteractiveElementExt as _;
-use gpui_kit::component::{h_flex, ActiveTheme as _, TitleBar};
+use gpui_kit::component::{h_flex, ActiveTheme as _, IconName, TitleBar};
 use gpui_kit::prelude::*;
 use gpui_kit::{
     canvas, div, point, px, AnyElement, BoxShadow, Context, ElementId, Entity, IntoElement,
@@ -68,6 +72,13 @@ pub(crate) const BAR_ID: &str = "tab-bar";
 
 /// The `+` at the end of the strip: always present, always the last thing.
 pub(crate) const ADD_ID: &str = "tab-add";
+
+/// The gear at the strip's far right: the app's settings, and the one way in
+/// (§7.1). Always present, and never scrolled away with the tabs.
+pub(crate) const SETTINGS_ID: &str = "tab-settings";
+
+/// What the gear is called, for a screen reader and for its hover.
+const SETTINGS_LABEL: &str = "Settings";
 
 /// The strip's bottom edge carries no rule in the design (`border-bottom: 0`),
 /// because the active tab runs into the header row below it.
@@ -151,6 +162,7 @@ fn row(view: &WorkspaceView, window: &Window, cx: &mut Context<WorkspaceView>) -
         .test_support()
         .child(scroller(view, cx))
         .child(add(cx))
+        .child(settings_gear(cx))
 }
 
 /// The tabs, in the box that clips them and the bar that scrolls them.
@@ -611,6 +623,50 @@ fn add(cx: &mut Context<WorkspaceView>) -> impl IntoElement {
             this.add_tab(window, cx);
         }))
         .child(glyph::plus_in(palette))
+}
+
+/// The gear at the far right of the strip: the app's own settings (§7.1).
+///
+/// It is *outside* the tabs' scroller, pushed to the strip's right edge — the last tab
+/// can be scrolled out of sight, this cannot — and it is the one way into the Settings
+/// tab, of which the window keeps at most one
+/// ([`WorkspaceView::open_settings_tab`](crate::WorkspaceView::open_settings_tab)).
+/// It is drawn as the `+` is: the same box, the same hover, one glyph.
+fn settings_gear(cx: &mut Context<WorkspaceView>) -> impl IntoElement {
+    let palette = palette(cx);
+    div()
+        .id(SETTINGS_ID)
+        .test_support()
+        .ml_auto()
+        .mr(px(design::TAB_ROW_PAD.1))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .size(px(design::ADD))
+        .rounded(px(design::ADD_RADIUS))
+        .mb(px((design::TAB_HEIGHT - design::ADD) / 2.))
+        .cursor_pointer()
+        .text_color(color(palette.tab_ink))
+        .hover(move |style| {
+            style
+                .bg(color(palette.tab_hover))
+                .text_color(color(palette.fg))
+        })
+        .aria_label(SETTINGS_LABEL)
+        .tooltip(|window, cx| {
+            widgets::tooltip::text(
+                "settings-gear-tooltip",
+                SETTINGS_LABEL,
+                px(200.),
+                window,
+                cx,
+            )
+        })
+        .on_click(cx.listener(|this, _, window, cx| {
+            this.open_settings_tab(window, cx);
+        }))
+        .child(IconName::Settings)
 }
 
 /// The window's palette, as the strip's drawing reads it.

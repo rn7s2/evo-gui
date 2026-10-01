@@ -52,7 +52,15 @@ fn a_tab_boots_snapshots_every_topic_and_streams() {
     }
 
     // `serving` waited for the live stream, and the tab's own server answers.
-    assert!(Control::attach(dir.path()).is_ok());
+    let control = Control::attach(dir.path()).expect("the tab's server");
+    // Every topic was asked for as a whole window (§5.2): the server's own default is
+    // smaller, and a live transcript wants `session::PAGE_ITEMS` items from the start.
+    let snapshots = control.requests_on("/snapshot");
+    assert!(!snapshots.is_empty(), "the boot read the snapshot");
+    for request in &snapshots {
+        let path = request["path"].as_str().unwrap();
+        assert!(path.contains("items=256"), "{path}");
+    }
     drop(handle);
 }
 
@@ -156,27 +164,55 @@ fn a_stream_reset_re_snapshots_everything_and_resumes_the_stream() {
     // Everything is re-read, and the stream resumes from the snapshot's cursor —
     // not from the beginning, and not from nothing.
     feed.expect("the re-read session", snapshot_of("session"));
-    let streams = control.requests_on("/stream");
+
+    // One read of the whole view, and one resumed stream. `requests` forgets what it
+    // returns, so both are read off the same answer.
+    let asked = control.requests();
+    let paths = |prefix: &str| -> Vec<String> {
+        asked
+            .iter()
+            .filter_map(|request| request["path"].as_str())
+            .filter(|path| path.starts_with(prefix))
+            .map(str::to_owned)
+            .collect()
+    };
+    let streams = paths("/stream");
     assert_eq!(
         streams.len(),
         1,
         "one resumed stream, not a second boot: {streams:?}"
     );
-    let path = streams[0]["path"].as_str().unwrap();
-    assert!(path.contains("since="), "{path}");
-    assert!(path.contains("lane%3A%2A"), "{path}");
+    assert!(streams[0].contains("since="), "{}", streams[0]);
+    assert!(streams[0].contains("lane%3A%2A"), "{}", streams[0]);
+
+    // The resync re-reads a whole window too (§5.2): it resumed from an atomic
+    // snapshot, and that snapshot is the same size as the first.
+    let snapshots = paths("/snapshot");
+    assert!(!snapshots.is_empty(), "the reset re-read the snapshot");
+    for path in &snapshots {
+        assert!(path.contains("items=256"), "{path}");
+    }
     drop(handle);
 }
 
 #[test]
 fn a_refetch_asks_for_every_topic_again() {
-    let (_dir, handle, updates) = tab("refetch", &[]);
+    let (dir, handle, updates) = tab("refetch", &[]);
     let mut feed = Feed::new(updates);
     serving(&mut feed);
+    let control = Control::attach(dir.path()).unwrap();
     feed.expect("the first snapshot", snapshot_of("session"));
+    control.requests(); // forget the boot's requests
 
     assert!(handle.refetch());
     feed.expect("the second snapshot", snapshot_of("session"));
+    // A refetch is the same read as the boot's, window and all (§5.2).
+    let asked = control.requests_on("/snapshot");
+    assert!(!asked.is_empty(), "the refetch read the snapshot");
+    for request in &asked {
+        let path = request["path"].as_str().unwrap();
+        assert!(path.contains("items=256"), "{path}");
+    }
     drop(handle);
 }
 
@@ -355,6 +391,29 @@ fn the_scrollback_pages_older_items_the_whole_item_and_an_image() {
     drop(handle);
 }
 
+/// The way back into history is a whole window (§5.4): the tab asks for
+/// [`session::PAGE_ITEMS`], never an ad-hoc number, so the live transcript and the
+/// page behind it are the same size.
+#[test]
+fn the_scrollback_page_is_a_whole_window() {
+    let (dir, handle, updates) = tab("page-window", &[]);
+    let mut feed = Feed::new(updates);
+    serving(&mut feed);
+    let control = Control::attach(dir.path()).unwrap();
+    feed.expect("the first snapshot", snapshot_of("session"));
+    control.requests();
+
+    assert!(handle.page("session", Some("e_9"), session::PAGE_ITEMS));
+    feed.expect("a page of items", |update| {
+        matches!(update, Update::ItemsBefore { .. })
+    });
+    let asked = control.requests_on("/items");
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    let path = asked[0]["path"].as_str().unwrap();
+    assert!(path.contains("limit=256"), "{path}");
+    drop(handle);
+}
+
 #[test]
 fn a_read_that_fails_comes_back_as_a_fetch_failed() {
     let (dir, handle, updates) = tab("reads-fail", &[]);
@@ -369,12 +428,12 @@ fn a_read_that_fails_comes_back_as_a_fetch_failed() {
     assert!(handle.media("session", "e_missing", 3));
     let failed = |want: &'static str| {
         move |update: &Update| {
-            matches!(update, Update::FetchFailed { what, reason }
+            matches!(update, Update::FetchFailed { what, reason, .. }
                 if what.starts_with(want) && !reason.is_empty())
         }
     };
     let update = feed.expect("the item failure", failed("item e_missing"));
-    let Update::FetchFailed { what, reason } = update else {
+    let Update::FetchFailed { what, reason, .. } = update else {
         unreachable!()
     };
     assert!(what.starts_with("item e_missing"), "{what}");

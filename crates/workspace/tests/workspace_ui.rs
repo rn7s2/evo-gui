@@ -1364,3 +1364,395 @@ fn the_quitting_screen_says_what_is_being_terminated(cx: &mut TestAppContext) {
     })
     .unwrap();
 }
+
+// --- the Settings tab (§7.1, §13) -----------------------------------------
+
+/// A test's own evo home: the four files a Settings tab reads live in it, and
+/// nothing here touches the machine's own `~/.evo`. The directory is not made — a
+/// missing file is what a project that has never been configured looks like, and
+/// reading one creates nothing.
+fn hermetic_evo_home() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let home = std::env::temp_dir().join(format!("workspace-settings-{}", std::process::id()));
+        std::env::set_var("EVO_HOME", home);
+    });
+}
+
+/// §7.1: the gear at the far right of the strip opens the app's Settings, there is
+/// only ever one of it, and it is the strip's last tab — a tab opened later goes
+/// *before* it, which is what keeps the strip and the stored tab set the same order.
+#[gpui_kit::test]
+fn the_gear_opens_one_settings_tab_and_shows_it_again(cx: &mut TestAppContext) {
+    hermetic_evo_home();
+    let (handle, view) = open_workspace(cx);
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(
+            window.try_find("tab-settings").is_some(),
+            "the gear is on the strip"
+        );
+        let strip = window.find("tab-strip-scroll").bounds();
+        let gear = window.find("tab-settings").bounds();
+        assert!(
+            gear.left() >= strip.right() - px(1.),
+            "the gear is past the tabs' own scroller, so scrolling cannot take it away"
+        );
+
+        window.click("tab-settings", cx);
+        window.render_frame(cx);
+        let settings = {
+            let view = view.read(cx);
+            assert_eq!(view.tabs().len(), 2, "the empty tab and the settings tab");
+            assert_eq!(view.selected_index(), 1, "and Settings is what is shown");
+            let tab = view.selected_tab().read(cx);
+            assert_eq!(tab.state(), &TabState::Settings);
+            assert_eq!(tab.title(), "Settings", "the strip's own label for it");
+            window.find(tab_label(tab.id().get()));
+            tab.id()
+        };
+
+        // Another tab goes before Settings, which stays last.
+        open_another_tab(window, &view, cx);
+        window.render_frame(cx);
+        {
+            let view = view.read(cx);
+            assert_eq!(view.tabs().len(), 3);
+            assert_eq!(
+                view.tabs()[2].read(cx).id(),
+                settings,
+                "the settings tab is still the last one"
+            );
+            assert_eq!(view.selected_index(), 1, "the new tab is the one shown");
+        }
+
+        // The gear again: the one that is there is shown, not a second one made.
+        window.click("tab-settings", cx);
+        window.render_frame(cx);
+        let view = view.read(cx);
+        assert_eq!(view.tabs().len(), 3, "no second settings tab");
+        assert_eq!(view.selected_index(), 2, "the one that is there is shown");
+    })
+    .unwrap();
+}
+
+/// §9.8: the Settings tab is not one an app stores — no folder, no swarm, no
+/// session — and the index the window hands over still addresses the records it
+/// lists, with Settings left out.
+#[gpui_kit::test]
+fn the_settings_tab_is_not_part_of_the_stored_tab_set(cx: &mut TestAppContext) {
+    hermetic_evo_home();
+    let (handle, view) = open_workspace(cx);
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click("tab-settings", cx);
+        window.render_frame(cx);
+        open_another_tab(window, &view, cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+
+    // With Settings shown, there is no record to select: the index the app reads is
+    // the one past the records rather than a record that is not there.
+    cx.update(|cx| {
+        let view = view.read(cx);
+        let records = view.tab_records(cx);
+        assert_eq!(
+            records.len(),
+            2,
+            "the two swarm tabs, without the settings tab"
+        );
+        assert!(
+            records
+                .iter()
+                .all(|record| record.folder.is_none() && record.session.is_none()),
+            "and the settings tab contributed nothing to either of them"
+        );
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click(tab_label(tab_id(&view, 2, cx)), cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    cx.update(|cx| {
+        let view = view.read(cx);
+        assert_eq!(
+            view.selected_index(),
+            view.tab_records(cx).len(),
+            "the selected index of a window showing Settings names no record"
+        );
+    });
+
+    // A swarm tab being shown: the index is the record, in strip order.
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.click(tab_label(tab_id(&view, 0, cx)), cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    cx.update(|cx| {
+        let view = view.read(cx);
+        assert_eq!(view.selected_index(), 0);
+        assert_eq!(
+            view.tab_records(cx)[0].window_id,
+            view.tabs()[0].read(cx).id(),
+            "the index the app is handed is the record of the tab being shown"
+        );
+    });
+}
+
+/// §7.1, §13: a Settings tab with edits that are not on disk is asked about before
+/// it goes — Discard Changes, or keep editing. The tab keeps its draft while the
+/// question is up, and the answer is what closes it.
+#[gpui_kit::test]
+fn closing_a_settings_tab_with_unsaved_edits_asks_first(cx: &mut TestAppContext) {
+    hermetic_evo_home();
+    let (handle, view) = open_workspace(cx);
+    let window = handle.into();
+
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("tab-settings", cx);
+        window.render_frame(cx);
+        // Nothing here focuses anything: showing the tab is what puts the caret in
+        // its editor, so what is typed lands in the file the page is showing.
+        window.input("(a)", cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    // The editors read their four files on the background executor; the draft is
+    // measured against what was read, so let the first read land before asking a
+    // question about it.
+    cx.run_until_parked();
+    cx.update(|cx| {
+        let editor = view
+            .read(cx)
+            .selected_tab()
+            .read(cx)
+            .settings_editor()
+            .cloned()
+            .expect("the settings tab has its editors");
+        assert!(
+            editor.read(cx).is_dirty(cx),
+            "what was typed is a draft, not a file"
+        );
+    });
+
+    // The `×` asks rather than closes.
+    cx.update_window(window, |_, window, cx| {
+        window.click(tab_close(tab_id(&view, 1, cx)), cx);
+        window.render_frame(cx);
+        assert!(
+            window.try_find("settings-close-prompt").is_some(),
+            "the tab asks before it goes"
+        );
+        assert_eq!(view.read(cx).tabs().len(), 2, "and it has not gone");
+
+        // Keep Editing: the question goes, the tab stays, the draft stays.
+        window.click("settings-close-keep", cx);
+        window.render_frame(cx);
+        assert!(window.try_find("settings-close-prompt").is_none());
+        assert_eq!(view.read(cx).tabs().len(), 2);
+        let editor = view.read(cx).tabs()[1]
+            .read(cx)
+            .settings_editor()
+            .cloned()
+            .expect("the editors");
+        assert!(editor.read(cx).is_dirty(cx), "the draft was kept");
+    })
+    .unwrap();
+
+    // Discard Changes: the draft goes back to the file, and the tab goes with it —
+    // through the tab's own `CloseRequested`, which the window hears on its next
+    // effect cycle, exactly as the app's own loop would.
+    cx.update_window(window, |_, window, cx| {
+        window.click(tab_close(tab_id(&view, 1, cx)), cx);
+        window.render_frame(cx);
+        assert!(
+            window.try_find("settings-close-prompt").is_some(),
+            "asking again asks again"
+        );
+        window.click("settings-close-discard", cx);
+        window.render_frame(cx);
+        assert!(
+            window.try_find("settings-close-prompt").is_none(),
+            "the question is answered"
+        );
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(view.read(cx).tabs().len(), 1, "the tab went");
+        assert_eq!(view.read(cx).selected_index(), 0);
+    })
+    .unwrap();
+}
+
+/// §7.1: the Settings tab is one of the strip's tabs for the keyboard too — the
+/// cycle walks onto it and off it, ⌘9 is it while it is last, and ⌘W closes it the
+/// way it closes any tab with nothing behind it.
+#[gpui_kit::test]
+fn the_settings_tab_takes_the_strip_keys(cx: &mut TestAppContext) {
+    hermetic_evo_home();
+    let (handle, view) = open_workspace(cx);
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click("tab-settings", cx);
+        window.render_frame(cx);
+        assert_eq!(view.read(cx).selected_index(), 1);
+
+        window.press("cmd-9", cx);
+        assert_eq!(
+            view.read(cx).selected_index(),
+            1,
+            "⌘9 is the settings tab while it is the last one"
+        );
+        window.press("ctrl-shift-tab", cx);
+        assert_eq!(
+            view.read(cx).selected_index(),
+            0,
+            "the cycle walks off it onto the tab before it"
+        );
+        window.press("ctrl-tab", cx);
+        assert_eq!(view.read(cx).selected_index(), 1, "and back onto it");
+
+        // Nothing behind it: ⌘W's own close takes it at once, with no swarm to wait
+        // for. (⌘W is the app's binding, over `menus`; this is the half the window
+        // owns, which is what the menu item calls.)
+        view.update(cx, |view, cx| view.close_selected_tab(window, cx));
+        window.render_frame(cx);
+        let view = view.read(cx);
+        assert_eq!(view.tabs().len(), 1, "the settings tab went");
+        assert_eq!(view.selected_index(), 0);
+        assert_eq!(view.tabs()[0].read(cx).state(), &TabState::Empty);
+    })
+    .unwrap();
+}
+
+/// §7.1, §13: a settings page that is *writing* is not closed under the write. The
+/// close waits, and the page comes to the front while it does — its own status line
+/// says `Saving…`, which is the feedback a press that did nothing would not give.
+#[gpui_kit::test]
+fn a_settings_tab_that_is_writing_is_not_closed_under_the_write(cx: &mut TestAppContext) {
+    hermetic_evo_home();
+    let (handle, view) = open_workspace(cx);
+    let window = handle.into();
+
+    let editor = |cx: &App| {
+        view.read(cx)
+            .selected_tab()
+            .read(cx)
+            .settings_editor()
+            .cloned()
+            .expect("the settings tab has its editors")
+    };
+
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("tab-settings", cx);
+        window.render_frame(cx);
+        window.input("(a)", cx);
+    })
+    .unwrap();
+    // The page reads its documents first; a draft is measured against what was read.
+    cx.run_until_parked();
+    assert!(
+        cx.read(|cx| editor(cx).read(cx).is_dirty(cx)),
+        "what was typed is a draft"
+    );
+
+    cx.update_window(window, |_, window, cx| {
+        // The page's own save: the document being shown, on its way to disk.
+        let page = editor(cx);
+        page.update(cx, |page, cx| page.save_selected(window, cx));
+        assert!(
+            page.read(cx).is_saving(),
+            "the write is in flight, on the background executor"
+        );
+
+        // The close does not walk away from it.
+        view.update(cx, |view, cx| view.close_selected_tab(window, cx));
+        window.render_frame(cx);
+        assert_eq!(
+            view.read(cx).tabs().len(),
+            2,
+            "the tab stays while the write is in flight"
+        );
+        assert_eq!(
+            window.find(settings::CONFIG_STATUS_ID).label(),
+            Some("Saving…"),
+            "and the page's own status line is what says so"
+        );
+    })
+    .unwrap();
+
+    // The write lands — one way or the other, on this machine — and the page stops
+    // saying it is writing.
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        let page = editor(cx);
+        assert!(
+            !page.read(cx).is_saving(),
+            "the write is not still in flight after the executor ran"
+        );
+        assert_eq!(view.read(cx).tabs().len(), 2, "and the tab is still here");
+    })
+    .unwrap();
+}
+
+/// §7.1, §9.8: a window can be left holding nothing but the Settings tab — the last
+/// swarm tab closes into it, the way the last tab closes into a fresh New Swarm page —
+/// and the index it hands the app is still the one past its records, so nothing
+/// invisible is ever selected. `+` is the way back, and it opens *before* Settings.
+#[gpui_kit::test]
+fn a_window_holding_only_settings_still_maps_its_records(cx: &mut TestAppContext) {
+    hermetic_evo_home();
+    let (handle, view) = open_workspace(cx);
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click("tab-settings", cx);
+        window.render_frame(cx);
+
+        // ⌘W's own close, on the New Swarm tab rather than on Settings.
+        view.update(cx, |view, cx| view.select_tab(0, window, cx));
+        view.update(cx, |view, cx| view.close_selected_tab(window, cx));
+        window.render_frame(cx);
+        {
+            let shown = view.read(cx);
+            assert_eq!(shown.tabs().len(), 1, "only the settings tab is left");
+            assert_eq!(shown.tabs()[0].read(cx).state(), &TabState::Settings);
+            assert_eq!(shown.selected_index(), 0);
+            assert!(shown.tab_records(cx).is_empty(), "and it is not a record");
+            assert_eq!(
+                shown.selected_index(),
+                shown.tab_records(cx).len(),
+                "so the app is handed an index that names no record"
+            );
+        }
+
+        // `+` is the way back, and the new tab goes before Settings.
+        window.click("tab-add", cx);
+        window.render_frame(cx);
+        let shown = view.read(cx);
+        assert_eq!(shown.tabs().len(), 2);
+        assert_eq!(shown.tabs()[0].read(cx).state(), &TabState::Empty);
+        assert_eq!(
+            shown.tabs()[1].read(cx).state(),
+            &TabState::Settings,
+            "settings is still the last tab"
+        );
+        assert_eq!(shown.tab_records(cx).len(), 1);
+        assert_eq!(
+            shown.selected_index(),
+            0,
+            "and the tab being shown is the record it names"
+        );
+    })
+    .unwrap();
+}

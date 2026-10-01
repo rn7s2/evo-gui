@@ -30,6 +30,8 @@ use composer::{Composer, ComposerEvent, ModelRow};
 use session::{
     AgentKey, Changes, ItemChange, LaunchPlan, Op, Queue, Status, StreamStatus, TabModel,
 };
+use settings::ConfigEditor;
+use store::ConfigScope;
 use swarm_client::{ErrorCode, OpError, OpReply};
 use tab_engine::{EngineHandle, Update};
 use transcript::TranscriptView;
@@ -48,9 +50,6 @@ const STEP_TICK: Duration = Duration::from_secs(1);
 /// How long a notice above the composer stays: long enough to read a refusal,
 /// short enough that it is gone before it becomes furniture (§4).
 const NOTICE_LIFETIME: Duration = Duration::from_secs(4);
-
-/// How many items one page of scrollback asks for (`GET /items?before=&limit=`, §5.4).
-const PAGE_ITEMS: u32 = 100;
 
 /// A transient line above the composer (§4, §9.2).
 ///
@@ -146,6 +145,13 @@ impl TabId {
 pub enum TabState {
     /// No folder chosen yet: the choosers and the history list (§7.2).
     Empty,
+    /// The app's own settings: the raw editors for the four files evo reads, in the
+    /// evo home every session shares.
+    ///
+    /// This tab drives no swarm and owns no folder, so it is never started, never
+    /// persisted and never waited on at quit — it is a screen in the window, and
+    /// the window keeps at most one of it (§7.1).
+    Settings,
     /// A swarm is starting in this folder; its progress is what we show (§3).
     Booting { folder: PathBuf },
     /// The coordinator answered `/health`; the tab page is live (§7.3).
@@ -212,6 +218,14 @@ pub enum TabContentEvent {
     ResetPane,
 }
 
+/// Which of the two screens a [`TabContent`] opens on (§7.1, §7.2): a New Swarm
+/// page with a swarm behind it, or the app's own Settings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    Swarm,
+    Settings,
+}
+
 /// The retained view behind one tab.
 ///
 /// A tab holds both of its screens at once: the empty tab's choosers and history,
@@ -267,6 +281,28 @@ pub struct TabContent {
     /// The left column: the agents, drawn by `agent_list`, fed from the model
     /// (§7.3).
     pub(crate) agents: Entity<AgentList>,
+    /// The global Settings editor — the four files in the evo home every session
+    /// shares. `Some` exactly on a [`TabState::Settings`] tab.
+    pub(crate) settings: Option<Entity<ConfigEditor>>,
+    /// The project's own editors, made the first time the folder row at the foot of
+    /// the lane column is pressed and kept from then on, so a draft survives going
+    /// back to a lane and returning (§7.3).
+    pub(crate) project_editor: Option<Entity<ConfigEditor>>,
+    /// The conversation column is showing the project's settings rather than the
+    /// selected agent's transcript — which is what a press on the folder row does,
+    /// and what selecting a lane or the coordinator undoes (§7.3).
+    pub(crate) project_settings: bool,
+    /// The thinking level the shown agent was last set to, kept beside the composer
+    /// it was fed: the header's reveal reads it before any thinking text has arrived
+    /// (§4.2, §7.3).
+    ///
+    /// It is the same reading the drawer gets — one topic state, taken in
+    /// [`TabContent::sync_composer`] — because the drawer's own copy is the
+    /// composer's private business.
+    pub(crate) thinking_level: Option<String>,
+    /// A close was asked for while an editor here holds unsaved changes: the page
+    /// draws the Discard / Keep Editing question instead of the tab going.
+    pub(crate) close_prompt: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -365,6 +401,33 @@ impl TabContent {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        TabContent::build(id, config, Kind::Swarm, window, cx)
+    }
+
+    /// The window's Settings tab (§7.1): raw editors for the four files evo reads,
+    /// in the home every session on this machine shares.
+    ///
+    /// It drives no swarm and owns no folder. The window keeps at most one of these
+    /// ([`crate::WorkspaceView::open_settings_tab`]), it is never written into the
+    /// stored tab set, and nothing about it is waited on at quit.
+    pub fn new_settings(
+        id: TabId,
+        config: Arc<LaunchEnv>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        TabContent::build(id, config, Kind::Settings, window, cx)
+    }
+
+    /// Both kinds are one retained view with one screen swapped out; this is the
+    /// shared half, so a Settings tab is a tab like any other on the strip.
+    fn build(
+        id: TabId,
+        config: Arc<LaunchEnv>,
+        kind: Kind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         // The rows come from the launcher's background scan (§9.5); the empty
         // tab fills this list as they arrive.
         let history = cx.new(|cx| ListState::new(HistoryList::new(Vec::new()), window, cx));
@@ -403,6 +466,9 @@ impl TabContent {
             &agents,
             |this, _list, event: &AgentListEvent, cx| match event {
                 AgentListEvent::Select(agent) => {
+                    // Choosing an agent is choosing a transcript: what it puts back
+                    // after the project's settings were showing (§7.3).
+                    this.hide_project_settings(cx);
                     this.select_agent(*agent, cx);
                     // A drawer is about the agent that was selected when it was
                     // opened: showing another agent's transcript folds it back, which
@@ -418,7 +484,10 @@ impl TabContent {
 
         let mut tab = TabContent {
             id,
-            state: TabState::Empty,
+            state: match kind {
+                Kind::Swarm => TabState::Empty,
+                Kind::Settings => TabState::Settings,
+            },
             choosers: Choosers::new(window, cx),
             history,
             transcripts: BTreeMap::new(),
@@ -436,6 +505,18 @@ impl TabContent {
             terminating: false,
             terminating_focus: cx.focus_handle(),
             agents,
+            // The global editor is the Settings tab's whole reason to exist; a swarm
+            // tab has none until its folder row is pressed.
+            settings: match kind {
+                Kind::Swarm => None,
+                Kind::Settings => {
+                    Some(cx.new(|cx| ConfigEditor::new(ConfigScope::Global, window, cx)))
+                }
+            },
+            project_editor: None,
+            project_settings: false,
+            thinking_level: None,
+            close_prompt: false,
             _subscriptions: vec![
                 history_subscription,
                 composer_subscription,
@@ -444,8 +525,11 @@ impl TabContent {
         };
         // The empty tab's check runs the binary this app would spawn, and says so
         // when it cannot: the app's own path, not the installed default (§9, §13).
-        let bin = tab.config.swarm_bin.clone();
-        tab.set_swarm_bin(bin, cx);
+        // A Settings tab starts no swarm and checks nothing.
+        if kind == Kind::Swarm {
+            let bin = tab.config.swarm_bin.clone();
+            tab.set_swarm_bin(bin, cx);
+        }
         tab
     }
 
@@ -460,7 +544,8 @@ impl TabContent {
     /// The folder this tab works in, once one is chosen.
     pub fn folder(&self) -> Option<&Path> {
         match &self.state {
-            TabState::Empty => None,
+            // Settings belongs to no folder: it edits the home every session shares.
+            TabState::Empty | TabState::Settings => None,
             TabState::Booting { folder }
             | TabState::Running { folder }
             | TabState::Failed { folder, .. } => Some(folder),
@@ -525,8 +610,26 @@ impl TabContent {
             // The composer is the only thing on the tab page to type into, and the
             // page is what a running tab shows.
             TabState::Running { .. } => {
+                // The project's settings, while they are what the page is showing,
+                // are what the keyboard is for: coming back to a tab whose folder
+                // row was pressed is coming back to that editor.
+                if self.project_settings {
+                    if let Some(editor) = &self.project_editor {
+                        editor.update(cx, |editor, cx| editor.focus_into(window, cx));
+                        return true;
+                    }
+                }
                 self.composer
                     .update(cx, |composer, cx| composer.focus_input(window, cx));
+                true
+            }
+            // A Settings tab is its editors: the first of them takes the caret, so
+            // an opened Settings tab is ready to be typed into.
+            TabState::Settings => {
+                let Some(editor) = &self.settings else {
+                    return false;
+                };
+                editor.update(cx, |editor, cx| editor.focus_into(window, cx));
                 true
             }
             // Starting, stopping, failed: nothing on the screen takes a keystroke,
@@ -625,11 +728,15 @@ impl TabContent {
         self.model().is_some_and(swarm_is_busy)
     }
 
-    /// The label on the tab: the folder's name, or `New Swarm` while empty.
+    /// The label on the tab: the folder's name, `New Swarm` while empty, or
+    /// `Settings`.
     pub fn title(&self) -> SharedString {
-        match self.folder() {
-            Some(folder) => folder_name(folder),
-            None => SharedString::from("New Swarm"),
+        match &self.state {
+            TabState::Settings => SharedString::from("Settings"),
+            _ => match self.folder() {
+                Some(folder) => folder_name(folder),
+                None => SharedString::from("New Swarm"),
+            },
         }
     }
 
@@ -637,6 +744,7 @@ impl TabContent {
     pub fn tooltip(&self) -> SharedString {
         let what = match &self.state {
             _ if self.terminating => "terminating the swarm…",
+            TabState::Settings => "the settings files evo reads",
             TabState::Empty => "no folder chosen",
             TabState::Booting { .. } => "starting the swarm…",
             TabState::Failed { was_up: true, .. } => "swarm gone: the server exited",
@@ -662,6 +770,165 @@ impl TabContent {
     /// button (§7.3).
     pub fn composer(&self) -> &Entity<Composer> {
         &self.composer
+    }
+
+    // --- the settings editors (§7.1, §7.3) ---------------------------------
+
+    /// The global Settings editor, on a Settings tab and nowhere else.
+    pub fn settings_editor(&self) -> Option<&Entity<ConfigEditor>> {
+        self.settings.as_ref()
+    }
+
+    /// The project's own editor, once the folder row at the foot of the lane column
+    /// has been pressed.
+    pub fn project_editor(&self) -> Option<&Entity<ConfigEditor>> {
+        self.project_editor.as_ref()
+    }
+
+    /// Whether the conversation area is showing the project's settings instead of
+    /// the selected agent's transcript.
+    pub fn project_settings_shown(&self) -> bool {
+        self.project_settings
+    }
+
+    /// Whether an editor on this tab holds changes that are not on disk yet — the
+    /// question a close has to ask first, wherever the editor is (a Settings tab, or
+    /// a running tab's project settings).
+    pub fn is_settings_dirty(&self, cx: &App) -> bool {
+        let dirty = |editor: &Entity<ConfigEditor>| editor.read(cx).is_dirty(cx);
+        self.settings.as_ref().is_some_and(dirty) || self.project_editor.as_ref().is_some_and(dirty)
+    }
+
+    /// Whether an editor on this tab is writing a document right now.
+    ///
+    /// A save runs on the background executor with a copy of the text, so an editor
+    /// dropped under it would leave a write landing on a file nobody is looking at —
+    /// and a discard answered "yes" while it is in flight would not undo it. Nothing
+    /// may close this tab, or throw its drafts away, until the write has landed.
+    pub fn is_settings_saving(&self, cx: &App) -> bool {
+        let saving = |editor: &Entity<ConfigEditor>| editor.read(cx).is_saving();
+        self.settings.as_ref().is_some_and(saving)
+            || self.project_editor.as_ref().is_some_and(saving)
+    }
+
+    /// Throw away every unsaved change this tab's editors hold — the "Discard" of a
+    /// close question, and what the app's own quit uses.
+    ///
+    /// Each page puts its drafts back to the text it last read, which is an input's
+    /// own work and needs the window the input lives in.
+    pub fn discard_settings_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for editor in [self.settings.clone(), self.project_editor.clone()]
+            .into_iter()
+            .flatten()
+        {
+            editor.update(cx, |editor, cx| editor.discard(window, cx));
+        }
+        self.close_prompt = false;
+        cx.notify();
+    }
+
+    /// Show the project's settings in the conversation area — the press on the folder
+    /// row at the foot of the lane column (§7.3).
+    ///
+    /// The editors are made the first time and kept from then on, so leaving them for
+    /// a lane's transcript and coming back finds the draft where it was left.
+    pub fn show_project_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(folder) = self.folder().map(Path::to_path_buf) else {
+            return;
+        };
+        let editor = match self.project_editor.clone() {
+            Some(editor) => editor,
+            None => {
+                let editor =
+                    cx.new(|cx| ConfigEditor::new(ConfigScope::Project(folder), window, cx));
+                self.project_editor = Some(editor.clone());
+                editor
+            }
+        };
+        if !self.project_settings {
+            self.project_settings = true;
+            cx.notify();
+        }
+        editor.update(cx, |editor, cx| editor.focus_into(window, cx));
+    }
+
+    /// Put the transcript back: what a press on a lane or the coordinator row does
+    /// (§7.3). The editor keeps its draft.
+    pub fn hide_project_settings(&mut self, cx: &mut Context<Self>) {
+        if self.project_settings {
+            self.project_settings = false;
+            cx.notify();
+        }
+    }
+
+    /// A close was asked for while an editor here is dirty: put the Discard / Keep
+    /// Editing question up instead of letting the tab go. Answers whether the
+    /// question is the thing holding the close back.
+    pub fn ask_close(&mut self, cx: &mut Context<Self>) -> bool {
+        self.close_prompt = true;
+        cx.notify();
+        true
+    }
+
+    /// Whether that question is up.
+    pub fn is_closing_prompted(&self) -> bool {
+        self.close_prompt
+    }
+
+    /// The question's "Discard": drop every unsaved change and ask the window to
+    /// close this tab — which it does at once, since a Settings tab drives no swarm.
+    pub fn discard_and_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // A document on its way to disk cannot be un-drafted: the question stays up
+        // until the write has landed (see [`Self::is_settings_saving`]).
+        if self.is_settings_saving(cx) {
+            return;
+        }
+        self.discard_settings_changes(window, cx);
+        cx.emit(TabContentEvent::CloseRequested);
+    }
+
+    /// The question's "Keep Editing": the question goes and the tab stays, with the
+    /// draft where it was.
+    pub fn keep_editing(&mut self, cx: &mut Context<Self>) {
+        if self.close_prompt {
+            self.close_prompt = false;
+            cx.notify();
+        }
+    }
+
+    /// Bring whatever this tab cannot walk away from to the front (§7.1, §9.8): the
+    /// project's settings rather than the transcript, when it is the project's editor
+    /// that holds the draft or the write — and, inside either page, the document that
+    /// holds it, rather than whichever document happened to be in front.
+    ///
+    /// A page that is writing is taken to the document it is writing, whichever one
+    /// the reader has since moved to; one that is not is taken to its first draft.
+    pub fn reveal_dirty_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(editor) = self.project_editor.clone() {
+            let (dirty, saving) = {
+                let editor = editor.read(cx);
+                (editor.is_dirty(cx), editor.is_saving())
+            };
+            if (dirty || saving) && !self.project_settings {
+                self.project_settings = true;
+                cx.notify();
+            }
+        }
+        for editor in [self.settings.clone(), self.project_editor.clone()]
+            .into_iter()
+            .flatten()
+        {
+            let file = {
+                let editor = editor.read(cx);
+                editor
+                    .saving_file()
+                    .or_else(|| editor.dirty_files(cx).into_iter().next())
+            };
+            let Some(file) = file else {
+                continue;
+            };
+            editor.update(cx, |editor, cx| editor.select(file, window, cx));
+        }
     }
 
     /// The app's catalog and session list, forwarded to the empty tab that shows
@@ -856,7 +1123,7 @@ impl TabContent {
         view.update(cx, |view, cx| {
             view.on_load_older(
                 move |oldest, _window, _cx| {
-                    engine.page(&page_topic, Some(oldest), PAGE_ITEMS);
+                    engine.page(&page_topic, Some(oldest), session::PAGE_ITEMS);
                 },
                 cx,
             );
@@ -995,6 +1262,10 @@ impl TabContent {
                 if let Some(changes) = changes {
                     self.push(changes, cx);
                 }
+                // An answer that added no row — a page overlapping what is held, or the
+                // last page of all — is still an answer: the header must stop saying it
+                // is loading even when nothing changed.
+                self.settle_history(&topic, cx);
             }
             // One item, whole: a tool row's untruncated output (§5.4). The view
             // holding that row takes it.
@@ -1010,7 +1281,12 @@ impl TabContent {
             } => self.on_media(&topic, &id, n, bytes, cx),
             // A read that failed. The view stays as it was, and one quiet line says
             // what could not be fetched: nothing is retried (§5.4).
-            Update::FetchFailed { what, reason } => {
+            Update::FetchFailed { what, reason, page } => {
+                // A page that failed still ends the wait: the header stops saying it is
+                // loading, and the reader can ask for that page again.
+                if let Some(topic) = page {
+                    self.settle_history(&topic, cx);
+                }
                 self.show_notice(
                     format!("Could not read {what}."),
                     Some(reason),
@@ -1080,8 +1356,12 @@ impl TabContent {
                 for change in topic_changes.items() {
                     match change {
                         ItemChange::Upsert { id, .. } => {
-                            if let Some(item) =
-                                live.model.items(agent).iter().find(|item| &item.id == id)
+                            // The topic's own index, not a scan of its items: a streamed
+                            // delta arrives per token, and a live mirror is long.
+                            if let Some(item) = live
+                                .model
+                                .agent_topic(agent)
+                                .and_then(|topic| topic.item(id))
                             {
                                 plan.upsert.push(item.clone());
                             }
@@ -1162,6 +1442,28 @@ impl TabContent {
         cx.notify();
     }
 
+    /// Release one topic's transcript from "Loading earlier items…" (§5.4).
+    ///
+    /// The header that asks for a page stays in flight until an answer lands, and an
+    /// answer is not always a row: a page that overlaps what the topic holds, the last
+    /// page of all, and a page that failed all change nothing, yet each must end the
+    /// wait. Only the topic the read was about is settled; the model still says whether
+    /// there is more behind what is held.
+    fn settle_history(&mut self, topic: &str, cx: &mut Context<Self>) {
+        let Some(agent) = AgentKey::from_topic(topic) else {
+            return;
+        };
+        let Some(view) = self.transcripts.get(&agent).cloned() else {
+            return;
+        };
+        let has_older = self
+            .live
+            .as_ref()
+            .and_then(|live| live.model.agent_topic(agent))
+            .is_some_and(|topic| topic.has_older());
+        view.update(cx, |view, cx| view.set_history(has_older, false, cx));
+    }
+
     /// Feed the composer from the model: the selected agent's own topic state — the
     /// chips, the todos, the model and the goal it draws (CONTRACT §4.2) — and whether
     /// this box may change the model and the effort.
@@ -1182,6 +1484,10 @@ impl TabContent {
             AgentKey::Lane(n) => format!("lane {n}"),
         };
         let settable = selected == AgentKey::Coordinator;
+        // The same reading the header takes for its reveal: the level this agent is
+        // set to, kept where the page can reach it (the drawer's own copy is the
+        // composer's).
+        self.thinking_level = state.thinking.clone();
         self.composer.update(cx, |composer, cx| {
             composer.set_agent(&state, &name, settable, cx);
             composer.set_swarm_busy(busy, cx);
@@ -1794,6 +2100,345 @@ mod tests {
         })
     }
 
+    /// §7.3: the reveal is offered before any thinking has arrived, to an agent whose
+    /// effort is a rung that thinks. The quietest rung and an effort nobody has read
+    /// wait for text.
+    #[gpui_kit::test]
+    fn an_effort_above_low_offers_the_reveal_before_any_text(cx: &mut TestAppContext) {
+        let (window, tab) = running_tab(cx);
+        let view = cx.update(|cx| cx.new(TranscriptView::new));
+        cx.update(|cx| {
+            tab.update(cx, |tab, _| {
+                tab.transcripts.insert(AgentKey::Coordinator, view.clone());
+            });
+            // An answer that carried no thinking at all: the only thing that could
+            // offer the reveal is the effort.
+            view.update(cx, |view, cx| {
+                view.replace(vec![assistant("e_1", "the answer", "")], cx);
+            });
+        });
+
+        let offered = |cx: &mut TestAppContext, level: Option<&str>| {
+            let level = level.map(str::to_string);
+            cx.update(|cx| tab.update(cx, |tab, _| tab.thinking_level = level));
+            cx.update_window(window, |_, window, cx| {
+                window.render_frame(cx);
+                window.try_find("transcript-thinking").is_some()
+            })
+            .expect("the band")
+        };
+
+        assert!(
+            offered(cx, Some("medium")),
+            "medium thinks: the reveal is offered while nothing has arrived yet"
+        );
+        assert!(offered(cx, Some("high")), "and so does every rung above it");
+        assert!(offered(cx, Some("xhigh")));
+        assert!(offered(cx, Some("max")));
+        assert!(
+            offered(cx, Some("ultra")),
+            "a rung this app has not been handed still thinks: the level, not a \
+             ladder's order, is what decides"
+        );
+        assert!(
+            !offered(cx, Some("low")),
+            "the quietest rung has nothing to reveal until it has revealed it"
+        );
+        assert!(!offered(cx, Some("off")), "and neither has the retired one");
+        assert!(
+            !offered(cx, None),
+            "an agent whose effort was never read is not guessed at"
+        );
+
+        // Thinking that arrived is the other way in, whatever the effort was set to
+        // — and the reveal left on is still the view's own state.
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.replace(vec![assistant("e_2", "the answer", "a thought")], cx);
+            });
+        });
+        assert!(
+            offered(cx, Some("low")),
+            "text in the transcript offers the reveal at any effort"
+        );
+        assert!(offered(cx, None));
+        cx.update_window(window, |_, window, cx| {
+            window.click("transcript-thinking", cx)
+        })
+        .expect("the press");
+        assert!(
+            cx.read(|cx| view.read(cx).is_showing_thinking(cx)),
+            "the press is the view's own state"
+        );
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.replace(vec![assistant("e_3", "the answer", "another thought")], cx);
+            });
+        });
+        assert!(
+            offered(cx, Some("low")),
+            "and the choice survives the transcript moving on"
+        );
+    }
+
+    /// §7.3: the reveal belongs to the agent being shown — its own transcript's
+    /// thinking, its own effort — so an agent with neither has none, even while
+    /// another agent's transcript does.
+    #[gpui_kit::test]
+    fn the_reveal_is_the_shown_agents_own(cx: &mut TestAppContext) {
+        let (window, tab) = running_tab(cx);
+        let lane = AgentKey::Lane(1);
+        let lane_view = cx.update(|cx| cx.new(TranscriptView::new));
+        cx.update(|cx| {
+            tab.update(cx, |tab, _| {
+                tab.transcripts.insert(lane, lane_view.clone());
+                tab.thinking_level = Some("medium".to_string());
+            });
+            lane_view.update(cx, |view, cx| {
+                view.replace(vec![assistant("e_1", "the answer", "")], cx);
+            });
+        });
+        // The coordinator is what a tab with no model shows, and it has no transcript
+        // here: nothing to reveal, whoever else has.
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window.try_find("transcript-thinking").is_none(),
+                "the shown agent's own transcript is what the band reads"
+            );
+        })
+        .expect("the band");
+    }
+
+    /// A window holding one Settings tab, and nothing else: what the reveal below
+    /// needs, and what a page that is writing looks like without a swarm around it.
+    fn settings_tab(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<TabContent>) {
+        crate::test_evo_home();
+        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            let options = WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(Bounds {
+                    origin: point(px(0.), px(0.)),
+                    size: size(px(1000.), px(700.)),
+                })),
+                ..Default::default()
+            };
+            gpui_kit::open_window(options, cx, |window, cx| {
+                cx.new(|cx| {
+                    TabContent::new_settings(
+                        TabId::new(7),
+                        Arc::new(LaunchEnv::default()),
+                        window,
+                        cx,
+                    )
+                })
+            })
+            .expect("settings window")
+        })
+    }
+
+    /// §9.8: a page that is writing is taken to the document the *write* is about,
+    /// whichever one the reader has since moved to — which is what "show me what the
+    /// quit would be waiting for" has to land on.
+    #[gpui_kit::test]
+    fn revealing_a_writing_page_lands_on_the_document_it_is_writing(cx: &mut TestAppContext) {
+        let (window, tab) = settings_tab(cx);
+        let editor = cx.update(|cx| {
+            tab.read(cx)
+                .settings_editor()
+                .cloned()
+                .expect("a settings tab has its editors")
+        });
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            // Showing the tab is what puts the caret in the page, as a window's own
+            // selection does (nobody else is focusing anything here).
+            tab.update(cx, |tab, cx| {
+                tab.focus_primary(window, cx);
+            });
+            window.input("(a)", cx);
+        })
+        .expect("the settings page");
+        // The page reads its documents once, on the background executor: the draft is
+        // measured against what was read, so let the read land before saving it.
+        cx.run_until_parked();
+        assert_eq!(
+            cx.read(|cx| editor.read(cx).selected()),
+            store::ConfigFile::Init,
+            "the page opens on `init.lisp`"
+        );
+
+        cx.update_window(window, |_, window, cx| {
+            editor.update(cx, |editor, cx| editor.save_selected(window, cx));
+            assert!(editor.read(cx).is_saving(), "the write is in flight");
+            // The reader moves on while it is: another document is in front now.
+            editor.update(cx, |editor, cx| {
+                editor.select(store::ConfigFile::Memory, window, cx)
+            });
+            assert_eq!(editor.read(cx).selected(), store::ConfigFile::Memory);
+
+            tab.update(cx, |tab, cx| tab.reveal_dirty_settings(window, cx));
+            assert_eq!(
+                editor.read(cx).selected(),
+                store::ConfigFile::Init,
+                "the reveal goes to the document being written, not the one being read"
+            );
+        })
+        .expect("the settings page again");
+    }
+
+    /// §7.3: the folder row at the foot of the lane column is one button — the
+    /// project's own way in. A press puts that project's settings where the
+    /// conversation was, composer and all; picking an agent puts the conversation
+    /// back, and either way the draft stays where it was left.
+    #[gpui_kit::test]
+    fn the_project_row_puts_the_project_settings_in_the_conversations_place(
+        cx: &mut TestAppContext,
+    ) {
+        let (window, tab) = running_tab(cx);
+        // A folder long enough that the row has to elide it: the row is one line, and
+        // the path is what gives way, never the gear beside it.
+        cx.update(|cx| {
+            tab.update(cx, |tab, _| {
+                tab.state = TabState::Running {
+                    folder: PathBuf::from(
+                        "/Users/somebody/coding/a-rather-long-workspace-name/deeper/still/project",
+                    ),
+                };
+            });
+        });
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window.try_find("composer").is_some(),
+                "the page opens on the conversation"
+            );
+
+            // The footer is one row, drawn as the list's own rows are: a lane row's
+            // height, with everything it holds inside it.
+            let row = window.find("project-row").bounds();
+            let path = window.find("project-row-path").bounds();
+            let gear = window.find("project-row-gear").bounds();
+            assert_eq!(
+                row.size.height,
+                px(agent_list::ROW_HEIGHT),
+                "the project's row is a lane row's height"
+            );
+            assert!(
+                path.right() <= gear.left(),
+                "a long path is elided, never run under the gear: {path:?} against {gear:?}"
+            );
+            assert!(
+                path.left() >= row.left() - px(1.) && gear.right() <= row.right() + px(1.),
+                "and both stay inside the row: {path:?} and {gear:?} against {row:?}"
+            );
+            assert_eq!(
+                window.find("project-row").selected(),
+                Some(false),
+                "and the row says it is not the thing being shown"
+            );
+
+            window.click("project-row", cx);
+            window.render_frame(cx);
+            assert!(
+                window.try_find("project-settings").is_some(),
+                "the project's settings are where the conversation was"
+            );
+            assert!(
+                window.try_find("composer").is_none(),
+                "the composer went with the conversation"
+            );
+            assert!(
+                window.try_find("agent-column").is_some(),
+                "the lane column stays"
+            );
+            assert_eq!(
+                window.find("project-row").selected(),
+                Some(true),
+                "the row says it is the one being shown"
+            );
+            // The press is what put the keyboard in the editors, so this lands in
+            // the file the page is showing.
+            window.input("(a)", cx);
+        })
+        .expect("the page");
+
+        let editor = cx.update(|cx| {
+            tab.read(cx)
+                .project_editor()
+                .cloned()
+                .expect("the row made the project's editors")
+        });
+        assert!(
+            cx.read(|cx| editor.read(cx).is_dirty(cx)),
+            "what was typed is a draft"
+        );
+        // Both of the tab's questions are about either editor: this is the draft a
+        // close has to ask about, and it is not a write in flight.
+        assert!(
+            cx.read(|cx| tab.read(cx).is_settings_dirty(cx)),
+            "the project's draft is the tab's to answer for"
+        );
+        assert!(
+            !cx.read(|cx| tab.read(cx).is_settings_saving(cx)),
+            "and nothing here is being written"
+        );
+
+        // Picking an agent is what puts the transcript back — the row's own event,
+        // on its own update.
+        cx.update(|cx| {
+            tab.update(cx, |tab, cx| {
+                tab.agents.update(cx, |_list, cx| {
+                    cx.emit(agent_list::AgentListEvent::Select(AgentKey::Coordinator))
+                });
+            });
+        });
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window.try_find("composer").is_some(),
+                "picking an agent puts the conversation back"
+            );
+            assert!(window.try_find("project-settings").is_none());
+            assert_eq!(window.find("project-row").selected(), Some(false));
+        })
+        .expect("the page again");
+        assert!(
+            cx.read(|cx| editor.read(cx).is_dirty(cx)),
+            "and the draft was not thrown away on the way out"
+        );
+
+        cx.update_window(window, |_, window, cx| {
+            window.click("project-row", cx);
+            window.render_frame(cx);
+            assert!(
+                window.try_find("project-settings").is_some(),
+                "the way back is the same press"
+            );
+        })
+        .expect("the page once more");
+        assert!(
+            cx.read(|cx| editor.read(cx).is_dirty(cx)),
+            "with the draft where it was left"
+        );
+
+        // Discarding is the tab's own answer, and it is the whole of what is thrown
+        // away: the project's page goes back to what is on disk. (The page reads its
+        // files once, on the background executor; a draft cannot be thrown away
+        // against a text that has not arrived yet.)
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| {
+            tab.update(cx, |tab, cx| tab.discard_settings_changes(window, cx));
+            window.render_frame(cx);
+        })
+        .expect("the page one last time");
+        assert!(
+            !cx.read(|cx| editor.read(cx).is_dirty(cx)),
+            "the drafts are gone"
+        );
+        assert!(!cx.read(|cx| tab.read(cx).is_settings_dirty(cx)));
+    }
+
     /// §9.5: a session is filed under what the swarm really ran — the server's own
     /// topics — and not under the empty tab's controls, whose plan carries nothing for
     /// anything evo resolved for itself. A server that has not spoken yet leaves the
@@ -1972,6 +2617,7 @@ mod tests {
                     Update::FetchFailed {
                         what: "item e_3 in session".to_string(),
                         reason: "404 not_found".to_string(),
+                        page: None,
                     },
                     window,
                     cx,
@@ -1987,6 +2633,86 @@ mod tests {
             );
         })
         .expect("the quiet line");
+    }
+
+    /// §5.4: a page that answered with nothing new — an overlap with what the topic
+    /// holds, or the last page of all — still ends the wait. "Loading earlier items…" is
+    /// the scrollback's only in-flight state, and an answer that changed no row used to
+    /// leave its header stuck.
+    #[gpui_kit::test]
+    fn an_empty_page_still_ends_the_wait(cx: &mut TestAppContext) {
+        let (window, tab) = running_tab(cx);
+        let view = cx.update(|cx| cx.new(TranscriptView::new));
+        cx.update(|cx| {
+            tab.update(cx, |tab, _| {
+                tab.transcripts.insert(AgentKey::Coordinator, view.clone());
+            });
+        });
+        // The reader asked for a page: the header is in flight.
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.replace(vec![assistant("e_2", "newest", "")], cx);
+                view.set_history(true, true, cx);
+            });
+        });
+        assert!(cx.read(|cx| view.read(cx).is_loading_older()));
+
+        cx.update_window(window, |_, window, cx| {
+            tab.update(cx, |tab, cx| {
+                tab.apply(
+                    Update::ItemsBefore {
+                        topic: "session".to_string(),
+                        body: serde_json::json!({"items": [], "has_more": true}),
+                    },
+                    window,
+                    cx,
+                );
+            });
+        })
+        .expect("the empty page");
+        assert!(
+            !cx.read(|cx| view.read(cx).is_loading_older()),
+            "the header stops waiting though no row changed"
+        );
+    }
+
+    /// §5.4: the same for a page that failed. Nothing is retried, but the wait ends and
+    /// the reader can ask again — a failure must not leave the header loading forever.
+    #[gpui_kit::test]
+    fn a_failed_page_still_ends_the_wait(cx: &mut TestAppContext) {
+        let (window, tab) = running_tab(cx);
+        let view = cx.update(|cx| cx.new(TranscriptView::new));
+        cx.update(|cx| {
+            tab.update(cx, |tab, _| {
+                tab.transcripts.insert(AgentKey::Coordinator, view.clone());
+            });
+        });
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.replace(vec![assistant("e_2", "newest", "")], cx);
+                view.set_history(true, true, cx);
+            });
+        });
+        assert!(cx.read(|cx| view.read(cx).is_loading_older()));
+
+        cx.update_window(window, |_, window, cx| {
+            tab.update(cx, |tab, cx| {
+                tab.apply(
+                    Update::FetchFailed {
+                        what: "items before e_2 in session".to_string(),
+                        reason: "503 unavailable".to_string(),
+                        page: Some("session".to_string()),
+                    },
+                    window,
+                    cx,
+                );
+            });
+        })
+        .expect("the failed page");
+        assert!(
+            !cx.read(|cx| view.read(cx).is_loading_older()),
+            "a failed page ends the wait so the reader can ask again"
+        );
     }
 
     /// A clock is what makes a frame a second worth paying for, and it is the

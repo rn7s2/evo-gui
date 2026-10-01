@@ -75,7 +75,16 @@ pub enum Update {
     /// A read failed. `what` names the fetch (`item e_3 in session`), `reason` is
     /// what the server or the socket said. Nothing is retried, and nothing panics:
     /// a failed fetch leaves the view as it was, and the UI decides what to say.
-    FetchFailed { what: String, reason: String },
+    ///
+    /// `page` is the topic a failure was a *page of older items* about, when that is
+    /// what failed: a page is the one read that left a transcript saying it was
+    /// loading, so its failure has to release that state — the reader can ask
+    /// again — rather than leave the header waiting on nothing.
+    FetchFailed {
+        what: String,
+        reason: String,
+        page: Option<String>,
+    },
     /// The server process died on its own; the engine has stopped.
     ServerGone,
     /// The engine has stopped, and how the server went.

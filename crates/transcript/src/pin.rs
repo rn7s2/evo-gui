@@ -114,11 +114,42 @@ impl Pin {
         Action::Leave
     }
 
+    /// A scroll the *layout* made — a row that left the record, a pane that grew, text
+    /// that reflowed. It can take the list off the tail, and a reader who is following
+    /// is still pulled back to it; but it never puts the list back *on* the tail, not
+    /// even a moment after the reader's own wheel: coming back to the latest is
+    /// something the reader does, and the design's 500ms window is about a scroll that
+    /// arrives after their wheel, not about a gap that closed because the content
+    /// shrank under them.
+    pub fn on_layout(&mut self, gap: f32) -> Action {
+        if self.pinned {
+            return if gap > SLACK {
+                Action::SnapToBottom
+            } else {
+                Action::Leave
+            };
+        }
+        self.away = gap > JUMP_AT;
+        Action::Leave
+    }
+
     /// The reader pressed "↓ Jump to latest": follow the tail again from here,
     /// with nothing to jump back to. The scroll itself is the view's.
+    ///
+    /// A jump is the view's own scroll, so the window in which a scroll counts as
+    /// the reader's is closed: the layout the jump causes is not theirs to answer
+    /// for, and must not unpin the list a moment after they asked for the tail.
     pub fn jumped(&mut self) {
         self.pinned = true;
         self.away = false;
+        self.last_user = None;
+    }
+
+    /// The view moved the list itself — a jump, a window that slid, an anchor put
+    /// back. Whatever scroll the new layout causes is not the reader's, however
+    /// recently they last touched a wheel.
+    pub fn settled(&mut self) {
+        self.last_user = None;
     }
 
     /// The same, without the row that was asked for.
@@ -128,6 +159,16 @@ impl Pin {
     pub fn reset(&mut self) {
         self.pinned = true;
         self.away = false;
+        self.last_user = None;
+    }
+
+    /// The view placed the reader somewhere itself — at the head of a block they asked
+    /// for. Their place is decided by where that leaves them, whether or not they
+    /// touched anything on the way, and the layout it causes is not theirs to answer
+    /// for.
+    pub fn placed(&mut self, gap: f32) {
+        self.pinned = gap <= SLACK;
+        self.away = gap > JUMP_AT;
         self.last_user = None;
     }
 
@@ -236,6 +277,38 @@ mod tests {
         assert!(pin.is_pinned(), "outside it: the layout's");
     }
 
+    /// A layout that closes the gap — a row leaving the record in front of the reader,
+    /// a pane that grew, text that reflowed — does not put the list back on its tail,
+    /// even inside the reader's own 500ms window. Only their own scroll does that.
+    #[test]
+    fn a_layout_that_closes_the_gap_does_not_put_the_list_back_on_its_tail() {
+        let clock = Clock::new();
+        let mut pin = Pin::new();
+        pin.touched_at(clock.at(0));
+        pin.on_scroll_at(600., clock.at(10));
+        assert!(!pin.is_pinned() && pin.is_away());
+
+        // 50ms later the content has shrunk under them and the gap is inside the slack.
+        assert_eq!(pin.on_layout(0.), Action::Leave);
+        assert!(!pin.is_pinned(), "the layout did not re-pin the list");
+        assert!(!pin.is_away(), "and there is nothing to jump to any more");
+
+        // Their own wheel to the foot still does it.
+        pin.on_scroll_at(0., clock.at(60));
+        assert!(pin.is_pinned());
+    }
+
+    /// A reader who is following is still pulled back by the layout, as the design
+    /// says: it is only being put back *on* the tail that is theirs to do.
+    #[test]
+    fn a_layout_still_pulls_a_follower_back_to_the_tail() {
+        let mut pin = Pin::new();
+        assert!(pin.is_pinned());
+        assert_eq!(pin.on_layout(120.), Action::SnapToBottom);
+        assert!(pin.is_pinned());
+        assert_eq!(pin.on_layout(4.), Action::Leave);
+    }
+
     /// A reader who jumps back is following again, at once.
     #[test]
     fn jumping_back_follows_the_tail_again() {
@@ -254,6 +327,39 @@ mod tests {
             pin.on_scroll_at(400., clock.at(10_000)),
             Action::SnapToBottom
         );
+    }
+
+    /// A jump closes the reader's own window: the layout it causes arrives right
+    /// after the press, and a scroll inside it must not be read as the reader's and
+    /// unpin the list they just asked to follow.
+    #[test]
+    fn a_jump_does_not_answer_for_the_layout_it_causes() {
+        let clock = Clock::new();
+        let mut pin = Pin::new();
+        pin.touched_at(clock.at(0));
+        pin.on_scroll_at(600., clock.at(10));
+        pin.jumped();
+
+        // 50ms later — well inside the 500ms window — the new layout reports a gap.
+        assert_eq!(pin.on_scroll_at(300., clock.at(60)), Action::SnapToBottom);
+        assert!(pin.is_pinned(), "the jump is not the reader's own scroll");
+    }
+
+    /// The same for a window that slid under the reader: an append while they are
+    /// following trims the rows above them, and the scroll that laying that out
+    /// causes is not theirs either.
+    #[test]
+    fn a_window_that_slid_does_not_answer_for_the_layout_it_causes() {
+        let clock = Clock::new();
+        let mut pin = Pin::new();
+        pin.touched_at(clock.at(0));
+        assert!(pin.is_pinned());
+
+        // The reader wheeled to the bottom 100ms ago and a row was trimmed above
+        // them: the layout reports the new gap.
+        pin.settled();
+        assert_eq!(pin.on_scroll_at(300., clock.at(100)), Action::SnapToBottom);
+        assert!(pin.is_pinned());
     }
 
     /// Switching agent resets the reader's place: another agent's transcript

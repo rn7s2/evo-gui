@@ -22,6 +22,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP="$ROOT/dist/Evo Desktop.app"
 BINARY="${CARGO_TARGET_DIR:-$ROOT/target}/release/evo-desktop"
 ICON="$ROOT/assets/icon/AppIcon.icns"
+LICENSES="$ROOT/assets/licenses"
 
 VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$ROOT/Cargo.toml" | head -n 1)"
 if [ -z "$VERSION" ]; then
@@ -45,12 +46,23 @@ if [ ! -f "$ICON" ]; then
     exit 1
 fi
 
+# Third-party licences the app ships with: the KaTeX fonts RaTeX embeds for math
+# are OFL-1.1, and RaTeX itself is MIT. All three travel with the app.
+if [ ! -f "$LICENSES/OFL.txt" ] ||
+    [ ! -f "$LICENSES/FONT_NOTICE.txt" ] ||
+    [ ! -f "$LICENSES/RaTeX-MIT.txt" ]; then
+    echo "bundle: missing third-party licences under $LICENSES" >&2
+    echo "bundle: expected OFL.txt, FONT_NOTICE.txt and RaTeX-MIT.txt" >&2
+    exit 1
+fi
+
 # Rebuilt from scratch, so nothing stale survives a re-bundle.
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BINARY" "$APP/Contents/MacOS/evo-desktop"
 chmod 755 "$APP/Contents/MacOS/evo-desktop"
 cp "$ICON" "$APP/Contents/Resources/AppIcon.icns"
+cp -R "$LICENSES" "$APP/Contents/Resources/licenses"
 
 cat >"$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

@@ -120,14 +120,24 @@ impl Default for Root {
     }
 }
 
-/// `~/.evo/desktop/`, honouring `$HOME`.
+/// `~/.evo/desktop/`, honouring `$EVO_HOME` and `$HOME`.
 pub fn default_root_dir() -> PathBuf {
     evo_dir().join("desktop")
 }
 
-/// `~/.evo/` — the evo home the rest of the app's layout hangs off.
+/// The evo home the rest of the app's layout hangs off: `$EVO_HOME` when it is
+/// set and non-empty, else `~/.evo/`.
+///
+/// `EVO_HOME` is evo's own override (`evo-home`, `src/util/util.lisp`): a child
+/// the app spawns reads its `init.lisp`, `swarm.lisp` and memory from there, so
+/// the files the app shows a person have to resolve the same way. Both are empty
+/// or unset on a normal machine, and the test home sets both to the same
+/// directory, so this changes nothing unless somebody moved evo.
 pub fn evo_dir() -> PathBuf {
-    home_dir().join(".evo")
+    match std::env::var_os("EVO_HOME") {
+        Some(home) if !home.is_empty() => PathBuf::from(home),
+        _ => home_dir().join(".evo"),
+    }
 }
 
 /// `$HOME`, or the current directory when the environment has none.
@@ -240,41 +250,131 @@ pub fn create_dir_private(dir: &Path) -> io::Result<()> {
 /// A reader never sees a half-written file, and a crash mid-write leaves the
 /// previous contents intact.
 pub fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    create_dir_private(parent)?;
-    let tmp = temp_sibling(path);
-    {
-        let mut opts = fs::OpenOptions::new();
-        opts.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(mode);
+    Staged::stage(path, bytes, mode)?.commit()
+}
+
+/// How many scratch names one write may try before giving up. Every try is a new
+/// name, so this is only a guard against a directory that will not hold a file at
+/// all; a handful of concurrent writers needs a handful of names.
+const TEMP_ATTEMPTS: u32 = 1024;
+
+/// A replacement for a file, staged beside it and not yet in place.
+///
+/// The bytes are already on disk — written, flushed, and wearing their final
+/// permissions — so the only thing between a caller and the new file is
+/// [`commit`](Staged::commit), one rename. A caller that has to check something
+/// still holds does it *after* staging: the gap between "the check said yes" and
+/// the file being replaced is then the rename itself.
+///
+/// Nothing is left behind: a `Staged` dropped without committing removes its
+/// scratch file, and so does one whose commit failed.
+pub(crate) struct Staged {
+    target: PathBuf,
+    temp: PathBuf,
+}
+
+impl Staged {
+    /// Put `bytes` in a fresh, private scratch file beside `target`.
+    ///
+    /// The scratch file is opened with `create_new` (`O_CREAT | O_EXCL`), so an
+    /// entry already at the name — a symlink somebody planted there included — is
+    /// never followed and never written through: that attempt is abandoned
+    /// untouched and the next name is tried. A missing parent directory is
+    /// created owner-only, as everywhere else in this crate.
+    pub(crate) fn stage(target: &Path, bytes: &[u8], mode: u32) -> io::Result<Staged> {
+        let parent = target
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        create_dir_private(parent)?;
+
+        let mut last = None;
+        for attempt in 0..TEMP_ATTEMPTS {
+            let temp = temp_candidate(target, attempt);
+            match stage_at(target, &temp, bytes, mode) {
+                Ok(staged) => return Ok(staged),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => last = Some(error),
+                Err(error) => return Err(error),
+            }
         }
-        let mut f = opts.open(&tmp)?;
-        f.write_all(bytes)?;
-        f.sync_all()?;
+        Err(last.unwrap_or_else(|| {
+            io::Error::new(io::ErrorKind::AlreadyExists, "no free scratch name")
+        }))
     }
-    match fs::rename(&tmp, path) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            let _ = fs::remove_file(&tmp);
-            Err(e)
-        }
+
+    /// Put it in place: one rename, which replaces the target atomically.
+    pub(crate) fn commit(self) -> io::Result<()> {
+        fs::rename(&self.temp, &self.target)
     }
 }
 
-fn temp_sibling(path: &Path) -> PathBuf {
-    // The name is unique per process *and* per call: the app writes from its own
-    // threads (§2 rule 6), and two of them writing one file must not share a
-    // scratch file.
-    static TMP_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let n = TMP_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+impl Drop for Staged {
+    fn drop(&mut self) {
+        // After a commit there is no scratch file left to remove, so this is the
+        // cleanup for a stage that failed, or was never committed, and nothing
+        // else. A missing file is not an error.
+        let _ = fs::remove_file(&self.temp);
+    }
+}
+
+/// The scratch name for one attempt: `.{name}.tmp-{pid}-{attempt}`.
+///
+/// It is guessable on purpose — it does not have to be unguessable, because
+/// `create_new` is what makes the write safe: whoever loses the race for a name
+/// simply moves to the next number, and whatever they left at that name is never
+/// touched.
+pub(crate) fn temp_candidate(path: &Path, attempt: u32) -> PathBuf {
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    path.with_file_name(format!(".{name}.tmp-{}-{n}", std::process::id()))
+    path.with_file_name(format!(".{name}.tmp-{}-{attempt}", std::process::id()))
+}
+
+/// Create the scratch file — never replacing anything — fill it, flush it, and
+/// give it its final permissions, all before anybody can see it.
+fn stage_at(target: &Path, temp: &Path, bytes: &[u8], mode: u32) -> io::Result<Staged> {
+    let mut opts = fs::OpenOptions::new();
+    // `create_new` is `O_CREAT | O_EXCL`: it fails on anything already at the
+    // name, and it does not follow a symlink. This is the whole defence against a
+    // planted scratch file — everything below this line only ever touches a file
+    // this call created.
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        opts.mode(mode);
+    }
+    let mut file = opts.open(temp)?;
+
+    let sealed = file
+        .write_all(bytes)
+        .and_then(|()| file.sync_all())
+        // Exact permissions, on the scratch file, *before* the rename: nothing
+        // after the commit may fail, and the file that appears already has them.
+        .and_then(|()| set_mode(temp, mode));
+    drop(file);
+    match sealed {
+        Ok(()) => Ok(Staged {
+            target: target.to_path_buf(),
+            temp: temp.to_path_buf(),
+        }),
+        Err(error) => {
+            let _ = fs::remove_file(temp);
+            Err(error)
+        }
+    }
+}
+
+#[cfg(unix)]
+fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))
+}
+
+#[cfg(not(unix))]
+fn set_mode(_: &Path, _: u32) -> io::Result<()> {
+    Ok(())
 }
 
 /// Serialize `value` as pretty JSON and write it atomically (mode 0600).
@@ -432,6 +532,77 @@ mod tests {
         quarantine(&path).unwrap();
         assert!(!path.exists());
         assert_eq!(fs::read_to_string(backup_path(&path)).unwrap(), "not json");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The scratch name is guessable, so somebody can plant something at it. The
+    /// write must not follow it: the plant is left alone, whatever it points at
+    /// is never opened, and the bytes go to the next free name.
+    #[test]
+    #[cfg(unix)]
+    fn a_planted_scratch_symlink_is_not_followed() {
+        let dir = temp("planted");
+        fs::create_dir_all(&dir).unwrap();
+        let victim = dir.join("victim");
+        fs::write(&victim, "do not touch").unwrap();
+        let path = dir.join("app.json");
+
+        let planted = temp_candidate(&path, 0);
+        std::os::unix::fs::symlink(&victim, &planted).unwrap();
+
+        write_atomic(&path, b"{\"a\":1}", FILE_MODE).unwrap();
+
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "do not touch");
+        assert!(planted.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "{\"a\":1}");
+        assert!(!path.symlink_metadata().unwrap().file_type().is_symlink());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A staged file is finished before it is in place: the bytes are there, the
+    /// permissions are the final ones, and the target has not been touched. One
+    /// that is dropped instead of committed leaves nothing at all.
+    #[test]
+    #[cfg(unix)]
+    fn a_stage_carries_its_final_permissions_and_a_drop_cleans_up() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = temp("stage");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("app.json");
+
+        let staged = Staged::stage(&path, b"{\"a\":1}", 0o640).unwrap();
+        let scratch = staged.temp.clone();
+        assert!(scratch.exists());
+        assert_eq!(fs::read(&scratch).unwrap(), b"{\"a\":1}");
+        assert_eq!(
+            scratch.metadata().unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        // Nothing has been replaced yet.
+        assert!(!path.exists());
+
+        drop(staged);
+        assert!(!scratch.exists());
+        assert!(!path.exists());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The scratch name is a new one per attempt, so a name that is taken is not
+    /// an error — the write moves on.
+    #[test]
+    fn a_taken_scratch_name_moves_to_the_next_attempt() {
+        let dir = temp("taken");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("app.json");
+        // Something is already at the first name.
+        fs::write(temp_candidate(&path, 0), "in the way").unwrap();
+
+        write_atomic(&path, b"{\"a\":1}", FILE_MODE).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "{\"a\":1}");
+        assert_eq!(
+            fs::read_to_string(temp_candidate(&path, 0)).unwrap(),
+            "in the way"
+        );
         fs::remove_dir_all(&dir).unwrap();
     }
 }

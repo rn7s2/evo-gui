@@ -8,6 +8,12 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 
+# `O_NOFOLLOW`/`O_NONBLOCK`/`ELOOP` for opening a config file without following
+# a symlink (see `config_file::open_regular`). Unix only: the constants do not
+# exist elsewhere, and the non-Unix fallback in that function does not need them.
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
 [[bin]]
 name = "store-lock-probe"
 path = "src/bin/lock_probe.rs"

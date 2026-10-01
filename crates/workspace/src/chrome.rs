@@ -538,6 +538,71 @@ impl WorkspaceView {
         self.quit_hook = Some(hook);
     }
 
+    /// The app is quitting, and the window may not go while an editor here holds
+    /// changes that are not on disk (§9.8): the app asks this first, and decides what
+    /// to do with the answer.
+    ///
+    /// Both kinds count — the Settings tab's own editors, and the project settings a
+    /// running tab is showing or has shown.
+    pub fn has_dirty_settings(&self, cx: &App) -> bool {
+        self.tabs
+            .iter()
+            .any(|tab| tab.read(cx).is_settings_dirty(cx))
+    }
+
+    /// Throw away every unsaved settings change in this window — what the app's quit
+    /// runs when the person would rather lose them than stay (§9.8).
+    ///
+    /// Putting a draft back is an input's own work, and an input lives in a window,
+    /// which the app's quit has in hand. A page that is *writing* keeps what it is
+    /// writing: nothing here throws away an edit that is already on its way to disk.
+    pub fn discard_settings_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for tab in self.tabs.clone() {
+            tab.update(cx, |tab, cx| tab.discard_settings_changes(window, cx));
+        }
+        cx.notify();
+    }
+
+    /// Whether any tab in this window is writing a settings file right now — the
+    /// other half of the quit's question (§9.8): a write that is in flight cannot be
+    /// called back, so the app waits for it rather than exiting under it.
+    pub fn has_saving_settings(&self, cx: &App) -> bool {
+        self.tabs
+            .iter()
+            .any(|tab| tab.read(cx).is_settings_saving(cx))
+    }
+
+    /// Show the first tab an exit would have to wait for, with its editor in front
+    /// and the keyboard in it — what the app's quit runs when the person would rather
+    /// keep what they were writing (§9.8). Answers whether there was such a tab.
+    ///
+    /// A write in flight comes first: it is the one thing that cannot be called back,
+    /// and the page is where its own status line says so. A tab holding a draft comes
+    /// next — that one *can* be answered for, which is what the quit is asking about.
+    /// Both are what [`Self::has_saving_settings`] and [`Self::has_dirty_settings`]
+    /// report; a close question that is already up stays up, because it belongs to
+    /// the person.
+    pub fn focus_dirty_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let mut chosen = None;
+        for (index, tab) in self.tabs.iter().enumerate() {
+            let tab = tab.read(cx);
+            if tab.is_settings_saving(cx) {
+                chosen = Some(index);
+                break;
+            }
+            if chosen.is_none() && tab.is_settings_dirty(cx) {
+                chosen = Some(index);
+            }
+        }
+        let Some(index) = chosen else {
+            return false;
+        };
+        let tab = self.tabs[index].clone();
+        tab.update(cx, |tab, cx| tab.reveal_dirty_settings(window, cx));
+        self.select_tab(index, window, cx);
+        true
+    }
+
     /// Open a tab — what ⌘T, the Window menu's New Tab and the strip's `+` do
     /// (§7.1).
     ///
@@ -591,6 +656,11 @@ impl WorkspaceView {
     pub fn tab_records(&self, cx: &App) -> Vec<TabRecord> {
         self.tabs
             .iter()
+            // The Settings tab is not one of them: it holds no folder, no swarm and
+            // no session, and a stored set that named it would promise a resume that
+            // cannot come back (§6, §9.8). It is always the last tab, so what is left
+            // here stands in the strip's own order.
+            .filter(|tab| tab.read(cx).state() != &crate::tab::TabState::Settings)
             .map(|tab| {
                 let tab = tab.read(cx);
                 TabRecord {
@@ -726,20 +796,12 @@ impl WorkspaceView {
         self.next_id += 1;
         let config = self.config.clone();
         let tab = cx.new(|cx| TabContent::new(id, config, window, cx));
-        let subscription = cx.subscribe_in(
-            &tab,
-            window,
-            |this, tab, event: &TabContentEvent, window, cx| {
-                let id = tab.read(cx).id();
-                this.on_tab_event(id, event.clone(), window, cx);
-            },
-        );
-        self.subscriptions.push_back((id, subscription));
-        self.tabs.push(tab.clone());
-        self.selected = self.tabs.len() - 1;
-        // The new tab is at the far end, which is exactly where an overflowing
-        // strip has to scroll to (§7.1) — and adding one changes the width every
-        // tab before it has.
+        let at = self.place_tab(tab.clone(), window, cx);
+        // The new tab is at the far end of the swarm tabs — past every other one,
+        // which is where an overflowing strip has to scroll to (§7.1) — and adding
+        // one changes the width every tab before it has. (The Settings tab, when
+        // there is one, stays past *it*: it is the strip's last tab always.)
+        self.select_tab(at, window, cx);
         self.ask_reveal(cx);
         // A tab opened now has the columns the window is showing (§7.3), and the
         // one drag state every page in the window shares.
@@ -752,13 +814,83 @@ impl WorkspaceView {
         // A tab opened now shows what the app already learned (§9.4, §9.5).
         let launcher = self.launcher.clone();
         tab.update(cx, |tab, cx| tab.set_launcher_data(&launcher, window, cx));
-        // The tab being shown is where the keyboard goes (§7.1). It matters beyond
-        // typing: GPUI resolves a keystroke against the *focused* element's place in
-        // the frame, so a keyboard left on a tab that is no longer drawn is a
-        // keyboard that answers no shortcut at all.
-        self.focus_selected(window, cx);
+        // The tab being shown is where the keyboard goes (§7.1): `select_tab` above
+        // moved it, and it matters beyond typing — GPUI resolves a keystroke against
+        // the *focused* element's place in the frame, so a keyboard left on a tab
+        // that is no longer drawn is a keyboard that answers no shortcut at all.
         cx.notify();
         tab
+    }
+
+    /// The window's Settings tab — what the gear at the far right of the strip does
+    /// (§7.1).
+    ///
+    /// There is at most one. Asking for it while it is already open shows the one
+    /// that is there rather than making a second, and it is always the strip's last
+    /// tab: a stored tab set has no Settings in it ([`Self::tab_records`]), so the
+    /// strip order with the Settings tab left out is exactly the order stored, and
+    /// [`Self::selected_index`] addresses both of them the same way (§9.8).
+    ///
+    /// It drives no swarm: nothing about it is spawned, waited on or written down
+    /// anywhere but the window.
+    pub fn open_settings_tab(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<TabContent> {
+        if let Some(index) = self.settings_index(cx) {
+            let tab = self.tabs[index].clone();
+            self.select_tab(index, window, cx);
+            return tab;
+        }
+        let id = TabId::new(self.next_id);
+        self.next_id += 1;
+        let config = self.config.clone();
+        let tab = cx.new(|cx| TabContent::new_settings(id, config, window, cx));
+        let at = self.place_tab(tab.clone(), window, cx);
+        self.select_tab(at, window, cx);
+        self.ask_reveal(cx);
+        cx.notify();
+        tab
+    }
+
+    /// Put a tab on the strip without showing it: watch its events, and leave the
+    /// Settings tab last. Answers where on the strip it went.
+    ///
+    /// A new tab goes *before* the Settings tab, never after it — that is what keeps
+    /// "the Settings tab is last" true for the life of the window, and with it the
+    /// one-to-one reading between the strip and the stored tab set.
+    fn place_tab(
+        &mut self,
+        tab: Entity<TabContent>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> usize {
+        let at = self.settings_index(cx).unwrap_or(self.tabs.len());
+        let id = tab.read(cx).id();
+        let subscription = cx.subscribe_in(
+            &tab,
+            window,
+            |this, tab, event: &TabContentEvent, window, cx| {
+                let id = tab.read(cx).id();
+                this.on_tab_event(id, event.clone(), window, cx);
+            },
+        );
+        self.subscriptions.push_back((id, subscription));
+        self.tabs.insert(at, tab);
+        // Everything from the insertion point on has moved along one, the shown tab
+        // included: it has to keep being the tab it was.
+        if self.selected >= at {
+            self.selected += 1;
+        }
+        at
+    }
+
+    /// Where the Settings tab is on the strip, while there is one (§7.1).
+    fn settings_index(&self, cx: &App) -> Option<usize> {
+        self.tabs
+            .iter()
+            .position(|tab| tab.read(cx).state() == &crate::tab::TabState::Settings)
     }
 
     /// Ask the strip to show the whole of the tab being shown (§7.1).
@@ -917,6 +1049,29 @@ impl WorkspaceView {
         };
         if tab.read(cx).is_terminating() {
             // Already on its way out: a second × has nothing more to do.
+            return;
+        }
+        // A save that is in flight is not something to walk away from. The write is
+        // on the background executor with a copy of the text, and dropping the editor
+        // under it — or answering a discard that could not undo it — is how a file
+        // changes with nobody watching. The close waits for it to land, and the page
+        // that is writing comes to the front while it does: its own status line says
+        // `Saving…`, which is the feedback — a press that looked like nothing
+        // happened would be worse than the wait.
+        if tab.read(cx).is_settings_saving(cx) {
+            tab.update(cx, |tab, cx| tab.reveal_dirty_settings(window, cx));
+            if let Some(index) = self.tabs.iter().position(|other| other.read(cx).id() == id) {
+                self.select_tab(index, window, cx);
+            }
+            return;
+        }
+        // An editor with changes that are not on disk is asked about first: the tab
+        // puts the Discard / Keep Editing question up and stays where it is until one
+        // of them is answered (§7.1, §13).
+        if tab.read(cx).is_settings_dirty(cx) && !tab.read(cx).is_closing_prompted() {
+            tab.update(cx, |tab, cx| {
+                tab.ask_close(cx);
+            });
             return;
         }
         // The swarm is told to stop now (stdin EOF), and the tab stays on the strip,
@@ -1960,6 +2115,145 @@ mod tests {
 
     /// §7.3: the two columns are the window's, not a tab's. A split dragged while
     /// one tab is shown is the split the next tab opens with.
+    /// §7.3, §13: a running tab whose project settings hold a draft asks before the
+    /// tab goes — the swarm is not stopped, and the page is not dropped, under an
+    /// edit nobody has answered for.
+    /// §9.8: the quit's "show me what I would lose" goes to a write in flight before
+    /// a draft — the one thing that cannot be called back — and it takes the page to
+    /// the document that holds it, not to whichever document was in front.
+    #[gpui_kit::test]
+    fn focusing_what_a_quit_would_wait_for_prefers_the_write(cx: &mut TestAppContext) {
+        crate::test_evo_home();
+        let (view, cx) = page_window(cx, test_root("focus-dirty"), (1280., 800.));
+        cx.update(|window, cx| window.render_frame(cx));
+
+        // A draft in the running tab's project settings.
+        cx.update(|window, cx| {
+            window.click("project-row", cx);
+            window.render_frame(cx);
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.input("(a)", cx);
+            window.render_frame(cx);
+        });
+        assert!(
+            cx.update(|_, cx| view.read(cx).tabs()[0].read(cx).is_settings_dirty(cx)),
+            "the project's page holds a draft"
+        );
+
+        // And a settings tab whose document is on its way to disk.
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.open_settings_tab(window, cx);
+            });
+            window.render_frame(cx);
+            window.input("(b)", cx);
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let page = view.read(cx).tabs()[1]
+                .read(cx)
+                .settings_editor()
+                .cloned()
+                .expect("the settings tab has its editors");
+            page.update(cx, |page, cx| page.save_selected(window, cx));
+            assert!(page.read(cx).is_saving(), "the write is in flight");
+            assert!(
+                view.read(cx).has_saving_settings(cx),
+                "and the window knows something is being written"
+            );
+
+            // Away to the other tab, then the quit's own question.
+            view.update(cx, |view, cx| view.select_tab(0, window, cx));
+            let shown = view.update(cx, |view, cx| view.focus_dirty_settings(window, cx));
+            assert!(shown, "there is something a quit would wait for");
+            assert_eq!(
+                view.read(cx).selected_index(),
+                1,
+                "the write in flight is what a quit would wait for"
+            );
+            assert!(
+                view.read(cx).tabs()[1].read(cx).settings_editor().is_some(),
+                "and the page it is writing is the one in front"
+            );
+        });
+    }
+
+    #[gpui_kit::test]
+    fn a_project_tab_with_a_draft_asks_before_it_goes(cx: &mut TestAppContext) {
+        let (view, cx) = page_window(cx, test_root("project-guard"), (1280., 800.));
+        cx.update(|window, cx| window.render_frame(cx));
+
+        // The folder row is the way in, and the press puts the keyboard in the page:
+        // what is typed lands there as a draft. The page reads its four documents
+        // once, on the background executor — a draft is measured against what was
+        // read, so the read is let to land before anything is typed.
+        cx.update(|window, cx| {
+            window.click("project-row", cx);
+            window.render_frame(cx);
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.input("(a)", cx);
+            window.render_frame(cx);
+        });
+        let (id, tab) = cx.update(|_, cx| {
+            let tab = view.read(cx).tabs()[0].clone();
+            let id = tab.read(cx).id();
+            (id, tab)
+        });
+        assert!(
+            cx.update(|_, cx| tab.read(cx).is_settings_dirty(cx)),
+            "the press and the typing left the project's settings dirty"
+        );
+
+        // The close asks, and asks with the project's settings still in front.
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| view.close_tab(id, window, cx));
+            window.render_frame(cx);
+            assert!(
+                window.try_find("settings-close-prompt").is_some(),
+                "the tab asks before it goes"
+            );
+        });
+        assert_eq!(
+            cx.update(|_, cx| view.read(cx).tabs().len()),
+            1,
+            "and it has not gone while the question is up"
+        );
+
+        // Keep Editing: the tab stays, the page stays, the draft stays.
+        cx.update(|window, cx| {
+            window.click("settings-close-keep", cx);
+            window.render_frame(cx);
+            assert!(window.try_find("settings-close-prompt").is_none());
+        });
+        assert!(cx.update(|_, cx| tab.read(cx).project_settings_shown()));
+        assert!(cx.update(|_, cx| tab.read(cx).is_settings_dirty(cx)));
+
+        // Discard: the drafts go, and so does the tab.
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| view.close_tab(id, window, cx));
+            window.render_frame(cx);
+            window.click("settings-close-discard", cx);
+            window.render_frame(cx);
+        });
+        // The close travels as the tab's own event, which the window hears on its
+        // next effect cycle.
+        cx.run_until_parked();
+        cx.update(|window, cx| window.render_frame(cx));
+        assert_eq!(
+            cx.update(|_, cx| view.read(cx).tabs().len()),
+            1,
+            "the last tab leaves a fresh New Swarm page, not an empty window"
+        );
+        assert_eq!(
+            cx.update(|_, cx| view.read(cx).selected_tab().read(cx).state().clone()),
+            crate::TabState::Empty
+        );
+    }
+
     #[gpui_kit::test]
     fn every_tab_shows_the_same_two_columns(cx: &mut TestAppContext) {
         let (view, cx) = page_window(cx, test_root("shared"), (1280., 800.));

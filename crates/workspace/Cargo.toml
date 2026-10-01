@@ -10,6 +10,7 @@ serde_json = { workspace = true }
 async-channel = "2"
 rfd = "0.17"
 session = { path = "../session" }
+settings = { path = "../settings" }
 store = { path = "../store" }
 widgets = { path = "../widgets" }
 swarm_client = { path = "../swarm_client" }

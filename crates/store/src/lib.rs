@@ -21,18 +21,24 @@
 //! * [`launch`] builds the argv of a `serve`, and the `check --json` that
 //!   validates it first.
 //!
-//! Nothing here reads a journal, writes a project file, or starts a server. Every
-//! write is atomic (temp file + rename) and owner-only, every load is tolerant (a
-//! corrupt file becomes a `.bak` and the defaults apply), and nothing here holds
-//! a secret: the bearer token stays in the server's own 0600 ready file
-//! (§2 rule 4).
+//! [`config_file`] is the one place the app reads and writes evo's *own* files
+//! rather than its desktop directory: the four a person edits by hand in Settings
+//! (`init.lisp`, `swarm.lisp`, `memory.sexp`, `lore.sexp`, global and per
+//! project). [`lispcheck`] reads such a text with a real SBCL — never evaluating
+//! it — so a typo is caught before the write. Nothing else here reads a journal
+//! or starts a server. Every write is atomic (temp file + rename) and
+//! owner-only, every load is tolerant (a corrupt file becomes a `.bak` and the
+//! defaults apply), and nothing here holds a secret: the bearer token stays in
+//! the server's own 0600 ready file (§2 rule 4).
 
 pub mod app_state;
 pub mod catalog;
 pub mod cli;
+pub mod config_file;
 pub mod design;
 pub mod history;
 pub mod launch;
+pub mod lispcheck;
 pub mod model_cache;
 pub mod paths;
 pub mod single;
@@ -43,8 +49,10 @@ pub use app_state::{AppState, Binaries, Recent, Theme, WindowBounds, SCHEMA_VERS
 pub use catalog::{
     Catalog, CheckReport, LaneModel, Model, ModelCheck, ModelRef, Problem, ProblemTarget,
 };
+pub use config_file::{ConfigError, ConfigFile, ConfigScope, SaveError};
 pub use history::{HistoryEntry, HistorySource, Session, SessionsQuery};
 pub use launch::{LaunchSpec, Program};
+pub use lispcheck::{CheckError, Checker};
 pub use model_cache::ModelCache;
 pub use paths::{Root, TabId};
 pub use single::{Activation, Primary, Secondary, SingleInstance};

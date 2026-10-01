@@ -1,0 +1,31 @@
+KaTeX font files (KaTeX_*.ttf)
+================================
+
+These TrueType fonts are taken from the KaTeX project:
+  https://github.com/KaTeX/KaTeX
+
+They are licensed under the SIL Open Font License, Version 1.1. The full
+license text is in OFL.txt in this directory.
+
+KaTeX's own MIT license applies to its software, not to the font binaries;
+font licensing follows OFL as described in KaTeX's documentation and
+upstream repository.
+
+Copyright and license notice, verbatim from the font metadata
+-------------------------------------------------------------
+
+Every face carries the same copyright holders and names its own Reserved Font
+Name in the line after "Khan Academy":
+
+  Copyright (c) 2009-2010, Design Science, Inc. (<www.mathjax.org>)
+  Copyright (c) 2014-2018 Khan Academy (<www.khanacademy.org>),
+  with Reserved Font Name KaTeX_<family>.
+
+  This Font Software is licensed under the SIL Open Font License, Version 1.1.
+  This license available with a FAQ at:
+  http://scripts.sil.org/OFL
+
+The `<family>` names reserved by the faces shipped with RaTeX 0.1.14 are:
+KaTeX_AMS, KaTeX_Caligraphic, KaTeX_Fraktur, KaTeX_Main, KaTeX_Math,
+KaTeX_SansSerif, KaTeX_Script, KaTeX_Size1, KaTeX_Size2, KaTeX_Size3,
+KaTeX_Size4, KaTeX_Typewriter.

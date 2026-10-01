@@ -8,6 +8,9 @@ edition = "2021"
 license = "MIT"
 
 [workspace.dependencies]
+# libc is a direct dependency of `store` only (the Unix open flags in
+# `config_file`); it was already in the tree through other crates.
+libc = "0.2"
 # `tree-sitter` ships the highlighter; each language feature adds one grammar.
 # They belong to the application, so they are turned on here once rather than by
 # whichever crate happens to render a code fence.

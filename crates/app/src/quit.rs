@@ -61,7 +61,30 @@ pub fn begin(cx: &mut App) {
 /// Start the quit sequence with swarms the caller already collected — the
 /// window's quit hook is handed them when the user closes the window (§9.8).
 /// Idempotent.
+///
+/// The one thing in front of it is the unsaved-Settings question (§13): a window
+/// holding edits that were never saved is asked about first, and this returns
+/// having done nothing while its dialog is up.
 pub fn begin_with(cx: &mut App, swarms: Vec<Rc<EngineHandle>>) {
+    if is_quitting(cx) {
+        return;
+    }
+    if crate::settings_guard::hold(cx) {
+        return;
+    }
+    run(cx, swarms);
+}
+
+/// Start the quit sequence with the question already answered (§13): what the
+/// unsaved-Settings dialog runs on "Discard and Quit". Nothing else reaches the
+/// quit this way — every other caller goes through [`begin`], which asks first.
+pub fn proceed(cx: &mut App) {
+    let swarms = swarms(cx);
+    run(cx, swarms);
+}
+
+/// The quit itself, with nothing in front of it (§9.8).
+fn run(cx: &mut App, swarms: Vec<Rc<EngineHandle>>) {
     if is_quitting(cx) {
         return;
     }

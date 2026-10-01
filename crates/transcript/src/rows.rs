@@ -325,7 +325,7 @@ fn gap_before(previous: Option<&Item>, row: &Item) -> Pixels {
 
 /// Whether a user row is a turn of the reader's that evo has taken: only those open a
 /// turn boundary. A queued row is not a turn yet, and a cancelled one never was.
-fn opens_a_turn(kind: &ItemKind) -> bool {
+pub(crate) fn opens_a_turn(kind: &ItemKind) -> bool {
     matches!(kind, ItemKind::User(user) if user.status == UserStatus::Sent)
 }
 
@@ -349,12 +349,8 @@ pub(crate) fn render_row(
         }
         _ => false,
     };
-    if matches!(data.items[index].kind, ItemKind::Assistant(_)) {
-        let id = data.items[index].id.clone();
-        data.note_rendered(&id);
-        if !waiting {
-            data.sync_document(index, cx);
-        }
+    if matches!(data.items[index].kind, ItemKind::Assistant(_)) && !waiting {
+        data.sync_document(index, cx);
     }
     // A report's own fields are markdown too: each document is brought up to date
     // here, at the frame that shows the row.
@@ -375,13 +371,12 @@ pub(crate) fn render_row(
 
     let focus = data.focus.clone();
     let mut stack = div().flex().flex_col().w_full().min_w_0();
-    // A user turn opens a new turn: say so, rather than printing a run marker.
+    // A user turn opens a new turn: say so, rather than printing a run marker. The
+    // number counts from the head of the record, not from the window: a turn hidden
+    // above the rows on screen still opened, and the label a reader sees does not
+    // move when the window does.
     if opens_a_turn(&item.kind) && previous.is_some() {
-        let turn = data.items[..=index]
-            .iter()
-            .filter(|item| opens_a_turn(&item.kind))
-            .count();
-        stack = stack.child(turn_separator(turn, &palette));
+        stack = stack.child(turn_separator(data.turn_number(index), &palette));
     }
 
     stack = stack.child(match &item.kind {
@@ -1376,7 +1371,7 @@ pub(crate) fn thinking_tail(thinking: &str) -> Option<SharedString> {
 /// Whether the agent's current turn already shows that it is working: an assistant
 /// message still streaming (its own pips, its thinking or its words) or a tool call
 /// still running (the card's pips). The turn is everything after the last user input
-/// evo took.
+/// evo took — of the rows given, so the caller decides how far back that looks.
 fn turn_shows_work(items: &[Item]) -> bool {
     items
         .iter()
@@ -1393,13 +1388,19 @@ fn turn_shows_work(items: &[Item]) -> bool {
 /// says so yet: the request is in flight, the model is reasoning without streaming it,
 /// or the next request after a tool is on its way. `None` once a row of the turn shows
 /// the work itself, or while the agent is not running.
+///
+/// They mark the foot of the *record*, so they are drawn only when the window reaches
+/// it: under a window whose foot is not the list's they would say the list ends while
+/// the output that arrived sits behind it. What the turn has shown is read off the
+/// window's own rows — the rows on screen — so the walk backwards never runs through a
+/// record the list is holding but not drawing.
 pub(crate) fn pending_row(data: &TranscriptData, cx: &App) -> Option<AnyElement> {
-    if !data.running || turn_shows_work(&data.items) {
+    let shown = &data.items[data.shown.clone()];
+    if !data.running || data.shown.end < data.items.len() || turn_shows_work(shown) {
         return None;
     }
     let palette = Palette::from_app(cx);
-    let gap = data
-        .items
+    let gap = shown
         .last()
         .map(|previous| {
             Group::of(&previous.kind)
@@ -2094,6 +2095,7 @@ fn report_row(
             Some(document) => TextView::new(document)
                 .style(report_text_style(cx))
                 .selectable(true)
+                .markdown_extensions(markdown::extensions())
                 .into_any_element(),
             None => div().child(value.to_string()).into_any_element(),
         };
