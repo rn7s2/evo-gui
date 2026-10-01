@@ -268,7 +268,7 @@ fn record() -> Vec<Item> {
         reply(
             &mut record,
             &long_message("Porting the view model", n),
-            if n % 3 == 0 {
+            if n.is_multiple_of(3) {
                 Some(
                     "The list measures a row only when it is built, so the heights arrive \
                      as the reader walks. That is the whole design: nothing above the pane \
@@ -286,7 +286,7 @@ fn record() -> Vec<Item> {
                 .map(|i| format!("test the_{i}th_row_is_built ... ok"))
                 .collect::<Vec<_>>()
                 .join("\n"),
-            n % 2 == 0,
+            n.is_multiple_of(2),
         );
         call(
             &mut record,
@@ -310,7 +310,7 @@ fn record() -> Vec<Item> {
         report(&mut record, (n % 6 + 1) as u64);
         notice(
             &mut record,
-            if n % 4 == 0 { "warn" } else { "info" },
+            if n.is_multiple_of(4) { "warn" } else { "info" },
             "lane 3 was restarted by its supervisor; the transcript kept its place",
         );
         lane_event(&mut record, (n % 6 + 1) as u64, "restarted", "warn");
@@ -321,13 +321,13 @@ fn record() -> Vec<Item> {
              view model, and the gate green.",
             (n as u64) * 4000,
         );
-        if n % 5 == 0 {
+        if n.is_multiple_of(5) {
             compaction(
                 &mut record,
                 "The redesign was planned; the item model, the rows and the list are in.",
             );
         }
-        if n % 7 == 0 {
+        if n.is_multiple_of(7) {
             outcome(&mut record, "completed");
         }
         call(
@@ -582,7 +582,7 @@ fn measure(cx: &mut HeadlessAppContext, window: AnyWindowHandle, page: &Entity<P
             older: view.has_older(),
             loading: view.is_loading_older(),
             rows_built,
-            renders: renders(&view),
+            renders: renders(view),
         }
     })
     .expect("the capture window is open")
