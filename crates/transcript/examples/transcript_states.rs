@@ -192,22 +192,22 @@ fn long_message(topic: &str, n: usize) -> String {
          \n\
          The measure is $800\\text{{px}}$ wide and the pane is the window less the column \
          beside it, so a row of prose is about \
-         $\\frac{{{{800 - 32}}}}{{{{7.5}}}} \\approx 102$ characters, and the list builds \
+         $\\frac{{800 - 32}}{{7.5}} \\approx 102$ characters, and the list builds \
          only what it needs:\n\
          \n\
          $$\n\
-         \\text{{{{rows built}}}} = \\frac{{{{\\text{{{{pane height}}}}}}}}{{{{\\text{{{{row \
-         height}}}}}}}} + \\text{{{{overdraw}}}}\n\
+         \\text{{rows built}} = \\frac{{\\text{{pane height}}}}{{\\text{{row \
+         height}}}} + \\text{{overdraw}}\n\
          $$\n\
          \n\
-         The {n}th pass over the same ground, and what changed: the item index is a map, \
+         Pass {n} over the same ground, and what changed: the item index is a map, \
          so a patch is a splice rather than a rescan; each message retains one document, \
          extended with `set_text`; and the journal is one virtual list, so a wheel costs a \
          pane of rows rather than a parse of the whole record.\n\
          \n\
          ## What the pane holds\n\
          \n\
-         - the rows the pane reaches, plus {n} rows of overdraw\n\
+         - the rows the pane reaches, plus a few rows of overdraw\n\
          - one measured height per row, kept across a splice\n\
          - the reader's place, which the pin decides\n\
          \n\
@@ -818,9 +818,15 @@ fn main() {
                 gpui_kit::component::Theme::change(mode, Some(window), cx);
             })
             .expect("the capture window is open");
-            // The theme change is one frame, and the assets are decoded off the render
-            // thread: two frames is what the app's own capture waits for.
-            frames(&mut cx, window, 2);
+            // A theme is another ink, and a formula's picture is keyed by its ink: the
+            // change sends every formula on screen back to the executor, and the frames
+            // in between draw its source. Wait for the pictures as after the setup, or
+            // the capture shows TeX where the app would show it only for a moment.
+            for _ in 0..12 {
+                std::thread::sleep(Duration::from_millis(20));
+                cx.run_until_parked();
+                frames(&mut cx, window, 2);
+            }
             let image = cx.capture_screenshot(window).expect("a frame to capture");
             let path = dir.join(format!("{name}-{suffix}.png"));
             image.save(&path).expect("write the picture");

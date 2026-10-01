@@ -852,24 +852,29 @@ fn quiet_row(
             let _ = view.update(cx, |view, cx| view.toggle_expanded(&click_id, cx));
         })
         .child(caret(expanded, palette))
+        // The head and its trailing figure read as one line — `Goal · updated · 240k/50k`
+        // — so they sit together with a word space between them, not the row's gap: the
+        // head may truncate, and the figure after it never does.
         .child(
             div()
+                .flex()
+                .items_center()
                 .min_w_0()
                 .flex_shrink(1.)
-                .truncate()
                 .text_size(palette.scaled(NAME_SIZE))
                 .text_color(palette.muted_foreground)
-                .child(head),
+                .child(div().min_w_0().flex_shrink(1.).truncate().child(head))
+                .children(trailing.map(|trailing| {
+                    div()
+                        .id(row_id(format!("{name}-trailing"), &id))
+                        .flex_none()
+                        .whitespace_nowrap()
+                        // A no-break space: an ordinary one at the start of a run is
+                        // the kind a layout may drop.
+                        .child(format!("\u{a0}{trailing}"))
+                        .test_support()
+                })),
         )
-        .children(trailing.map(|trailing| {
-            div()
-                .id(row_id(format!("{name}-trailing"), &id))
-                .flex_none()
-                .text_size(palette.scaled(NAME_SIZE))
-                .text_color(palette.muted_foreground)
-                .child(trailing)
-                .test_support()
-        }))
         .test_support();
 
     let mut row = div().w_full().min_w_0().flex().flex_col().child(header);
