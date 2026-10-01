@@ -198,6 +198,11 @@ const HISTORY_LIST_ID: &str = "history-list";
 /// named so that it can (a `group_hover` needs its own state) and so a probe can watch it.
 const HISTORY_ARROW_ID: &str = "history-arrow";
 const HISTORY_ROW_ID: &str = "history-row";
+/// The glyph a row leads with says which program wrote the session it resumes (§2), and
+/// the two are named one each so that a probe — and the test below — can say which kind a
+/// row wears without reading the SVG. A row wears one of them, never both.
+const HISTORY_KIND_AGENT_ID: &str = "history-kind-agent";
+const HISTORY_KIND_SWARM_ID: &str = "history-kind-swarm";
 const HISTORY_HINT_ID: &str = "history-hint";
 const HISTORY_COUNT_ID: &str = "history-count";
 /// What the history section is called, for a screen reader: the rows name themselves, but
@@ -258,6 +263,71 @@ fn row_hover_fill(dark: bool) -> Hsla {
 
 /// How much of the page's ink the design mixes into it for a hovered row: 5%.
 const ROW_HOVER_MIX: f32 = 0.05;
+
+/// What a session of this kind is called, where the row says it in words: the tooltip's
+/// first line, and part of the name the row gives a screen reader. The row's glyph says it
+/// without them (§2) — this is the same fact for anyone the glyph does not reach.
+fn kind_label(swarm: bool) -> &'static str {
+    if swarm {
+        "Swarm session"
+    } else {
+        "Agent session"
+    }
+}
+
+/// The glyph a session of this kind leads its row with: one person for the session of one
+/// agent, a graph of nodes for the swarm's — both from the icons the app ships
+/// (`gpui_kit::assets::Assets` embeds the kit's default bundle, and these two are in it).
+fn kind_glyph(swarm: bool) -> IconName {
+    if swarm {
+        IconName::Network
+    } else {
+        IconName::User
+    }
+}
+
+/// The element a row's kind glyph wears, per row: named after the kind, so that the two
+/// are told apart wherever the row is looked at — by a probe, a capture's own tree, or a
+/// test that says the agent row has no swarm glyph on it.
+fn kind_icon_id(swarm: bool, row: usize) -> ElementId {
+    let name = if swarm {
+        HISTORY_KIND_SWARM_ID
+    } else {
+        HISTORY_KIND_AGENT_ID
+    };
+    ElementId::NamedInteger(name.into(), row as u64)
+}
+
+/// One row's tooltip lines: what kind of session this is, then the facts the session model
+/// knows (`fact · fact · …`), which is what the design's row-tooltip would carry.
+fn tooltip_lines(row: &session::HistoryRow) -> Vec<SharedString> {
+    std::iter::once(SharedString::from(kind_label(row.swarm)))
+        .chain(
+            row.tooltip
+                .split(" · ")
+                .map(|line| SharedString::from(line.to_string())),
+        )
+        .collect()
+}
+
+/// One row's name for a screen reader: its title, then what kind of session it is, then the
+/// facts it shows — what a person reads off the row, in the order they read it, and the
+/// badge as the last word when the row wears one. The name is given rather than computed
+/// from the parts, so the kind is in it whether or not the glyph drew.
+fn row_aria_label(row: &session::HistoryRow) -> SharedString {
+    let mut label = format!(
+        "{}, {}, {}, {}",
+        row.title,
+        kind_label(row.swarm),
+        row.folder_short,
+        row.when
+    );
+    if row.open_at_quit {
+        label.push_str(", ");
+        label.push_str(OPEN_AT_QUIT_TEXT);
+    }
+    SharedString::from(label)
+}
 
 /// `font-weight:500`, as much of it as this app can draw — [`widgets::text::MEDIUM`].
 ///
@@ -1822,7 +1892,7 @@ impl EmptyTabState {
             .into_any_element()
     }
 
-    /// One history row: the folder glyph, the title with the badge the app's own recents
+    /// One history row: the kind's glyph, the title with the badge the app's own recents
     /// earn, the path and how long ago under it, and the arrow that says what a click does.
     ///
     /// `count` is how many rows the list has, which is what the first and last rows need:
@@ -1877,16 +1947,18 @@ impl EmptyTabState {
             .when(ix == 0, |row| row.rounded_t(ROW_INNER_RADIUS))
             .when(ix + 1 == count, |row| row.rounded_b(ROW_INNER_RADIUS))
             .when(ix > 0, |row| row.border_t_1().border_color(theme.border))
+            .aria_label(row_aria_label(row))
             .tooltip({
                 // One fact per line (the row's tooltip is `fact · fact · …`), each
                 // wrapping inside the box: as one run the kit's flex row laid the
                 // text out on a single line that ran past its own 460px box and the
                 // window's edge (a folder, a session file name, a date, the models).
-                let lines: Vec<SharedString> = row
-                    .tooltip
-                    .split(" · ")
-                    .map(|line| SharedString::from(line.to_string()))
-                    .collect();
+                //
+                // Its first line is what kind of session this is, which the glyph
+                // says without words (§2): a click resumes either kind's journal the
+                // same way, so the kind is the one fact a person cannot read off the
+                // title, the path and the clock.
+                let lines: Vec<SharedString> = tooltip_lines(row);
                 move |window, cx| {
                     widgets::tooltip::wrapped(
                         HISTORY_TOOLTIP_ID,
@@ -1905,10 +1977,21 @@ impl EmptyTabState {
             .child(
                 // `.history-icon{color:var(--muted-fg)}`: the row's own glyph is quiet,
                 // the title beside it is not.
+                //
+                // The glyph is the *kind* the row is — one agent's session or a swarm's
+                // (§2) — and it sits on the title's line rather than in the middle of
+                // the two the row holds: it is the title's own mark, and the path and
+                // the clock under it have none.
                 div()
+                    .id(kind_icon_id(row.swarm, ix))
+                    .test_support()
                     .flex_none()
+                    .self_start()
+                    .h(BODY_LINE)
+                    .flex()
+                    .items_center()
                     .text_color(muted)
-                    .child(Icon::new(IconName::Folder).with_size(ROW_ICON)),
+                    .child(Icon::new(kind_glyph(row.swarm)).with_size(ROW_ICON)),
             )
             .child(
                 v_flex()
@@ -2633,6 +2716,47 @@ mod tests {
             swarm: true,
             source: session::HistorySource::Index,
             open_at_quit: open,
+        }
+    }
+
+    /// Whether the bundle the app installs carries `path` — `gpui_kit::assets::Assets`,
+    /// which is what `main` hands the application (`with_assets`). An `IconName` the
+    /// bundle does not carry is a glyph that draws nothing, so the kind's two are asked
+    /// for here rather than assumed.
+    fn is_bundled(path: &str) -> bool {
+        use gpui_kit::AssetSource as _;
+        matches!(gpui_kit::assets::Assets.load(path), Ok(Some(bytes)) if !bytes.is_empty())
+    }
+
+    /// A history row's own id, for the row at `row`.
+    fn history_row_id(row: usize) -> ElementId {
+        ElementId::NamedInteger(HISTORY_ROW_ID.into(), row as u64)
+    }
+
+    /// The same row, for the other kind: the session of one agent (§2).
+    fn agent_entry(session: &str, folder: &str, open: bool) -> HistoryEntry {
+        HistoryEntry {
+            swarm: false,
+            lanes: None,
+            ..entry(session, folder, open)
+        }
+    }
+
+    /// One row of the session model's shape, for the two things a row says in words: the
+    /// tooltip's first line and its name for a screen reader.
+    fn session_row(swarm: bool) -> session::HistoryRow {
+        session::HistoryRow {
+            title: "project".to_string(),
+            folder_short: "~/coding/project".to_string(),
+            when: "just now".to_string(),
+            tooltip: "~/coding/project · /j/1.sexp · 2026-09-29 09:25:44 UTC (+00:00)".to_string(),
+            swarm,
+            session_path: "/j/1.sexp".to_string(),
+            folder: "~/coding/project".to_string(),
+            coordinator_model: Some("stub-a".to_string()),
+            lanes_model: None,
+            source: session::HistorySource::Index,
+            open_at_quit: false,
         }
     }
 
@@ -3488,6 +3612,132 @@ mod tests {
                 swarm: true,
             }]
         );
+    }
+
+    /// §2: the two kinds are told apart by the glyph a row leads with, chosen from the
+    /// icons the app ships — one person for one agent's session, a graph of nodes for a
+    /// swarm's — and by the words the row says the same thing in.
+    #[test]
+    fn each_kind_leads_with_its_own_glyph_and_says_so_in_words() {
+        // The glyph is a name, not a shape: what a row draws is the SVG at this path,
+        // out of the bundle the app installs — so the test pins the path, and asks the
+        // bundle for it rather than trusting that the name exists.
+        use gpui_kit::component::IconNamed as _;
+        assert_eq!(
+            kind_glyph(true).path(),
+            "icons/network.svg",
+            "a swarm's session"
+        );
+        assert_eq!(
+            kind_glyph(false).path(),
+            "icons/user.svg",
+            "one agent's session"
+        );
+        assert_ne!(kind_glyph(true).path(), kind_glyph(false).path());
+        for path in [kind_glyph(true).path(), kind_glyph(false).path()] {
+            assert!(is_bundled(&path), "the app ships {path}");
+        }
+        assert_eq!(kind_label(true), "Swarm session");
+        assert_eq!(kind_label(false), "Agent session");
+        // The row's own name for the two, which is also what a probe looks for.
+        assert_ne!(kind_icon_id(true, 0), kind_icon_id(false, 0));
+        assert_eq!(kind_icon_id(true, 3).to_string(), "history-kind-swarm-3");
+        assert_eq!(kind_icon_id(false, 3).to_string(), "history-kind-agent-3");
+
+        // What the row says without the glyph: the kind leads its tooltip, and the
+        // facts the session model knows follow it, none of them lost.
+        for swarm in [true, false] {
+            let row = session_row(swarm);
+            let lines = tooltip_lines(&row);
+            assert_eq!(lines[0], kind_label(swarm), "the kind is the first line");
+            assert_eq!(lines[1], "~/coding/project");
+            assert_eq!(
+                lines.len(),
+                1 + row.tooltip.split(" · ").count(),
+                "one line more than the facts: {:?}",
+                lines
+            );
+            // And the name a screen reader reads: what the row shows, with the kind
+            // in it — a person who cannot see the glyph is told the same thing.
+            let aria = row_aria_label(&row);
+            assert!(
+                aria.contains(kind_label(swarm)),
+                "the row's name says its kind: {aria}"
+            );
+            assert!(aria.starts_with("project, "), "{aria}");
+            assert!(aria.contains("~/coding/project") && aria.contains("just now"));
+            assert!(!aria.contains(OPEN_AT_QUIT_TEXT), "this row wears no badge");
+        }
+        // A row the app had open says so in its name too, as its badge does.
+        let open = session::HistoryRow {
+            open_at_quit: true,
+            ..session_row(true)
+        };
+        assert!(
+            row_aria_label(&open).ends_with(OPEN_AT_QUIT_TEXT),
+            "{}",
+            row_aria_label(&open)
+        );
+    }
+
+    /// §2: a history row of either kind renders its own glyph and wears the kind in its
+    /// own name — read off the tree, the way a screen reader and a probe read it.
+    #[gpui_kit::test]
+    fn a_history_row_of_either_kind_wears_its_own_glyph_and_name(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.history(
+            cx,
+            &[
+                entry("/j/swarm.sexp", "/Users/you/coding/foo", false),
+                agent_entry("/j/agent.sexp", "/Users/you/coding/bar", false),
+            ],
+            "/Users/you",
+        );
+        f.render(cx);
+        f.act(cx, |window, cx| {
+            // Each row leads with its own kind's glyph, and with no other.
+            assert!(
+                window.find(kind_icon_id(true, 0)).visible(),
+                "the swarm's row leads with the swarm's glyph"
+            );
+            assert!(window.try_find(kind_icon_id(false, 0)).is_none());
+            assert!(
+                window.find(kind_icon_id(false, 1)).visible(),
+                "the agent's row leads with the agent's glyph"
+            );
+            assert!(window.try_find(kind_icon_id(true, 1)).is_none());
+
+            // The glyph sits on the row's first line: its own box is that line's, so
+            // its middle is the title's middle, not the middle of the two lines.
+            let glyph = window.find(kind_icon_id(true, 0)).bounds();
+            let row = window.find(history_row_id(0)).bounds();
+            assert_eq!(
+                glyph.size.height, BODY_LINE,
+                "the glyph's box is the title's own line"
+            );
+            assert_eq!(
+                glyph.top() - row.top(),
+                ROW_PAD_Y,
+                "at the row's head, where the title is — not in the middle of the two lines"
+            );
+
+            // And each row names itself with the kind in it.
+            let swarm = window.find(history_row_id(0)).label().unwrap().to_string();
+            assert!(swarm.starts_with("foo, Swarm session"), "{swarm}");
+            let agent = window.find(history_row_id(1)).label().unwrap().to_string();
+            assert!(agent.starts_with("bar, Agent session"), "{agent}");
+
+            window.hover(history_row_id(0), cx);
+        });
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(1500));
+        cx.run_until_parked();
+        f.render(cx);
+        f.act(cx, |window, _| {
+            // The row keeps the tooltip it had — the one whose first line is now the
+            // kind (`tooltip_lines`, above, is what says which line that is).
+            assert!(window.find(HISTORY_TOOLTIP_ID).visible());
+        });
     }
 
     /// A history row's tooltip lists its facts one per line, and a line longer than
