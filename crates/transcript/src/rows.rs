@@ -811,6 +811,15 @@ fn image_row(
                     .border_1()
                     .border_color(palette.border)
                     .overflow_hidden()
+                    // A frame is a box a reader can see and click whatever the picture's
+                    // own size: a 1×1 screenshot is not a dot in the middle of nothing.
+                    // Wide and tall pictures are their own size — a minimum only bites
+                    // where the picture is smaller than it.
+                    .min_w(palette.scaled(MIN_PICTURE))
+                    .min_h(palette.scaled(MIN_PICTURE))
+                    .flex()
+                    .items_center()
+                    .justify_center()
                     .on_click(move |_, _, cx| {
                         let _ =
                             view.update(cx, |view, cx| view.toggle_image_size(&click_id, n, cx));
@@ -828,7 +837,9 @@ fn image_row(
                             palette.scaled(if full { FULL_IMAGE } else { THUMBNAIL }),
                             palette.scaled(IMAGE_WIDTH),
                         )
-                        .rounded(palette.radius - px(1.)),
+                        .id(row_id(format!("transcript-image-picture-{n}"), id))
+                        .rounded(palette.radius - px(1.))
+                        .test_support(),
                     )
                     .test_support()
                     .into_any_element()
@@ -865,6 +876,14 @@ const THUMBNAIL: f32 = 120.;
 const FULL_IMAGE: f32 = 340.;
 /// How wide one may be drawn (`imgcheck::picture`'s own cap at 100%).
 const IMAGE_WIDTH: f32 = 520.;
+/// The smallest frame a picture is drawn in, whatever the picture's own size: a 1×1
+/// screenshot, or an 8×8 icon, is a box a reader can see and click to open rather than a
+/// dot in the middle of nothing.
+///
+/// The picture is *not* scaled up to fill it. GPUI paints a scaled image through its own
+/// filter and offers no nearest-neighbour one, and a blurred 8×8 icon is worse than the
+/// icon at its own size, centred on the frame's surface.
+const MIN_PICTURE: f32 = 48.;
 
 /// One image the transcript is not showing: a muted line saying what it is and where it
 /// got to, in place of a hole.

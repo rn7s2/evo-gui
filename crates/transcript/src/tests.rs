@@ -1112,6 +1112,115 @@ fn an_image_that_arrives_off_screen_is_measured_when_it_comes_back(cx: &mut Test
     );
 }
 
+/// A picture smaller than its frame is a box, not a dot.
+///
+/// The frame carries a minimum (`MIN_PICTURE`, scaled by the reader's zoom like the rest of
+/// the row) and the picture is centred in it at its own size — not blown up to fill it,
+/// because GPUI has no nearest-neighbour draw and a blurred 8×8 icon is worse than a small
+/// one on a surface a reader can see. A picture larger than the minimum is its own size,
+/// exactly as before.
+#[gpui_kit::test]
+fn a_picture_smaller_than_its_frame_is_a_box_not_a_dot(cx: &mut TestAppContext) {
+    let (view, cx) = open_in(cx, 1200., vec![user_with_image("u_1", 3)]);
+    view.update(cx, |view, cx| view.on_fetch_image(|_, _, _, _| {}, cx));
+    frames(cx, 2);
+    for (n, (w, h)) in [(0u32, (1u32, 1u32)), (1, (8, 8)), (2, (1000, 600))] {
+        let picture = crate::decode_image(&transcript_png_sized(w, h)).expect("a decodable PNG");
+        view.update(cx, |view, cx| view.set_image("u_1", n, picture, cx));
+    }
+    frames(cx, 2);
+
+    let frame = |cx: &mut gpui_kit::VisualTestContext, n: u32| {
+        row_box(cx, row_id(format!("transcript-image-{n}"), "u_1"))
+    };
+    let drawn = |cx: &mut gpui_kit::VisualTestContext, n: u32| {
+        row_box(cx, row_id(format!("transcript-image-picture-{n}"), "u_1"))
+    };
+    let centred = |cx: &mut gpui_kit::VisualTestContext, n: u32| {
+        let (frame, picture) = (frame(cx, n), drawn(cx, n));
+        let slack = |outer: f32, inner: f32| (outer - inner) / 2.;
+        for (axis, gap, want) in [
+            (
+                "x",
+                f32::from(picture.origin.x - frame.origin.x),
+                slack(
+                    f32::from(frame.size.width),
+                    f32::from(picture.size.width),
+                ),
+            ),
+            (
+                "y",
+                f32::from(picture.origin.y - frame.origin.y),
+                slack(
+                    f32::from(frame.size.height),
+                    f32::from(picture.size.height),
+                ),
+            ),
+        ] {
+            assert!(
+                (gap - want).abs() <= 0.5,
+                "{axis}: a {n}'s picture sits at {gap}, not centred ({want})"
+            );
+        }
+    };
+
+    // The floor: a 1×1 or an 8×8 screenshot is a box, and the picture in it is the size it
+    // is — a dot in the middle, never stretched to fill the frame.
+    for (n, own) in [(0u32, 1.), (1, 8.)] {
+        assert_eq!(
+            frame(cx, n).size,
+            gpui_kit::size(px(48.), px(48.)),
+            "`MIN_PICTURE` is the frame a tiny picture is drawn in"
+        );
+        assert_eq!(
+            drawn(cx, n).size,
+            gpui_kit::size(px(own), px(own)),
+            "and the picture keeps its own size"
+        );
+        centred(cx, n);
+    }
+
+    // A picture with the pixels to fill the frame is unchanged: the caps, and its own
+    // corners inside the rounded one.
+    assert_eq!(
+        frame(cx, 2).size,
+        gpui_kit::size(px(522.), px(122.)),
+        "`IMAGE_WIDTH` 520 by `THUMBNAIL` 120, inside the frame's 1px border"
+    );
+    assert_eq!(drawn(cx, 2).size, gpui_kit::size(px(520.), px(120.)));
+    centred(cx, 2);
+
+    // The floor follows the reader's zoom like everything else in the row (§7.2).
+    set_zoom(cx, 1.5);
+    assert_eq!(
+        frame(cx, 0).size,
+        gpui_kit::size(px(72.), px(72.)),
+        "half again as large at 150%"
+    );
+    assert_eq!(drawn(cx, 0).size, gpui_kit::size(px(1.), px(1.)));
+    assert_eq!(frame(cx, 2).size, gpui_kit::size(px(782.), px(182.)));
+    set_zoom(cx, 1.0);
+
+    // Opened, a tiny picture is a box as well — the full cap does not change what a 1×1
+    // is — while one with the pixels to spare opens into them.
+    cx.update(|window, cx| window.click(row_id("transcript-image-0", "u_1"), cx));
+    frames(cx, 2);
+    assert_eq!(
+        frame(cx, 0).size,
+        gpui_kit::size(px(48.), px(48.)),
+        "a 1×1 opens into the same box"
+    );
+    centred(cx, 0);
+    cx.update(|window, cx| window.click(row_id("transcript-image-2", "u_1"), cx));
+    frames(cx, 2);
+    assert_eq!(
+        frame(cx, 2).size,
+        gpui_kit::size(px(522.), px(342.)),
+        "and a 1000×600 opens to `FULL_IMAGE`'s 340"
+    );
+    centred(cx, 2);
+}
+
 /// A one-pixel PNG, made here rather than embedded: the test is about the path from
 /// bytes to a drawn frame, and this is the smallest thing that goes through it.
 fn transcript_png() -> Vec<u8> {
