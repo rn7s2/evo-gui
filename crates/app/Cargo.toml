@@ -30,3 +30,9 @@ gpui-kit = { workspace = true, features = ["test-support"] }
 proofs = { path = "../proofs" }
 # The probe crops its pictures in-process (already in the lock through gpui).
 image = { version = "0.25", default-features = false, features = ["png"] }
+# The traffic-light check reads AppKit's own button frames off the real window.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = ["NSWindow", "NSView", "NSButton", "NSControl", "NSResponder"] }
+objc2-foundation = { version = "0.3", features = ["NSGeometry"] }
+raw-window-handle = "0.6"
