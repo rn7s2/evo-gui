@@ -58,8 +58,9 @@ pub(crate) const VALUE_LIMIT: usize = 96;
 /// Height of a collapsed tool row, so a long run of them stays a list.
 pub(crate) const TOOL_ROW_HEIGHT: Pixels = px(24.);
 /// The caret's column in a tool row's head: `Rows.css`'s `.tc-caret` is 16px
-/// square, holding the design's 12px chevron.
-const DISCLOSURE_WIDTH: Pixels = px(16.);
+/// square, holding the design's 12px chevron. A plain number so the head's own
+/// geometry can be added up in a `const`: [`TC_BODY_INDENT`] is derived from it.
+const DISCLOSURE_WIDTH: f32 = 16.;
 /// The disclosure chevron: a glyph with about ten pixels of ink, centred in its
 /// own column. The glyph box is larger than the ink a chevron actually draws.
 /// Width of the key column of an expanded argument list: enough for a nested
@@ -1489,8 +1490,8 @@ fn tool_row(
         .w_full()
         .flex()
         .items_center()
-        .gap_2()
-        .pl_2()
+        .gap(px(TC_HEAD_GAP))
+        .pl(px(TC_HEAD_PAD))
         .pr(px(10.))
         .text_size(px(13.))
         .cursor_default()
@@ -1504,22 +1505,12 @@ fn tool_row(
         .child(caret(expanded, palette))
         .child(
             div()
-                .size(px(TC_ICON))
-                .flex_shrink_0()
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(5.))
-                .bg(mix(palette.foreground, 8., palette.sidebar))
-                .text_color(palette.foreground)
-                .child(Icon::new(IconName::ArrowRight).size(px(12.))),
-        )
-        .child(
-            div()
+                .id(row_id("transcript-tool-name", &id))
                 .flex_shrink_0()
                 .font_family(palette.mono.clone())
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_size(px(12.5))
+                .test_support()
                 .child(tool.name.clone()),
         );
     if !target.is_empty() {
@@ -1594,7 +1585,7 @@ fn tool_row(
                 .pt(px(10.))
                 .pr(px(12.))
                 .pb(px(12.))
-                .pl(px(42.))
+                .pl(px(TC_BODY_INDENT))
                 .child(arguments_block(id.clone(), &tool.args, palette))
                 .child(result_block(
                     id.clone(),
@@ -1625,10 +1616,15 @@ pub(crate) fn one_line(text: &str) -> String {
     }
 }
 
-/// The tool's head height, its icon box, and the label size above a payload —
-/// `Rows.css`'s `.tc-head`, `.tc-icon` and `.tc-caption`.
+/// The tool head's own numbers: its height (`.tc-head`), the leading padding before
+/// the caret and the gap between the head's children, and the column the head's text
+/// starts in — that padding, the caret's own column and the gap after it.
+/// [`TC_BODY_INDENT`] is the same column, so a call's arguments and its result begin
+/// under the tool's name.
 const TC_HEAD: f32 = 34.;
-const TC_ICON: f32 = 20.;
+const TC_HEAD_PAD: f32 = 8.;
+const TC_HEAD_GAP: f32 = 8.;
+pub(crate) const TC_BODY_INDENT: f32 = TC_HEAD_PAD + DISCLOSURE_WIDTH + TC_HEAD_GAP;
 
 /// What the call was aimed at, and what it was asked to do — the two halves of the
 /// design's sentence, read out of the call's own arguments.
@@ -1757,7 +1753,7 @@ fn caret(expanded: bool, palette: &Palette) -> AnyElement {
     let easing = widgets::effort::cubic_bezier(0.25, 0.1, 0.25, 1.0);
 
     div()
-        .w(DISCLOSURE_WIDTH)
+        .w(px(DISCLOSURE_WIDTH))
         .flex_shrink_0()
         .flex()
         .items_center()

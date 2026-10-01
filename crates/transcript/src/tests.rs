@@ -12,7 +12,8 @@ use session::{Item, ItemKind};
 
 use crate::rows::{
     cap_fields, cap_text, json_fields, row_id, take_chars, thinking_tail, Cap, FieldValue,
-    CONTEXT_BLOCK_LINES, RESULT_LIMIT, THINKING_TAIL_CHARS, TURN_LABEL_OVERHANG, VALUE_LIMIT,
+    CONTEXT_BLOCK_LINES, RESULT_LIMIT, TC_BODY_INDENT, THINKING_TAIL_CHARS, TURN_LABEL_OVERHANG,
+    VALUE_LIMIT,
 };
 use crate::TranscriptView;
 
@@ -1359,9 +1360,10 @@ fn a_row_that_opens_no_turn_keeps_the_air_between_blocks(cx: &mut TestAppContext
 }
 
 /// The tool card, to the numbers `Rows.css` gives it: a 34px head with the
-/// caret's own 16px column, a body inset 42px from the card's left and 10px from
-/// its top, a caption on a 17.25px line box 4px above a `72px 1fr` key/value
-/// grid whose rows sit 3px apart on a 19px line.
+/// caret's own 16px column, a body inset to the column the head's text starts in
+/// (the head's padding, the caret and the gap after it) and 10px from its top, a
+/// caption on a 17.25px line box 4px above a `72px 1fr` key/value grid whose rows
+/// sit 3px apart on a 19px line.
 #[gpui_kit::test]
 fn the_tool_card_is_the_designs(cx: &mut TestAppContext) {
     let (_view, cx) = open!(
@@ -1388,10 +1390,25 @@ fn the_tool_card_is_the_designs(cx: &mut TestAppContext) {
 
         let args = row_id("transcript-tool-arguments", "t_1");
         let args_box = box_of(window, args.clone());
-        // `.tc-body{padding:10px 12px 12px 42px}` — from the card's own edge,
-        // which is the head's box (the 1px border is outside it) — under the
-        // body's own 1px top rule (`border-top:1px solid var(--rule-soft)`).
-        assert_eq!(args_box.origin.x - head.origin.x, px(42.));
+        // `.tc-body{padding:10px 12px 12px …}` — from the card's own edge, which is
+        // the head's box (the 1px border is outside it) — under the body's own 1px
+        // top rule (`border-top:1px solid var(--rule-soft)`). Its left inset is the
+        // head's own text column, so the arguments and the result begin under the
+        // tool's name.
+        let name = box_of(window, row_id("transcript-tool-name", "t_1"));
+        assert_eq!(
+            TC_BODY_INDENT, 32.,
+            "the head's own 8px of padding + its 16px caret column + 8px of gap"
+        );
+        assert_eq!(
+            name.origin.x - head.origin.x,
+            px(TC_BODY_INDENT),
+            "the head's text starts at the column the body is inset to"
+        );
+        assert_eq!(
+            args_box.origin.x, name.origin.x,
+            "the body starts under the tool's name: {args_box:?} vs {name:?}"
+        );
         assert_eq!(
             args_box.origin.y - head.bottom(),
             px(11.),
