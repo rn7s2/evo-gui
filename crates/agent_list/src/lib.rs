@@ -1759,7 +1759,7 @@ mod tests {
             f.list.update(cx, |list, cx| {
                 list.set_down_reason(
                     1,
-                    Some("model ark-opus-4.5 is not registered under provider :aiden".to_string()),
+                    Some("model opus-4.5 is not registered under provider :acme".to_string()),
                     cx,
                 )
             });

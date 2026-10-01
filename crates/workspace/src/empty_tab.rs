@@ -2050,8 +2050,8 @@ mod tests {
     fn catalog_body() -> Value {
         serde_json::json!({
             "models": [
-                {"id": "ark-deepseek-v4.1-flash", "provider": "aiden", "name": "DeepSeek V4.1",
-                 "api": "ark-chat", "context_window": 200000,
+                {"id": "deepseek-v4.1-flash", "provider": "acme", "name": "DeepSeek V4.1",
+                 "api": "chat-model", "context_window": 200000,
                  "reasoning": false, "images": false, "ready": true, "reason": null},
                 {"id": "claude-opus-4.5", "provider": "anthropic", "name": "Claude Opus 4.5",
                  "api": "anthropic-messages", "context_window": 1000000,
@@ -2063,8 +2063,8 @@ mod tests {
             "default_model": {"id": "claude-opus-4.5", "provider": "anthropic"},
             "thinking_levels": ["low", "medium", "high", "xhigh", "max"],
             "lanes": {"models": [
-                {"id": "ark-deepseek-v4.1-flash", "provider": "aiden", "ok": false,
-                 "reason": "ark-chat is not an api a lane has"},
+                {"id": "deepseek-v4.1-flash", "provider": "acme", "ok": false,
+                 "reason": "chat-model is not an api a lane has"},
                 {"id": "claude-opus-4.5", "provider": "anthropic", "ok": true, "reason": null},
                 {"id": "claude-sonnet-5", "provider": "proxy", "ok": false,
                  "reason": "api anthropic-oauth-messages is not in a lane"}
@@ -2370,7 +2370,7 @@ mod tests {
             cx,
             check(
                 ("claude-sonnet-5", "proxy"),
-                ("ark-deepseek-v4.1-flash", "aiden"),
+                ("deepseek-v4.1-flash", "acme"),
                 Vec::new(),
             ),
         );
@@ -2385,7 +2385,7 @@ mod tests {
             );
             assert_eq!(
                 shown(state, Card::Lanes, cx),
-                "ark-deepseek-v4.1-flash@aiden"
+                "deepseek-v4.1-flash@acme"
             );
             // …which is a registration this card cannot launch on as it stands: the field
             // still shows it, and the check's own line under the cards explains it.
@@ -2410,7 +2410,7 @@ mod tests {
                 state.on_choose(
                     Card::Coordinator,
                     &SelectEvent::Confirm(Some(SharedString::from(
-                        "ark-deepseek-v4.1-flash@aiden",
+                        "deepseek-v4.1-flash@acme",
                     ))),
                     window,
                     cx,
@@ -2434,11 +2434,11 @@ mod tests {
             let state = state.read(cx);
             assert_eq!(
                 state.launcher.chosen_key(Card::Coordinator),
-                Some("ark-deepseek-v4.1-flash@aiden")
+                Some("deepseek-v4.1-flash@acme")
             );
             assert_eq!(
                 shown(state, Card::Coordinator, cx),
-                "ark-deepseek-v4.1-flash@aiden",
+                "deepseek-v4.1-flash@acme",
                 "the field stays where the person put it"
             );
             assert_eq!(
@@ -2633,7 +2633,7 @@ mod tests {
         f.set_check(
             cx,
             check(
-                ("ark-deepseek-v4.1-flash", "aiden"),
+                ("deepseek-v4.1-flash", "acme"),
                 ("claude-opus-4.5", "anthropic"),
                 Vec::new(),
             ),
@@ -2642,7 +2642,7 @@ mod tests {
         f.act(cx, |_, cx| {
             assert_eq!(
                 tab.read(cx).coordinator_model(cx).as_ref(),
-                "ark-deepseek-v4.1-flash@aiden"
+                "deepseek-v4.1-flash@acme"
             );
             assert_eq!(
                 tab.read(cx).lanes_model(cx).as_ref(),

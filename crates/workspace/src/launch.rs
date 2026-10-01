@@ -225,7 +225,7 @@ mod tests {
             folder: PathBuf::from("/Users/you/coding/foo"),
             plan: plan(
                 Some(("claude-opus-5", "anthropic")),
-                Some(("ark-deepseek-v4.1-flash", "aiden")),
+                Some(("deepseek-v4.1-flash", "acme")),
                 Some(4),
             ),
         };
@@ -254,7 +254,7 @@ mod tests {
                 "--workers",
                 "4",
                 "--lane-model",
-                "ark-deepseek-v4.1-flash@aiden",
+                "deepseek-v4.1-flash@acme",
             ]
         );
     }

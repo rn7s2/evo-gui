@@ -133,19 +133,19 @@ mod tests {
                 {"id": "claude-opus-5", "provider": "anthropic", "name": "Claude Opus 5",
                  "api": "anthropic-messages", "context_window": 200000,
                  "reasoning": true, "images": true, "ready": true, "reason": null},
-                {"id": "ark-deepseek-v4.1-flash", "provider": "aiden", "name": "DeepSeek V4.1",
-                 "api": "ark-chat", "context_window": 936000,
+                {"id": "deepseek-v4.1-flash", "provider": "acme", "name": "DeepSeek V4.1",
+                 "api": "chat-model", "context_window": 936000,
                  "reasoning": false, "images": false, "ready": true, "reason": null}
             ],
             "providers": [{"name": "anthropic", "api": "anthropic-messages", "has_key": true,
                            "key_env": "ANTHROPIC_API_KEY"}],
-            "default_model": {"id": "ark-deepseek-v4.1-flash", "provider": "aiden"},
+            "default_model": {"id": "deepseek-v4.1-flash", "provider": "acme"},
             "thinking_levels": ["off", "low", "medium", "high", "xhigh"],
             "languages": [{"code": "en", "name": "English"}],
             "lanes": {"models": [
                 {"id": "claude-opus-5", "provider": "anthropic", "ok": true, "reason": null},
-                {"id": "ark-deepseek-v4.1-flash", "provider": "aiden", "ok": false,
-                 "reason": "api ark-chat is not in a lane"}
+                {"id": "deepseek-v4.1-flash", "provider": "acme", "ok": false,
+                 "reason": "api chat-model is not in a lane"}
             ]},
             "warnings": []
         })
@@ -168,7 +168,7 @@ mod tests {
             .lane_model_ok("claude-opus-5", Some("anthropic")));
         assert!(!cache
             .catalog()
-            .lane_model_ok("ark-deepseek-v4.1-flash", Some("aiden")));
+            .lane_model_ok("deepseek-v4.1-flash", Some("acme")));
     }
 
     #[test]

@@ -437,7 +437,7 @@ mod tests {
             when: "2026-08-24T09:00:00Z".to_owned(),
             models: TabModels {
                 coordinator: Some("claude-opus-5".to_owned()),
-                lanes: Some("ark-deepseek-v4.1-flash".to_owned()),
+                lanes: Some("deepseek-v4.1-flash".to_owned()),
             },
             lanes: 4,
             open_at_quit: true,
@@ -451,7 +451,7 @@ mod tests {
         assert_eq!(merged.models.coordinator.as_deref(), Some("claude-opus-5"));
         assert_eq!(
             merged.models.lanes.as_deref(),
-            Some("ark-deepseek-v4.1-flash")
+            Some("deepseek-v4.1-flash")
         );
         assert_eq!(merged.source, HistorySource::Index);
         assert!(merged.open_at_quit, "the app is the only side that knows");

@@ -402,8 +402,8 @@ mod tests {
                 {"id": "claude-opus-5", "provider": "Anthropic", "name": "Claude Opus 5",
                  "api": "anthropic-messages", "context_window": 200000,
                  "reasoning": true, "images": true, "ready": true, "reason": null},
-                {"id": "ark-deepseek-v4.1-flash", "provider": "aiden", "name": "DeepSeek V4.1 Flash",
-                 "api": "ark-chat", "context_window": 936000,
+                {"id": "deepseek-v4.1-flash", "provider": "acme", "name": "DeepSeek V4.1 Flash",
+                 "api": "chat-model", "context_window": 936000,
                  "reasoning": false, "images": false, "ready": true, "reason": null},
                 {"id": "claude-sonnet-5", "provider": "proxy", "name": "Claude Sonnet 5",
                  "api": "anthropic-oauth-messages", "context_window": 1000000,
@@ -414,13 +414,13 @@ mod tests {
                  "key_env": "ANTHROPIC_API_KEY"},
                 {"name": "proxy", "api": "anthropic-oauth-messages", "has_key": false, "key_env": null}
             ],
-            "default_model": {"id": "ark-deepseek-v4.1-flash", "provider": "aiden"},
+            "default_model": {"id": "deepseek-v4.1-flash", "provider": "acme"},
             "thinking_levels": ["off", "low", "medium", "high", "xhigh"],
             "languages": [{"code": "en", "name": "English"}],
             "ops": [], "commands": [], "skills": [], "tools": [],
             "lanes": {"models": [
                 {"id": "claude-opus-5", "provider": "anthropic", "ok": true, "reason": null},
-                {"id": "ark-deepseek-v4.1-flash", "provider": "aiden", "ok": true, "reason": null},
+                {"id": "deepseek-v4.1-flash", "provider": "acme", "ok": true, "reason": null},
                 {"id": "claude-sonnet-5", "provider": "proxy", "ok": false,
                  "reason": "api anthropic-oauth-messages is not in a lane"}
             ]},
@@ -500,7 +500,7 @@ mod tests {
     #[test]
     fn a_model_without_an_id_is_dropped_and_one_without_a_provider_keeps_a_bare_spec() {
         let catalog = Catalog::from_json(json!({"models": [
-            {"provider": "aiden"},
+            {"provider": "acme"},
             {"id": "bare", "ready": true}
         ]}));
         let models = catalog.models();
@@ -513,9 +513,9 @@ mod tests {
     fn a_check_report_reads_its_problems_as_lines() {
         let report = CheckReport::from_json(&json!({
             "ok": false,
-            "model": {"id": "m", "provider": "aiden", "ok": true, "reason": null},
-            "lane_model": {"id": "l", "provider": "aiden", "ok": false,
-                           "reason": "a lane cannot register ark-chat"},
+            "model": {"id": "m", "provider": "acme", "ok": true, "reason": null},
+            "lane_model": {"id": "l", "provider": "acme", "ok": false,
+                           "reason": "a lane cannot register chat-model"},
             "thinking": "high",
             "lane_thinking": "low",
             "workers": 12,
@@ -528,7 +528,7 @@ mod tests {
         assert_eq!(report.model.as_ref().map(|m| m.ok), Some(true));
         assert_eq!(
             report.lane_model.as_ref().and_then(|m| m.reason.as_deref()),
-            Some("a lane cannot register ark-chat")
+            Some("a lane cannot register chat-model")
         );
         // The three values a launch would resolve with no flags (§2), which the empty
         // tab's controls open on: an effort for each card, and the count.
