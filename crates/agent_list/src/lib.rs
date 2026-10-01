@@ -350,7 +350,7 @@ impl AgentList {
         let badge = self
             .coordinator_reconnecting
             .then(|| SharedString::from("reconnecting"));
-        let mut tooltip = format!("main — the coordinator · {word}");
+        let mut tooltip = format!("coordinator · {word}");
         if let Some(clock) = &clock {
             tooltip.push_str(&format!(" · step {clock}"));
         }
@@ -364,9 +364,9 @@ impl AgentList {
         let state: SharedString = clock.unwrap_or_else(|| word.to_string()).into();
         RowView {
             key: AgentKey::Coordinator,
-            name: "main".into(),
+            name: "coordinator".into(),
             busy: status.is_busy(),
-            task: Some("coordinator".into()),
+            task: None,
             task_color: paint::color(palette.muted_fg),
             state,
             state_color: paint::color(palette.muted_fg),
@@ -374,7 +374,7 @@ impl AgentList {
             stop: None,
             dot_surface: self.dot_surface(AgentKey::Coordinator, palette),
             tooltip: tooltip.into(),
-            aria: format!("main, {word}{step}").into(),
+            aria: format!("coordinator, {word}{step}").into(),
         }
     }
 
@@ -1784,7 +1784,7 @@ mod tests {
                 .label()
                 .unwrap_or_default()
                 .to_string();
-            assert_eq!(main, "main, idle");
+            assert_eq!(main, "coordinator, idle");
             assert!(
                 window.try_find(badge_id(AgentKey::Coordinator)).is_none(),
                 "no badge while the stream is up"
@@ -1799,7 +1799,7 @@ mod tests {
                 .label()
                 .unwrap_or_default()
                 .to_string();
-            assert_eq!(main, "main, running");
+            assert_eq!(main, "coordinator, running");
             assert!(window.find(badge_id(AgentKey::Coordinator)).visible());
             // The state keeps its cell: the badge is added after it, not instead.
             assert!(window.find(state_id(AgentKey::Coordinator)).visible());
@@ -1853,7 +1853,7 @@ mod tests {
                 .label()
                 .unwrap_or_default()
                 .to_string();
-            assert_eq!(main, "main, running, step 41s");
+            assert_eq!(main, "coordinator, running, step 41s");
 
             // A compaction is work too.
             f.list.update(cx, |list, cx| {
@@ -1888,7 +1888,7 @@ mod tests {
                 .label()
                 .unwrap_or_default()
                 .to_string();
-            assert_eq!(main, "main, running, step 0s");
+            assert_eq!(main, "coordinator, running, step 0s");
         });
     }
 

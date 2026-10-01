@@ -185,9 +185,9 @@ first run shows: there is nothing to resume yet, which is not a failure.
 
 ```
 ┌──────────────────────┬────────────────────────────────────────────┐
-│ Lanes 2 of 6 busy    │ main  coordinator                          │
+│ Lanes 2 of 6 busy    │ coordinator                                │
 ├──────────────────────┼────────────────────────────────────────────┤
-│ ● main   coordinator │        the agent's transcript              │
+│ ● coordinator        │        the agent's transcript              │
 │ ◐ lane 1 the view …  │                                            │
 │ ○ lane 2        idle │  ┌──────────────────────────────────────┐  │
 │ ✗ lane 3        down │  │ Todos 1/3         ⌃                  │  │
@@ -202,9 +202,9 @@ first run shows: there is nothing to resume yet, which is not a failure.
 ### Left — the agents
 
 The column opens with its own band — `Lanes`, and `2 of 6 busy` at the other
-end — and then `main`, the coordinator, followed by one row per lane: a status
+end — and then the `coordinator`, followed by one row per lane: a status
 glyph, the task it is on (truncated), and the state — `idle`, or how long the
-current step has taken while it works. `main`, the coordinator, says `waiting on
+current step has taken while it works. The `coordinator` row says `waiting on
 lanes` while it is held for them. A lane that is down shows the reason in place
 of its task; hovering any row gives the whole story. While a lane is working its
 row carries a small **Stop** — the one thing a person may do
@@ -230,7 +230,7 @@ time, so a name is never cut in half: `…/project`, or
 
 ### The transcript
 
-A slim header names the agent being shown (`main`, `Lane 1`) with the same status
+A slim header names the agent being shown (`coordinator`, `lane 1`) with the same status
 glyph the left column uses, the task that agent was given, and — when that
 agent's transcript carries thinking text — a **Show thinking** button that
 reveals it (**Hide thinking** puts it back). The toggle is per agent: switching
@@ -295,7 +295,7 @@ once it is taken, the card becomes the turn it is.
 
 When you scroll away from the bottom the view stops following and offers a
 **Jump to latest** button. An agent with nothing to show says so in its own words:
-`Ask the coordinator to get started` for `main`, and
+`Ask the coordinator to get started` for the coordinator, and
 `Lane 1 hasn't been given work yet.` for a lane.
 
 ### The composer, at the foot
@@ -384,7 +384,7 @@ following; `app.json`'s `theme` field is what is stored (`system`, `light`,
   swarm restarts it (`lane_event: restarted` on the coordinator's topic) and the
   row comes back.
 - **The connection drops.** The tab reconnects with a backoff and shows a
-  reconnecting badge on the `main` row and above the transcript. A server that
+  reconnecting badge on the `coordinator` row and above the transcript. A server that
   restarted answers with another epoch, which is a `stream.reset`: the tab reads
   everything again and keeps working — and because it re-reads, a restarted
   swarm cannot leave half of two conversations on screen.

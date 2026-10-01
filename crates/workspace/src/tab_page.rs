@@ -426,7 +426,7 @@ impl TabContent {
         let palette = design::palette(cx.theme().mode.is_dark());
         let agent = self.selected_agent();
         let name = match agent {
-            AgentKey::Coordinator => SharedString::from("main"),
+            AgentKey::Coordinator => SharedString::from("coordinator"),
             AgentKey::Lane(n) => SharedString::from(format!("lane {n}")),
         };
         let task = self.header_task(agent);
@@ -466,12 +466,12 @@ impl TabContent {
             .into_any_element()
     }
 
-    /// What the band says the agent is doing — the design's own rule: `main` is the
-    /// coordinator, and a lane says the task it was given while it works, where it is
+    /// What the band says the agent is doing: nothing more for the coordinator (its
+    /// name says it), and a lane says the task it was given while it works, where it is
     /// otherwise, and why it is down when it is.
     fn header_task(&self, agent: AgentKey) -> SharedString {
         let AgentKey::Lane(n) = agent else {
-            return SharedString::from("coordinator");
+            return SharedString::default();
         };
         let model = self.model();
         if let Some(reason) = model.and_then(|model| model.lane_down_reason(n)) {
