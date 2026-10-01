@@ -31,7 +31,7 @@ use session::{
     Notice, NoticeSeverity, QueuePosition, RunOutcome, ToolItem, UserItem, UserStatus,
 };
 
-use crate::imgcheck::picture;
+use crate::imgcheck::{picture, MIN_PICTURE};
 use crate::ImageState;
 
 use crate::style::{mix, text_style, Palette, BLOCK_GAP, GROUP_GAP, TIGHT_GAP, TURN_GAP};
@@ -811,6 +811,15 @@ fn image_row(
                     .border_1()
                     .border_color(palette.border)
                     .overflow_hidden()
+                    // A frame is a box a reader can see and click whatever the picture's
+                    // own size: a 1×1 screenshot is not a dot in the middle of nothing.
+                    // The floor is a floor, not a size, so a wide picture keeps the frame
+                    // it had, and `decode_image` bakes a small one up to meet it.
+                    .min_w(palette.scaled(MIN_PICTURE))
+                    .min_h(palette.scaled(MIN_PICTURE))
+                    .flex()
+                    .items_center()
+                    .justify_center()
                     .on_click(move |_, _, cx| {
                         let _ =
                             view.update(cx, |view, cx| view.toggle_image_size(&click_id, n, cx));
@@ -828,7 +837,9 @@ fn image_row(
                             palette.scaled(if full { FULL_IMAGE } else { THUMBNAIL }),
                             palette.scaled(IMAGE_WIDTH),
                         )
-                        .rounded(palette.radius - px(1.)),
+                        .id(row_id(format!("transcript-image-picture-{n}"), id))
+                        .rounded(palette.radius - px(1.))
+                        .test_support(),
                     )
                     .test_support()
                     .into_any_element()

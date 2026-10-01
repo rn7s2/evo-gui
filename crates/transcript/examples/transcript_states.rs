@@ -860,7 +860,7 @@ fn main() {
     // One entry per state: what it is called, the zoom it draws at, how wide its
     // window is (the reading measure's own bound is the pane, so a picture of the
     // measure needs a pane wider than it), and how it is reached.
-    let states: [(&str, f32, f32, Setup); 24] = [
+    let states: [(&str, f32, f32, Setup); 25] = [
         ("bottom", 1., WINDOW_SIZE.0, |_, _, _| ITEMS),
         ("tool-hover", 1., WINDOW_SIZE.0, |cx, window, _| {
             // A folded card under the pointer: the head's hover ink is the whole of
@@ -945,6 +945,43 @@ fn main() {
                     // The fetch that came back 404: the row says what it is instead of
                     // leaving the reader with a gap.
                     view.set_image_failed("e_images", 2, cx);
+                })
+            });
+            settle(cx, window);
+            ITEMS
+        }),
+        // One turn carrying the three sizes a picture comes in: the smallest there is, an
+        // icon, and a screenshot. A tiny picture used to be a dot — the frame was the
+        // picture's own size — and is now a block of its own pixels, baked up to a whole
+        // number of them, centred in a box a reader can see.
+        ("tiny-pictures", 1., WINDOW_SIZE.0, |cx, window, page| {
+            let view = transcript_of(cx, page);
+            let dot = checker_bytes(1, 1);
+            let icon = checker_bytes(8, 8);
+            let shot = picture_bytes();
+            cx.update(|cx| {
+                view.update(cx, |view, cx| {
+                    view.upsert(
+                        session::Item::from_json(&json!({
+                            "id": "e_tiny", "ts": 1, "kind": "user", "status": "sent",
+                            "text": "one pixel, one icon, one screenshot",
+                            "images": [
+                                { "name": "dot.png", "media_type": "image/png",
+                                  "bytes": dot.len(), "href": "/media/e_tiny/0" },
+                                { "name": "icon.png", "media_type": "image/png",
+                                  "bytes": icon.len(), "href": "/media/e_tiny/1" },
+                                { "name": "pane.png", "media_type": "image/png",
+                                  "bytes": shot.len(), "href": "/media/e_tiny/2" }
+                            ]
+                        }))
+                        .expect("an image turn"),
+                        cx,
+                    );
+                    for (n, bytes) in [&dot, &icon, &shot].into_iter().enumerate() {
+                        if let Some(frame) = transcript::decode_image(bytes) {
+                            view.set_image("e_tiny", n as u32, frame, cx);
+                        }
+                    }
                 })
             });
             settle(cx, window);
@@ -1123,9 +1160,24 @@ fn main() {
 /// A picture with something to see at its corners: a saturated diagonal gradient, so a
 /// corner the frame does not clip shows as a square of colour against the frame's curve.
 fn picture_bytes() -> Vec<u8> {
-    let image = image::RgbaImage::from_fn(240, 160, |x, y| {
+    png_bytes(image::RgbaImage::from_fn(240, 160, |x, y| {
         image::Rgba([(x * 255 / 240) as u8, 90, (y * 255 / 160) as u8, 255])
-    });
+    }))
+}
+
+/// A picture of a given size in two inks: at 8×8 it is pixel art, at 1×1 it is one square
+/// of the first ink — the smallest picture there is, and what a thumbnail of one is about.
+fn checker_bytes(width: u32, height: u32) -> Vec<u8> {
+    png_bytes(image::RgbaImage::from_fn(width, height, |x, y| {
+        if (x + y) % 2 == 0 {
+            image::Rgba([214, 61, 61, 255])
+        } else {
+            image::Rgba([244, 244, 245, 255])
+        }
+    }))
+}
+
+fn png_bytes(image: image::RgbaImage) -> Vec<u8> {
     let mut bytes = std::io::Cursor::new(Vec::new());
     image
         .write_to(&mut bytes, image::ImageFormat::Png)
