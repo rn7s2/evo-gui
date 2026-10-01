@@ -54,8 +54,10 @@ use store::design::{self, Palette, INSET, MEASURE, RADIUS};
 use widgets::effort::{cubic_bezier, Motion};
 use widgets::{paint, Chip, EffortSlider};
 
+pub mod attachments;
 mod complete;
 
+pub use attachments::{Attachment, AttachmentKind, Outgoing};
 use complete::Popup;
 pub use complete::{Answer, Candidate, CompletionKind, Question};
 
@@ -252,10 +254,11 @@ struct Agent {
 /// (`session::OpRequest`): the composer names the action, never the endpoint.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ComposerEvent {
-    /// Post this text as the coordinator's turn. It lands at the running turn's next
-    /// boundary, so text sent while the agent works is queued, not lost. The op is
-    /// `input.send`.
-    Send(String),
+    /// Post this message as the coordinator's turn. It lands at the running turn's
+    /// next boundary, so a message sent while the agent works is queued, not lost.
+    /// The op is `input.send`: its images ride in `images`, and its other files are
+    /// named by path in the text (see [`attachments`]).
+    Send(Outgoing),
     /// Stop the coordinator's own run (the TUI's esc) — `run.interrupt` with scope
     /// `session`. The draft is untouched.
     Interrupt,
@@ -1135,7 +1138,7 @@ impl Composer {
                 name: name.to_string(),
                 args: args.to_string(),
             },
-            None => ComposerEvent::Send(draft),
+            None => ComposerEvent::Send(Outgoing::from(draft)),
         };
         cx.emit(event);
         cx.notify();

@@ -123,7 +123,7 @@ impl Demo {
             |_this, _composer, event: &ComposerEvent, _window, _cx| {
                 // A real owner sends one op here.
                 match event {
-                    ComposerEvent::Send(text) => println!("input.send: {text:?}"),
+                    ComposerEvent::Send(outgoing) => println!("input.send: {outgoing:?}"),
                     ComposerEvent::Interrupt => println!("run.interrupt scope=session"),
                     ComposerEvent::StopSwarm => println!("run.interrupt scope=swarm"),
                     ComposerEvent::ModelSet { id, provider } => {

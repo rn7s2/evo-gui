@@ -1716,7 +1716,8 @@ impl TabContent {
         let sent = match self.live.as_mut() {
             Some(live) => {
                 let (request, pending) = match event {
-                    ComposerEvent::Send(text) => {
+                    ComposerEvent::Send(outgoing) => {
+                        let text = outgoing.text;
                         // An idle coordinator runs the words now; a run in flight takes
                         // them at its next step boundary (§5.5) — `queue: now` either
                         // way. `after_run` would hold them until the whole run ends,
