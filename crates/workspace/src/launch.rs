@@ -135,6 +135,17 @@ pub fn check_spec(plan: &LaunchPlan) -> LaunchSpec {
     spec
 }
 
+/// The argv a single agent's own catalog is read with (§5.6): `evo-agent catalog
+/// --json`.
+///
+/// One binary, one subcommand, no flags. `evo-agent` has no `check` — the flags
+/// `evo-swarm check` is asked about are `--workers` and `--lane-model`, which a
+/// launch with no lanes neither passes nor asks after — so this is everything a
+/// single-agent launch can be told about itself before it starts.
+pub fn agent_catalog_argv() -> Vec<String> {
+    vec!["catalog".to_owned(), "--json".to_owned()]
+}
+
 /// Ask `evo-swarm check --json` about one launch (§9): are the models resolvable,
 /// can a lane reach its API, is the key there.
 ///
@@ -319,6 +330,13 @@ mod tests {
         assert_eq!(argv[at + 1], "/Users/you/.evo/sessions/a/1.sexp");
         assert!(!argv.iter().any(|flag| flag == "--model"));
         assert_eq!(launch.plan(), None);
+    }
+
+    /// §5.6: one agent's own catalog is one subcommand — there is no `check`, and
+    /// nothing to pass it.
+    #[test]
+    fn a_single_agents_catalog_is_one_subcommand_with_no_flags() {
+        assert_eq!(agent_catalog_argv(), vec!["catalog", "--json"]);
     }
 
     #[test]

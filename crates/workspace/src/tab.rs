@@ -538,8 +538,10 @@ impl TabContent {
         // when it cannot: the app's own path, not the installed default (§9, §13).
         // A Settings tab starts no swarm and checks nothing.
         if kind == Kind::Swarm {
-            let bin = tab.config.swarm_bin.clone();
-            tab.set_swarm_bin(bin, cx);
+            let swarm = tab.config.swarm_bin.clone();
+            let agent = tab.config.agent_bin.clone();
+            tab.set_swarm_bin(swarm, cx);
+            tab.set_agent_bin(agent, cx);
         }
         tab
     }

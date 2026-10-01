@@ -720,11 +720,13 @@ impl WorkspaceView {
         // runs the binary Settings now names (§9, §13): a path fixed in the panel
         // has to take effect on the tab the person is looking at. A tab that has
         // started keeps what it started with — the panel's own note (§13).
-        let bin = self.config.swarm_bin.clone();
+        let swarm = self.config.swarm_bin.clone();
+        let agent = self.config.agent_bin.clone();
         for tab in &self.tabs {
             tab.update(cx, |tab, cx| {
                 if tab.state() == &crate::tab::TabState::Empty {
-                    tab.set_swarm_bin(bin.clone(), cx);
+                    tab.set_swarm_bin(swarm.clone(), cx);
+                    tab.set_agent_bin(agent.clone(), cx);
                 }
             });
         }

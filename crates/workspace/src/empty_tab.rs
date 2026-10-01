@@ -387,6 +387,17 @@ enum FolderPicker {
     Fixed(Option<PathBuf>),
 }
 
+/// Where a single agent's catalog comes from: the binary, or an answer already known.
+#[derive(Clone, Default)]
+enum CatalogProbe {
+    /// Run it: `evo-agent catalog --json`, on the app's own executor.
+    #[default]
+    Command,
+    /// Answer with this body, starting no process. For tests, which must not run a
+    /// binary to see what the page does with a catalog.
+    Fixed(Value),
+}
+
 /// Where a check's answer comes from: the swarm binary, or an answer already known.
 #[derive(Clone, Default)]
 enum CheckProbe {
@@ -514,8 +525,15 @@ struct EmptyTabState {
     /// The catalog has arrived, from the cache or from a server: until it has, the model
     /// fields hold nothing to choose from.
     catalog: bool,
-    /// The catalog could not be read: shown under the cards, where the check's lines are.
-    catalog_error: Option<String>,
+    /// The app's own catalog read failed: `evo-swarm catalog --json`, or a running
+    /// server's body. The swarm's list, and so the swarm's trouble — shown under the cards
+    /// while the workers card's switch is on.
+    app_catalog_error: Option<String>,
+    /// This page's own `evo-agent catalog --json` failed. The other program's list, and
+    /// so its own trouble — shown while the switch is off. Both are kept, so a switch
+    /// either way shows the trouble of the read that is now this launch's
+    /// ([`EmptyTabState::catalog_error`]).
+    agent_catalog_error: Option<String>,
     /// Nobody has touched this page since it opened.
     ///
     /// The app hands the keyboard to the page's first control when a tab is shown — the
@@ -526,6 +544,17 @@ struct EmptyTabState {
     /// The `evo-swarm` a check runs. The app's own path from Settings, so the check is
     /// about the swarm this app would really spawn.
     swarm_bin: PathBuf,
+    /// The `evo-agent` a single-agent launch would spawn, and the binary its own catalog
+    /// is read from: the app's own path from Settings (§13), so what the page shows is
+    /// what it would really run.
+    agent_bin: PathBuf,
+    /// The catalog the app learned — `evo-swarm catalog --json`, or a running server's
+    /// body — kept as it arrived.
+    ///
+    /// Which list the fields resolve from is the workers card's switch: this one while it
+    /// is on, and `evo-agent`'s own while it is off (§7.2). Switching back needs the
+    /// swarm's body again, and the app's read is not re-asked for on a switch.
+    swarm_catalog: Option<Value>,
     /// What the last check found wrong with the launch the controls describe (§9). One
     /// line each, in evo's own words; empty when the launch is fine.
     problems: Vec<Problem>,
@@ -534,6 +563,8 @@ struct EmptyTabState {
     check_revision: u64,
     /// Where a check's answer comes from.
     check_probe: CheckProbe,
+    /// Where a single agent's own catalog comes from.
+    catalog_probe: CatalogProbe,
     /// Where a folder pick answers from.
     picker: FolderPicker,
     /// The history list's two states (§2): still being fetched, or it could not be read.
@@ -601,14 +632,18 @@ impl EmptyTabState {
             fields_stale: false,
             home: std::env::var("HOME").ok(),
             catalog: false,
-            catalog_error: None,
+            app_catalog_error: None,
+            agent_catalog_error: None,
             untouched: true,
             // The app hands its own path in as soon as it can; until then this is where
             // the installed binary is (§1).
             swarm_bin: cli::swarm_bin(),
+            agent_bin: cli::agent_bin(),
+            swarm_catalog: None,
             problems: Vec::new(),
             check_revision: 0,
             check_probe: CheckProbe::default(),
+            catalog_probe: CatalogProbe::default(),
             picker: FolderPicker::Dialog,
             history_loading: false,
             history_error: None,
@@ -724,8 +759,16 @@ impl EmptyTabState {
     /// — so nothing here has to compare API sets.
     fn set_catalog(&mut self, catalog: &Value, window: &mut Window, cx: &mut Context<Self>) {
         self.catalog = true;
-        self.catalog_error = None;
-        self.launcher.set_catalog(catalog);
+        self.app_catalog_error = None;
+        // The app's own read is the swarm's — `evo-swarm catalog --json`, or a running
+        // server's body — and it is what the fields resolve from while the workers card's
+        // switch is on. Off, they resolve from the one `evo-agent` prints for itself, so
+        // this body is kept and waits for the switch to come back
+        // ([`EmptyTabState::set_use_swarm`]).
+        self.swarm_catalog = Some(catalog.clone());
+        if self.launcher.swarm() {
+            self.launcher.set_catalog(catalog);
+        }
         self.sync_fields(window, cx);
         self.run_check(cx);
         cx.notify();
@@ -741,6 +784,15 @@ impl EmptyTabState {
         if !self.launcher.set_swarm(swarm) {
             return;
         }
+        // Which model list the fields resolve from is the switch's own business: the
+        // app's read while it is on, `evo-agent`'s while it is off. Coming back needs the
+        // swarm's body again — this page asked the app for it once, and a switch is not a
+        // reason to ask again.
+        if swarm {
+            if let Some(catalog) = self.swarm_catalog.clone() {
+                self.launcher.set_catalog(&catalog);
+            }
+        }
         // The two fields resolved differently — a check's answer dropped, or one asked for
         // again — so the selects showing them are rebuilt on the next frame, which is
         // where a window is ([`EmptyTabState::fields_stale`]).
@@ -749,11 +801,76 @@ impl EmptyTabState {
         cx.notify();
     }
 
-    /// What a single-agent launch has to say about itself: nothing evo-swarm's own words
-    /// would cover — a single agent has no lanes to report on, and no `check` behind it.
-    fn probe_single_agent(&mut self, cx: &mut Context<Self>) {
-        if !self.problems.is_empty() {
-            self.problems.clear();
+    /// The `evo-agent` a single-agent launch runs, and the binary its own catalog comes
+    /// from: the app's own path from Settings (§13).
+    fn set_agent_bin(&mut self, bin: PathBuf, cx: &mut Context<Self>) {
+        if self.agent_bin == bin {
+            return;
+        }
+        self.agent_bin = bin;
+        // A path fixed in Settings has to take effect on the page the person is looking
+        // at: with the switch off that is the catalog this page reads for itself.
+        if !self.launcher.swarm() {
+            self.run_check(cx);
+        }
+    }
+
+    /// Ask `evo-agent catalog --json` — one agent's own model list, from its own init
+    /// file, off the thread that draws.
+    ///
+    /// The body is the one `evo-swarm catalog --json` prints minus `lanes`: the
+    /// registrations with their `ready` and `reason`, the levels a `--thinking` may carry,
+    /// the registration evo would resolve with no flags. There is no `check` to ask
+    /// ([`EmptyTabState::run_check`]), so a registration evo cannot reach is the one line
+    /// this probe puts under the cards — in evo's own words, and about the coordinator
+    /// alone: a single agent has no lanes to report on.
+    fn probe_single_agent(&mut self, revision: u64, cx: &mut Context<Self>) {
+        if let CatalogProbe::Fixed(catalog) = self.catalog_probe.clone() {
+            self.settle_single_agent(Ok(catalog), revision, cx);
+            return;
+        }
+        let bin = self.agent_bin.clone();
+        let argv = crate::launch::agent_catalog_argv();
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            let answer = cx
+                .background_executor()
+                .spawn(async move { cli::run_json(&bin, &argv) })
+                .await;
+            let _ = this.update(cx, move |state, cx| {
+                state.settle_single_agent(answer, revision, cx)
+            });
+        })
+        .detach();
+    }
+
+    /// Take a single agent's catalog, if it is still the answer to the question this page
+    /// is asking: the switch is still off, and nothing has been asked since.
+    ///
+    /// A body that is no longer wanted is dropped: the switch can move while the process
+    /// runs, and a list read for one program is not the other's.
+    fn settle_single_agent(
+        &mut self,
+        answer: Result<Value, CliError>,
+        revision: u64,
+        cx: &mut Context<Self>,
+    ) {
+        if self.check_revision != revision || self.launcher.swarm() {
+            return;
+        }
+        match answer {
+            Ok(catalog) => {
+                self.catalog = true;
+                self.agent_catalog_error = None;
+                self.fields_stale |= self.launcher.set_catalog(&catalog);
+                self.problems = agent_problems(&self.launcher);
+            }
+            Err(error) => {
+                // The one read a single agent has could not be made: one line of the same
+                // kind the catalog's own trouble wears, with the process's own words in
+                // the hover.
+                self.problems = agent_problems(&self.launcher);
+                self.agent_catalog_error = Some(error.summary());
+            }
         }
         cx.notify();
     }
@@ -775,6 +892,14 @@ impl EmptyTabState {
         self.run_check(cx);
     }
 
+    /// A single agent's catalog, without running one: the tab's answer for a test, and
+    /// the probe's own source from then on.
+    #[allow(dead_code)]
+    fn set_agent_catalog(&mut self, catalog: &Value, cx: &mut Context<Self>) {
+        self.catalog_probe = CatalogProbe::Fixed(catalog.clone());
+        self.run_check(cx);
+    }
+
     /// Ask the launch the controls describe about itself (§9), off the thread that
     /// draws: are the models resolvable, can a lane reach its API, is the key there. The
     /// answer is both the lines under the cards and what the fields resolve to.
@@ -793,7 +918,7 @@ impl EmptyTabState {
         self.check_revision += 1;
         let revision = self.check_revision;
         if !self.launcher.swarm() {
-            self.probe_single_agent(cx);
+            self.probe_single_agent(revision, cx);
             return;
         }
         let plan = self.launcher.plan();
@@ -883,9 +1008,22 @@ impl EmptyTabState {
     }
 
     /// The catalog could not be learned: one more line under the cards, in evo's own words.
+    /// This is the app's own read — the swarm's — and it is the line while the switch is on.
     fn set_catalog_error(&mut self, error: Option<String>, cx: &mut Context<Self>) {
-        self.catalog_error = error.filter(|error| !error.trim().is_empty());
+        self.app_catalog_error = error.filter(|error| !error.trim().is_empty());
         cx.notify();
+    }
+
+    /// The trouble with the list this launch would run on, in the words of the read that
+    /// had it: the app's own while the workers card's switch is on, and this page's own
+    /// `evo-agent catalog --json` while it is off.
+    fn catalog_error(&self) -> Option<&str> {
+        let read = if self.launcher.swarm() {
+            &self.app_catalog_error
+        } else {
+            &self.agent_catalog_error
+        };
+        read.as_deref()
     }
 
     /// The cfg the folder dialog starts in, and the `~` the history rows shorten around.
@@ -1470,13 +1608,13 @@ impl EmptyTabState {
                 .collect();
         // The catalog's own trouble is one more line of the same kind: what the page does
         // without it, with the server's own words in the hover.
-        if let Some(error) = &self.catalog_error {
+        if let Some(error) = self.catalog_error() {
             let text = if self.catalog {
                 CATALOG_STALE
             } else {
                 CATALOG_FAILED
             };
-            let detail = SharedString::from(error.clone());
+            let detail = SharedString::from(error);
             lines.push(
                 div()
                     .id("catalog-problem")
@@ -1880,6 +2018,31 @@ fn put_count(
     }
 }
 
+/// What a single-agent launch has to say about itself, from a catalog alone.
+///
+/// One line at most: the coordinator's registration, when evo cannot reach it, in evo's
+/// own words — the same `reason` its menu row carries. A registration evo gave no reason
+/// for says nothing rather than inventing one; a lane's own judgement is not asked, since
+/// one agent has no lanes; and the count and the effort are `check`'s answers, which
+/// `evo-agent` is never asked for.
+fn agent_problems(launcher: &Launcher) -> Vec<Problem> {
+    let Some(model) = launcher.chosen(Card::Coordinator) else {
+        return Vec::new();
+    };
+    if model.ready {
+        return Vec::new();
+    }
+    model
+        .ready_reason
+        .clone()
+        .map(|reason| Problem {
+            code: "model_not_ready".to_string(),
+            message: reason,
+        })
+        .into_iter()
+        .collect()
+}
+
 /// The registrations one card's menu offers.
 fn model_items(launcher: &Launcher, role: Card) -> Vec<ModelItem> {
     launcher
@@ -1977,6 +2140,14 @@ impl TabContent {
     pub fn set_swarm_bin(&mut self, bin: PathBuf, cx: &mut Context<Self>) {
         let state = self.choosers.state.clone();
         state.update(cx, |state, cx| state.set_swarm_bin(bin, cx));
+        cx.notify();
+    }
+
+    /// The `evo-agent` this app would spawn, which is the binary a single-agent launch
+    /// runs and the one its catalog is read from (§9, §13).
+    pub fn set_agent_bin(&mut self, bin: PathBuf, cx: &mut Context<Self>) {
+        let state = self.choosers.state.clone();
+        state.update(cx, |state, cx| state.set_agent_bin(bin, cx));
         cx.notify();
     }
 
@@ -2191,6 +2362,31 @@ mod tests {
     /// A window wide enough for the 800 px block, and tall enough for the whole page.
     const WINDOW: (f32, f32) = (1200., 800.);
 
+    /// An `evo-agent catalog --json` body (§5.6): the same shape as the swarm's, minus
+    /// `lanes` — a single agent has no lane judgement to offer — and its registrations
+    /// are its own init file's, which is why one of them is a model the swarm's catalog
+    /// does not list at all.
+    fn agent_catalog_body() -> Value {
+        serde_json::json!({
+            "models": [
+                {"id": "evo-agent-model", "provider": "acme", "name": "Agent Model",
+                 "api": "chat-model", "context_window": 128000,
+                 "reasoning": false, "images": false, "ready": true, "reason": null},
+                {"id": "claude-sonnet-5", "provider": "proxy", "name": "Claude Sonnet 5",
+                 "api": "anthropic-oauth-messages", "context_window": 1000000,
+                 "reasoning": true, "images": true, "ready": false,
+                 "reason": "no credential for proxy"},
+                {"id": "claude-opus-4.5", "provider": "anthropic", "name": "Claude Opus 4.5",
+                 "api": "anthropic-messages", "context_window": 200000,
+                 "reasoning": true, "images": true, "ready": false,
+                 "reason": "anthropic-messages is not registered for evo-agent"}
+            ],
+            "default_model": {"id": "evo-agent-model", "provider": "acme"},
+            "thinking_levels": ["low", "medium", "high"],
+            "warnings": []
+        })
+    }
+
     /// A `/catalog` body as `evo-swarm catalog --json` prints it (§5.6): the default
     /// registration, one every lane may run, one no lane may run, and the ladder.
     fn catalog_body() -> Value {
@@ -2279,6 +2475,23 @@ mod tests {
             });
         }
 
+        /// The catalog a single agent's own probe answers with, from now on: no process
+        /// runs in a test.
+        fn set_agent_catalog(&self, cx: &mut TestAppContext, catalog: &Value) {
+            let state = self.state(cx);
+            self.act(cx, |_, cx| {
+                state.update(cx, |state, cx| state.set_agent_catalog(catalog, cx))
+            });
+        }
+
+        /// The workers card's switch, as the window hands it down (§7.2).
+        fn set_use_swarm(&self, cx: &mut TestAppContext, swarm: bool) {
+            let tab = self.tab.clone();
+            self.act(cx, |_, cx| {
+                tab.update(cx, |tab, cx| tab.set_use_swarm(swarm, cx))
+            });
+        }
+
         fn history(&self, cx: &mut TestAppContext, entries: &[HistoryEntry], home: &str) {
             let tab = self.tab.clone();
             self.act(cx, |_, cx| {
@@ -2311,6 +2524,7 @@ mod tests {
                         // by `set_check`, and the resolution never reaches a binary.
                         Arc::new(crate::LaunchEnv {
                             swarm_bin: PathBuf::from("/nonexistent/evo-swarm"),
+                            agent_bin: PathBuf::from("/nonexistent/evo-agent"),
                             ..crate::LaunchEnv::default()
                         }),
                         window,
@@ -3370,6 +3584,207 @@ mod tests {
             after, before,
             "and every box on the card is exactly where it was"
         );
+    }
+
+    /// §5.6, §7.2: a single-agent launch runs on the list `evo-agent` prints for itself —
+    /// its own init file, its own registrations — not on the app's own read, which is the
+    /// swarm's. And the switch coming back brings the swarm's list with it, without asking
+    /// the app a second time.
+    #[gpui_kit::test]
+    fn a_single_agent_launch_resolves_from_its_own_catalog(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.set_catalog(cx, &catalog_body());
+        f.render(cx);
+        let state = f.state(cx);
+        f.act(cx, |_, cx| {
+            assert_eq!(
+                state.read(cx).launcher.chosen_key(Card::Coordinator),
+                Some("claude-opus-4.5@anthropic"),
+                "the swarm's own default registration, from the app's read"
+            )
+        });
+
+        f.set_agent_catalog(cx, &agent_catalog_body());
+        f.set_use_swarm(cx, false);
+        f.render(cx);
+        f.act(cx, |_, cx| {
+            let state = state.read(cx);
+            let keys: Vec<&str> = state
+                .launcher
+                .models()
+                .iter()
+                .map(|model| model.key.as_str())
+                .collect();
+            assert_eq!(
+                keys,
+                vec![
+                    "evo-agent-model@acme",
+                    "claude-sonnet-5@proxy",
+                    "claude-opus-4.5@anthropic"
+                ],
+                "the agent's own registrations, in its own order"
+            );
+            assert_eq!(
+                state.launcher.chosen_key(Card::Coordinator),
+                Some("evo-agent-model@acme"),
+                "and its own default registration"
+            );
+            assert!(state.problems.is_empty(), "nothing is wrong with it");
+        });
+
+        // Back on: the swarm's list, as the app handed it over, and its own default.
+        f.set_use_swarm(cx, true);
+        f.render(cx);
+        f.act(cx, |window, cx| {
+            let state = state.read(cx);
+            assert_eq!(
+                state.launcher.chosen_key(Card::Coordinator),
+                Some("claude-opus-4.5@anthropic")
+            );
+            assert!(
+                state
+                    .launcher
+                    .models()
+                    .iter()
+                    .any(|model| model.key == "deepseek-v4.1-flash@acme"),
+                "the swarm's registrations are back"
+            );
+            assert!(
+                window.try_find("catalog-problem").is_none(),
+                "and the read that worked is not complained about"
+            );
+        });
+    }
+
+    /// §9: with the switch off there is no `check` to ask, so the one line the page can
+    /// put under the cards is evo's own reason for the coordinator's registration — in
+    /// evo's own words, and about nothing else. A registration the person picked while
+    /// the switch was on is the case that has one: evo-agent's own list says it cannot be
+    /// reached.
+    #[gpui_kit::test]
+    fn a_single_agents_line_is_evos_own_reason_for_the_model(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.set_catalog(cx, &catalog_body());
+        f.render(cx);
+        let state = f.state(cx);
+        // The person's own pick: the swarm's catalog can reach it, and it stands across
+        // the switch, as a pick does.
+        f.act(cx, |_, cx| {
+            state.update(cx, |state, cx| {
+                state
+                    .launcher
+                    .choose(Card::Coordinator, "claude-opus-4.5@anthropic");
+                cx.notify();
+            })
+        });
+        f.set_agent_catalog(cx, &agent_catalog_body());
+        f.set_use_swarm(cx, false);
+        f.render(cx);
+
+        f.act(cx, |window, cx| {
+            let state = state.read(cx);
+            assert_eq!(
+                state.launcher.chosen_key(Card::Coordinator),
+                Some("claude-opus-4.5@anthropic"),
+                "the pick is still the launch's model"
+            );
+            assert_eq!(
+                state.problems,
+                vec![Problem {
+                    code: "model_not_ready".to_string(),
+                    message: "anthropic-messages is not registered for evo-agent".to_string(),
+                }],
+                "and evo-agent's own reason for it is the one line"
+            );
+            assert_eq!(
+                window
+                    .find(ElementId::NamedInteger(PROBLEM_ID.into(), 0))
+                    .label(),
+                Some("anthropic-messages is not registered for evo-agent")
+            );
+        });
+    }
+
+    /// §9: a check is the swarm's own answer. With the switch off, the page asks for no
+    /// check and takes none — a lane's problem is not a single agent's, and a report that
+    /// arrived anyway resolves nothing.
+    #[gpui_kit::test]
+    fn a_swarms_check_has_nothing_to_say_once_the_switch_is_off(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.set_catalog(cx, &catalog_body());
+        f.set_agent_catalog(cx, &agent_catalog_body());
+        f.set_use_swarm(cx, false);
+        f.render(cx);
+        let state = f.state(cx);
+        f.set_check(
+            cx,
+            CheckReport {
+                ok: false,
+                problems: vec![Problem {
+                    code: "lane_model_not_found".to_string(),
+                    message: "no such lane model".to_string(),
+                }],
+                ..CheckReport::default()
+            },
+        );
+        f.render(cx);
+        f.act(cx, |window, cx| {
+            let state = state.read(cx);
+            assert!(
+                state.problems.is_empty(),
+                "a lane's problem is not a single agent's"
+            );
+            assert_eq!(
+                state.launcher.chosen_key(Card::Coordinator),
+                Some("evo-agent-model@acme"),
+                "and the check resolved nothing into the fields"
+            );
+            assert!(
+                window
+                    .try_find(ElementId::NamedInteger(PROBLEM_ID.into(), 0))
+                    .is_none(),
+                "nothing of it was drawn either"
+            );
+        });
+    }
+
+    /// §5.6: an answer read for one program is not the other's. A probe that comes back
+    /// after the switch moved is dropped, and what the page holds stays what it is.
+    #[gpui_kit::test]
+    fn a_single_agents_answer_is_dropped_once_the_switch_moves_back(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.set_catalog(cx, &catalog_body());
+        f.set_use_swarm(cx, false);
+        f.render(cx);
+        let state = f.state(cx);
+        let stale = f.act(cx, |_, cx| state.read(cx).check_revision);
+        f.set_use_swarm(cx, true);
+        f.act(cx, |_, cx| {
+            state.update(cx, |state, cx| {
+                state.settle_single_agent(Ok(agent_catalog_body()), stale, cx)
+            })
+        });
+        f.render(cx);
+        f.act(cx, |_, cx| {
+            let state = state.read(cx);
+            assert!(state.launcher.swarm(), "the switch is on again");
+            assert!(
+                state
+                    .launcher
+                    .models()
+                    .iter()
+                    .any(|model| model.key == "deepseek-v4.1-flash@acme"),
+                "the swarm's registrations are what the page holds"
+            );
+            assert!(
+                !state
+                    .launcher
+                    .models()
+                    .iter()
+                    .any(|model| model.key == "evo-agent-model@acme"),
+                "and the answer read for the other program never landed"
+            );
+        });
     }
 
     /// The sliders are the shared widget, named with this page's own ids, so a test — or a
