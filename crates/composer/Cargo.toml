@@ -8,8 +8,12 @@ gpui-kit = { workspace = true }
 session = { path = "../session" }
 store = { path = "../store" }
 widgets = { path = "../widgets" }
+# Decoding a picture for its tile: the thumbnail is the picture fitted onto a canvas of
+# the tile's own shape, so the drawing does not depend on gpui's own fit (see
+# `prepare_thumbnail`). The same major version `transcript` links against, so the frames
+# it makes are the ones `RenderImage::new` wants.
+image = "0.25"
 
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }
 serde_json = { workspace = true }
-image = "0.25"

@@ -59,8 +59,8 @@ use gpui_kit::{
     anchored, deferred, div, img, point, px, radians, AbsoluteLength, Anchor, Animation,
     AnimationExt as _, AnyElement, App, AsyncApp, Bounds, BoxShadow, ClickEvent, ClipboardEntry,
     ClipboardItem, Context, ElementId, Entity, EventEmitter, ExternalPaths, FocusHandle,
-    FontWeight, Global, HighlightStyle, Image, ImageSource, IntoElement, KeyBinding, Keystroke,
-    KeystrokeEvent, ObjectFit, PathPromptOptions, Pixels, Point, Render, ScrollHandle,
+    FontWeight, Global, HighlightStyle, ImageSource, IntoElement, KeyBinding, Keystroke,
+    KeystrokeEvent, ObjectFit, PathPromptOptions, Pixels, Point, Render, RenderImage, ScrollHandle,
     SharedString, StyledText, Subscription, Task, TestSupportExt as _, WeakEntity, Window,
 };
 use session::{ordered_segments, GoalInfo, Segment, Todo, TodoStatus, TopicState};
@@ -157,6 +157,10 @@ const TILE: Pixels = px(112.);
 const TILE_GAP: Pixels = px(10.);
 const THUMB: Pixels = px(72.);
 const THUMB_RADIUS: Pixels = px(6.);
+/// How many canvas pixels a tile's own pixel is worth: the thumbnail is decoded once and
+/// drawn from that canvas, so it is made twice the tile's size and is crisp on a display
+/// whose pixels are points.
+const THUMB_SCALE: u32 = 2;
 const TILE_NAME: Pixels = px(16.);
 /// The mark that takes an attachment off the message: an 18px round control at the
 /// tile's top-right, 4px inside it.
@@ -485,6 +489,54 @@ fn kind_of(path: &Path) -> AttachmentKind {
     }
 }
 
+/// One attachment's thumbnail: the picture the bytes are, scaled to fit a tile and
+/// centred on a canvas of the tile's own shape.
+///
+/// The canvas is the tile, which is the whole point: gpui fits a picture into whatever box
+/// its element is, and a picture that the box cannot hold is not fitted the way the tile
+/// means it to be — a tall one comes out stretched to the box's shape rather than lettered
+/// inside it (measured: a 40×400 picture in a 112×72 box fills it). A thumbnail drawn on a
+/// canvas of the tile's own shape needs no fitting at all: the picture is already where it
+/// belongs, and what is not picture is transparent, so the frame's own fill shows in the
+/// letterbox and the picture's corners are the only corners in the tile.
+///
+/// `None` when the bytes are not a picture evo (or a tile) can draw: the tile then says
+/// what the file is with its own glyph.
+fn prepare_thumbnail(bytes: &[u8]) -> Option<Arc<RenderImage>> {
+    let (canvas_w, canvas_h) = (
+        (f32::from(TILE) * THUMB_SCALE as f32) as u32,
+        (f32::from(THUMB) * THUMB_SCALE as f32) as u32,
+    );
+    let picture = ::image::load_from_memory(bytes).ok()?.into_rgba8();
+    let (w, h) = picture.dimensions();
+    if w == 0 || h == 0 {
+        return None;
+    }
+    // The least scale that holds the whole picture — both ways, so nothing is cropped and
+    // nothing is squashed.
+    let fit = (canvas_w as f32 / w as f32).min(canvas_h as f32 / h as f32);
+    let (fitted_w, fitted_h) = (
+        ((w as f32 * fit).round() as u32).max(1),
+        ((h as f32 * fit).round() as u32).max(1),
+    );
+    let fitted_picture = ::image::imageops::resize(
+        &picture,
+        fitted_w,
+        fitted_h,
+        ::image::imageops::FilterType::Triangle,
+    );
+    let mut canvas = ::image::RgbaImage::new(canvas_w, canvas_h);
+    ::image::imageops::overlay(
+        &mut canvas,
+        &fitted_picture,
+        i64::from((canvas_w - fitted_w) / 2),
+        i64::from((canvas_h - fitted_h) / 2),
+    );
+    Some(Arc::new(RenderImage::new(vec![::image::Frame::new(
+        canvas,
+    )])))
+}
+
 /// Whether the path's own name ends in one of the five image extensions.
 fn has_image_extension(path: &Path) -> bool {
     path.extension()
@@ -656,10 +708,12 @@ pub struct Composer {
     /// others are added around it ([`Attachment::id`]).
     attachments: Vec<Attachment>,
     next_attachment: u64,
-    /// The bytes of a pasted image, already framed for drawing: built when they arrive,
-    /// since the panel is drawn again on every keystroke and a copy of an image's bytes
-    /// per frame is not the box's work. Keyed by attachment id, like the tiles.
-    pasted: HashMap<u64, Arc<Image>>,
+    /// Each image attachment's own thumbnail, decoded once when it was added: the picture
+    /// scaled to fit a tile, on a canvas of the tile's own shape, so drawing it is one
+    /// blit and never a fit gpui does per frame. Keyed by attachment id, like the tiles —
+    /// an attachment that is not here (a file, a picture that could not be read) draws the
+    /// file's own glyph.
+    thumbs: HashMap<u64, Arc<RenderImage>>,
     /// The effort slider's own motion: the level's move along the rail, the press,
     /// the hover and the focus fades. One per composer, handed back every render.
     effort_motion: Rc<Motion>,
@@ -816,7 +870,7 @@ impl Composer {
             attachments_scroll: ScrollHandle::new(),
             attachments: Vec::new(),
             next_attachment: 1,
-            pasted: HashMap::new(),
+            thumbs: HashMap::new(),
             effort_motion: Rc::new(Motion::new()),
             box_bounds: Rc::new(Cell::new(Bounds::default())),
             effort_focus: cx.focus_handle(),
@@ -1190,7 +1244,15 @@ impl Composer {
         for path in paths {
             let name = name_of(&path);
             let kind = kind_of(&path);
-            self.push_attachment(name, kind, None);
+            // The picture's own bytes, read once: the tile is drawn on every keystroke,
+            // and the file is what the message will carry anyway.
+            let thumb = match &kind {
+                AttachmentKind::ImageFile(path) => std::fs::read(path)
+                    .ok()
+                    .and_then(|bytes| prepare_thumbnail(&bytes)),
+                _ => None,
+            };
+            self.push_attachment(name, kind, thumb);
         }
         cx.notify();
     }
@@ -1212,11 +1274,12 @@ impl Composer {
             return false;
         };
         let name = format!("{PASTED_NAME}.{}", image.format.extension());
+        let thumb = prepare_thumbnail(&image.bytes);
         let kind = AttachmentKind::ImageBytes {
             media_type: image.format.mime_type().to_string(),
             bytes: Arc::new(image.bytes.clone()),
         };
-        self.push_attachment(name, kind, Some(Arc::new(image)));
+        self.push_attachment(name, kind, thumb);
         cx.notify();
         true
     }
@@ -1230,11 +1293,16 @@ impl Composer {
     /// a strip that appeared shut would hide the answer to the dialog they had just
     /// answered. After that the strip is theirs — adding a fourth does not re-open one
     /// they folded.
-    fn push_attachment(&mut self, name: String, kind: AttachmentKind, image: Option<Arc<Image>>) {
+    fn push_attachment(
+        &mut self,
+        name: String,
+        kind: AttachmentKind,
+        thumb: Option<Arc<RenderImage>>,
+    ) {
         let id = self.next_attachment;
         self.next_attachment += 1;
-        if let Some(image) = image {
-            self.pasted.insert(id, image);
+        if let Some(thumb) = thumb {
+            self.thumbs.insert(id, thumb);
         }
         if self.attachments.is_empty() {
             self.attachments_open = true;
@@ -1245,7 +1313,7 @@ impl Composer {
     /// Take one attachment off the message — the tile's own `×`.
     fn remove_attachment(&mut self, id: u64, cx: &mut Context<Self>) {
         self.attachments.retain(|attachment| attachment.id != id);
-        self.pasted.remove(&id);
+        self.thumbs.remove(&id);
         cx.notify();
     }
 
@@ -1393,7 +1461,7 @@ impl Composer {
                 .update(cx, |input, cx| input.set_value("", window, cx));
             // The attachments went with the message, so the next one starts empty.
             self.attachments.clear();
-            self.pasted.clear();
+            self.thumbs.clear();
         }
         cx.notify();
     }
@@ -2025,7 +2093,7 @@ impl Composer {
                     .rounded(THUMB_RADIUS)
                     .overflow_hidden()
                     .bg(paint::color(palette.input))
-                    .child(self.thumbnail(attachment, palette))
+                    .child(self.thumbnail(index, attachment, palette))
                     .child(
                         div()
                             .id(ElementId::from(format!("attachment-remove-{index}")))
@@ -2092,30 +2160,31 @@ impl Composer {
             .into_any_element()
     }
 
-    /// A tile's picture: the image itself, scaled to fit the tile's box, or the file's
-    /// own glyph when the attachment is not an image.
+    /// A tile's picture: the attachment's own thumbnail, or the file's own glyph when it
+    /// has none.
     ///
-    /// The image is drawn with `Contain` over the frame's whole box, so a picture of any
-    /// shape is shown whole — a thumbnail says which file this is, and a crop of a
-    /// screenshot can hide the part that does. The curve is the frame's
-    /// ([`THUMB_RADIUS`]), carried by the picture itself.
-    fn thumbnail(&self, attachment: &Attachment, palette: &'static Palette) -> AnyElement {
-        let source = match &attachment.kind {
-            // A pasted image's bytes, framed when they arrived: the frame is the one
-            // gpui's own asset system decodes from, and re-making it here would copy the
-            // bytes on every frame the box is drawn in.
-            AttachmentKind::ImageBytes { .. } => self
-                .pasted
-                .get(&attachment.id)
-                .map(|image| ImageSource::Image(image.clone())),
-            AttachmentKind::ImageFile(path) => Some(ImageSource::from(path.clone())),
-            AttachmentKind::File(_) => None,
-        };
-        match source {
-            Some(source) => img(source)
-                .size_full()
-                .object_fit(ObjectFit::Contain)
+    /// The thumbnail *is* the tile's box ([`prepare_thumbnail`]), so the picture covers the
+    /// frame exactly and gpui's `object_fit` has nothing left to decide: it is a picture of
+    /// the tile's own shape being drawn into the tile. The curve is the frame's
+    /// ([`THUMB_RADIUS`]), carried by the picture itself — a picture left square would
+    /// paint its own corners over the frame's curve.
+    fn thumbnail(
+        &self,
+        index: usize,
+        attachment: &Attachment,
+        palette: &'static Palette,
+    ) -> AnyElement {
+        match self.thumbs.get(&attachment.id) {
+            Some(thumb) => img(ImageSource::Render(thumb.clone()))
+                .id(ElementId::from(format!("attachment-picture-{index}")))
+                .w(TILE)
+                .h(THUMB)
+                .flex_none()
+                .object_fit(ObjectFit::Fill)
                 .rounded(THUMB_RADIUS)
+                // Last: `test_support` wraps the element, and the wrapper is not an image
+                // to gpui — the style has to be on the `Img` itself.
+                .test_support()
                 .into_any_element(),
             None => div()
                 .size_full()
@@ -4841,6 +4910,79 @@ mod tests {
         }
     }
 
+    /// A thumbnail is the whole picture fitted onto a canvas of the tile's own shape: the
+    /// picture's own proportions, inside the tile, centred — with the letterbox left
+    /// transparent so the frame's own fill shows through, and never the picture stretched
+    /// to the tile's shape.
+    #[test]
+    fn a_thumbnail_is_the_whole_picture_fitted_to_the_tile() {
+        let scratch = Scratch::new("thumbs");
+        let canvas = (
+            (f32::from(TILE) as u32) * THUMB_SCALE,
+            (f32::from(THUMB) as u32) * THUMB_SCALE,
+        );
+        // A tall picture, a wide one, and one of the tile's own shape: the three cases a
+        // fit has to get right.
+        for (name, width, height) in [
+            ("tall.png", 40u32, 400u32),
+            ("wide.png", 400, 40),
+            ("square.png", 96, 96),
+        ] {
+            let bytes = std::fs::read(scratch.png(name, width, height)).expect("the picture");
+            let thumb = prepare_thumbnail(&bytes).expect("a thumbnail");
+            let drawn_size = thumb.size(0);
+            assert_eq!(
+                (drawn_size.width.0, drawn_size.height.0),
+                (canvas.0 as i32, canvas.1 as i32),
+                "{name}: the canvas is the tile"
+            );
+
+            let pixels = thumb.as_bytes(0).expect("the frame's pixels");
+            let opaque = |x: u32, y: u32| pixels[((y * canvas.0 + x) * 4 + 3) as usize] == 255;
+            let columns: Vec<u32> = (0..canvas.0)
+                .filter(|x| (0..canvas.1).any(|y| opaque(*x, y)))
+                .collect();
+            let rows: Vec<u32> = (0..canvas.1)
+                .filter(|y| (0..canvas.0).any(|x| opaque(x, *y)))
+                .collect();
+            let drawn = (
+                columns[columns.len() - 1] - columns[0] + 1,
+                rows[rows.len() - 1] - rows[0] + 1,
+            );
+            // The picture's own shape …
+            let fit = (canvas.0 as f32 / width as f32).min(canvas.1 as f32 / height as f32);
+            let expected = (
+                (width as f32 * fit).round() as u32,
+                (height as f32 * fit).round() as u32,
+            );
+            assert!(
+                drawn.0.abs_diff(expected.0) <= 1 && drawn.1.abs_diff(expected.1) <= 1,
+                "{name}: {drawn:?} is not the picture's own {expected:?}"
+            );
+            // … inside the tile, using up one of its two ways, and centred on it.
+            assert!(
+                drawn.0 <= canvas.0 && drawn.1 <= canvas.1,
+                "{name}: {drawn:?} inside {canvas:?}"
+            );
+            assert!(
+                drawn.0 == canvas.0 || drawn.1 == canvas.1,
+                "{name}: {drawn:?} is fitted to {canvas:?}, not adrift in it"
+            );
+            let left = columns[0];
+            let right = canvas.0 - 1 - columns[columns.len() - 1];
+            assert!(
+                left.abs_diff(right) <= 1,
+                "{name}: centred ({left} vs {right})"
+            );
+        }
+
+        // Bytes that are not a picture have no thumbnail: the tile says `file` instead.
+        assert!(
+            prepare_thumbnail(b"not a picture at all, however it is named").is_none(),
+            "and nothing is invented for bytes that are not one"
+        );
+    }
+
     /// The `+` is the foot row's own control — a chip's pill, a chip's height, a chip's
     /// three fills — standing immediately left of the one action button, and what it asks
     /// the picker for is what the draft then carries.
@@ -4991,6 +5133,23 @@ mod tests {
             let thumb = window.find("attachment-thumb-0");
             assert_eq!(thumb.bounds().size.width, TILE);
             assert_eq!(thumb.bounds().size.height, THUMB);
+            // The picture is the frame's own box, not the picture's own shape: gpui reads
+            // an image element's aspect ratio off the image it is about to draw, so a
+            // `size_full` picture lays out taller than the frame and is then cut by the
+            // frame's *rectangle* rather than its curve — a square corner in the wedge
+            // the curve leaves. Both are the frame's numbers here, so neither can happen.
+            let picture = window.find("attachment-picture-0");
+            assert_eq!(
+                picture.bounds().size,
+                thumb.bounds().size,
+                "the picture is the frame: {:?} vs {:?}",
+                picture.bounds(),
+                thumb.bounds()
+            );
+            assert!(
+                window.try_find("attachment-picture-1").is_none(),
+                "and the text file draws a glyph rather than a picture"
+            );
             let name = window.find("attachment-name-0");
             assert!(
                 name.bounds().top() >= thumb.bounds().bottom(),
