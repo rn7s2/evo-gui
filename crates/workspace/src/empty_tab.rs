@@ -236,18 +236,18 @@ fn row_hover_fill(dark: bool) -> Hsla {
 /// How much of the page's ink the design mixes into it for a hovered row: 5%.
 const ROW_HOVER_MIX: f32 = 0.05;
 
-/// `font-weight:500`, as much of it as this app can draw.
+/// `font-weight:500`, as much of it as this app can draw — [`widgets::text::MEDIUM`].
 ///
 /// The design names 500 in five places on this page — the model field's provider, the two
-/// effort levels, the folder card's label and a history row's title. This app's font stack
-/// has no medium face: gpui resolves the theme's `.SystemUIFont` by family, and asking it
-/// for 500 rasterises *exactly* like 400 (measured off the probe's own pictures — the two
-/// weights' ink is identical to the pixel), which is why the provider used to weigh
-/// whatever its id did. The nearest face that really is heavier is the semibold, so that is
-/// what every 500 on this page wears; the day the theme carries a family with a medium
-/// face, this is the one place to change.
+/// effort levels, the folder card's label and a history row's title — and it names it in
+/// six more across the rest of the app. This app's font stack has no medium face: gpui
+/// resolves the theme's `.SystemUIFont` by family, and asking it for 500 rasterises
+/// *exactly* like 400 (measured off the probe's own pictures — the two weights' ink is
+/// identical to the pixel), which is why the provider used to weigh whatever its id did.
+/// [`widgets::text::MEDIUM`] is the one place that decision is written down; this is the
+/// page's own name for it.
 fn medium<T: Styled>(element: T) -> T {
-    element.font_semibold()
+    element.font_weight(widgets::text::MEDIUM)
 }
 
 /// `box-shadow: 0 0 0 <spread>px <colour>` — the ring the design draws on a focused field.
@@ -1223,6 +1223,10 @@ impl EmptyTabState {
                     .rounded(px(design::RADIUS))
                     .border_1()
                     .border_color(border)
+                    // The card's own surface. CSS paints a box-shadow *outside* the border;
+                    // gpui paints one under the element, so without a surface of its own
+                    // the focus ring's `muted` filled the whole field.
+                    .bg(theme.background)
                     .track_focus(&handle)
                     // `.number-input:focus-within{border-color:var(--primary);box-shadow:0 0 0 2px var(--muted)}`
                     .focus(move |style| style.border_color(primary).shadow(vec![ring(2., muted)]))
@@ -2027,9 +2031,11 @@ impl ListDelegate for HistoryList {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui_kit::component::ThemeMode;
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{
-        point, size, AnyWindowHandle, Bounds, TestAppContext, WindowBounds, WindowOptions,
+        point, size, AnyWindowHandle, Background, Bounds, Quad, ScaledPixels, TestAppContext,
+        Window, WindowBounds, WindowOptions,
     };
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -2754,6 +2760,110 @@ mod tests {
             assert_eq!(state.read(cx).launcher.workers(), session::WORKERS_MIN);
             assert_eq!(state.read(cx).count.read(cx).value().as_ref(), "1");
         });
+    }
+
+    /// The count box wears the card's own surface, in both themes and with the keyboard on
+    /// it.
+    ///
+    /// The design's `.number-input` has no background — in CSS a box-shadow paints outside
+    /// the border, so the `--muted` ring never reaches the field. gpui paints the shadow
+    /// under the element instead, so a box with no surface of its own let the ring fill the
+    /// whole field while it had the keyboard. The ring itself is a shadow primitive, which
+    /// the scene does not hand to tests (the probe's pictures show it); what a test can
+    /// hold is the surface under it, the border the same focus style repaints, and that
+    /// focus paints without moving the box.
+    #[gpui_kit::test]
+    fn the_count_box_keeps_the_cards_surface_when_it_takes_the_keyboard(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.set_catalog(cx, &catalog_body());
+        f.render(cx);
+
+        for mode in [ThemeMode::Light, ThemeMode::Dark] {
+            f.act(cx, |window, cx| {
+                Theme::change(mode, None, cx);
+                // At rest: the light iteration below leaves the keyboard on the field, and
+                // the first thing a frame paints is what the design has at rest.
+                window.blur(cx);
+                window.render_frame(cx);
+
+                let (background, edge, primary) = {
+                    let theme = cx.theme();
+                    (theme.background, theme.border, theme.primary)
+                };
+                let bounds = window.find(COUNT_BOX_ID).bounds();
+                let (surface, border) = box_paint(window, bounds);
+                assert_eq!(
+                    surface,
+                    Background::from(background),
+                    "{mode:?}: the box paints the card's surface, not the ring's `muted`"
+                );
+                assert_eq!(border, edge, "{mode:?}: the design's own border");
+
+                // The keyboard on the count field: the same style repaints the border, the
+                // surface the ring is drawn around is still the card's, and the box has not
+                // moved for it.
+                window.click(COUNT_FIELD_ID, cx);
+                window.render_frame(cx);
+                let (surface, border) = box_paint(window, bounds);
+                assert_eq!(
+                    surface,
+                    Background::from(background),
+                    "{mode:?}: the ring must not fill the field it rings"
+                );
+                assert_eq!(
+                    border, primary,
+                    "{mode:?}: the focus style's border, as the design's own `:focus-within`"
+                );
+                assert_eq!(
+                    window.find(COUNT_BOX_ID).bounds(),
+                    bounds,
+                    "{mode:?}: focus paints, it does not move or resize the box"
+                );
+            });
+        }
+    }
+
+    /// What the count box paints under its own bounds: the surface it fills, and the
+    /// colour of the border it strokes.
+    ///
+    /// The focus ring is a *shadow* primitive, which `painted_quads` does not carry — the
+    /// probe's pictures are where that is looked at. What a test can hold is the quad gpui
+    /// fills (`background`) and the one it strokes (`border_widths`): gpui paints an
+    /// element's background and its border as two quads at the same bounds, the border's
+    /// own fill transparent.
+    fn box_paint(window: &Window, bounds: Bounds<Pixels>) -> (Background, Hsla) {
+        let want = bounds.scale(window.scale_factor());
+        let own: Vec<Quad> = window
+            .painted_quads()
+            .into_iter()
+            .filter(|quad| covers(quad.bounds, want) && quad.bounds.size.width <= want.size.width)
+            .collect();
+        let surface = own
+            .iter()
+            .find(|quad| !quad.background.is_transparent())
+            .expect("the box paints a surface of its own");
+        let border = own
+            .iter()
+            .find(|quad| quad.border_widths.top.as_f32() > 0.)
+            .expect("the box paints its border");
+        (surface.background, border.border_color)
+    }
+
+    /// Whether one quad's bounds cover another's, in the scaled pixels the scene is
+    /// painted in.
+    fn covers(outer: Bounds<ScaledPixels>, inner: Bounds<ScaledPixels>) -> bool {
+        let (outer_right, outer_bottom) = (
+            outer.origin.x.as_f32() + outer.size.width.as_f32(),
+            outer.origin.y.as_f32() + outer.size.height.as_f32(),
+        );
+        let (inner_right, inner_bottom) = (
+            inner.origin.x.as_f32() + inner.size.width.as_f32(),
+            inner.origin.y.as_f32() + inner.size.height.as_f32(),
+        );
+        outer.origin.x.as_f32() <= inner.origin.x.as_f32()
+            && outer.origin.y.as_f32() <= inner.origin.y.as_f32()
+            && outer_right >= inner_right
+            && outer_bottom >= inner_bottom
     }
 
     /// The two steppers walk one count at a time and stop at the ends.

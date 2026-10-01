@@ -216,25 +216,22 @@ fn live_states(
 
     // --- the strip itself ------------------------------------------------------
     //
-    // Four tabs, one of them working, one of them under the pointer: the design's
-    // own subject (`TabStrip.tsx`), and the only state that shows the outward
-    // corners at the ends of a tab, the dividers between tabs and what a hover
-    // does to them. The working tab is the one this capture is on.
-    let extra = {
-        let view = view.clone();
-        cx.update_window(window, |_, window, cx| {
-            view.update(cx, |view, cx| {
-                (0..3)
-                    .map(|_| view.open_empty_tab(window, cx).read(cx).id())
-                    .collect::<Vec<_>>()
-            })
-        })?
-    };
-    let under_the_pointer = extra[0];
-    // The tab that is working is the one these states are about, so it stays the
-    // one being shown: the hovered tab is the second, and the strip is now the
-    // design's own picture — an active tab with its corners, a hovered one beside
-    // it, and the dividers the two of them hide.
+    // The running tab and one New Swarm tab, opened by the strip's own button.
+    // A second click must select that same empty tab, not manufacture another.
+    click(cx, window, "tab-add".into())?;
+    pump(cx, Duration::from_millis(100));
+    click(cx, window, "tab-add".into())?;
+    let under_the_pointer = cx.update(|cx| {
+        let view = view.read(cx);
+        assert_eq!(view.tabs().len(), 2, "repeated + keeps one New Swarm tab");
+        assert_eq!(view.selected_index(), 1);
+        let tab = view.selected_tab().read(cx);
+        assert_eq!(tab.state(), &TabState::Empty);
+        assert_eq!(tab.title().as_ref(), "New Swarm");
+        tab.id()
+    });
+    // The working tab stays selected; the empty tab is hovered so its fill and
+    // the active tab's outward corners are visible beside the trailing +.
     cx.update_window(window, |_, window, cx| {
         let view = view.clone();
         view.update(cx, |view, cx| view.select_tab(0, window, cx));
@@ -256,9 +253,7 @@ fn live_states(
         let view = view.clone();
         view.update(cx, |view, cx| {
             view.select_tab(0, window, cx);
-            for id in extra {
-                view.close_tab(id, window, cx);
-            }
+            view.close_tab(under_the_pointer, window, cx);
         });
     })?;
     pump(cx, Duration::from_millis(400));
@@ -274,7 +269,7 @@ fn live_states(
 
     // --- a tool row, opened -----------------------------------------------------
     type_text(cx, window, tab, TOOL_PROMPT)?;
-    let tool = wait_for(cx, "a tool row", |cx| tool_item(cx, tab));
+    let tool = wait_for(cx, "the completed bash row", |cx| tool_item(cx, tab));
     click(cx, window, row("transcript-tool", &tool))?;
     pump(cx, Duration::from_millis(600));
     shot(cx, window, dir, "04-tool")?;
@@ -455,11 +450,14 @@ fn items(cx: &mut HeadlessAppContext, tab: &Entity<TabContent>) -> Vec<Item> {
     })
 }
 
-/// The id of the first tool row in the coordinator's transcript.
+/// The bash call just sent, not an earlier delegate row.
 fn tool_item(cx: &mut HeadlessAppContext, tab: &Entity<TabContent>) -> Option<String> {
     items(cx, tab)
         .into_iter()
-        .find(|item| matches!(item.kind, ItemKind::Tool(_)))
+        .find(|item| {
+            matches!(&item.kind, ItemKind::Tool(tool)
+                if tool.name == "bash" && tool.result.is_some() && !tool.status.is_running())
+        })
         .map(|item| item.id)
 }
 

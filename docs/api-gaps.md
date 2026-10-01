@@ -36,23 +36,6 @@ To close it: a per-model `effort: ["low", …, "max"]` (or `effort_levels`) in
 `/catalog`'s `models[]`, beside `reasoning`. Then the detail line can be the design's
 own, range and all.
 
-## A hovered row's own fill under an animated child (`agent_list`)
-
-The design gives a lane row a `--row-surface` that follows the pointer: the row mixes 5% of
-the ink into itself while the pointer is on it, 9% while it is the selected one, and hands
-that colour down to the working dot's breath (`Workspace.css`'s `.ws-lane:hover`,
-`.ws-lane.selected`, and `color-mix(… var(--pulse) …, var(--row-surface))` on `.dot-busy`).
-The quiet end of a dot's breath is therefore the fill it is actually sitting on.
-
-GPUI has no hover-aware style for an animated element. `widgets::BreathingDot` paints the
-breath's own blend against a surface fixed when the row is built, so a hovered row's busy
-dot breathes between the ink and the row's **resting** fill (the sidebar) — 5% of the ink
-away from the fill under it, on the quiet half of every breath. Selection is right, because
-it is the list's own state and `agent_list` passes the row's 9% mix; hover is not reachable
-without re-rendering the dot from a hover handler the widget does not own.
-
-To close it: a style refinement that reaches an animated element (or a `group_hover` the
-`with_animation` closure can read), and the dot's surface becomes the design's variable.
 ## A scroll area that decides its own height (`gpui-component`'s `Scrollable`)
 
 `ScrollableElement::overflow_y_scrollbar()` wraps the element: a new root becomes the box a
@@ -92,20 +75,3 @@ with no id the glyph stayed at the muted ink, with one it flipped to the page's,
 To close it: hover state for elements without ids, or a documented requirement that a
 `group_hover` carries one. The transcript's copy button and `agent_list`'s stop button both
 name their own elements, which is what makes their group styles work.
-## A markdown table's own rules (`TextView`'s node style)
-
-A table's rows are ruled with the *node* style's `border` (`TextStyle::border`, which
-`TextViewStyle` has no field for), so a row rule is whatever the theme's border token is —
-`#DDD7CB` in the light theme — while the design rules the table's frame and its rows with
-`--rule` (the foreground 17% into the background: `#CCC8C1`) and its cells with the softer
-`--rule-soft`. The frame and the cell rules are ours to set (the table's own refinement, and
-`table_cell`), but the row rule is drawn by the kit in a colour no call can reach.
-
-Painting over it from the cell is not a way out: `table_cell` gets one border colour for both
-of its edges, so matching the row rule would take the cell rules from `--rule-soft` to
-`--rule` — a 14-unit step on a line that reads as a hairline — and the last row would then
-draw a second rule on top of the frame, which the design removes by hand
-(`.measure tr:last-child td{border-bottom:0}`).
-
-To close it: a `border` (and a softer one) on `TextViewStyle`, or a table style whose row rule
-is separate from the node's own border.

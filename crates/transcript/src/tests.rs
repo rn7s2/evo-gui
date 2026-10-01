@@ -1322,3 +1322,136 @@ fn a_wheel_takes_the_list_off_its_tail_and_the_pill_appears(cx: &mut TestAppCont
         "with the reader back at the latest, the pill is away..."
     );
 }
+
+/// "↓ Jump to latest" goes to the tail — the latest row on screen — not to the
+/// head. gpui's offset runs *negative* downwards, so an ease aimed at
+/// `+max_offset` clamps to 0 and the reader never leaves the head.
+#[gpui_kit::test]
+fn jump_to_latest_lands_on_the_tail(cx: &mut TestAppContext) {
+    let items: Vec<Item> = (0..40)
+        .map(|i| user(&format!("u_{i:02}"), "a turn of its own"))
+        .collect();
+    let (view, cx) = open!(cx, items);
+    for _ in 0..4 {
+        cx.update(|window, cx| window.render_frame(cx));
+    }
+    // The reader goes to the very top.
+    view.update(cx, |view, _| {
+        view.pin.touched();
+        view.scroll.set_offset(gpui_kit::point(px(0.), px(0.)));
+    });
+    for _ in 0..2 {
+        cx.update(|window, cx| window.render_frame(cx));
+    }
+    let transcript = cx.update(|window, _| window.find("transcript").bounds());
+    let first = cx.update(|window, _| window.find(row_id("transcript-row", "u_00")).bounds());
+    assert!(
+        first.top() >= transcript.top() - px(1.),
+        "at the head first: {first:?}"
+    );
+
+    // The reader's own way back: a press on the pill, not a call.
+    view.update(cx, |view, cx| {
+        view.pin.on_scroll(3000.);
+        cx.notify();
+    });
+    for _ in 0..3 {
+        cx.update(|window, cx| window.render_frame(cx));
+    }
+    assert!(
+        cx.update(|window, _| window.find("transcript-jump").visible()),
+        "the pill is drawn before the press"
+    );
+    cx.update(|window, cx| window.click("transcript-jump", cx));
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(500));
+    cx.run_until_parked();
+    for _ in 0..3 {
+        cx.update(|window, cx| window.render_frame(cx));
+    }
+    // The scroller itself is at the tail: gpui's offset is `-max_offset` down
+    // there, and an ease aimed at `+max_offset` clamps to 0 — the head.
+    let (offset, max_offset) = cx.read(|cx| {
+        let view = view.read(cx);
+        (
+            f32::from(view.scroll.offset().y),
+            f32::from(view.scroll.max_offset().y),
+        )
+    });
+    assert_eq!(
+        offset, -max_offset,
+        "the scroller sits at `-max_offset`, the tail, not at the head"
+    );
+    let last = cx.update(|window, _| window.find(row_id("transcript-row", "u_39")).bounds());
+    assert!(
+        last.bottom() <= transcript.bottom() + px(1.)
+            && last.bottom() > transcript.bottom() - px(60.),
+        "the latest row is at the pane's foot after the jump: {last:?} vs {transcript:?}"
+    );
+    assert!(cx.read(|cx| view.read(cx).is_following_tail(cx)));
+    assert!(
+        !cx.update(|window, _| window.find("transcript-jump").visible()),
+        "and the pill is away again"
+    );
+}
+
+/// The rich-text style is built on the Base seam so that the ink a table's *row*
+/// rules are drawn in is the design's `--rule` — `color-mix(in srgb, var(--fg)
+/// 17%, var(--bg))` — rather than the widget border the component fold always
+/// ended at (`--border`, a step lighter), in both themes.
+///
+/// The colours the fold took from the theme are passed explicitly on this seam
+/// (`TextViewStyle::default()` is the neutral light palette), so this holds them
+/// to the theme's own values and the heading steps to the app's, as well.
+#[gpui_kit::test]
+fn the_text_style_draws_rules_in_the_designs_ink_in_both_themes(cx: &mut TestAppContext) {
+    use gpui_kit::component::ActiveTheme as _;
+    use gpui_kit::component::{Theme as ComponentTheme, ThemeMode};
+    use gpui_kit::{rems, StyleRefinement};
+
+    cx.update(gpui_kit::init);
+    for mode in [ThemeMode::Light, ThemeMode::Dark] {
+        cx.update(|cx| ComponentTheme::change(mode, None, cx));
+        let (style, palette, theme) = cx.update(|cx| {
+            (
+                crate::style::text_style(cx),
+                crate::style::Palette::from_app(cx),
+                cx.theme().clone(),
+            )
+        });
+
+        assert_eq!(
+            style.border(),
+            crate::style::mix(style.foreground(), 17., palette.background),
+            "{mode:?}: a row rule is `--rule`, 17% of the foreground into the page"
+        );
+        assert_ne!(
+            style.border(),
+            theme.border,
+            "{mode:?}: and not the widget border the component style fell back to"
+        );
+
+        // Nothing else rides on the seam change: the fold's colours, the
+        // appearance and the paragraph gap are the theme's own.
+        assert_eq!(style.foreground(), theme.foreground);
+        assert_eq!(style.muted_foreground(), theme.muted_foreground);
+        assert_eq!(style.link(), theme.link);
+        assert_eq!(style.selection(), theme.selection);
+        assert_eq!(style.code_background(), theme.muted);
+        assert_eq!(style.is_dark(), theme.is_dark());
+        assert_eq!(
+            style.paragraph_gap(),
+            rems(0.625),
+            "`p {{ margin: 10px 0 }}`"
+        );
+
+        // Headings keep the app's own step up from the body size.
+        for (level, scale) in [(1u8, 1.25), (2, 1.1), (3, 1.05), (4, 1.), (5, 1.), (6, 1.)] {
+            assert_eq!(
+                style.heading(level),
+                StyleRefinement::default().text_size(px(f32::from(theme.font_size) * scale)),
+                "{mode:?}: heading {level} steps by {scale}"
+            );
+        }
+    }
+}

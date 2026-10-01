@@ -514,15 +514,22 @@ impl TranscriptView {
         self.pin.jumped();
         cx.notify();
         let scroll = self.scroll.clone();
+        // gpui's offset grows *negative* as the list scrolls down (`set_offset`: "as
+        // you scroll further down the offset becomes more negative"), so the tail is
+        // at `-max_offset`. Aiming at `+max_offset` clamped to 0 — the head.
         let from = f32::from(scroll.offset().y);
-        let to = f32::from(scroll.max_offset().y);
-        self.jump = Some(cx.spawn(async move |_view, cx| {
+        let to = -f32::from(scroll.max_offset().y);
+        self.jump = Some(cx.spawn(async move |view, cx| {
             for step in 1..=JUMP_STEPS {
                 cx.background_executor().timer(JUMP_STEP).await;
                 let t = step as f32 / JUMP_STEPS as f32;
                 let y = from + (to - from) * ease_out(t);
                 scroll.set_offset(point(scroll.offset().x, px(y)));
+                let _ = view.update(cx, |_, cx| cx.notify());
             }
+            // Land exactly on the tail, even if it grew while we travelled.
+            scroll.scroll_to_bottom();
+            let _ = view.update(cx, |_, cx| cx.notify());
         }));
     }
 

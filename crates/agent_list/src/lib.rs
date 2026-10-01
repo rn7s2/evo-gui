@@ -133,6 +133,9 @@ pub struct AgentList {
     /// The column's own focus (§7.3): a click takes it, and the arrows walk the rows while it
     /// is held. The list is the thing being navigated, so it is the thing that is focused.
     focus_handle: FocusHandle,
+    /// The row the pointer is on, for the dot's `--row-surface`: the dot paints a colour
+    /// fixed when the row was built, so the row says where the pointer is.
+    hovered: Option<AgentKey>,
 }
 
 impl EventEmitter<AgentListEvent> for AgentList {}
@@ -150,6 +153,7 @@ impl AgentList {
             down_reasons: BTreeMap::new(),
             now_millis: 0,
             focus_handle: cx.focus_handle(),
+            hovered: None,
         }
     }
 
@@ -238,6 +242,18 @@ impl AgentList {
     /// The agent the list is highlighting.
     pub fn selected(&self) -> AgentKey {
         self.selected
+    }
+
+    /// The fill a row's working dot breathes against: `.ws-lane`'s `--row-surface` —
+    /// the sidebar at rest, the 5% mix under the pointer, the 9% mix while selected.
+    fn dot_surface(&self, key: AgentKey, palette: &'static Palette) -> Rgb {
+        if self.is_selected(key) {
+            paint::mix(palette.fg, SELECTED_MIX, palette.sidebar)
+        } else if self.hovered == Some(key) {
+            paint::mix(palette.fg, HOVER_MIX, palette.sidebar)
+        } else {
+            palette.sidebar
+        }
     }
 
     /// The lanes as the list currently draws them.
@@ -356,6 +372,7 @@ impl AgentList {
             state_color: paint::color(palette.muted_fg),
             badge,
             stop: None,
+            dot_surface: self.dot_surface(AgentKey::Coordinator, palette),
             tooltip: tooltip.into(),
             aria: format!("main, {word}{step}").into(),
         }
@@ -415,6 +432,7 @@ impl AgentList {
             state_color,
             badge: None,
             stop: row.is_busy().then_some(key),
+            dot_surface: self.dot_surface(key, palette),
             tooltip: lane_tooltip(row, reason, self.now_millis).into(),
             aria: aria.into(),
         }
@@ -485,8 +503,7 @@ impl AgentList {
         let badge = view.badge;
         let stop = view.stop;
         let stoppable = stop.is_some();
-        // The row's own fill, and the one the dot breathes against: on hover and while
-        // selected the dot has a new surface, as the design's `--row-surface` does.
+        // Match the three `--row-surface` fills used by the dot.
         let hover = paint::mix(palette.fg, HOVER_MIX, palette.sidebar);
         let active = paint::mix(palette.fg, SELECTED_MIX, palette.sidebar);
         let surface = if selected { active } else { palette.sidebar };
@@ -512,19 +529,36 @@ impl AgentList {
             })
             .text_size(LANE_FONT)
             .text_color(paint::color(palette.fg))
+            // The row says where the pointer is, so its dot can breathe against that
+            // row's own fill (§7.3).
+            .on_hover(cx.listener(move |this, hovered, _, cx| {
+                let next = if *hovered { Some(key) } else { None };
+                if next.is_some() && this.hovered != next {
+                    this.hovered = next;
+                    cx.notify();
+                } else if next.is_none() && this.hovered == Some(key) {
+                    // Only the row being left clears it: the next row's `true` may have
+                    // arrived first.
+                    this.hovered = None;
+                    cx.notify();
+                }
+            }))
             .child({
                 let busy = view.busy;
                 let slot = format!("agent-{key:?}");
                 BreathingDot::new(widgets::dot::dot_id(slot), busy)
                     .palette(palette)
-                    .surface(surface)
+                    .surface(view.dot_surface)
                     .idle_opacity(WORKSPACE_IDLE)
                     .render()
             })
             .child(
                 div()
                     .flex_none()
-                    .when(selected, |name| name.font_medium())
+                    // `.ws-lane.selected{font-weight:500}` — the design's medium, which
+                    // `.ws-lane-task` and `.ws-lane-state` opt out of with a 400 of their
+                    // own, so the name is the cell that gets heavier.
+                    .when(selected, |name| name.font_weight(widgets::text::MEDIUM))
                     .child(name),
             )
             .child(
@@ -761,6 +795,8 @@ struct RowView {
     badge: Option<SharedString>,
     /// The Stop button's lane, while the row can be stopped.
     stop: Option<AgentKey>,
+    /// The fill above, for the working dot: `--row-surface`.
+    dot_surface: Rgb,
     tooltip: SharedString,
     aria: SharedString,
 }
@@ -1167,6 +1203,125 @@ mod tests {
                 "hovering the row moves neither the state nor the Stop"
             );
             assert_eq!(window.find(stop_id(1)).bounds(), stop);
+        });
+    }
+
+    /// §7.3: the dot breathes against the fill the row has under it — the design's
+    /// `--row-surface`, which the pointer and the selection each step up. The three
+    /// values are the design's own: `var(--sidebar)`, `color-mix(fg 5%, sidebar)` and
+    /// `color-mix(fg 9%, sidebar)`, with `.selected` winning over `:hover` because its
+    /// rule comes later in the sheet.
+    #[gpui_kit::test]
+    fn the_dot_breathes_against_the_fill_the_row_has_under_it(cx: &mut TestAppContext) {
+        let f = open(
+            cx,
+            lanes(vec![
+                lane(1, LaneStatus::Working, Some("one")),
+                lane(2, LaneStatus::Working, Some("two")),
+            ]),
+        );
+        let palette = design::palette(false);
+        let rest = palette.sidebar;
+        let hovered = paint::mix(palette.fg, HOVER_MIX, palette.sidebar);
+        let selected = paint::mix(palette.fg, SELECTED_MIX, palette.sidebar);
+        let surface = |f: &Fixture, cx: &App, key: AgentKey| {
+            let list = f.list.read(cx);
+            let row = list
+                .lanes()
+                .lanes
+                .iter()
+                .find(|row| AgentKey::Lane(row.n) == key)
+                .expect("the lane is in the list");
+            list.lane_view(row, palette).dot_surface
+        };
+
+        // Nothing under the pointer, nothing selected: the sidebar.
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            assert_eq!(surface(&f, cx, AgentKey::Lane(1)), rest);
+        });
+
+        // The pointer on lane 1's row: that row's fill, and only that one.
+        f.act(cx, |window, cx| {
+            let row = window.find(row_id(AgentKey::Lane(1))).bounds();
+            window.simulate_mouse_move(row.center(), cx);
+            window.render_frame(cx);
+            assert_eq!(
+                f.list.read(cx).hovered,
+                Some(AgentKey::Lane(1)),
+                "the row the pointer is on"
+            );
+            assert_eq!(surface(&f, cx, AgentKey::Lane(1)), hovered);
+            assert_eq!(
+                surface(&f, cx, AgentKey::Lane(2)),
+                rest,
+                "a row the pointer is not on keeps the sidebar"
+            );
+        });
+
+        // The pointer on the selected row: the selection's own step, not the pointer's.
+        f.act(cx, |_, cx| {
+            f.list
+                .update(cx, |list, cx| list.set_selected(AgentKey::Lane(1), cx))
+        });
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                surface(&f, cx, AgentKey::Lane(1)),
+                selected,
+                "`:selected` wins over `:hover`, as it does in the sheet"
+            );
+        });
+
+        // The pointer away: back to the resting fill, whatever is selected.
+        f.act(cx, |window, cx| {
+            window.simulate_mouse_move(point(COLUMN_WIDTH / 2., px(HEADER_HEIGHT / 2.)), cx);
+            window.render_frame(cx);
+            assert_eq!(f.list.read(cx).hovered, None);
+            assert_eq!(surface(&f, cx, AgentKey::Lane(1)), selected);
+        });
+    }
+
+    /// §7.3: the pointer crossing from one row to the next leaves the list on the row it
+    /// arrived at. Up the list the arriving row is told before the one it left, so the
+    /// row being left must not clear the row the pointer is on.
+    #[gpui_kit::test]
+    fn the_pointer_crossing_rows_leaves_the_list_on_the_row_it_arrived_at(cx: &mut TestAppContext) {
+        let f = open(
+            cx,
+            lanes(vec![
+                lane(1, LaneStatus::Working, Some("one")),
+                lane(2, LaneStatus::Working, Some("two")),
+            ]),
+        );
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            let lane1 = window.find(row_id(AgentKey::Lane(1))).bounds().center();
+            let lane2 = window.find(row_id(AgentKey::Lane(2))).bounds().center();
+            let away = point(COLUMN_WIDTH / 2., px(HEADER_HEIGHT / 2.));
+
+            // Down the list, then back up it: whichever row is told first, the list is
+            // left on the row the pointer is on.
+            window.simulate_mouse_move(lane1, cx);
+            window.render_frame(cx);
+            assert_eq!(f.list.read(cx).hovered, Some(AgentKey::Lane(1)));
+
+            window.simulate_mouse_move(lane2, cx);
+            window.render_frame(cx);
+            assert_eq!(f.list.read(cx).hovered, Some(AgentKey::Lane(2)));
+
+            window.simulate_mouse_move(lane1, cx);
+            window.render_frame(cx);
+            assert_eq!(
+                f.list.read(cx).hovered,
+                Some(AgentKey::Lane(1)),
+                "the row the pointer left does not clear the row it arrived at"
+            );
+
+            // Off the rows: the row the pointer was on resets.
+            window.simulate_mouse_move(away, cx);
+            window.render_frame(cx);
+            assert_eq!(f.list.read(cx).hovered, None);
         });
     }
 

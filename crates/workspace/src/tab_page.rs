@@ -416,8 +416,12 @@ impl TabContent {
             .border_color(paint::color(palette.border))
             .text_color(paint::color(palette.fg))
             .child(
-                // `.ws-head{font-size:14px}` with `.ws-agent-name{font-weight:500}`.
-                div().font_medium().text_size(px(14.)).child(name),
+                // `.ws-head{font-size:14px}` with `.ws-agent-name{font-weight:500}` — the
+                // design's medium, which is `widgets::text::MEDIUM` in this font stack.
+                div()
+                    .font_weight(widgets::text::MEDIUM)
+                    .text_size(px(14.))
+                    .child(name),
             )
             .child(
                 // One line, elided: a task is a sentence, and the transcript below is

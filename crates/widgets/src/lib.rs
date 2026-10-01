@@ -32,6 +32,7 @@ pub mod dot;
 pub mod effort;
 pub mod glyph;
 pub mod paint;
+pub mod text;
 pub mod tooltip;
 
 pub use chip::Chip;

@@ -15,8 +15,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use gpui_kit::base::{Easing, SelectableText};
-use gpui_kit::component::text::{TextView, TextViewMotion};
+use gpui_kit::base::{Easing, SelectableText, TextView, TextViewMotion};
 use gpui_kit::component::{h_flex, Icon, IconName};
 use gpui_kit::TestSupportExt as _;
 use gpui_kit::{
@@ -1323,7 +1322,8 @@ fn tool_row(
             .child(
                 div()
                     .flex_shrink_0()
-                    .font_weight(FontWeight::MEDIUM)
+                    // `.tc-target{flex:0 0 auto;font-weight:500}`.
+                    .font_weight(widgets::text::MEDIUM)
                     .child(target),
             );
     }
@@ -1790,10 +1790,8 @@ fn report_field_ink(label: &str, palette: &Palette) -> Hsla {
 
 /// The markdown style of a report's row: the message style with the design's own
 /// `.rp-row p{margin:0}` — a paragraph inside a row adds no air of its own.
-fn report_text_style(cx: &App) -> gpui_kit::component::text::TextViewStyle {
-    let mut style = text_style(cx);
-    style.paragraph_gap = gpui_kit::rems(0.);
-    style
+fn report_text_style(cx: &App) -> gpui_kit::base::TextViewStyle {
+    text_style(cx).with_paragraph_gap(gpui_kit::rems(0.))
 }
 
 /// One lane's report: what it did, in the fields the item carries — never re-parsed out of

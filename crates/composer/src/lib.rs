@@ -865,7 +865,8 @@ impl Composer {
                     .child(
                         div()
                             .flex_none()
-                            .font_medium()
+                            // `.todo-strip-count{font-weight:500}`.
+                            .font_weight(widgets::text::MEDIUM)
                             .text_color(paint::color(palette.fg))
                             .child(SharedString::from(format!(
                                 "Todos {done}/{}",
@@ -989,7 +990,8 @@ impl Composer {
                         .child(
                             div()
                                 .flex_none()
-                                .font_medium()
+                                // `.drawer-title{font-weight:500}`.
+                                .font_weight(widgets::text::MEDIUM)
                                 .text_color(paint::color(palette.fg))
                                 .child(title),
                         )

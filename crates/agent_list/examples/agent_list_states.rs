@@ -9,7 +9,12 @@
 //!
 //! ```sh
 //! cargo run -p agent_list --example agent_list_states -- --capture /tmp/agent-list
+//! cargo run -p agent_list --example agent_list_states -- --capture /tmp/agent-list --burst 24
 //! ```
+//!
+//! `--burst N` takes N frames of every state, 80ms apart, named `<state>-<i>-<theme>.png`:
+//! the working dot breathes on a clock of its own, so the ends of the breath — the fill it
+//! sits on, and the ink — need more than one frame to be seen.
 //!
 //! Nothing here pokes a widget's fields: the column is fed the topic's own shapes
 //! (`LaneList` / `LaneRow`), and the pointer, the wheel and the keyboard are the paths a
@@ -206,16 +211,27 @@ fn row_center(n: u32) -> (f32, f32) {
 }
 
 fn main() {
-    let dir: PathBuf = std::env::args()
-        .skip_while(|arg| arg != "--capture")
+    let args: Vec<String> = std::env::args().collect();
+    let dir: PathBuf = args
+        .iter()
+        .skip_while(|arg| arg.as_str() != "--capture")
         .nth(1)
-        .unwrap_or_else(|| "/tmp/agent-list".to_string())
+        .map(String::as_str)
+        .unwrap_or("/tmp/agent-list")
         .into();
     std::fs::create_dir_all(&dir).expect("the capture directory");
+    let burst: usize = args
+        .iter()
+        .skip_while(|arg| arg.as_str() != "--burst")
+        .nth(1)
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(1)
+        .max(1);
 
-    let states: [&str; 6] = [
+    let states: [&str; 7] = [
         "rest",
         "pointer",
+        "working-resting-pointer",
         "working-pointer",
         "scrollbar-hover",
         "scrolled",
@@ -228,7 +244,11 @@ fn main() {
         match name {
             // On a lane's row, which is what the pointer does before it can do anything.
             "pointer" => point_at(&mut cx, window, row_center(5)),
-            // On the row of the lane that is working: its Stop comes out.
+            // On the row of a working lane that is not the selected one: its dot breathes
+            // against the fill the pointer put under it.
+            "working-resting-pointer" => point_at(&mut cx, window, row_center(2)),
+            // On the row of the lane that is working and selected: the dot breathes
+            // against the selected fill.
             "working-pointer" => point_at(&mut cx, window, row_center(1)),
             // On the scroll area's own edge, which is where a scrollbar's own hover is.
             "scrollbar-hover" => point_at(&mut cx, window, (WINDOW_WIDTH - 3., 200.)),
@@ -278,10 +298,33 @@ fn main() {
                 window.render_frame(cx);
             })
             .unwrap();
-            let image = cx.capture_screenshot(window).expect("a frame to capture");
-            let path = dir.join(format!("{name}-{suffix}.png"));
-            image.save(&path).expect("write the picture");
-            println!("[states] {name}: {}", path.display());
+            for frame in 0..burst {
+                // The dot's clock is real time: a moment of it has to pass between two
+                // pictures of it.
+                if frame > 0 {
+                    std::thread::sleep(Duration::from_millis(80));
+                }
+                cx.update_window(window, |_, window, cx| {
+                    window.render_frame(cx);
+                })
+                .unwrap();
+                let image = cx.capture_screenshot(window).expect("a frame to capture");
+                let path = if burst == 1 {
+                    dir.join(format!("{name}-{suffix}.png"))
+                } else {
+                    dir.join(format!("{name}-{frame:02}-{suffix}.png"))
+                };
+                image.save(&path).expect("write the picture");
+                if burst == 1 {
+                    println!("[states] {name}: {}", path.display());
+                }
+            }
+            if burst > 1 {
+                println!(
+                    "[states] {name}-{suffix}: {burst} frames in {}",
+                    dir.display()
+                );
+            }
         }
     }
     let _ = COLUMN_WIDTH;
