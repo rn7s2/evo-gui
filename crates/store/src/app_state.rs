@@ -570,7 +570,7 @@ mod tests {
             );
         }
         assert_eq!(ZOOM_DEFAULT, 1.0);
-        assert!(ZOOM_MIN < ZOOM_DEFAULT && ZOOM_DEFAULT < ZOOM_MAX);
+        const { assert!(ZOOM_MIN < ZOOM_DEFAULT && ZOOM_DEFAULT < ZOOM_MAX) };
         fs::remove_dir_all(root.path()).unwrap();
     }
 

@@ -346,11 +346,13 @@ fn main() {
                 press(cx, window, "down");
             }
         }),
-        // A word mid-prose: the caret is at the end of `/he`, and the popup stands
-        // over that line, not over the line's end.
+        // A word mid-prose: the caret is at the end of `/mo`, and the popup stands
+        // over that line — which is where the caret is — not over the end of the
+        // message. `mo` is what three commands begin or contain, so the list is a
+        // list and not a single row.
         ("completion-mid-prose", |cx, window, page| {
-            type_into(cx, window, page, "please run /he now");
-            // Four lefts put the caret at the end of `/he`.
+            type_into(cx, window, page, "please run /mo now");
+            // Four lefts put the caret at the end of `/mo`.
             for _ in 0..4 {
                 press(cx, window, "left");
             }

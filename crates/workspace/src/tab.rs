@@ -3069,7 +3069,65 @@ mod tests {
                  "ready": false, "reason": "no API key"},
             ],
             "thinking_levels": ["low", "medium", "high", "xhigh", "max"],
+            "commands": [
+                {"name": "lore", "description": "durable guidance", "args_hint": "<text>"},
+                {"name": "loop", "description": "run a prompt again and again",
+                 "args_hint": null},
+            ],
         })
+    }
+
+    /// §7.3, §5.6: the catalog's own `commands` are what a `/word` completes against, in a
+    /// tab that is already running — evo's registry, never a list this client keeps.
+    #[gpui_kit::test]
+    fn the_catalogs_commands_reach_a_running_tabs_popup(cx: &mut TestAppContext) {
+        let (window, tab) = running_tab(cx);
+
+        cx.update_window(window, |_, window, cx| {
+            let data = LauncherData {
+                catalog: Some(catalog_body()),
+                ..LauncherData::default()
+            };
+            tab.update(cx, |tab, cx| tab.set_launcher_data(&data, window, cx));
+            // The caret in the input, then the word a reader would type. Rendering
+            // first is what puts the input in the window's own tree, and
+            // `focus_primary` is what opening this tab does to put the keyboard there.
+            window.render_frame(cx);
+            tab.update(cx, |tab, cx| {
+                tab.focus_primary(window, cx);
+            });
+            window.input("/lo", cx);
+        })
+        .expect("the page");
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("completion-row-0").label(),
+                Some("/lore · durable guidance"),
+                "the registry's first command, in the registry's own words"
+            );
+            assert_eq!(
+                window.find("completion-row-1").label(),
+                Some("/loop · run a prompt again and again"),
+                "and the second: the word is a prefix of one and a subsequence of the other"
+            );
+        })
+        .expect("the page");
+
+        // Enter takes the highlighted row: the word the registry's own list offered is
+        // written out, and the message is not sent.
+        cx.update_window(window, |_, window, cx| window.press("enter", cx))
+            .expect("the page");
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find(("input", 4294967302u64)).value(),
+                Some("/lore "),
+                "the row was taken"
+            );
+        })
+        .expect("the page");
     }
 
     /// §5.6: the catalog the app learned reaches the composer of a tab that is already

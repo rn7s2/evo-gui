@@ -54,12 +54,14 @@ call one tool, `SLOW …` makes it answer in sixty deltas over six seconds.
   lane could register; the stub home registers exactly one model, which every lane
   can run, so there is nothing to grey. A home with a second, lane-incapable model
   is what that picture needs.
-- **The composer's fold-outs**: the goal's objective folded out, the todo list opened,
-  and the model drawer folded out inside the box. These pictures never open them, so
-  they are taken from the composer alone — `cargo run -p composer --example
+- **The composer's fold-outs, and its completion popup**: the goal's objective folded
+  out, the todo list opened, the model drawer folded out inside the box, and the list a
+  `/word` raises — over the caret at the message's start, walked down three rows,
+  mid-prose, and the image's own symbols inside `/eval`. These pictures never open them,
+  so they are taken from the composer alone — `cargo run -p composer --example
   composer_states -- --capture /tmp/composer-states`, which slides the goal strip, the
   todo strip, the model drawer, the busy face and a lane's own read-only drawer off the
-  same clicks a person makes.
+  same clicks a person makes, and types the words the popup is raised by.
 - **A compaction divider**, which needs a session long enough for evo to compact.
 - **A dropped connection** and the reconnecting badge: the app reconnects with a
   backoff, and the picture needs a server to die under a live tab.
