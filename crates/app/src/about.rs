@@ -177,7 +177,11 @@ pub fn open(window: &mut Window, cx: &mut App) {
                     .bg(cx.theme().muted)
                     .p_3()
                     .child(row(cx, "State", &state_dir))
-                    .child(row(cx, "Log", &log_path)),
+                    // A release build keeps no log of its own, so there is no file
+                    // to point at.
+                    .when(crate::logging::ENABLED, |rows| {
+                        rows.child(row(cx, "Log", &log_path))
+                    }),
             )
             .width(px(430.))
             .show_cancel(false)

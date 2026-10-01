@@ -1,5 +1,11 @@
 //! The app's own log (§2, §6): `~/.evo/desktop/app.log`, one line per event.
 //!
+//! **A release build writes none of it**: [`AppLog::open`] returns the disabled
+//! logger there, which touches neither the directory nor the file, and nothing
+//! reaches stderr either. Debug builds — `cargo run`, tests, examples, the
+//! probe — behave as they always have. The gate is that one `cfg!`, so no call
+//! site moves.
+//!
 //! Lines start with an RFC 3339 **UTC** timestamp (`2026-09-29T09:09:56Z`), so a
 //! log read next to a journal never depends on the machine's timezone.
 //!
@@ -19,6 +25,13 @@ use store::time;
 
 /// The log file's name inside `~/.evo/desktop`.
 pub const LOG_NAME: &str = "app.log";
+
+/// The one gate: debug builds write the log (and echo it to stderr), a release
+/// build writes nothing at all. The log is a developer's tool — the app a
+/// person runs ships no `app.log`, opens no file and owns no directory for it.
+/// Keeping it here means no call site has to know, and [`AppLog`]'s API stays
+/// the same in both builds.
+pub const ENABLED: bool = cfg!(debug_assertions);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Level {
@@ -46,15 +59,23 @@ pub struct AppLog {
 struct Inner {
     path: PathBuf,
     file: Mutex<Option<File>>,
+    /// False for the disabled logger [`AppLog::disabled`] makes: `line` returns
+    /// at once, so nothing reaches the file or stderr.
+    enabled: bool,
 }
 
 impl AppLog {
     /// `~/.evo/desktop/app.log`, created if needed.
     ///
     /// A log that cannot be opened is not fatal: the app still runs, and the
-    /// reason goes to stderr once rather than stopping a launch.
+    /// reason goes to stderr once rather than stopping a launch. A release
+    /// build does not get this far — it opens the disabled logger, which does
+    /// not even make the directory.
     pub fn open(root: &Root) -> AppLog {
         let path = root.path().join(LOG_NAME);
+        if !ENABLED {
+            return AppLog::disabled(path);
+        }
         // The very first launch has no `~/.evo/desktop` yet, and the log is
         // opened before anything else creates it.
         if let Some(parent) = path.parent() {
@@ -71,6 +92,20 @@ impl AppLog {
             inner: Arc::new(Inner {
                 path,
                 file: Mutex::new(file),
+                enabled: true,
+            }),
+        }
+    }
+
+    /// A logger that writes nothing and echoes nothing: what [`AppLog::open`]
+    /// hands back in a release build. It keeps the path, so a dialog that names
+    /// the log still has one to name.
+    fn disabled(path: PathBuf) -> AppLog {
+        AppLog {
+            inner: Arc::new(Inner {
+                path,
+                file: Mutex::new(None),
+                enabled: false,
             }),
         }
     }
@@ -81,6 +116,9 @@ impl AppLog {
     }
 
     pub fn line(&self, level: Level, message: impl AsRef<str>) {
+        if !self.inner.enabled {
+            return;
+        }
         let message = message.as_ref();
         let text = format!(
             "{} {:<5} {}\n",
@@ -135,6 +173,38 @@ mod tests {
         assert!(lines[0].contains("info"), "{text}");
         assert!(lines[1].contains("error"), "{text}");
         assert!(lines[0].contains("hello"), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Tests run in a debug build, so the gate is open: `open` hands back the
+    /// writing logger, and its lines land in the file.
+    #[test]
+    fn a_debug_build_opens_the_writing_logger() {
+        let dir = std::env::temp_dir().join(format!("evo-desktop-log-on-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let log = AppLog::open(&Root::at(&dir));
+        assert!(log.inner.enabled, "cfg!(debug_assertions) is the gate");
+        log.info("written");
+
+        assert!(log.path().is_file(), "a debug build's log is a real file");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The closed gate, built by hand (a test cannot be a release binary): the
+    /// disabled logger makes no file, no directory, and no stderr line.
+    #[test]
+    fn the_disabled_logger_writes_nothing() {
+        let dir = std::env::temp_dir().join(format!("evo-desktop-log-off-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("desktop").join(LOG_NAME);
+        let log = AppLog::disabled(path.clone());
+        log.info("silent");
+        log.warn("silent");
+        log.error("silent");
+
+        assert_eq!(log.path(), path, "a dialog still has a path to name");
+        assert!(!path.exists(), "no log file: {}", path.display());
+        assert!(!path.parent().unwrap().exists(), "not even the directory");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
