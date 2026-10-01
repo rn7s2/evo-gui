@@ -60,7 +60,6 @@ use ratex_parser::parse as parse_tex;
 use ratex_svg::{render_to_svg, SvgOptions};
 use ratex_types::color::Color;
 use ratex_types::math_style::MathStyle;
-use store::design::{INSET, MEASURE};
 
 use crate::style::Palette;
 
@@ -570,7 +569,7 @@ fn displayed(node: &MarkdownNode, body: &str, cx: &mut App) -> Option<AnyElement
             // width, so `max_w` below is the bound that holds today.
             .w_full()
             .min_w_0()
-            .max_w(px(MEASURE - 2. * INSET))
+            .max_w(palette.measure_content())
             .overflow_x_scroll()
             // `mx_auto` centres a picture that fits and leaves a wider one against
             // the left edge, where the scroller can reach it.
@@ -693,6 +692,8 @@ fn color_of(ink: u32) -> Color {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The design's own measure and inset: what a pane has to hold for an inline picture.
+    use store::design::INSET;
 
     /// One formula, laid out here and now: the work itself, without a window or a
     /// background executor in the way.
@@ -1153,9 +1154,12 @@ mod tests {
 #[cfg(test)]
 mod drawn_in_a_window {
     use super::*;
+    // The measure and its inset, at the design's own size: the numbers the drawing code
+    // reads off the palette while a frame is built.
     use gpui_kit::base::{TextView, TextViewState};
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{AppContext as _, Context, Entity, Render, TestAppContext};
+    use store::design::{INSET, MEASURE};
 
     struct Host {
         document: Entity<TextViewState>,
