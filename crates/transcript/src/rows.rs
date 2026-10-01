@@ -1327,6 +1327,7 @@ fn tool_row(
         session::ToolStatus::Ok => ("ok", palette.success),
     };
     let (target, summary) = tool_sentence(&tool.args);
+    let (target, summary) = (one_line(&target), one_line(&summary));
 
     let click_view = view.clone();
     let click_id = id.clone();
@@ -1379,8 +1380,14 @@ fn tool_row(
             )
             .child(
                 div()
-                    .flex_shrink_0()
-                    // `.tc-target{flex:0 0 auto;font-weight:500}`.
+                    // `.tc-target{flex:0 0 auto;font-weight:500}` — but it gives way
+                    // (with an ellipsis) rather than push the status out of the card
+                    // when it is longer than the head.
+                    .flex_shrink(1.)
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
                     .font_weight(widgets::text::MEDIUM)
                     .child(target),
             );
@@ -1395,12 +1402,18 @@ fn tool_row(
             .text_color(palette.muted_foreground)
             .child(summary),
     );
-    head = head.child(status_pill(
-        status,
-        pill,
-        palette,
-        tool.status == session::ToolStatus::Ok,
-    ));
+    head = head.child(
+        div()
+            .id(row_id("transcript-tool-status", &id))
+            .flex_shrink_0()
+            .test_support()
+            .child(status_pill(
+                status,
+                pill,
+                palette,
+                tool.status == session::ToolStatus::Ok,
+            )),
+    );
 
     let mut card = div()
         .id(row_id("transcript-tool-row", &id))
@@ -1443,6 +1456,21 @@ fn tool_row(
     }
 
     card.test_support().into_any_element()
+}
+
+/// A tool head's text as the one line the head has room for: the first line that
+/// says something, with `…` after it when more lines follow. A width the line
+/// overruns is the head's own ellipsis.
+pub(crate) fn one_line(text: &str) -> String {
+    let mut lines = text.lines().map(str::trim).filter(|line| !line.is_empty());
+    let Some(first) = lines.next() else {
+        return String::new();
+    };
+    if lines.next().is_some() {
+        format!("{first} …")
+    } else {
+        first.to_string()
+    }
 }
 
 /// The tool's head height, its icon box, and the label size above a payload —

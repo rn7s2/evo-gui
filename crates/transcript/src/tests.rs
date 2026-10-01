@@ -776,6 +776,44 @@ fn a_tool_calls_sentence_comes_from_its_arguments() {
     assert!(summary.ends_with('…'));
 }
 
+/// A tool head is one line: a multi-line command shows its first line and `…`,
+/// and a line wider than the head gives way to the status, which stays in the card.
+#[test]
+fn a_tool_heads_text_is_one_line() {
+    use crate::rows::one_line;
+    assert_eq!(one_line("make test"), "make test");
+    assert_eq!(
+        one_line("\n  cd repo && python3 - <<'EOF'\nprint(1)\nEOF\n"),
+        "cd repo && python3 - <<'EOF' …"
+    );
+    assert_eq!(one_line("  \n "), "");
+}
+
+#[gpui_kit::test]
+fn a_long_tool_head_keeps_its_status_in_the_card(cx: &mut TestAppContext) {
+    let long = format!(
+        "cd ~/coding/evo-gui && {}\nsecond line\n}}",
+        "grep -n pattern file; ".repeat(40)
+    );
+    let call = item(json!({
+        "id": "t_1", "ts": 1, "kind": "tool", "call_id": "c_1", "name": "bash",
+        "args": { "command": long }, "status": "ok",
+    }));
+    let (_view, cx) = open!(cx, vec![call]);
+    cx.update(|window, cx| window.render_frame(cx));
+    cx.update(|window, _| {
+        let head = window.find(row_id("transcript-tool", "t_1")).bounds();
+        let status = window
+            .find(row_id("transcript-tool-status", "t_1"))
+            .bounds();
+        assert_eq!(head.size.height, px(34.), "the head stays one line tall");
+        assert!(
+            status.right() <= head.right() && status.left() > head.left(),
+            "the status stays inside the head: {status:?} in {head:?}"
+        );
+    });
+}
+
 /// Switching agent starts the new transcript at its latest item, whatever the old
 /// one's reader was doing.
 #[gpui_kit::test]
