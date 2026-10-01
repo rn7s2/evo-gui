@@ -165,6 +165,9 @@ pub struct TabRecord {
     pub folder: Option<PathBuf>,
     /// The session it resumed, when it has one — what makes a tab resumable.
     pub session: Option<PathBuf>,
+    /// Whether it is a swarm or one `evo-agent` (§7.2), which is what the app writes
+    /// into its own record of the session.
+    pub swarm: bool,
 }
 
 impl TabRecord {
@@ -197,6 +200,7 @@ pub fn open_tabs(cx: &App) -> (Vec<TabRecord>, Option<usize>) {
             store_id: record.store_id,
             folder: record.folder,
             session: record.session,
+            swarm: record.swarm,
         })
         .collect();
     (records, Some(view.selected_index()))
@@ -245,6 +249,9 @@ pub fn remember_tab_set(state: &mut AppState, records: &[TabRecord], selected: O
             known.as_ref().map_or(0, |recent| recent.lanes),
         )
         .open_at_quit();
+        // Which program wrote this session: the app's own record, for a history row that
+        // has no index entry to read it from (§2, §7.2).
+        recent.swarm = record.swarm;
         recent.when = when.clone();
         if let Some(known) = known {
             recent.models = known.models;
@@ -329,6 +336,7 @@ mod tests {
             store_id: None,
             folder: folder.map(PathBuf::from),
             session: session.map(PathBuf::from),
+            swarm: true,
         }
     }
 
@@ -340,6 +348,7 @@ mod tests {
             store_id: Some(StoredTabId::parse("9f2c1a").unwrap()),
             folder: Some(PathBuf::from("/coding/a")),
             session: Some(PathBuf::from("/sessions/one.sexp")),
+            swarm: true,
         };
         remember_tab_set(&mut state, &[started, record(5, None, None)], Some(1));
 

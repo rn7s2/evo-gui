@@ -41,7 +41,11 @@
 //!                                 where ID lands in each, and how long it has
 //!                                 really been since the `tap` before it: a
 //!                                 transition, frame by frame
-//! launch                          launch the shown tab in the world's folder
+//! launch                          launch the shown tab in the world's folder,
+//!                                 with the plan its own controls carry (§7.2) —
+//!                                 so the workers card's switch decides the
+//!                                 program, and a model or an effort the script
+//!                                 moved is the one the launch passes
 //! wait-running                    wait for the shown tab to be running
 //! quit                            ask the app to quit, the menu item's way
 //! quit-wait [SECS]                wait for every swarm the quit stopped to be gone
@@ -491,12 +495,15 @@ fn run(world: &str, out: &Path, script: &str) -> Result<(), Error> {
             "launch" => {
                 let tab = cx.update(|cx| view.read(cx).selected_tab().clone());
                 let folder = folder.clone();
+                // What the page's own controls carry, which is what a person's
+                // click emits (`TabContent::request_launch`, §7.2, §1): the
+                // workers card's switch is the program, so a script that flips it
+                // launches the other one. The plan used to be `default()` — always
+                // a swarm — which made the switch unexercisable from here.
+                let plan = cx.update(|cx| tab.read(cx).launch_plan(cx));
                 cx.update(move |cx| {
                     tab.update(cx, |_tab, cx| {
-                        cx.emit(TabContentEvent::Launch {
-                            folder,
-                            plan: session::LaunchPlan::default(),
-                        })
+                        cx.emit(TabContentEvent::Launch { folder, plan })
                     })
                 });
             }

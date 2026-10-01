@@ -30,6 +30,7 @@
 //! tab.select(AgentKey::Lane(2))         the center column shows another agent
 //! ```
 
+pub mod attachments;
 mod completion;
 mod format;
 mod item;
@@ -40,6 +41,7 @@ mod swarm;
 mod tab;
 mod topic;
 
+pub use attachments::{turn as attachment_turn, Attached, FILES_HEADING};
 pub use completion::{
     byte_offset, char_offset, complete_request, completion, Completion, CompletionItem,
     CompletionKind,

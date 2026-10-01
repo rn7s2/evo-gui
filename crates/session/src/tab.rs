@@ -456,7 +456,20 @@ impl TabModel {
     /// which is what a queued input is cancelled by; the row itself arrives as an
     /// `item.add` on topic `session`.
     pub fn send_input(&self, text: &str, queue: crate::Queue) -> crate::OpRequest {
-        crate::OpRequest::input_send(text, Vec::new(), queue, Some("session"))
+        self.send_input_with(text, Vec::new(), queue)
+    }
+
+    /// The same, carrying the turn's images ([`crate::attachments`], CONTRACT §5.5): one
+    /// `{path}` or `{name, media_type, data}` entry each, as [`crate::attachment_turn`]
+    /// builds them. What the *text* says about a file the reader attached is already in
+    /// it — a message's files travel as their paths, in the message.
+    pub fn send_input_with(
+        &self,
+        text: &str,
+        images: Vec<serde_json::Value>,
+        queue: crate::Queue,
+    ) -> crate::OpRequest {
+        crate::OpRequest::input_send(text, images, queue, Some("session"))
     }
 
     /// Take back an input still queued.

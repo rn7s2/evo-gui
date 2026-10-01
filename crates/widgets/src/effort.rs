@@ -30,6 +30,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     div, px, relative, AnyElement, App, Bounds, BoxShadow, ElementId, FocusHandle,
     InteractiveElement as _, IntoElement as _, KeyDownEvent, MouseButton, MouseDownEvent,
@@ -465,6 +466,10 @@ pub struct EffortSlider {
     rail: Rc<Cell<Bounds<Pixels>>>,
     /// Whether the app is asking for less movement, so a change lands at once.
     reduce_motion: bool,
+    /// Drawn where it is and taking nothing: no click, no drag, no arrow, no tab
+    /// stop. A control its owner has turned off — the workers card with the
+    /// single-agent switch off — keeps showing the level it holds.
+    disabled: bool,
     /// A re-render the caller lends the slider, so a press draws its thumb in the
     /// same frame rather than on the next one the caller happens to do.
     notify: Option<Notify>,
@@ -506,6 +511,7 @@ impl EffortSlider {
             motion,
             rail: Rc::new(Cell::new(Bounds::default())),
             reduce_motion: false,
+            disabled: false,
             notify: None,
             on_change: None,
         }
@@ -528,6 +534,15 @@ impl EffortSlider {
     /// `cx.reduce_motion()`; on, every change lands where it is going.
     pub fn reduce_motion(mut self, reduce_motion: bool) -> Self {
         self.reduce_motion = reduce_motion;
+        self
+    }
+
+    /// Draw the slider without taking anything: the rail, the ticks, the fill and
+    /// the thumb stay where the level puts them, and no pointer or keyboard event
+    /// moves it. The caller owns the grey — this widget draws the control, its
+    /// owner the state it is in.
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
         self
     }
 
@@ -590,6 +605,9 @@ impl EffortSlider {
     /// what lets a 140ms move be walked frame by frame instead of slept through.
     pub fn render_at(self, window: &Window, now: Instant) -> AnyElement {
         let last = self.levels.len().saturating_sub(1);
+        // A disabled slider paints itself and takes nothing: every handler below is
+        // registered only while it is live.
+        let live = !self.disabled;
         let ink = self.palette;
         let focused = self.focus.as_ref().is_some_and(|f| f.is_focused(window));
         let frame = self.motion.frame(
@@ -723,70 +741,75 @@ impl EffortSlider {
             .relative()
             .h(px(HEIGHT))
             .w_full()
-            .cursor_pointer()
             .child(rail)
-            .on_hover({
-                let (motion, notify) = (self.motion.clone(), self.notify.clone());
-                move |hovered: &bool, _window: &mut Window, cx: &mut App| {
-                    motion.set_hovered(*hovered);
-                    if let Some(notify) = &notify {
-                        notify(cx);
-                    }
-                }
-            })
-            .on_mouse_down(MouseButton::Left, {
-                let (motion, notify, pick) =
-                    (self.motion.clone(), self.notify.clone(), pick.clone());
-                move |event: &MouseDownEvent, window: &mut Window, cx: &mut App| {
-                    motion.set_down(true);
-                    if let Some(notify) = &notify {
-                        notify(cx);
-                    }
-                    pick(event.position.x.into(), window, cx);
-                }
-            })
-            .on_mouse_move({
-                let pick = pick.clone();
-                move |event: &MouseMoveEvent, window: &mut Window, cx: &mut App| {
-                    // The design's `if (e.buttons & 1)`: a move drags only while a
-                    // button is down, never on a bare hover.
-                    if event.pressed_button == Some(MouseButton::Left) {
-                        pick(event.position.x.into(), window, cx);
-                    }
-                }
-            })
-            .on_mouse_up(MouseButton::Left, {
-                let (motion, notify) = (self.motion.clone(), self.notify.clone());
-                move |_event: &MouseUpEvent, _window: &mut Window, cx: &mut App| {
-                    motion.set_down(false);
-                    if let Some(notify) = &notify {
-                        notify(cx);
-                    }
-                }
-            })
-            .on_mouse_up_out(MouseButton::Left, {
-                let (motion, notify) = (self.motion.clone(), self.notify.clone());
-                move |_event: &MouseUpEvent, _window: &mut Window, cx: &mut App| {
-                    motion.set_down(false);
-                    if let Some(notify) = &notify {
-                        notify(cx);
-                    }
-                }
-            })
-            .on_key_down({
-                let (levels, on_change) = (self.levels.len(), self.on_change.clone());
-                let level = self.level;
-                move |event: &KeyDownEvent, window: &mut Window, cx: &mut App| {
-                    let last = levels.saturating_sub(1);
-                    if let Some(next) = step(level, &event.keystroke.key, last) {
-                        cx.stop_propagation();
-                        if let Some(on_change) = &on_change {
-                            on_change(next, window, cx);
+            // Everything that could move it, wired only while it is live: a disabled
+            // slider is drawn and read, never touched.
+            .when(live, |slider| {
+                slider
+                    .cursor_pointer()
+                    .on_hover({
+                        let (motion, notify) = (self.motion.clone(), self.notify.clone());
+                        move |hovered: &bool, _window: &mut Window, cx: &mut App| {
+                            motion.set_hovered(*hovered);
+                            if let Some(notify) = &notify {
+                                notify(cx);
+                            }
                         }
-                    }
-                }
+                    })
+                    .on_mouse_down(MouseButton::Left, {
+                        let (motion, notify, pick) =
+                            (self.motion.clone(), self.notify.clone(), pick.clone());
+                        move |event: &MouseDownEvent, window: &mut Window, cx: &mut App| {
+                            motion.set_down(true);
+                            if let Some(notify) = &notify {
+                                notify(cx);
+                            }
+                            pick(event.position.x.into(), window, cx);
+                        }
+                    })
+                    .on_mouse_move({
+                        let pick = pick.clone();
+                        move |event: &MouseMoveEvent, window: &mut Window, cx: &mut App| {
+                            // The design's `if (e.buttons & 1)`: a move drags only while a
+                            // button is down, never on a bare hover.
+                            if event.pressed_button == Some(MouseButton::Left) {
+                                pick(event.position.x.into(), window, cx);
+                            }
+                        }
+                    })
+                    .on_mouse_up(MouseButton::Left, {
+                        let (motion, notify) = (self.motion.clone(), self.notify.clone());
+                        move |_event: &MouseUpEvent, _window: &mut Window, cx: &mut App| {
+                            motion.set_down(false);
+                            if let Some(notify) = &notify {
+                                notify(cx);
+                            }
+                        }
+                    })
+                    .on_mouse_up_out(MouseButton::Left, {
+                        let (motion, notify) = (self.motion.clone(), self.notify.clone());
+                        move |_event: &MouseUpEvent, _window: &mut Window, cx: &mut App| {
+                            motion.set_down(false);
+                            if let Some(notify) = &notify {
+                                notify(cx);
+                            }
+                        }
+                    })
+                    .on_key_down({
+                        let (levels, on_change) = (self.levels.len(), self.on_change.clone());
+                        let level = self.level;
+                        move |event: &KeyDownEvent, window: &mut Window, cx: &mut App| {
+                            let last = levels.saturating_sub(1);
+                            if let Some(next) = step(level, &event.keystroke.key, last) {
+                                cx.stop_propagation();
+                                if let Some(on_change) = &on_change {
+                                    on_change(next, window, cx);
+                                }
+                            }
+                        }
+                    })
             });
-        if let Some(focus) = self.focus.clone() {
+        if let (true, Some(focus)) = (live, self.focus.clone()) {
             slider = slider.track_focus(&focus);
         }
         slider.into_any_element()
@@ -1272,6 +1295,8 @@ mod naming {
         /// What the slider last asked for, which is what a caller's own state is
         /// fed from.
         seen: Rc<Cell<usize>>,
+        /// Whether the caller has turned the slider off.
+        disabled: Rc<Cell<bool>>,
     }
 
     /// What a test drives a host by, once the host itself is in a window.
@@ -1279,6 +1304,7 @@ mod naming {
         level: Rc<Cell<usize>>,
         now: Rc<Cell<Instant>>,
         seen: Rc<Cell<usize>>,
+        disabled: Rc<Cell<bool>>,
     }
 
     impl Host {
@@ -1286,13 +1312,20 @@ mod naming {
             let level = Rc::new(Cell::new(level));
             let now = Rc::new(Cell::new(Instant::now()));
             let seen = Rc::new(Cell::new(usize::MAX));
+            let disabled = Rc::new(Cell::new(false));
             let host = Host {
                 level: level.clone(),
                 now: now.clone(),
                 motion: Rc::new(Motion::new()),
                 seen: seen.clone(),
+                disabled: disabled.clone(),
             };
-            let handles = Handles { level, now, seen };
+            let handles = Handles {
+                level,
+                now,
+                seen,
+                disabled,
+            };
             (host, handles)
         }
     }
@@ -1366,6 +1399,7 @@ mod naming {
             let seen = self.seen.clone();
             let slider = EffortSlider::new("effort", self.level.get(), self.motion.clone())
                 .palette(&store::design::LIGHT)
+                .disabled(self.disabled.get())
                 .on_change(move |next, _window, _cx| seen.set(next));
             div()
                 .id("slider-host")
@@ -1488,6 +1522,47 @@ mod naming {
         assert!(
             (home - low).abs() < 0.5,
             "the way back ends where it started: {home} vs {low}"
+        );
+    }
+
+    /// A caller that turns the slider off gets a control that is drawn where it
+    /// is and takes nothing: no click on the rail, no arrow on the keyboard. The
+    /// same two gestures on a live slider move it, which is what makes the
+    /// switched-off one's silence say something.
+    #[gpui_kit::test]
+    fn a_disabled_slider_is_drawn_and_takes_nothing(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (host, handles) = Host::new(2);
+        let (_host, cx) = cx.add_window_view(|_window, _cx| host);
+        handles.draw(2, 0, cx);
+        let rest = handles.thumb_at(cx);
+
+        // Live: a click at the rail's own middle is a change.
+        let at = handles.part("effort", cx).center();
+        press(cx, at);
+        release(cx, at);
+        handles.draw(2, 140, cx);
+        assert_eq!(handles.seen.get(), 2, "a live slider takes the click");
+        assert!(
+            (handles.thumb_at(cx) - rest).abs() < 0.01,
+            "and it was already there"
+        );
+
+        // Off: the same click, and the arrows, are nothing at all.
+        handles.seen.set(usize::MAX);
+        handles.disabled.set(true);
+        handles.draw(2, 140, cx);
+        assert!(
+            (handles.thumb_at(cx) - rest).abs() < 0.01,
+            "a disabled slider still draws its own level"
+        );
+        press(cx, at);
+        release(cx, at);
+        handles.draw(2, 140, cx);
+        assert_eq!(
+            handles.seen.get(),
+            usize::MAX,
+            "a click on a disabled rail asks for nothing"
         );
     }
 

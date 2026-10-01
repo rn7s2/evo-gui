@@ -6,3 +6,6 @@ edition.workspace = true
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
+# A pasted image travels as base64 in `input.send`'s `images` (§5.5): encoding it is
+# the client's job, and this is the encoder already in the tree.
+base64 = { workspace = true }
