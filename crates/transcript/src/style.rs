@@ -8,7 +8,7 @@ use gpui_kit::{
     px, rems, App, FontWeight, Global, Hsla, Overflow, Pixels, SharedString, StyleRefinement,
     Styled as _,
 };
-use store::design;
+use store::design::{self, INSET};
 
 /// The transcript's font zoom: the scale every text size and line height the
 /// transcript draws is multiplied by (§7.2).
@@ -74,11 +74,13 @@ impl TranscriptZoom {
     }
 }
 
-/// The widest a row's content gets.
+/// The widest a row's content gets, at the design's own type size.
 ///
 /// A column wider than this centres the same measure instead of letting a line
 /// run the full width of a maximised window; tables and code blocks inside a
-/// message share it, so the whole transcript reads as one column.
+/// message share it, so the whole transcript reads as one column. The measure the
+/// transcript actually draws at is [`Palette::measure`] — this number times the
+/// reader's zoom (§7.2).
 pub(crate) const MEASURE: f32 = 800.;
 
 /// The markdown table's frame radius (`Rows.css`'s
@@ -150,6 +152,34 @@ impl Palette {
     /// around text are *not* scaled: they stay the design's own.
     pub(crate) fn scaled(&self, value: f32) -> Pixels {
         px(value * self.zoom)
+    }
+
+    /// The reading measure at the reader's zoom: the design's own 800px column, widened
+    /// and narrowed with the type (§7.2).
+    ///
+    /// What a line holds is not the column's width in pixels but its width *in ems*: 800
+    /// pixels of a 13px face is some hundred characters, and at 150% the same 800 pixels
+    /// would hold two thirds of a line — while at 75% it would hold half as much again.
+    /// A reader who reaches for Zoom In is asking for the same page, bigger, so the column
+    /// is scaled with the type and the line stays the design's own.
+    ///
+    /// It is a **maximum**, not a width: every box that uses it is `w_full` first, so a
+    /// window narrower than the measure fills its pane exactly as it does at 100%. Nothing
+    /// here is a floor either — a maximised window centres the measure rather than
+    /// stretching it.
+    pub(crate) fn measure(&self) -> Pixels {
+        px(MEASURE * self.zoom)
+    }
+
+    /// What the measure holds inside it: the column less the page's own inset on each
+    /// side. This is the width a line, a table or a display formula may actually use.
+    ///
+    /// The inset stays the design's 16px at every zoom: it is the page's gutter, not the
+    /// text's, and leaving it fixed costs the line 1.4% more characters than at 100% (at
+    /// 150%) or 1.4% fewer (at 75%) — under what a reader can feel, and cheaper to read
+    /// than a gutter that grows into the column.
+    pub(crate) fn measure_content(&self) -> Pixels {
+        self.measure() - px(2. * INSET)
     }
 
     /// A card's hairline: `color-mix(in srgb, var(--fg) 17%, var(--bg))` — the

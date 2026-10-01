@@ -18,7 +18,7 @@ use session::{Item, ItemKind};
 use crate::rows::{
     cap_fields, cap_text, json_fields, row_id, take_chars, thinking_tail, Cap, FieldValue,
     CONTEXT_BLOCK_LINES, RESULT_LIMIT, TC_BODY_INDENT, THINKING_TAIL_CHARS, TURN_LABEL_OVERHANG,
-    VALUE_LIMIT,
+    USER_LINE, VALUE_LIMIT,
 };
 use crate::TranscriptView;
 
@@ -2841,4 +2841,217 @@ fn a_relative_path_is_measured_from_the_tabs_folder(cx: &mut TestAppContext) {
         [disk.file()],
         "a relative path with no folder to measure it from opens nothing"
     );
+}
+
+// --- the reading measure and the reader's zoom (§7.2) ---------------------------------
+
+/// The transcript in a pane of its own width: a headless test's window is maximised, and a
+/// fixed box is how a narrow pane — or one narrower than the reader's measure — is arranged.
+struct PaneHost {
+    transcript: Entity<TranscriptView>,
+    width: f32,
+}
+
+impl PaneHost {
+    fn new(width: f32, cx: &mut Context<Self>) -> Self {
+        Self {
+            transcript: cx.new(TranscriptView::new),
+            width,
+        }
+    }
+}
+
+impl Render for PaneHost {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div().flex().flex_col().size_full().child(
+            div()
+                .id("pane-host")
+                .test_support()
+                .w(px(self.width))
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .child(div().flex_1().min_h_0().child(self.transcript.clone())),
+        )
+    }
+}
+
+/// Open a transcript in a pane `width` pixels wide.
+fn open_in(
+    cx: &mut TestAppContext,
+    width: f32,
+    items: Vec<Item>,
+) -> (Entity<TranscriptView>, &mut gpui_kit::VisualTestContext) {
+    cx.update(gpui_kit::init);
+    let (host, cx) = cx.add_window_view(|_window, cx| PaneHost::new(width, cx));
+    let view = cx.read(|cx| host.read(cx).transcript.clone());
+    view.update(cx, |view, cx| view.replace(items, cx));
+    frames(cx, 2);
+    (view, cx)
+}
+
+/// The reader's zoom, for the whole app: one global, so every transcript on screen redraws
+/// at the new size.
+fn set_zoom(cx: &mut gpui_kit::VisualTestContext, scale: f32) {
+    cx.update(|_, cx| crate::TranscriptZoom(scale).set(cx));
+    frames(cx, 2);
+}
+
+/// The reading column's own box: the padded one the list centres, whose id says which slot
+/// of the record it belongs to.
+fn column_width(cx: &mut gpui_kit::VisualTestContext) -> gpui_kit::Pixels {
+    cx.update(|window, _| {
+        window
+            .find(("transcript-column", 0usize))
+            .bounds()
+            .size
+            .width
+    })
+}
+
+/// The whole pane the transcript is drawn in.
+fn pane_width(cx: &mut gpui_kit::VisualTestContext) -> gpui_kit::Pixels {
+    pane(cx).size.width
+}
+
+/// A row's box, by the id its wrapper carries, in the window the reader is looking at.
+fn row_box(
+    cx: &mut gpui_kit::VisualTestContext,
+    id: gpui_kit::ElementId,
+) -> gpui_kit::Bounds<gpui_kit::Pixels> {
+    cx.update(|window, _| window.find(id).bounds())
+}
+
+/// One row's measure box: the width a line of it may use.
+fn measure_width(cx: &mut gpui_kit::VisualTestContext, id: &str) -> gpui_kit::Pixels {
+    row_box(cx, row_id("transcript-measure", id)).size.width
+}
+
+/// The reading measure follows the reader's zoom: the design's 800px column at 100%, and
+/// half again at 150%, so a line holds the same number of characters at every zoom. It is a
+/// **maximum** — a pane narrower than the measure fills the pane, as it always has — and
+/// the page's own inset stays the design's 16px inside it, so a line gets the column less
+/// 32.
+#[gpui_kit::test]
+fn the_reading_measure_follows_the_zoom(cx: &mut TestAppContext) {
+    let (_view, cx) = open_in(cx, 1600., vec![user("u_1", "a turn of its own")]);
+    assert_eq!(pane_width(cx), px(1600.), "the fixture pane");
+    for (scale, column) in [(1.0, 800.), (1.5, 1200.), (0.75, 600.), (2.0, 1600.)] {
+        set_zoom(cx, scale);
+        assert_eq!(column_width(cx), px(column), "the column at {scale}×");
+        assert_eq!(
+            measure_width(cx, "u_1"),
+            px(column - 32.),
+            "and what a line of it may use, at {scale}×"
+        );
+    }
+
+    // The design's own size is exactly what it was before the measure scaled, and the
+    // column is centred in its pane rather than stretched by it.
+    set_zoom(cx, 1.0);
+    assert_eq!(column_width(cx), px(800.));
+    assert_eq!(measure_width(cx, "u_1"), px(768.));
+}
+
+/// A pane narrower than the reader's measure is the pane: 150% of 800px is 1200px and a
+/// 1000px window has 1000 of them, so the column is the pane and a line is the pane less
+/// its insets.
+#[gpui_kit::test]
+fn a_pane_narrower_than_the_measure_is_the_pane(cx: &mut TestAppContext) {
+    let (_view, cx) = open_in(cx, 1000., vec![user("u_1", "a turn of its own")]);
+    assert_eq!(pane_width(cx), px(1000.), "the fixture pane");
+    for (scale, column) in [(1.0, 800.), (1.5, 1000.), (2.0, 1000.), (0.75, 600.)] {
+        set_zoom(cx, scale);
+        assert_eq!(column_width(cx), px(column), "the column at {scale}×");
+        assert_eq!(
+            measure_width(cx, "u_1"),
+            px(column - 32.),
+            "and what a line of it may use, at {scale}×"
+        );
+    }
+}
+
+/// What the scaled measure is *for*: the same paragraph is the same number of lines at 150%
+/// as at 100%, in a pane wide enough to be the measure's own. Unscaled, the line would hold
+/// two thirds of the words at 150% and the paragraph would be half again as many lines.
+#[gpui_kit::test]
+fn a_line_holds_the_same_words_at_every_zoom(cx: &mut TestAppContext) {
+    let sentence = "The measure is what a reader's line is: the design gives it to a window, \
+                    and the reader's zoom gives it a size. ";
+    let paragraph = sentence.repeat(8);
+    let (_view, cx) = open_in(cx, 1600., vec![user("u_1", &paragraph)]);
+
+    // The lines a plain row's own text is drawn in: its box over the line box it draws on,
+    // which is the design's 21px at the reader's zoom.
+    let lines = |cx: &mut gpui_kit::VisualTestContext, scale: f32| -> f32 {
+        set_zoom(cx, scale);
+        let text = row_box(cx, row_id("transcript-user-text", "u_1"));
+        let line =
+            cx.update(|_, cx| f32::from(crate::style::Palette::from_app(cx).scaled(USER_LINE)));
+        f32::from(text.size.height) / line
+    };
+
+    let at_100 = lines(cx, 1.0);
+    assert!(
+        at_100 > 4.,
+        "the fixture is a paragraph, not a line: {at_100}"
+    );
+    let at_150 = lines(cx, 1.5);
+    assert!(
+        (at_100 - at_150).abs() <= 1.,
+        "{at_100} lines at 100%, {at_150} at 150%: the column did not follow the type"
+    );
+    let at_75 = lines(cx, 0.75);
+    assert!(
+        (at_100 - at_75).abs() <= 1.,
+        "{at_100} lines at 100%, {at_75} at 75%"
+    );
+}
+
+/// A zoom is a change of measure, not of place (§7.2): the rows are re-measured, and the
+/// reader is where they were — at the tail one stays at the tail, and one reading back keeps
+/// the row they were on.
+#[gpui_kit::test]
+fn a_zoom_keeps_the_readers_place(cx: &mut TestAppContext) {
+    let items: Vec<Item> = (0..300)
+        .map(|i| {
+            user(
+                &format!("u_{i:04}"),
+                "a turn of its own, long enough that its row is a few lines tall in the pane",
+            )
+        })
+        .collect();
+    let ids: Vec<String> = (0..300).map(|i| format!("u_{i:04}")).collect();
+    let (view, cx) = open!(cx, items);
+
+    // Following the tail: every zoom still shows the newest row, and the pin holds.
+    for scale in [1.5, 0.75, 2.0, 1.0] {
+        set_zoom(cx, scale);
+        assert!(drawn_row(cx, "u_0299"), "the newest row at {scale}×");
+        assert!(
+            cx.read(|cx| view.read(cx).is_following_tail(cx)),
+            "a follower is still a follower at {scale}×"
+        );
+    }
+
+    // Reading back: the row at the top of the pane is the one the reader was on.
+    wheel(cx, 600.);
+    wheel(cx, 600.);
+    let before = top_row_in_pane(cx, &ids).expect("a row at the top of the pane");
+    assert!(
+        cx.read(|cx| view.read(cx).is_away_from_latest(cx)),
+        "the reader is reading back"
+    );
+    set_zoom(cx, 1.5);
+    let after = top_row_in_pane(cx, &ids).expect("a row at the top of the pane");
+    assert_eq!(
+        before, after,
+        "the reader keeps the row they were on when the measure changes"
+    );
+    assert!(cx.read(|cx| view.read(cx).is_away_from_latest(cx)));
+
+    // And a second zoom leaves them on it again.
+    set_zoom(cx, 0.75);
+    assert_eq!(top_row_in_pane(cx, &ids).as_deref(), Some(after.as_str()));
 }

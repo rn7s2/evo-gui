@@ -34,7 +34,7 @@ use session::{
 use crate::imgcheck::picture;
 use crate::ImageState;
 
-use crate::style::{mix, text_style, Palette, BLOCK_GAP, GROUP_GAP, MEASURE, TIGHT_GAP, TURN_GAP};
+use crate::style::{mix, text_style, Palette, BLOCK_GAP, GROUP_GAP, TIGHT_GAP, TURN_GAP};
 use crate::{link, markdown, TranscriptData, TranscriptView};
 use widgets::glyph;
 
@@ -619,7 +619,9 @@ pub(crate) fn render_row(
                 .id(row_id("transcript-measure", &item.id))
                 .w_full()
                 .min_w_0()
-                .max_w(px(MEASURE))
+                // The reading measure at the reader's zoom (§7.2) — the same column as
+                // at 100%, at a size that holds the same line.
+                .max_w(palette.measure())
                 // The body size of the transcript, at the reader's zoom (§7.2):
                 // what a row does not set a size of its own inherits this — the
                 // message's markdown among them, which reads it off the ambient
@@ -716,7 +718,7 @@ const TURN_LABEL_LINE: f32 = 18.;
 /// `.user-row{font-size:14px;line-height:1.5}` — the two numbers, at the design's
 /// own zoom.
 const USER_SIZE: f32 = 14.;
-const USER_LINE: f32 = 21.;
+pub(crate) const USER_LINE: f32 = 21.;
 
 fn user_row(
     id: ItemId,
@@ -821,8 +823,12 @@ fn image_row(
                     // picture carries the frame's radius less its border itself — or its
                     // square corners show outside the frame's curve.
                     .child(
-                        picture(frame.clone(), if full { FULL_IMAGE } else { THUMBNAIL })
-                            .rounded(palette.radius - px(1.)),
+                        picture(
+                            frame.clone(),
+                            palette.scaled(if full { FULL_IMAGE } else { THUMBNAIL }),
+                            palette.scaled(IMAGE_WIDTH),
+                        )
+                        .rounded(palette.radius - px(1.)),
                     )
                     .test_support()
                     .into_any_element()
@@ -851,8 +857,14 @@ fn image_row(
 
 /// How tall a thumbnail is, and how tall the same picture is when it is opened: a row is a
 /// row until the reader asks for the whole picture.
-const THUMBNAIL: Pixels = px(120.);
-const FULL_IMAGE: Pixels = px(340.);
+///
+/// The numbers are the design's own at 100%, and they follow the reader's zoom like the
+/// rest of a row's content: a screenshot is read, not framed, so at 150% it is half again
+/// as large rather than a thumbnail adrift in a column twice as wide (§7.2).
+const THUMBNAIL: f32 = 120.;
+const FULL_IMAGE: f32 = 340.;
+/// How wide one may be drawn (`imgcheck::picture`'s own cap at 100%).
+const IMAGE_WIDTH: f32 = 520.;
 
 /// One image the transcript is not showing: a muted line saying what it is and where it
 /// got to, in place of a hole.
