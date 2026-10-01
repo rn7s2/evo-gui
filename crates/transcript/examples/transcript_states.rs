@@ -22,8 +22,9 @@
 //! The record is [`ITEMS`] items — turns, markdown with headings, lists, a table, a code
 //! fence and TeX, tool calls, lane reports, notices, goal rows, a compaction divider and
 //! thinking text — and every state below is reached the way a reader reaches it: a wheel
-//! over the list, a press on the pill, a message growing under a pinned reader, the zoom
-//! the menu sets, a window that changes shape. Nothing pokes the view's fields.
+//! over the list, a press on the pill, a message growing under a pinned reader, a card
+//! folded open under the pointer, the zoom the menu sets, a window that changes shape.
+//! Nothing pokes the view's fields.
 //!
 //! Hosting is the app's own: the transcript sits in a `flex_1().min_h_0()` box, as
 //! `tab_page.rs`'s conversation column embeds it, in a *cached* view whose style is
@@ -691,6 +692,53 @@ fn stream(cx: &mut HeadlessAppContext, window: AnyWindowHandle, page: &Entity<Pa
     }
 }
 
+// ---------------------------------------------------------------------------
+// The two corners of a tool card's own ink.
+// ---------------------------------------------------------------------------
+
+/// The heads of the tool rows the pane has built, with where each was painted: the
+/// list builds a row when the pane reaches it, so this is the pane's own window onto
+/// the cards again.
+fn tool_heads(
+    cx: &mut HeadlessAppContext,
+    window: AnyWindowHandle,
+) -> Vec<(ElementId, Bounds<Pixels>)> {
+    let mut heads = Vec::new();
+    for n in 0..ITEMS {
+        let head: ElementId = (
+            ElementId::from(SharedString::from("transcript-tool")),
+            item_id(n),
+        )
+            .into();
+        let found = cx
+            .update_window(window, |_, window, _| {
+                window.try_find(head.clone()).map(|fact| fact.bounds())
+            })
+            .expect("the capture window is open");
+        if let Some(bounds) = found {
+            heads.push((head, bounds));
+        }
+    }
+    heads
+}
+
+/// A pane that has stopped moving: opening a card changes the height of a row above
+/// the one a reader is looking at, so a head probed before the list has settled is a
+/// head in the wrong place.
+fn settle(cx: &mut HeadlessAppContext, window: AnyWindowHandle) {
+    for _ in 0..6 {
+        cx.run_until_parked();
+        frames(cx, window, 2);
+    }
+}
+
+/// Put the pointer on a row, as a reader's does.
+fn hover(cx: &mut HeadlessAppContext, window: AnyWindowHandle, head: ElementId) {
+    cx.update_window(window, |_, window, cx| window.hover(head, cx))
+        .expect("the capture window is open");
+    settle(cx, window);
+}
+
 fn main() {
     let dir: PathBuf = std::env::args()
         .skip_while(|arg| arg != "--capture")
@@ -703,12 +751,35 @@ fn main() {
     let items = record();
     println!("[states] the record: {} items", items.len());
 
-    // The states, in the order they are read: the list's own places, then the pill and
-    // the walk back, then a message growing, then the scrollback's quiet line, then the
-    // reader's zoom, then a window that changes shape.
+    // The states, in the order they are read: the list's own places, a tool card's own
+    // two corners, then the pill and the walk back, then a message growing, then the
+    // scrollback's quiet line, then the reader's zoom, then a window that changes shape.
     type Setup = fn(&mut HeadlessAppContext, AnyWindowHandle, &Entity<Page>);
-    let states: [(&str, f32, Setup); 13] = [
+    let states: [(&str, f32, Setup); 15] = [
         ("bottom", 1., |_, _, _| {}),
+        ("tool-hover", 1., |cx, window, _| {
+            // A folded card under the pointer: the head's hover ink is the whole of
+            // the card's inside, so all four of its corners are the card's own.
+            settle(cx, window);
+            let shown = tool_heads(cx, window).into_iter().find(|(_, bounds)| {
+                bounds.top() >= px(60.) && bounds.bottom() <= px(WINDOW_SIZE.1)
+            });
+            if let Some((head, _)) = shown {
+                hover(cx, window, head);
+            }
+        }),
+        ("tool-open", 1., |cx, window, _| {
+            // An open card: the head's own ink reaches the top corners, and the body's
+            // fill the bottom ones, with the head's underside square between them.
+            settle(cx, window);
+            let last = tool_heads(cx, window).pop();
+            if let Some((head, _)) = last {
+                cx.update_window(window, |_, window, cx| window.click(head.clone(), cx))
+                    .expect("the capture window is open");
+                settle(cx, window);
+                hover(cx, window, head);
+            }
+        }),
         ("scrolled-up", 1., |cx, window, _| {
             for _ in 0..3 {
                 wheel(cx, window, SCREEN);
