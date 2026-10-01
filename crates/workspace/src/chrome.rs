@@ -155,11 +155,30 @@ pub fn fit_to_work_area(requested: Size<Pixels>, work_area: Bounds<Pixels>) -> B
 /// strip: it lets the title bar own dragging and double-clicking instead of the
 /// system (§7.1).
 pub fn window_options(cx: &App) -> WindowOptions {
-    WindowOptions {
+    let mut options = WindowOptions {
         window_bounds: Some(initial_window_bounds(cx)),
         window_min_size: Some(MIN_WINDOW_SIZE),
         ..TitleBar::window_options()
+    };
+    if let Some(titlebar) = options.titlebar.as_mut() {
+        titlebar.traffic_light_position = Some(traffic_light_position());
     }
+    options
+}
+
+/// AppKit's frame for each traffic light button: 14pt square, the circle
+/// centered in it.
+const TRAFFIC_BUTTON: f32 = 14.;
+
+/// Where the traffic lights sit: vertically centered in the tab strip.
+///
+/// `TitleBar`'s own `(9, 9)` centers them in its 34px bar, which leaves them
+/// 4px high in the 42px strip. The x stays at AppKit's 9.
+pub fn traffic_light_position() -> gpui_kit::Point<Pixels> {
+    point(
+        px(9.),
+        px((store::design::STRIP_HEIGHT - TRAFFIC_BUTTON) / 2.),
+    )
 }
 
 /// What the window is closed with (§9.8).
@@ -1052,6 +1071,16 @@ mod tests {
         ElementId, InputEvent as _, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
         MouseUpEvent, Point, TestAppContext, VisualTestContext,
     };
+
+    /// The traffic lights' 14pt buttons sit with equal room above and below
+    /// inside the strip.
+    #[test]
+    fn traffic_lights_are_centered_in_the_strip() {
+        let top = f32::from(traffic_light_position().y);
+        let bottom = store::design::STRIP_HEIGHT - top - TRAFFIC_BUTTON;
+        assert_eq!(top, bottom);
+        assert_eq!(top, 14.);
+    }
 
     /// A window of a given size, built by `build` — the production entry point,
     /// at the size this test cares about.
