@@ -249,8 +249,13 @@ its markdown source (it appears on hover, at the top of the message, and answers
 `Copied` when pressed), with a separate **Copy** on every fenced code block for
 the code alone.
 
-Scrolling back pages older items in from the server, across compactions: the
-scrollback is the whole session, not the model's current context.
+Scrolling back reaches the whole session, not the model's current context: the transcript holds
+every item the session has and draws it with a virtual list, so only the rows you can see are
+built (a journal of thousands of items scrolls like a short one). Older items behind the oldest
+one it holds are fetched from the server by the list itself — one page at a time, while the
+session still has more — and a quiet `Loading earlier items…` line at the head says so while a
+page is on its way; there is nothing to press, and a page that arrives is spliced in above you
+without moving what you are reading.
 
 The markdown is the subset a model actually writes — headings, lists, task lists,
 tables, quotes, rules, inline code — with four decisions worth knowing:

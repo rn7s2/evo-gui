@@ -3,6 +3,12 @@ name = "transcript"
 version.workspace = true
 edition.workspace = true
 
+[features]
+# The two numbers the tests hold this view to — how many rows a frame built, and how
+# many times the view rendered — and nothing else. Off by default, so a shipping
+# build carries no bookkeeping.
+test-support = []
+
 [dependencies]
 gpui-kit = { workspace = true }
 serde_json = { workspace = true }

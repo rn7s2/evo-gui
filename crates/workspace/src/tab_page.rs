@@ -740,7 +740,21 @@ impl TabContent {
             })
             // The view says what an agent with nothing to show means, and for which
             // agent.
-            .child(div().flex_1().min_h_0().children(view))
+            //
+            // It is embedded as a *cached* view: the transcript is a long subtree — a
+            // journal of thousands of rows — and everything else in the window notifies
+            // on its own schedule (a lane's breathing dot every frame, the composer's
+            // chips, the lane list). Without the cache each of those notifications
+            // re-renders and re-lays out the whole list; with it the transcript is
+            // rendered only when it or the data it reads is itself notified, or when the
+            // box it lives in changes shape.
+            .child(div().flex_1().min_h_0().children(view.map(|view| {
+                // A cached view is laid out from this style alone, never measured
+                // from its rows, so it must fill the box outright: `flex_1` would
+                // mean nothing in this block box and leave the transcript 0px tall.
+                gpui_kit::AnyView::from(view)
+                    .cached(gpui_kit::StyleRefinement::default().size_full())
+            })))
             .child(self.composer.clone())
             .into_any_element()
     }

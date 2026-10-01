@@ -13,7 +13,7 @@ build prompt; references like §9.4 in the code point at it.
 | `tab_engine` | pure Rust, no gpui | one tab's I/O, off the UI thread: spawn → snapshot → one stream → ops. Commands in, updates out over an `async-channel`; the UI folds the updates into `session`. |
 | `session` | pure Rust | the tab's view model: a mirror of the server's topics (`TabModel`: items, topic states, the lane list, the selection), the empty tab's `Launcher` (the four choosers, the history rows, the check's problems), and `OpRequest`/`OpSink` — the UI's actions as the ops of §5.5, handed to the transport rather than sent from here. |
 | `widgets` | gpui | the pieces more than one surface draws, from the design: the breathing dot a working agent wears, the effort slider, the chip. `store::design` owns their numbers and colours. |
-| `transcript` | gpui | the reading column: one agent's items, rendered markdown that stays rendered while it streams, tool/notice/lane rows, paging back, the thinking reveal. |
+| `transcript` | gpui | the reading column: one agent's items, rendered markdown that stays rendered while it streams, tool/notice/lane rows, the whole journal in a virtual list with older pages loading themselves, the thinking reveal. |
 | `agent_list` | gpui | the lanes column: its band (`Lanes`, and how many are busy), then `main` first and one row per lane — breathing dot, task, state or step clock, selection, reconnecting badge, the lane's own Stop. |
 | `composer` | gpui | the box at the foot of the conversation: the todo strip across its top, the drawers a chip folds out inside it, the input (2 rows to half the pane, Enter/Shift+Enter/Esc), and the foot row — the agent's segments as chips, and the one Send/Stop button. |
 | `workspace` | gpui | the window: title bar and tab strip, the empty tab (choosers, folder button, history, the check's problems), the tab page's two columns and the split between them, and the tab lifecycle that wires `tab_engine` to `session`. |
@@ -59,3 +59,14 @@ verified; a title-only message is not acceptable. Every message ends with the tr
 - The agent column is resizable by dragging the split (180–480 px, starting at 260), and
   its width is shared by every tab and kept in `app.json`; the conversation keeps 420 px.
   A double-click on the split puts it back.
+- The transcript is `gpui::list` over the whole record (`crates/transcript/src/lib.rs`): only the
+  rows the pane can reach are built, their heights live in the list's own sum tree, and every op
+  splices the list where the row belongs rather than rebuilding it. Older pages are fetched by the
+  view itself while its owner says the topic has more. The tab page embeds the view **cached**, so a
+  notification elsewhere in the window (a lane's breathing dot asks for a frame every frame) does not
+  re-render and re-lay-out the journal.
+  Two limits come with gpui's list, both of which the reader can feel but not lose data over: the
+  scrollbar's thumb is computed from the heights measured so far, so it is approximate until the rows
+  have been reached once; and a single very large scroll from far away lands at the end of the
+  *measured* region rather than at the record's foot, which the next scroll (or the pin, once the
+  reader is at the measured foot) closes.
