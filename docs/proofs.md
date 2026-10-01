@@ -12,10 +12,10 @@ EVO_SWARM_BIN=…/build/evo-swarm EVO_AGENT_BIN=…/build/evo-agent \
 
 The binaries come from the environment (`EVO_SWARM_BIN` / `EVO_AGENT_BIN`, else
 `/usr/local/bin`), and the scripted model is `evo-agent/tests/stub-messages.py`,
-found through `EVO_STUB_MESSAGES`, then beside this checkout's `evo-agent`
-sibling, then in this workspace's own `evo-agent`. `--nocapture` prints each
-proof's timings and what it asserted — the interesting half of a proof is the
-line it prints before it fails.
+found through `EVO_STUB_MESSAGES`, then in `EVO_AGENT_REPO`, then in the
+`evo-agent` checkout beside this one. `--nocapture` prints what each proof
+asserted, and how long it took where the proof times itself — the interesting half
+of a proof is the line it prints before it fails.
 
 ## The world each proof runs in
 
@@ -26,15 +26,19 @@ line it prints before it fails.
 `swarm.log` the server writes. `spawn` runs `store::launch`'s argv through
 `swarm_client` with the child's stdin held as a pipe, and readiness is the ready
 file: nothing here polls a health endpoint, picks a port, waits for a token file
-or compares pids.
+or compares pids. The whole directory is removed when the process is done —
+`EVO_PROOFS_KEEP=1` keeps it, which is where a failure is read from.
 
 A fixture is also what guarantees the servers are *gone* when it is: a proof's own
 `Server` stops itself (it holds the child's pipe, and EOF is the whole signal), but
-a server the app started — the captures, a UI test — belongs to nobody's `Drop` and
-would go on running after the process that drove it ends. So the fixture's `Drop`
-finds every process whose command line names its own temp directory (the ready file
-publishes the session's pid and leaves `supervisor_pid` null, so a pid is not
-enough), and stops them: `SIGTERM`, then `SIGKILL`.
+a server the app started — the captures, a UI test, `crates/app`'s own end-to-end
+test — belongs to nobody's `Drop` and would go on running after the process that
+drove it ends. So the fixture's `Drop` stops the process **groups this process
+started**, through `swarm_client::reap_spawned`: every server is spawned as its own
+group leader (`process_group(0)`, so its pid is the handle), the group is
+forgotten once nobody is left in it, and the signal is `SIGTERM` with `SIGKILL`
+for whatever a three-second wait is not enough for. Nothing is found by name,
+command line or pattern, and no other process's group is ever touched.
 
 `Watcher` (in `watch.rs`) is how a proof reads a server: one snapshot seeds a
 topic, items and state mirror, and every op of §5.3 keeps it current
@@ -54,11 +58,20 @@ client would be holding.
 | `t06_history_resume` | swarm | `evo-agent sessions --json` lists the session (one process, one document, no journal parsed here) and `--resume <that exact path>` brings the turn back. |
 | `t07_catalog_choosers` | no server at all | `evo-swarm catalog --json` fills the choosers — models, `lanes.models`, a registration with its provider — and `evo-swarm check --json` judges the launch the choosers describe, including refusing a model nothing registered, in evo's own words. |
 | `t08_quit_on_eof` | agent | §8's first rung, and the whole of the app's quit: closing the pipe the tab was started with ends the child — a tab that has served nothing **and** a tab that has answered a turn. |
+| `t09_queued_turn_is_sent` | swarm | A turn queued while the coordinator works is **drawn as sent** once it is steered in: `input.send` answers with the id it will have, `queue: now` (what the composer sends) is drained at the run's next step and `after_run` when the whole run ends, and the stream shows both reaching `status: sent` with the session back to `idle` — the app's own fold (`session::TabModel`) reading each as a `user` item whose status is `Sent`. |
+| `t10_stop_swarm_names_only_busy_lanes` | swarm | Two lanes, one working (`DELAY10`) and one idle: `run.interrupt` with scope `swarm` names `lane:1` **and never `lane:2`**, the note the coordinator reads is `[human] stopped lane 1 (interrupt)` — *lane*, singular — and the `human_action` item's own `lanes` is `[1]`. The bug it pins: a lane's own interrupt answers `{interrupted: []}` for an idle lane, and an empty array is non-NIL, so a swarm that read `(getf result :interrupted)` counted **every** lane as stopped. |
+| `t11_completion_and_levels` | agent | Three reads, against a real server: `complete` **counts characters where a box works in bytes** (a caret past two `✓`), and what the caret is on is the server's answer — `/` a command word, `/comp` in `run /comp now` that word, `/eval`'s content a **symbol** whose range reaches past the caret, `/usr/local` nothing; every model carries the `effort_levels` it takes, live and offline (`catalog --json` / `check --json`); and a command's lines are published **twice** — the reply's `notices` and session `notice` items alike. |
+| `t12_attachments` | agent | One turn carrying an image by path, pasted bytes and a table, where **only the images ride with the turn**: `images` gets one entry each (`{path}`, and `{name, media_type, data}` for the paste) and a file no payload at all — its **absolute** path is in the message's text, under `Attached files:`. The op is accepted, the reply's `item_id` is the row the snapshot publishes, both images name `/media/<id>/<n>` and fetch back the file as evo read it and the bytes as they were pasted. An image evo cannot read is refused `invalid_args` — the sentence the tab puts above the composer — and **adds no row**. |
+| `t13_images_resume` | swarm, resumed | §1's resume with a picture in it: a turn carrying an image by path is sent, the server is stopped and **the picture deleted from disk**, and the resumed session publishes the same item back — same id, same words, the same `href`, `media_type` and byte count — with `GET /media/<id>/0` answering the **journaled** bytes, which is what a resumed transcript's image row is drawn from; `image 1` is still a 404 and `GET /items/<id>` names the same media, while `input.send` with `topic: lane:1` and an image is `invalid_args`. |
 
 Every proof runs against `Program::Swarm` (`const PROGRAM`) — the server a tab
 really starts — except `t08`, which is about the pipe and names the agent because
-the coordinator a swarm is built on reads it the same way. `t07` starts no server
-at all: it reads the offline CLIs.
+the coordinator a swarm is built on reads it the same way, and `t11`/`t12`, which
+run a single `evo-agent` (`Program::Agent`, no lanes) to ask the server itself: a
+completion, a catalog, one turn's attachments. `t07` starts no server at all — it
+reads the offline CLIs — and `t13` is about what an **already-resumed** server
+answers, where `t04` and `t06` are the other two that come back to a session on
+disk.
 
 ## What the proofs found
 
@@ -99,6 +112,10 @@ Against the builds before the integration merge, and what happened to each:
 What the proofs deliberately do not cover is the shell: single instance, the
 window's bounds, the launch-time loads reaching the empty tab, Settings, the quit
 sequence, and a boot failure's own screen. Those are `crates/app/tests/`
-(`appearance`, `settings`, `quit`, `boot_failure`), plus each UI crate's own
-tests. The bundle is checked by hand: `scripts/bundle.sh`, then
+(`appearance`, `zoom`, `settings`, `quit`, `quit_settings`, `quit_swarm`,
+`boot_failure`), plus each UI crate's own tests. And one of them is not a shell but
+an end-to-end turn: `attachments_e2e` drives a **real `evo-agent serve`** through
+the app's own tab — the file dialog answered by an injected picker, one turn the
+server takes and one it refuses — and reads what the window drew, down to the
+transcript's image row. The bundle is checked by hand: `scripts/bundle.sh`, then
 `scripts/single_instance_check.sh`.
