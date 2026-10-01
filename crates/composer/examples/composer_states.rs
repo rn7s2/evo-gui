@@ -87,7 +87,7 @@ fn models() -> Vec<ModelRow> {
         },
         ModelRow {
             id: "stub-c".to_string(),
-            provider: "ark".to_string(),
+            provider: "acme".to_string(),
             detail: "1M ctx".to_string(),
             reason: Some("no credential".to_string()),
         },
@@ -102,7 +102,7 @@ fn many_models() -> Vec<ModelRow> {
     (0..10u8)
         .map(|n| ModelRow {
             id: format!("stub-{}", char::from(b'a' + n)),
-            provider: ["openai", "proxy", "ark"][n as usize % 3].to_string(),
+            provider: ["openai", "proxy", "acme"][n as usize % 3].to_string(),
             detail: format!("{}k ctx · effort low–max", (n as u32 + 1) * 100),
             reason: (n % 5 == 2).then(|| "no credential".to_string()),
         })
