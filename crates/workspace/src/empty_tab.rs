@@ -41,9 +41,9 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    div, px, AnyElement, App, BoxShadow, Context, ElementId, Entity, FocusHandle, Focusable as _,
-    Hsla, IntoElement, MouseButton, Pixels, ScrollHandle, SharedString, Subscription,
-    TestSupportExt as _, TextAlign, WeakEntity, Window,
+    div, px, AbsoluteLength, AnyElement, App, BoxShadow, Context, ElementId, Entity, FocusHandle,
+    Focusable as _, Hsla, IntoElement, MouseButton, Pixels, ScrollHandle, SharedString,
+    Subscription, TestSupportExt as _, TextAlign, WeakEntity, Window,
 };
 use serde_json::Value;
 use session::{HistoryEntry, LaunchPlan, Launcher, ModelOption, Role as Card};
@@ -90,6 +90,19 @@ const SELECT_PAD_R: Pixels = px(34.);
 /// line's own ink lands on the design's (measured off the probe's picture: the summary's
 /// ink sits 12..24 from the box's top, as it does in the design).
 const SELECT_TEXT_TOP: Pixels = px(6.);
+/// `.select-menu`'s own width, and how far a row's detail line may widen it.
+///
+/// A registration's line now carries the levels that model takes (`GET /catalog`'s
+/// `effort_levels`), and a ladder cropped to `… xhigh…` would misstate what the model
+/// offers — so a menu is as wide as its own widest row, never narrower than the design's
+/// box and never past the ceiling, which is where a menu would stop being a menu.
+const MENU_W: Pixels = px(340.);
+const MENU_MAX_W: Pixels = px(560.);
+/// What the menu puts around a row's text: the list's own `px(4.)` insets, the row's
+/// `px_2`, the gap before the trailing check and a `Size::XSmall` check icon — and the
+/// margin a line needs at the row's trailing edge, or it reads as cropped even when it
+/// is not. Measured against the real window: 44 px still ellipsised the five-level line.
+const MENU_CHROME: Pixels = px(64.);
 const CHEVRON: &str = "⌄";
 const CHEVRON_RIGHT: Pixels = px(11.);
 const CHEVRON_TOP: Pixels = px(5.);
@@ -292,6 +305,14 @@ impl From<(&ModelOption, Card)> for ModelItem {
 }
 
 impl ModelItem {
+    /// How wide this row is drawn: its two lines — `provider · id` over the detail — each
+    /// in the size it is drawn in, plus what the list and the row put around them.
+    fn width(&self, base: Pixels, detail: Pixels, window: &Window) -> Pixels {
+        let title = text_width(&self.title(), base, window);
+        let line = text_width(&self.detail, detail, window);
+        title.max(line) + MENU_CHROME
+    }
+
     /// The design's own line for a registration, in the trigger and in the menu alike:
     /// `<b>provider</b> · id`.
     ///
@@ -964,7 +985,7 @@ impl EmptyTabState {
                     .min_w_0()
                     .gap(FIELD_GAP)
                     .items_end()
-                    .child(self.model_field(role, cx))
+                    .child(self.model_field(role, window, cx))
                     .child(
                         div()
                             .w(FIELD_COLUMN)
@@ -975,7 +996,7 @@ impl EmptyTabState {
     }
 
     /// The model field: the design's `.field` — a label, then the select's own box.
-    fn model_field(&self, role: Card, cx: &Context<Self>) -> impl IntoElement {
+    fn model_field(&self, role: Card, window: &Window, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let (id, field, label) = match role {
             Card::Coordinator => (COORDINATOR_MODEL_ID, &self.coordinator, "Coordinator model"),
@@ -1076,7 +1097,12 @@ impl EmptyTabState {
                             .text_size(FIELD_TEXT)
                             .line_height(FIELD_LINE)
                             .text_color(theme.foreground)
-                            .menu_width(px(340.))
+                            .menu_width(menu_width(
+                                &self.launcher,
+                                role,
+                                cx.theme().font_size,
+                                window,
+                            ))
                             .accessibility_label(label)
                             // The design draws its own chevron (the box's `.select-chevron`
                             // above); the kit's trailing caret is an empty icon, so the
@@ -1761,6 +1787,38 @@ fn model_items(launcher: &Launcher, role: Card) -> Vec<ModelItem> {
         .iter()
         .map(|model| ModelItem::from((model, role)))
         .collect()
+}
+
+/// How wide a card's model menu is drawn: the design's own [`MENU_W`], or as wide as the
+/// card's widest row needs — whichever is more, up to [`MENU_MAX_W`].
+///
+/// The rows are measured with the window's own text system, before any of the menu is laid
+/// out, so the width does not depend on which rows happen to be rendered: a registration
+/// whose line is long sets the width for the whole menu, and the picture does not jump as
+/// the menu scrolls.
+fn menu_width(launcher: &Launcher, role: Card, base: Pixels, window: &Window) -> Pixels {
+    // `.text_xs()`: three quarters of the window's own root size.
+    let detail = window.rem_size() * 0.75;
+    model_items(launcher, role)
+        .iter()
+        .map(|item| item.width(base, detail, window))
+        .fold(px(0.), |widest, row| widest.max(row))
+        .max(MENU_W)
+        .min(MENU_MAX_W)
+}
+
+/// One line's width, as the window's text system measures it.
+fn text_width(text: &str, size: Pixels, window: &Window) -> Pixels {
+    if text.is_empty() {
+        return px(0.);
+    }
+    let mut style = window.text_style();
+    style.font_size = AbsoluteLength::Pixels(size);
+    let run = style.to_run(text.len());
+    window
+        .text_system()
+        .shape_line(SharedString::from(text.to_string()), size, &[run], None)
+        .width
 }
 
 /// Where a card's chosen registration sits in its menu, for a select that takes an index.
@@ -2557,6 +2615,51 @@ mod tests {
             }
             window.render_frame(cx);
             assert_eq!(state.read(cx).count.read(cx).value().as_ref(), "9");
+        });
+    }
+
+    /// §5.6: a model's menu is as wide as its widest row — and never narrower than the
+    /// design's own box.
+    ///
+    /// The row a registration is offered under now names the levels that model takes, so
+    /// the longest line a catalog can produce is longer than it was: five levels do not fit
+    /// 340 px, and a ladder cropped to `… xhigh…` would misstate what the model offers. A
+    /// card whose lines are short keeps the design's own width.
+    #[gpui_kit::test]
+    fn the_menu_is_as_wide_as_its_widest_line(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.set_catalog(cx, &catalog_body());
+        f.render(cx);
+        let state = f.state(cx);
+        f.act(cx, |window, cx| {
+            let wide = menu_width(&state.read(cx).launcher, Card::Coordinator, px(14.), window);
+            assert!(
+                wide > MENU_W,
+                "the five-level line does not fit the design's own box: {wide:?}"
+            );
+            assert!(
+                wide <= MENU_MAX_W,
+                "and the menu is still a menu, not a pane: {wide:?}"
+            );
+        });
+
+        // The same card with a catalog whose only line is short: the design's own width.
+        f.set_catalog(
+            cx,
+            &serde_json::json!({
+                "models": [
+                    {"id": "stub-a", "provider": "stub", "name": "stub-a",
+                     "context_window": 1000, "ready": true, "effort_levels": []}
+                ],
+                "default_model": {"id": "stub-a", "provider": "stub"},
+                "lanes": {"models": [{"id": "stub-a", "provider": "stub", "ok": true}]},
+                "thinking_levels": ["low", "high"],
+            }),
+        );
+        f.render(cx);
+        f.act(cx, |window, cx| {
+            let narrow = menu_width(&state.read(cx).launcher, Card::Coordinator, px(14.), window);
+            assert_eq!(narrow, MENU_W, "`1k ctx` keeps the design's own box");
         });
     }
 
