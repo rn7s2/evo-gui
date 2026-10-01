@@ -122,6 +122,30 @@ fn notice_words(error: &OpError) -> (String, Option<String>) {
     (text, detail)
 }
 
+/// What the composer attached, as the wire takes it ([`session::Attached`]) — the one
+/// place the two crates' types meet, because a tile's own kind is the composer's
+/// business and the op's payload is the session's.
+///
+/// Nothing is decided here: which of the three a tile is was decided when the reader
+/// added it (a dropped file, a paste), and what each becomes on the wire is
+/// [`session::attachment_turn`]'s.
+fn attached(attachments: &[composer::Attachment]) -> Vec<session::Attached> {
+    attachments
+        .iter()
+        .map(|attachment| match &attachment.kind {
+            composer::AttachmentKind::ImageFile(path) => session::Attached::ImageFile(path.clone()),
+            composer::AttachmentKind::ImageBytes { media_type, bytes } => {
+                session::Attached::ImageBytes {
+                    name: attachment.name.clone(),
+                    media_type: media_type.clone(),
+                    bytes: bytes.as_ref().clone(),
+                }
+            }
+            composer::AttachmentKind::File(path) => session::Attached::File(path.clone()),
+        })
+        .collect()
+}
+
 /// Identity of a tab inside the window.
 ///
 /// Monotonic, never reused, so it can key elements and outlive a tab being
@@ -1717,12 +1741,24 @@ impl TabContent {
             Some(live) => {
                 let (request, pending) = match event {
                     ComposerEvent::Send(outgoing) => {
-                        let text = outgoing.text;
+                        // What the reader attached, as the wire takes it (§5.5): an
+                        // image rides *with* the turn, in the op's own `images` — evo
+                        // journals it, which is what puts it in the transcript and
+                        // brings it back on resume — and a file is named by its own
+                        // absolute path, in the message's text. Nothing embeds a file:
+                        // the agent reads one with its tools if it wants to.
+                        let (text, images) = session::attachment_turn(
+                            &outgoing.text,
+                            &attached(&outgoing.attachments),
+                        );
                         // An idle coordinator runs the words now; a run in flight takes
                         // them at its next step boundary (§5.5) — `queue: now` either
                         // way. `after_run` would hold them until the whole run ends,
                         // which for a working coordinator can be a very long time.
-                        (live.model.send_input(&text, Queue::Now), Pending::Send)
+                        (
+                            live.model.send_input_with(&text, images, Queue::Now),
+                            Pending::Send,
+                        )
                     }
                     ComposerEvent::StopSwarm => (live.model.interrupt_swarm(), Pending::Interrupt),
                     ComposerEvent::Interrupt => {
@@ -1931,7 +1967,12 @@ impl TabContent {
         if let Some(asked) = asked {
             match asked {
                 Pending::Send => {
-                    // A sent message clears the draft when the server took it.
+                    // A sent message clears the draft when the server took it — and
+                    // only then: a refusal (an image evo cannot read is `invalid_args`)
+                    // leaves the words where they were, and the strip with them, so the
+                    // reader can take the picture out or name another file and send the
+                    // same message again. The line above the composer is the server's
+                    // own reason for it ([`notice_words`]).
                     self.composer.update(cx, |composer, cx| {
                         composer.request_finished(reply.ok, window, cx)
                     });

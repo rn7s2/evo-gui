@@ -234,6 +234,21 @@ fn the_tab_turns_a_ui_action_into_one_op_request() {
     assert_eq!(send.args["queue"], "after_run");
     assert_eq!(send.args["topic"], "session");
 
+    assert_eq!(send.args["images"], json!([]), "no attachments, no images");
+
+    // A turn with a picture in it: the images reach the op as the client built them.
+    let with_image = tab.send_input_with(
+        "look",
+        vec![json!({"path": "/tmp/shot.png"})],
+        session::Queue::Now,
+    );
+    assert_eq!(with_image.op, "input.send");
+    assert_eq!(
+        with_image.args["images"],
+        json!([{"path": "/tmp/shot.png"}])
+    );
+    assert_eq!(with_image.args["queue"], "now");
+
     let cancel = tab.cancel_input("e_queued_1");
     assert_eq!(cancel.op, "input.cancel");
     assert_eq!(cancel.args["item_id"], "e_queued_1");

@@ -23,6 +23,9 @@ gpui-kit = { version = "=0.7.0", features = [
     "tree-sitter-toml",
     "tree-sitter-typescript",
 ] }
+# `base64` is a direct dependency of `session` only: a pasted image travels as
+# base64 in `input.send`'s `images`, and the encoder was already in the tree.
+base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
