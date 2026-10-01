@@ -317,6 +317,14 @@ Evidence includes `cargo test -p transcript -p workspace` and the stub-world pro
   tab) → `09-resumed-*` (byte-identical to `07-lane-*` in both themes). Both pictures were
   inspected, in both themes. The superseded `bb9036…` binary reproduced the
   missing post-resume lane chips; this one does not.
+- [x] Post-merge recheck (2026-10-01 13:10 reinstall from evo-agent `702b1b5`, which
+  carries PR #106 idle-lane interrupt, #107 stub `THINK`, #108 CI cache): installed
+  `evo-swarm` `2128bfcd5611e8df2a3ba85e9da0abd30c23d0e31fe4686560b940a71775d741`, `evo-agent`
+  `d08b835ec18175b1b946e5897d5a932650bee18f9ab603e46365b718fcf071d0`. All ten proofs pass
+  against `/usr/local/bin` with `EVO_*` scrubbed, including t09 (queued turn sent) and t10
+  (Stop swarm names only the working lane) (`/tmp/proofs-final.log`). The stock stub's
+  `THINK` prompt drives the thinking row: `/tmp/think-final/91-thinking-open-*` shows it
+  open, `92-thinking-closed-*` closed; coordinator inspected the dark one.
 - [x] GUI-created swarms receive `EVO_BABY_EVO=0` from `HOST_ENV`; ordinary terminal
   sessions do not. Agent's environment gate is merged in PR #104. The live ops probe
   returned disabled with 0 and enabled with 1; no global user configuration changed.
