@@ -438,6 +438,50 @@ fn links_setup(cx: &mut HeadlessAppContext, window: AnyWindowHandle, page: &Enti
     rows
 }
 
+/// A short record whose reader's turn carried files: the reader's own words, and the
+/// files under them as chips — the one that is there, and the one that is gone.
+///
+/// The message is written the way the app writes it (`session::attachment_turn`): the
+/// heading and one absolute path per file, in the reader's own text. The row is what
+/// reads it back, so a picture of this state is a picture of that reading.
+fn files_record(root: &Path) -> Vec<Item> {
+    let here = root.join("notes/report.md");
+    // A file that was attached and has since gone: the chip is still the message's, and
+    // dimmed rather than dropped.
+    let gone = root.join("notes/gone.csv");
+    let _ = std::fs::remove_file(&gone);
+    let text = session::attachment_turn(
+        "summarise this, and say what the columns in the other one are",
+        &[session::Attached::File(here), session::Attached::File(gone)],
+    )
+    .0;
+    let mut record = Record::new();
+    turn(&mut record, &text);
+    reply(
+        &mut record,
+        "The report is a summary of the run; the columns are in the spreadsheet, which I \
+         could not open — it is not there any more.",
+        None,
+    );
+    record.items
+}
+
+/// The files state: a message with the files it carried drawn under its words.
+fn files_setup(cx: &mut HeadlessAppContext, window: AnyWindowHandle, page: &Entity<Page>) -> usize {
+    let root = links_folder();
+    let view = transcript_of(cx, page);
+    let items = files_record(&root);
+    let rows = items.len();
+    cx.update(|cx| {
+        view.update(cx, |view, cx| {
+            view.set_folder(Some(root), cx);
+            view.replace(items, cx);
+        })
+    });
+    frames(cx, window, 3);
+    rows
+}
+
 // ---------------------------------------------------------------------------
 // The host: the app's own embedding, one cached view in a `flex_1` box.
 // ---------------------------------------------------------------------------
@@ -1094,6 +1138,10 @@ fn main() {
         // and paths in them underlined. The call below it is the contrast: its arguments
         // and its result hold the same kinds of words, and none of them is a link.
         ("links", 1., WINDOW_SIZE.0, links_setup),
+        // A turn whose message carried files: the reader's words, and the files under
+        // them as chips — the one that is there, and the one that is gone, which is
+        // drawn dimmed and presses nothing.
+        ("files", 1., WINDOW_SIZE.0, files_setup),
         // The same record with the call opened: what a call carried is drawn as data.
         ("links-call", 1., WINDOW_SIZE.0, |cx, window, page| {
             let rows = links_setup(cx, window, page);

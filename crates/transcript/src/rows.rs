@@ -12,6 +12,7 @@
 //! or a quiet line about something evo, the swarm or a person did.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -85,6 +86,10 @@ pub(crate) const COLUMN_GAP: Pixels = px(12.);
 const KEY_SIZE: f32 = 12.;
 /// The size a panel's caption is drawn at: `Rows.css`'s `.tc-caption`, 11.5px.
 const CAPTION_SIZE: f32 = 11.5;
+/// The size a file's name is drawn at under a message, and the line box it sits in:
+/// a chip is a caption in a pill, not a line of the message.
+const FILE_SIZE: f32 = 12.;
+const FILE_LINE: f32 = 16.;
 /// The size a tool row's name is drawn at, and the size of the status word
 /// beside it.
 const NAME_SIZE: f32 = 13.;
@@ -172,6 +177,9 @@ pub(crate) fn row_id(name: impl Into<SharedString>, id: &str) -> ElementId {
 // string keys the document the words are read from and names the line the row draws, so
 // the two cannot drift apart.
 pub(crate) const USER_TEXT: &str = "transcript-user-text";
+/// The words of a message whose own text goes on to name the files it carries: what
+/// the row draws above them, where [`USER_TEXT`] keeps the message as it was written.
+pub(crate) const USER_WORDS: &str = "transcript-user-words";
 const NOTICE_TEXT: &str = "transcript-notice";
 const LANE_EVENT_TEXT: &str = "transcript-lane-event";
 const RUN_OUTCOME_TEXT: &str = "transcript-run-outcome";
@@ -192,7 +200,17 @@ const COMMAND_TEXT: &str = "transcript-command-text";
 pub(crate) fn plain_texts(item: &Item, expanded: bool) -> Vec<(&'static str, String)> {
     let mut texts = Vec::new();
     match &item.kind {
-        ItemKind::User(user) => texts.push((USER_TEXT, user.text.clone())),
+        ItemKind::User(user) => {
+            // What the reader sent is the row's own text, block and all: it is what a
+            // copy of the row takes, and what a summary of the row says. The words
+            // above the block are what the row draws, with the files under them.
+            texts.push((USER_TEXT, user.text.clone()));
+            if let Some(sent) = sent(&user.text) {
+                if !sent.words.is_empty() {
+                    texts.push((USER_WORDS, sent.words.to_string()));
+                }
+            }
+        }
         ItemKind::Notice(notice) => texts.push((NOTICE_TEXT, notice.text.clone())),
         ItemKind::LaneEvent(event) => texts.push((LANE_EVENT_TEXT, lane_event_line(event))),
         ItemKind::RunOutcome(outcome) => texts.push((RUN_OUTCOME_TEXT, outcome.text())),
@@ -720,6 +738,136 @@ const TURN_LABEL_LINE: f32 = 18.;
 const USER_SIZE: f32 = 14.;
 pub(crate) const USER_LINE: f32 = 21.;
 
+/// A message's own text, read as the reader meant it: the words they wrote, and the
+/// files the message carries, which `session` names under them.
+pub(crate) struct Sent<'a> {
+    /// The reader's words, with the block and the blank line above it taken off.
+    pub(crate) words: &'a str,
+    /// The files the block names, in the order it names them.
+    pub(crate) files: Vec<&'a str>,
+}
+
+/// [`Sent`] for one message's text, when it ends with the block `session` writes
+/// (`session::text_with_files`): exactly [`session::FILES_HEADING`], then one
+/// `- <absolute path>` line per file, and nothing else after them.
+///
+/// Everything else is the reader's own words and is drawn as they were written: a
+/// heading inside the prose, a list that goes on past the block, a line that names
+/// something that is not an absolute path, a block with no file under it, and a
+/// heading whose line does not open a paragraph (the block is the message, or the
+/// words are above a blank line — nothing else).
+pub(crate) fn sent(text: &str) -> Option<Sent<'_>> {
+    // The lines with where each one starts, so the words stay a slice of this text.
+    let mut lines: Vec<(usize, &str)> = Vec::new();
+    let mut at = 0;
+    for line in text.split('\n') {
+        lines.push((at, line));
+        at += line.len() + 1;
+    }
+    // Trailing blank lines are the message's own whitespace, not part of the block.
+    let mut end = lines.len();
+    while end > 0 && lines[end - 1].1.trim().is_empty() {
+        end -= 1;
+    }
+    // The block ends the text: the paths, and the heading that introduces them.
+    let mut start = end;
+    while start > 0 && block_path(lines[start - 1].1).is_some() {
+        start -= 1;
+    }
+    if start == end {
+        return None;
+    }
+    let head = start.checked_sub(1)?;
+    if lines[head].1.trim_end() != session::FILES_HEADING {
+        return None;
+    }
+    // The heading opens a paragraph of its own: above it is the reader's words, or
+    // nothing at all (a message that is only the files it carries).
+    let words = match head.checked_sub(1) {
+        None => "",
+        Some(above) if lines[above].1.trim().is_empty() => &text[..lines[above].0],
+        Some(_) => return None,
+    };
+    Some(Sent {
+        words: words.trim_end(),
+        files: lines[start..end]
+            .iter()
+            .filter_map(|(_, line)| block_path(line))
+            .collect(),
+    })
+}
+
+/// The absolute path a line of the block names, when the line is one of the block's:
+/// `- `, the path, and nothing else on the line.
+fn block_path(line: &str) -> Option<&str> {
+    let path = line.trim_end().strip_prefix("- ")?.trim_end();
+    Path::new(path).is_absolute().then_some(path)
+}
+
+/// The name of the file a path names, and the path itself when it has no name of its
+/// own (`/`): what a chip says, where the whole path is a hover away.
+fn file_name(path: &str) -> &str {
+    Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or(path)
+}
+
+/// The files a message's own text names, under its words: a chip each, the file's name
+/// and no path, and a press opens the file where it is — the same opening a link in the
+/// words gets.
+///
+/// A file that is not there is still drawn, dimmed and with the path it was, and presses
+/// nothing: the message says what it carried, and that it is gone.
+fn file_row(id: &ItemId, files: &[&str], data: &TranscriptData, palette: &Palette) -> AnyElement {
+    let chips = files.iter().enumerate().map(|(n, path)| {
+        let open = link::on_click(data.open_link());
+        let there = data.paths.resolve(path).is_some();
+        let name = file_name(path).to_string();
+        let tooltip = path.to_string();
+        let tip_id = format!("transcript-file-tip-{n}");
+        let chip = div()
+            .id(row_id(format!("transcript-file-{n}"), id))
+            .aria_label(path.to_string())
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .px_2()
+            .py_1()
+            .rounded(palette.radius)
+            .border_1()
+            .border_color(palette.border)
+            .bg(palette.background)
+            .text_size(palette.scaled(FILE_SIZE))
+            .line_height(palette.scaled(FILE_LINE))
+            .child(Icon::new(IconName::File).size(palette.scaled(FILE_SIZE)))
+            .child(name)
+            .tooltip(move |window, cx| {
+                widgets::tooltip::text(tip_id.clone(), tooltip.clone(), px(520.), window, cx)
+            });
+        let chip = if there {
+            let href: SharedString = path.to_string().into();
+            chip.text_color(palette.muted_foreground)
+                .cursor_pointer()
+                .hover(|style| style.text_color(palette.foreground))
+                .on_click(move |event, window, cx| open(&href, event, window, cx))
+        } else {
+            // Dimmed: the chip is there to be read, not pressed.
+            chip.text_color(palette.muted_foreground).opacity(0.55)
+        };
+        chip.test_support()
+    });
+    h_flex()
+        .id(row_id("transcript-files", id))
+        .flex_wrap()
+        .gap_2()
+        .pt_1()
+        .children(chips)
+        .test_support()
+        .into_any_element()
+}
+
 fn user_row(
     id: ItemId,
     user: &UserItem,
@@ -744,6 +892,15 @@ fn user_row(
         palette.foreground
     };
 
+    // The files a message carries are named in its own text. The row draws the words,
+    // with the files under them as chips: a reader sees what they said, and what went
+    // with it, rather than the line `session` writes to tell the agent.
+    let sent = sent(&user.text);
+    let (key, words) = match &sent {
+        Some(sent) => (USER_WORDS, sent.words),
+        None => (USER_TEXT, user.text.as_str()),
+    };
+
     let mut card = div()
         .id(row_id("transcript-user", &id))
         .w_full()
@@ -760,10 +917,15 @@ fn user_row(
         .text_size(palette.scaled(USER_SIZE))
         // `.user-row{font-size:14px}` under the page's `line-height: 1.5`.
         .line_height(palette.scaled(USER_LINE))
-        .text_color(text_color)
-        .child(linked_text(
-            &id, USER_TEXT, USER_TEXT, &user.text, data, text_color, cx,
-        ));
+        .text_color(text_color);
+
+    if !words.is_empty() {
+        card = card.child(linked_text(&id, key, key, words, data, text_color, cx));
+    }
+
+    if let Some(sent) = &sent {
+        card = card.child(file_row(&id, &sent.files, data, palette));
+    }
 
     if !user.images.is_empty() {
         card = card.child(image_row(&id, user, data, view, palette));

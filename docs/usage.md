@@ -314,6 +314,13 @@ picture sent in a session you resume is there again; one still on its way says
 `name — loading…` where the thumbnail will be, and one the session cannot produce
 says `name — could not be shown` rather than leaving a hole.
 
+**Your turn's files** are drawn under its words as chips, one per file: the file's
+own name, the whole path a hover away, and a click opens the file where it is. A
+file that has since moved or gone is still named, dimmed, and opens nothing. The
+message itself carries the paths — one `- /abs/path` line per file under
+`Attached files:`, after your words — and the transcript reads that block back
+instead of showing you the line written for the agent.
+
 Scrolling back reaches the whole session, not the model's current context: the transcript holds
 every item the session has and draws it with a virtual list, so only the rows you can see are
 built (a journal of thousands of items scrolls like a short one). Older items behind the oldest
