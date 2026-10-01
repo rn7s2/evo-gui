@@ -532,6 +532,12 @@ fn prepare_thumbnail(bytes: &[u8]) -> Option<Arc<RenderImage>> {
         i64::from((canvas_w - fitted_w) / 2),
         i64::from((canvas_h - fitted_h) / 2),
     );
+    // GPUI's `RenderImage` carries BGRA (its own decoders swap red and blue before
+    // handing a frame over); a canvas handed over as RGBA is drawn with the two
+    // exchanged — a red picture would tile blue.
+    for pixel in canvas.as_chunks_mut::<4>().0 {
+        pixel.swap(0, 2);
+    }
     Some(Arc::new(RenderImage::new(vec![::image::Frame::new(
         canvas,
     )])))
@@ -4908,6 +4914,32 @@ mod tests {
                 "and it is one or the other: {kind:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_red_picture_tiles_red() {
+        // GPUI's `RenderImage` is BGRA: a tile handed over as RGBA draws a red picture
+        // blue. The thumbnail carries red in the third byte of each pixel.
+        let scratch = Scratch::new("bgra");
+        let path = scratch.0.join("red.png");
+        let image = image::RgbaImage::from_pixel(64, 64, image::Rgba([0xD0, 0x10, 0x20, 0xFF]));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .expect("encode a PNG");
+        std::fs::write(&path, bytes.into_inner()).expect("write the picture");
+        let thumb =
+            prepare_thumbnail(&std::fs::read(&path).expect("the picture")).expect("a thumbnail");
+        let pixels = thumb.as_bytes(0).expect("the frame's pixels");
+        let opaque = pixels
+            .chunks_exact(4)
+            .find(|pixel| pixel[3] == 0xFF)
+            .expect("an opaque pixel");
+        assert_eq!(
+            [opaque[0], opaque[1], opaque[2]],
+            [0x20, 0x10, 0xD0],
+            "blue, green, red: the order GPUI reads"
+        );
     }
 
     /// A thumbnail is the whole picture fitted onto a canvas of the tile's own shape: the
