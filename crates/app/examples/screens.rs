@@ -126,6 +126,22 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let tab = cx.update(|cx| view.read(cx).selected_tab().clone());
     shot(&mut cx, window, dir, "01-empty")?;
 
+    // --- one of those fields, open ---------------------------------------------
+    //
+    // The trigger says `provider · id`; the rows under it are where a registration's
+    // own detail line is, and that line is what the catalog spells per model —
+    // context window, modalities, and the levels that model takes, in its own order
+    // and in full (`GET /catalog`'s `effort_levels`; the composer's drawer offers
+    // the same model's own rungs). A height is given to the open menu below: the
+    // field is one registration in the stub home, and the picture is about the row.
+    click(&mut cx, window, "coordinator-model".into())?;
+    pump(&mut cx, Duration::from_millis(600));
+    shot(&mut cx, window, dir, "01b-model-menu")?;
+    cx.update_window(window, |_, window, cx| {
+        window.press("escape", cx);
+    })?;
+    pump(&mut cx, Duration::from_millis(200));
+
     // --- a tab that starts a swarm ---------------------------------------------
     launch(&mut cx, &tab, &fixture.folder);
     let state = wait_for(&mut cx, "the tab to settle", |cx| {

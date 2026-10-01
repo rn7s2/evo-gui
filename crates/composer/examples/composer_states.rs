@@ -18,7 +18,9 @@
 //! about a symbol, so the `/eval` state hands the popup the rows a real
 //! `evo.eval:completions-for` returns for the token it is showing.
 
+use std::cell::RefCell;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -31,7 +33,7 @@ use gpui_kit::{
 };
 use session::TopicState;
 
-use composer::{Candidate, Composer, ModelRow};
+use composer::{Answer, Candidate, CompletionKind, Composer, ComposerEvent, ModelRow};
 
 /// The window the pictures are taken in: one conversation column, the width the app
 /// gives it, so the box is docked on the reading measure it is drawn on.
@@ -40,9 +42,14 @@ const WINDOW_SIZE: (f32, f32) = (1000., 720.);
 /// The topic's own state, as a server would publish it (`GET /snapshot`), run on
 /// one of the catalog's registrations.
 fn state(busy: bool, model: &str) -> TopicState {
+    state_at(busy, model, "openai")
+}
+
+/// The same, on a registration another provider owns: `id@provider` is what a model is.
+fn state_at(busy: bool, model: &str, provider: &str) -> TopicState {
     TopicState::from_json(&serde_json::json!({
         "status": if busy { "running" } else { "idle" },
-        "model": {"id": model, "provider": "openai", "ready": true},
+        "model": {"id": model, "provider": provider, "ready": true},
         "thinking": "high",
         "context": {"tokens": 48000, "window": 936000, "source": "usage"},
         "goal": {"goal_id": "a1b2c3d4", "objective": "Ship the redesign: every screen taken \
@@ -74,29 +81,38 @@ fn levels() -> Vec<String> {
         .collect()
 }
 
-/// The models the drawer offers, as `GET /catalog` lists them (§5.6): one chosen,
-/// one ready, one that cannot be used and says why.
+/// The models the drawer offers, as `GET /catalog` lists them (§5.6): one chosen, one
+/// ready, one that cannot be used and says why. Each carries the levels it takes — the
+/// whole ladder, a provider's own three rungs, and none at all — which is what the
+/// drawer's own ladder is drawn from.
 fn models() -> Vec<ModelRow> {
     vec![
         ModelRow {
             id: "stub-a".to_string(),
             provider: "openai".to_string(),
-            detail: "200k ctx · vision · effort low–max".to_string(),
+            detail: "200k ctx · vision · effort low, medium, high, xhigh, max".to_string(),
+            effort_levels: rungs(&["low", "medium", "high", "xhigh", "max"]),
             reason: None,
         },
         ModelRow {
             id: "stub-b".to_string(),
             provider: "proxy".to_string(),
-            detail: "936k ctx · effort low–xhigh".to_string(),
+            detail: "936k ctx · effort low, high, max".to_string(),
+            effort_levels: rungs(&["low", "high", "max"]),
             reason: None,
         },
         ModelRow {
             id: "stub-c".to_string(),
             provider: "acme".to_string(),
             detail: "1M ctx".to_string(),
+            effort_levels: Vec::new(),
             reason: Some("no credential".to_string()),
         },
     ]
+}
+
+fn rungs(names: &[&str]) -> Vec<String> {
+    names.iter().map(|name| name.to_string()).collect()
 }
 
 /// A catalog long enough to need the drawer's region: ten registrations, so the
@@ -108,7 +124,11 @@ fn many_models() -> Vec<ModelRow> {
         .map(|n| ModelRow {
             id: format!("stub-{}", char::from(b'a' + n)),
             provider: ["openai", "proxy", "acme"][n as usize % 3].to_string(),
-            detail: format!("{}k ctx · effort low–max", (n as u32 + 1) * 100),
+            detail: format!(
+                "{}k ctx · effort low, medium, high, xhigh, max",
+                (n as u32 + 1) * 100
+            ),
+            effort_levels: rungs(&["low", "medium", "high", "xhigh", "max"]),
             reason: (n % 5 == 2).then(|| "no credential".to_string()),
         })
         .collect()
@@ -188,6 +208,60 @@ fn type_into(
     .unwrap();
 }
 
+/// Answer the box's own question the way a tab does, with what a server answers for a
+/// `/command` word: the whitespace-delimited word the caret is in, when that word
+/// starts with a slash, and the registry's commands as its candidates.
+///
+/// A real tab sends `complete` (§5.6) and hands the reply back; these pictures are of
+/// the popup, so the reply is the one the picture is about — the catalog's own
+/// commands, for the word being typed. A state whose answer is not a command word
+/// answers with [`answer_with`] instead.
+fn answer(cx: &mut HeadlessAppContext, page: &Entity<Page>) {
+    // The debounce first: the box asks when the caret has rested on the word.
+    cx.advance_clock(std::time::Duration::from_millis(50));
+    cx.run_until_parked();
+    let Some((text, cursor)) = page.read_with(cx, |page, _| page.question()) else {
+        return;
+    };
+    let start = text[..cursor]
+        .rfind(char::is_whitespace)
+        .map_or(0, |index| index + 1);
+    let end = text[cursor..]
+        .find(char::is_whitespace)
+        .map_or(text.len(), |index| cursor + index);
+    let is_command = text[start..end].starts_with('/');
+    answer_with(
+        cx,
+        page,
+        Answer {
+            kind: is_command.then_some(CompletionKind::Command),
+            name: if is_command {
+                start + 1..end
+            } else {
+                start..end
+            },
+            items: commands(),
+        },
+    );
+}
+
+/// Hand the box the answer to the question it asked, as a tab hands it one.
+fn answer_with(cx: &mut HeadlessAppContext, page: &Entity<Page>, answer: Answer) {
+    // The caret rests first: the box asks on that rest, and a tab answers a question it
+    // has been asked — the example is that tab, so it waits for the question too.
+    cx.advance_clock(Duration::from_millis(50));
+    cx.run_until_parked();
+    let Some((text, cursor)) = page.read_with(cx, |page, _| page.question()) else {
+        return;
+    };
+    let composer = composer_of(cx, page);
+    cx.update(|cx| {
+        composer.update(cx, |composer, cx| {
+            composer.set_completion(&text, cursor, answer, cx)
+        })
+    });
+}
+
 /// Move the caret within the box by pressing a key, as a reader does.
 fn press(cx: &mut HeadlessAppContext, window: AnyWindowHandle, key: &str) {
     cx.update_window(window, |_, window, cx| window.press(key, cx))
@@ -197,17 +271,39 @@ fn press(cx: &mut HeadlessAppContext, window: AnyWindowHandle, key: &str) {
 /// The column the box is docked at the foot of: what the app renders above it.
 struct Page {
     composer: Entity<Composer>,
+    /// What the box has asked, newest last: the example's stand-in for the tab, which
+    /// is what sends the box's ops and hands their answers back.
+    asked: Rc<RefCell<Vec<ComposerEvent>>>,
+    /// Kept alive: dropping it would stop the recording.
+    _subscription: gpui_kit::Subscription,
 }
 
 impl Page {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let composer = cx.new(|cx| Composer::new(window, cx));
+        let asked: Rc<RefCell<Vec<ComposerEvent>>> = Rc::new(RefCell::new(Vec::new()));
+        let recorded = asked.clone();
+        let subscription = cx.subscribe(&composer, move |_, _, event: &ComposerEvent, _| {
+            recorded.borrow_mut().push(event.clone())
+        });
         composer.update(cx, |composer, cx| {
             composer.set_pane_height(px(WINDOW_SIZE.1 - 200.), cx);
             composer.set_agent(&state(false, "stub-a"), "Coordinator", true, cx);
             composer.set_catalog(levels(), models(), commands(), cx);
         });
-        Self { composer }
+        Self {
+            composer,
+            asked,
+            _subscription: subscription,
+        }
+    }
+
+    /// The question the box asked last, as the tab would have sent it.
+    fn question(&self) -> Option<(String, usize)> {
+        self.asked.borrow().last().and_then(|event| match event {
+            ComposerEvent::Complete { text, cursor } => Some((text.clone(), *cursor)),
+            _ => None,
+        })
     }
 }
 
@@ -291,13 +387,14 @@ fn main() {
 
     // The states, in the order the design reads them: the goal's objective folded
     // out, then the todo list, then the model drawer — the catalog's own three
-    // models, and a catalog long enough that the models scroll — then the one
+    // models, on a registration whose ladder is a subset and on one that takes no
+    // effort at all, and a catalog long enough that the models scroll — then the one
     // button's other face, then a lane's own box, which changes nothing, and says so.
     // Then the completion popup, one picture per thing it does: the commands over
     // the word at the message's start, the same list walked down its own rows, a word
     // mid-prose, and the image's own symbols inside `/eval`.
     type Setup = fn(&mut HeadlessAppContext, AnyWindowHandle, &Entity<Page>);
-    let states: [(&str, Setup); 11] = [
+    let states: [(&str, Setup); 13] = [
         ("goal-open", |cx, window, _| {
             click(cx, window, "goal-strip-row")
         }),
@@ -315,6 +412,36 @@ fn main() {
                     // only the region's own scroll can show.
                     composer.set_agent(&state(false, "stub-j"), "Coordinator", true, cx);
                     composer.set_catalog(levels(), many_models(), commands(), cx);
+                })
+            });
+            click(cx, window, "composer-chip-model");
+        }),
+        // A model whose provider takes three rungs, not the session's five: the
+        // drawer's rail is the *model's* own ladder, so it is three stops long — and
+        // the chip's own level (`high`) is on it.
+        ("model-drawer-subset", |cx, window, page| {
+            let composer = composer_of(cx, page);
+            cx.update(|cx| {
+                composer.update(cx, |composer, cx| {
+                    composer.set_agent(
+                        &state_at(false, "stub-b", "proxy"),
+                        "Coordinator",
+                        true,
+                        cx,
+                    );
+                    composer.set_catalog(levels(), models(), commands(), cx);
+                })
+            });
+            click(cx, window, "composer-chip-model");
+        }),
+        // A model that takes no effort setting at all: the row keeps its place and says
+        // so, with no rail under it — a fact, rather than a control that vanishes.
+        ("model-drawer-none", |cx, window, page| {
+            let composer = composer_of(cx, page);
+            cx.update(|cx| {
+                composer.update(cx, |composer, cx| {
+                    composer.set_agent(&state_at(false, "stub-c", "acme"), "Coordinator", true, cx);
+                    composer.set_catalog(levels(), models(), commands(), cx);
                 })
             });
             click(cx, window, "composer-chip-model");
@@ -338,11 +465,13 @@ fn main() {
         // wide as its widest row, and these are the rows evo's own registry sends.
         ("completion-command", |cx, window, page| {
             type_into(cx, window, page, "/");
+            answer(cx, page);
         }),
         // The same list walked: three rows down, so the highlight — and the list
         // under it — is somewhere other than the first row.
         ("completion-walked", |cx, window, page| {
             type_into(cx, window, page, "/");
+            answer(cx, page);
             for _ in 0..3 {
                 press(cx, window, "down");
             }
@@ -358,6 +487,7 @@ fn main() {
             for _ in 0..4 {
                 press(cx, window, "left");
             }
+            answer(cx, page);
         }),
         // A word started near the right-hand edge of the box: the list is pulled back
         // inside the window instead of hanging off it — its labels are no longer on the
@@ -369,17 +499,22 @@ fn main() {
                 page,
                 "please check the docs and the run outcomes before you answer, then /re",
             );
+            answer(cx, page);
         }),
         // `/eval` content completes against the live image: here the package's own
-        // exported names, as `evo.eval:completions-for` answers for `evo.eval:`.
+        // exported names, as the server answers them for the token `evo.eval:`.
         ("completion-symbols", |cx, window, page| {
             type_into(cx, window, page, "/eval (evo.eval:");
-            let composer = composer_of(cx, page);
-            cx.update(|cx| {
-                composer.update(cx, |composer, cx| {
-                    composer.set_symbols("evo.eval:", eval_package_symbols(), cx)
-                })
-            });
+            answer_with(
+                cx,
+                page,
+                Answer {
+                    kind: Some(CompletionKind::Symbol),
+                    // The token the caret is in: `evo.eval:` begins just after `(evo.`…
+                    name: 7..16,
+                    items: eval_package_symbols(),
+                },
+            );
         }),
     ];
 

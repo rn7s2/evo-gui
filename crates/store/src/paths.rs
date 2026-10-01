@@ -270,7 +270,12 @@ const TEMP_ATTEMPTS: u32 = 1024;
 /// scratch file, and so does one whose commit failed.
 pub(crate) struct Staged {
     target: PathBuf,
-    temp: PathBuf,
+    /// The scratch file, while it is still this write's to remove.
+    ///
+    /// A committed stage has none: its file has *become* the target, and the name it
+    /// was staged at is free again for whoever asks for it next. Removing that name
+    /// then would take the file out from under another writer — see [`Staged::commit`].
+    temp: Option<PathBuf>,
 }
 
 impl Staged {
@@ -303,17 +308,33 @@ impl Staged {
     }
 
     /// Put it in place: one rename, which replaces the target atomically.
-    pub(crate) fn commit(self) -> io::Result<()> {
-        fs::rename(&self.temp, &self.target)
+    ///
+    /// The rename is the commit, so the scratch name is free the instant it lands —
+    /// and another writer, racing for the same target, may already be staging at it.
+    /// This clears its own hold on the name *before* the drop that would remove it:
+    /// a drop at that point would delete that other writer's scratch file, and its
+    /// commit would fail with `NotFound` — one whole write lost, not merely delayed.
+    /// (A drop that still holds the name removes it, which is the cleanup for a stage
+    /// that failed or was never committed.)
+    pub(crate) fn commit(mut self) -> io::Result<()> {
+        let temp = self
+            .temp
+            .as_ref()
+            .expect("a staged file has a scratch path");
+        // A rename that fails leaves the scratch file staged, and `self` drops with it.
+        fs::rename(temp, &self.target)?;
+        self.temp = None;
+        Ok(())
     }
 }
 
 impl Drop for Staged {
     fn drop(&mut self) {
-        // After a commit there is no scratch file left to remove, so this is the
-        // cleanup for a stage that failed, or was never committed, and nothing
-        // else. A missing file is not an error.
-        let _ = fs::remove_file(&self.temp);
+        // The cleanup for a stage that failed, or was never committed. A missing file
+        // is not an error.
+        if let Some(temp) = self.temp.take() {
+            let _ = fs::remove_file(temp);
+        }
     }
 }
 
@@ -357,7 +378,7 @@ fn stage_at(target: &Path, temp: &Path, bytes: &[u8], mode: u32) -> io::Result<S
     match sealed {
         Ok(()) => Ok(Staged {
             target: target.to_path_buf(),
-            temp: temp.to_path_buf(),
+            temp: Some(temp.to_path_buf()),
         }),
         Err(error) => {
             let _ = fs::remove_file(temp);
@@ -571,7 +592,10 @@ mod tests {
         let path = dir.join("app.json");
 
         let staged = Staged::stage(&path, b"{\"a\":1}", 0o640).unwrap();
-        let scratch = staged.temp.clone();
+        let scratch = staged
+            .temp
+            .clone()
+            .expect("a staged file has a scratch path to clean up");
         assert!(scratch.exists());
         assert_eq!(fs::read(&scratch).unwrap(), b"{\"a\":1}");
         assert_eq!(
@@ -584,6 +608,41 @@ mod tests {
         drop(staged);
         assert!(!scratch.exists());
         assert!(!path.exists());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A committed stage holds nothing afterwards: the rename took its scratch file,
+    /// and the cleanup a failed or abandoned stage runs is not run at all.
+    ///
+    /// That is what makes the *name* safe to free. Another writer racing for the same
+    /// target stages at the same names — the name carries the pid and the attempt, so
+    /// it reaches the same candidates — and a drop that removed "its" scratch file
+    /// after the rename would remove theirs instead: their commit then fails with
+    /// `NotFound` and a whole write is lost. The interleaving is a window of
+    /// microseconds, which is what `concurrent_writes_never_mix_contents` below is
+    /// there to hit; this pins the state it depends on.
+    #[test]
+    #[cfg(unix)]
+    fn a_committed_stage_holds_nothing_to_clean_up() {
+        let dir = temp("committed-stage");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("app.json");
+
+        let staged = Staged::stage(&path, b"{\"a\":1}", 0o600).unwrap();
+        let scratch = staged.temp.clone().expect("a scratch path");
+        staged.commit().unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"{\"a\":1}");
+        assert!(
+            !scratch.exists(),
+            "the rename took the scratch file, and the commit left nothing behind it"
+        );
+        // Nothing else of this write's is left to run, so the name is the next
+        // writer's: whatever stages there now owns it.
+        fs::write(&scratch, b"{\"b\":2}").unwrap();
+        assert_eq!(fs::read(&scratch).unwrap(), b"{\"b\":2}");
+
+        fs::remove_file(&scratch).unwrap();
         fs::remove_dir_all(&dir).unwrap();
     }
 

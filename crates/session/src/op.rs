@@ -252,6 +252,14 @@ impl OpRequest {
         OpRequest::new("extension.load", json!({ "path": path }))
     }
 
+    /// `complete`: what the caret in an input box is on, and what could fill it. A
+    /// read — nothing idle, and not gated by `--no-http-eval`. `cursor` is the
+    /// protocol's own count: characters, not bytes
+    /// ([`crate::completion::complete_request`] converts).
+    pub fn complete(text: &str, cursor: usize) -> OpRequest {
+        OpRequest::new("complete", json!({ "text": text, "cursor": cursor }))
+    }
+
     /// `eval` (RCE behind the token, disabled by `--no-http-eval`).
     pub fn eval(code: &str) -> OpRequest {
         OpRequest::new("eval", json!({ "code": code }))

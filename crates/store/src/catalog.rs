@@ -33,6 +33,13 @@ pub struct Model {
     pub context_window: Option<u64>,
     /// Whether the model can be given a thinking budget.
     pub reasoning: bool,
+    /// The levels this model takes, in ladder order (`/catalog.models[].effort_levels`).
+    ///
+    /// A model's ladder is not the session's: one provider offers `low high max`, and a
+    /// model with no effort parameter at all names none. A body from a server that
+    /// predates the field names none for every model, which reads the same way — the
+    /// client shows no effort rather than inventing a rung.
+    pub effort_levels: Vec<String>,
     /// Whether it takes images.
     pub images: bool,
     /// Whether evo can reach it right now (key present, endpoint alive).
@@ -213,6 +220,7 @@ impl Catalog {
                     api: string(m, "api"),
                     context_window: m.get("context_window").and_then(Value::as_u64),
                     reasoning: m.get("reasoning").and_then(Value::as_bool).unwrap_or(false),
+                    effort_levels: string_array(m.get("effort_levels")),
                     images: m.get("images").and_then(Value::as_bool).unwrap_or(false),
                     ready: m.get("ready").and_then(Value::as_bool).unwrap_or(false),
                     reason: string(m, "reason"),
@@ -401,10 +409,12 @@ mod tests {
             "models": [
                 {"id": "claude-opus-5", "provider": "Anthropic", "name": "Claude Opus 5",
                  "api": "anthropic-messages", "context_window": 200000,
-                 "reasoning": true, "images": true, "ready": true, "reason": null},
+                 "reasoning": true, "effort_levels": ["low", "medium", "high", "xhigh", "max"],
+                 "images": true, "ready": true, "reason": null},
                 {"id": "deepseek-v4.1-flash", "provider": "acme", "name": "DeepSeek V4.1 Flash",
                  "api": "chat-model", "context_window": 936000,
-                 "reasoning": false, "images": false, "ready": true, "reason": null},
+                 "reasoning": false, "effort_levels": [], "images": false,
+                 "ready": true, "reason": null},
                 {"id": "claude-sonnet-5", "provider": "proxy", "name": "Claude Sonnet 5",
                  "api": "anthropic-oauth-messages", "context_window": 1000000,
                  "reasoning": true, "images": true, "ready": false, "reason": "no credential"}
@@ -454,6 +464,26 @@ mod tests {
         // An unreachable registration says so.
         assert!(!models[2].ready);
         assert_eq!(models[2].reason.as_deref(), Some("no credential"));
+    }
+
+    /// A model's own ladder is read where evo puts it, and a model that takes no
+    /// effort reads as one — as does every model of a body that predates the field.
+    #[test]
+    fn a_models_effort_levels_are_its_own() {
+        let catalog = Catalog::from_json(body());
+        assert_eq!(
+            catalog.models()[0].effort_levels,
+            ["low", "medium", "high", "xhigh", "max"]
+        );
+        assert!(catalog.models()[1].effort_levels.is_empty());
+
+        // The field is absent from a body written before evo published it, and from a
+        // model registered without a ladder: both read as no levels, never as a panic.
+        let old_body = json!({"models": [{"id": "m", "provider": "p", "reasoning": true}]});
+        assert!(Catalog::from_json(old_body).models()[0]
+            .effort_levels
+            .is_empty());
+        assert!(Catalog::empty().models().is_empty());
     }
 
     #[test]

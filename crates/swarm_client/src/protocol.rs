@@ -496,6 +496,13 @@ pub struct ModelInfo {
     pub context_window: Option<u64>,
     #[serde(default)]
     pub reasoning: bool,
+    /// The levels this model takes, in ladder order — `["low","high","max"]` for a
+    /// provider whose ladder is not a run of levels, `[]` for a model with no effort
+    /// parameter at all (§5.6, evo-agent 3ad8d0a). Empty also reads a *server* that
+    /// predates the field: a client shows no effort for such a model rather than
+    /// inventing a rung, which is what an empty list means anyway.
+    #[serde(default)]
+    pub effort_levels: Vec<String>,
     #[serde(default)]
     pub images: bool,
     #[serde(default)]
@@ -583,6 +590,10 @@ pub struct LaneModel {
     pub ok: bool,
     #[serde(default)]
     pub reason: Option<String>,
+    /// The levels this model takes, as its `models[]` entry carries them: a lane's
+    /// model is the same registration, so its ladder is the same ladder.
+    #[serde(default)]
+    pub effort_levels: Vec<String>,
 }
 
 /// `evo-agent sessions --json` (§2), newest first.
@@ -846,6 +857,12 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(catalog.models[0].context_window, Some(1000000));
+        // A server that predates `effort_levels` names none, and one that carries it
+        // is read in its own order.
+        assert!(catalog.models[0].effort_levels.is_empty());
+        assert!(catalog.lanes.as_ref().unwrap().models[0]
+            .effort_levels
+            .is_empty());
         assert!(catalog.providers[0].has_key);
         assert_eq!(catalog.default_model.as_ref().unwrap().id, "m");
         assert_eq!(catalog.thinking_levels.len(), 5);
@@ -853,6 +870,20 @@ mod tests {
         assert_eq!(catalog.commands[0].args_hint.as_deref(), Some("<text>"));
         assert!(!catalog.lanes.as_ref().unwrap().models[0].ok);
         assert_eq!(catalog.warnings.len(), 1);
+
+        let levelled: Catalog = serde_json::from_value(json!({
+            "models": [{"id": "m", "provider": "p", "effort_levels": ["low", "high", "max"]},
+                       {"id": "n", "provider": "p", "effort_levels": []}],
+            "lanes": {"models": [{"id": "m", "provider": "p", "ok": true,
+                                  "effort_levels": ["low", "high", "max"]}]}
+        }))
+        .unwrap();
+        assert_eq!(
+            levelled.models[0].effort_levels,
+            vec!["low".to_string(), "high".to_string(), "max".to_string()]
+        );
+        assert!(levelled.models[1].effort_levels.is_empty());
+        assert_eq!(levelled.lanes.unwrap().models[0].effort_levels.len(), 3);
 
         // An agent's catalog has no lane half; an empty catalog is still a catalog.
         let bare: Catalog = serde_json::from_value(json!({})).unwrap();

@@ -448,15 +448,26 @@ fn the_fixtures_are_the_contract_shapes() {
             "api",
             "context_window",
             "reasoning",
+            "effort_levels",
             "images",
             "ready",
         ] {
             assert!(model.get(key).is_some(), "model has no {key}");
         }
+        // Never null, never left out: a model with no effort parameter names an empty
+        // list, so a menu can state the levels without branching (§5.6).
+        assert!(
+            model["effort_levels"].is_array(),
+            "effort_levels is not a list"
+        );
     }
     for lane in catalog["lanes"]["models"].as_array().unwrap() {
         assert!(lane.get("ok").is_some(), "lane model has no ok");
         assert!(lane.get("reason").is_some(), "lane model has no reason");
+        assert!(
+            lane["effort_levels"].is_array(),
+            "a lane's model carries the levels its own entry does"
+        );
     }
 
     let check = fixture("check-bad.json");

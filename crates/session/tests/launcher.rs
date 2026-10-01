@@ -47,7 +47,10 @@ fn every_registration_is_an_option_named_by_id_and_provider() {
     let opus = &options[0];
     assert_eq!(opus.id, "claude-opus-5");
     assert_eq!(opus.provider, "anthropic");
-    assert_eq!(opus.detail, "200k ctx · vision");
+    assert_eq!(
+        opus.detail,
+        "200k ctx · vision · effort low, medium, high, xhigh, max"
+    );
     assert!(opus.ready && opus.lane_ok);
     // A model evo cannot reach says so in its own words, and a lane cannot register it
     // either.
@@ -68,20 +71,24 @@ fn keys_of(options: &[session::ModelOption]) -> Vec<&str> {
     options.iter().map(|m| m.key.as_str()).collect()
 }
 
-/// The menu's second line is as much of the design's as the catalog can fill: the ctx
-/// window, then the modalities. The design's own line ends with that model's effort range
-/// (`effort low–max`), which `/catalog` does not publish — the global `thinking_levels` is
-/// the session's ladder, not this model's — so it is left out rather than invented
-/// (docs/api-gaps.md); and `reasoning` is not a word, so it prints as nothing.
+/// The menu's second line: the ctx window, the modalities, and the levels that
+/// registration takes — `200k ctx · vision · effort low, high, max`. The `reasoning` flag
+/// is not a word, so it still prints as nothing.
 #[test]
-fn a_models_detail_is_its_ctx_window_and_its_modalities() {
+fn a_models_detail_is_its_ctx_window_its_modalities_and_its_levels() {
     let options = model_options(&fixture("catalog.json"));
-    assert_eq!(options[0].detail, "200k ctx · vision");
+    assert_eq!(
+        options[0].detail,
+        "200k ctx · vision · effort low, medium, high, xhigh, max"
+    );
     assert_eq!(
         options[1].detail, "936k ctx",
-        "a model that reasons still gets no effort range invented for it"
+        "a model with no effort parameter names no levels, and nothing is invented for it"
     );
-    assert_eq!(options[2].detail, "1M ctx · vision", "not `1000k ctx`");
+    assert_eq!(
+        options[2].detail, "1M ctx · vision · effort low, high, max",
+        "the model's own ladder, in full: not `1000k ctx`, and not a range"
+    );
     // Nothing else in the body is a second line: no window, no detail.
     let bare = model_options(&json!({"models": [
         {"id": "m", "provider": "p", "reasoning": true},
@@ -89,6 +96,33 @@ fn a_models_detail_is_its_ctx_window_and_its_modalities() {
     ]}));
     assert_eq!(bare[0].detail, "", "no API says a window was `0 ctx`");
     assert_eq!(bare[1].detail, "");
+    // A server that predates `effort_levels` names none for any model: the line ends at
+    // the modalities, exactly as a model with no effort parameter does.
+    let old = model_options(&json!({"models": [
+        {"id": "m", "provider": "p", "context_window": 200000, "images": true}
+    ]}));
+    assert_eq!(old[0].detail, "200k ctx · vision");
+    assert!(old[0].effort_levels.is_empty());
+}
+
+/// A model's own ladder is carried beside its detail line, in the catalog's order, so a
+/// chooser can offer the levels *that* model takes rather than the session's.
+#[test]
+fn a_model_carries_the_levels_it_takes() {
+    let options = model_options(&fixture("catalog.json"));
+    assert_eq!(
+        options[0].effort_levels,
+        ["low", "medium", "high", "xhigh", "max"]
+    );
+    assert!(
+        options[1].effort_levels.is_empty(),
+        "a model with no effort parameter offers none"
+    );
+    assert_eq!(
+        options[2].effort_levels,
+        ["low", "high", "max"],
+        "a ladder that is not a run of levels is carried as it is"
+    );
 }
 
 /// §5.6: a token count reads the way the design's own rows print it — in thousands, and
