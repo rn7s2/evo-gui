@@ -217,7 +217,19 @@ the agent header are the same height on the same surface, so the rule under them
   topic's `has_more` says there is more — and a quiet `Loading earlier items…` line sits at the head
   of the list while one is on its way; there is no button to press, and a page that lands is spliced
   in above the reader without moving what they are reading. Auto-follow the tail while the reader is
-  at the bottom; show a jump affordance when they are not.
+  at the bottom; show a jump affordance when they are not. **Links**: an address or a path in a row's
+  *own words* — a user's turn, an assistant's markdown, a notice, a lane's line, a report's field, the
+  body of a quiet row — is drawn underlined and is pressable: `http`, `https` and `mailto` through
+  `App::open_url` (the browser, the mail client), and a file or a folder through
+  `App::open_with_system` (the platform's application; the Finder for a folder). A path is resolved
+  the way the tab is: `~/…` from the reader's home, a relative path from the folder the tab runs in,
+  and a trailing `:line` or `:line:col` names a line of the file rather than a file of its own —
+  `crates/transcript/src/lib.rs:42` opens that file. A path that is not on disk stays words, and the
+  disk is asked once per token and the answer remembered for a few seconds (`linkify::Paths`: 3 s,
+  512 tokens), so no frame stats anything; a tab whose folder moves re-reads its rows. A tool call's
+  arguments and its result are **data**: drawn exactly as they came, with nothing in them to press.
+  The opener is the view's own handler (`TranscriptView::on_open_link`), so a test can hold what was
+  pressed without opening anything on the machine.
 - **The composer, at the foot of the conversation** — the selected agent's, on the transcript's own
   reading measure (an 800 px measure, inset 16). `design/doc28/Composer.tsx`: an `input`-surface box,
   12 px radius, 1 px border; with the caret in it the border mixes 55% of the primary into the
