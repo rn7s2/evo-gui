@@ -314,10 +314,25 @@ fn end_position(text: &str) -> Position {
 /// How wide one line of text is, as the text system measures it: what the popup is
 /// sized by before any of it is laid out.
 fn text_width(text: &str, size: Pixels, weight: FontWeight, window: &Window) -> Pixels {
+    text_width_in(text, None, size, weight, window)
+}
+
+/// [`text_width`] in a given font family — the monospace face a Lisp symbol is drawn
+/// in — or the window's own when `family` is `None`.
+fn text_width_in(
+    text: &str,
+    family: Option<&SharedString>,
+    size: Pixels,
+    weight: FontWeight,
+    window: &Window,
+) -> Pixels {
     if text.is_empty() {
         return px(0.);
     }
     let mut style = window.text_style();
+    if let Some(family) = family {
+        style.font_family = family.clone();
+    }
     style.font_size = AbsoluteLength::Pixels(size);
     style.font_weight = weight;
     let run = style.to_run(text.len());
@@ -1598,6 +1613,12 @@ impl Composer {
                         .id(ElementId::from(format!("completion-label-{index}")))
                         .test_support()
                         .flex_none()
+                        // A symbol is Lisp being typed into the image: code, drawn in
+                        // the theme's monospace face as an editor draws its completions.
+                        // A command is a word of the UI, in the UI's own face.
+                        .when(popup.kind == Kind::Symbol, |label| {
+                            label.font_family(cx.theme().mono_font_family.clone())
+                        })
                         .child(StyledText::new(label).with_highlights(highlights)),
                 )
                 .child(
@@ -1694,18 +1715,20 @@ impl Composer {
     ///
     /// Measured once per list, when the rows are new: a row cannot change without the
     /// popup being rebuilt, and text shaping is not work to repeat every frame.
-    fn measure_popup(&mut self, window: &Window) -> Pixels {
+    fn measure_popup(&mut self, window: &Window, cx: &App) -> Pixels {
         let Some(popup) = self.popup.as_ref() else {
             return px(POPUP_MIN_W);
         };
+        let mono = (popup.kind == Kind::Symbol).then(|| cx.theme().mono_font_family.clone());
         let widest = popup
             .rows
             .iter()
             .map(|candidate| {
                 // The label is measured in the heavier face it is drawn in where the
                 // word matched — the widest it can be — and the description as it is.
-                text_width(
+                text_width_in(
                     &popup.label(candidate),
+                    mono.as_ref(),
                     POPUP_FONT,
                     widgets::text::MEDIUM,
                     window,
@@ -2235,7 +2258,7 @@ impl Render for Composer {
             let width = match self.popup_width {
                 Some(width) => width,
                 None => {
-                    let width = self.measure_popup(window);
+                    let width = self.measure_popup(window, cx);
                     self.popup_width = Some(width);
                     width
                 }
