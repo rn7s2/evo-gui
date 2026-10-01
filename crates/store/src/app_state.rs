@@ -100,6 +100,16 @@ pub const LEFT_MAX: f32 = 480.0;
 /// is for, and a page that is mostly chrome is not a page (§7.3).
 pub const CENTER_MIN: f32 = 420.0;
 
+/// The scale the transcript's text is drawn at, and the range the View menu's
+/// Zoom In / Zoom Out work in (§7.2).
+///
+/// One app-wide number, like the pane widths: every open transcript in every tab
+/// follows it, and `1.0` is the design's own size. The bounds live with the
+/// schema because a stored number is only read if it is inside them.
+pub const ZOOM_DEFAULT: f32 = 1.0;
+pub const ZOOM_MIN: f32 = 0.75;
+pub const ZOOM_MAX: f32 = 2.0;
+
 impl Default for Panes {
     fn default() -> Panes {
         Panes { left: LEFT_DEFAULT }
@@ -261,6 +271,10 @@ pub struct AppState {
     /// The tab page's side columns, app-wide (§7.3). Absent in a file written
     /// before there were any: the defaults are what the page opens with.
     pub panes: Panes,
+    /// The transcript's font zoom (§7.2): what Zoom In / Zoom Out / Actual Size
+    /// leave behind. Absent in a file written before the View menu existed, which
+    /// reads as the design's own size.
+    pub zoom: f32,
 }
 
 impl Default for AppState {
@@ -274,6 +288,7 @@ impl Default for AppState {
             recents: Vec::new(),
             theme: Theme::System,
             panes: Panes::default(),
+            zoom: ZOOM_DEFAULT,
         }
     }
 }
@@ -308,6 +323,7 @@ impl AppState {
         self.window = self.window.sanitized();
         self.binaries = self.binaries.sanitized();
         self.panes = self.panes.sanitized();
+        self.zoom = ranged(self.zoom, ZOOM_MIN, ZOOM_MAX, ZOOM_DEFAULT);
 
         // A stored id is only kept if it is still safe as a single path segment.
         let mut seen = std::collections::HashSet::new();
@@ -524,6 +540,37 @@ mod tests {
             Panes { left: 200.0 },
             "the width is read, the column that is gone is ignored"
         );
+        fs::remove_dir_all(root.path()).unwrap();
+    }
+
+    /// §7.2: the transcript's zoom is remembered, and a file this app did not write
+    /// opens at the design's own size.
+    #[test]
+    fn the_transcript_zoom_is_remembered_and_read_back_into_range() {
+        let root = temp_root("zoom");
+        let mut state = sample();
+        state.zoom = 1.4;
+        state.save(&root).unwrap();
+        assert_eq!(AppState::load(&root).zoom, 1.4);
+
+        // A file from before the View menu existed, one whose number is outside the
+        // range, and one that is not a number at all: each opens at the default.
+        for body in [
+            r#"{"version":1}"#,
+            r#"{"version":1,"zoom":6.0}"#,
+            r#"{"version":1,"zoom":0.1}"#,
+            r#"{"version":1,"zoom":"big"}"#,
+        ] {
+            root.ensure().unwrap();
+            fs::write(root.app_json(), body).unwrap();
+            assert_eq!(
+                AppState::load(&root).zoom,
+                ZOOM_DEFAULT,
+                "{body} opens at the design's own size"
+            );
+        }
+        assert_eq!(ZOOM_DEFAULT, 1.0);
+        assert!(ZOOM_MIN < ZOOM_DEFAULT && ZOOM_DEFAULT < ZOOM_MAX);
         fs::remove_dir_all(root.path()).unwrap();
     }
 
