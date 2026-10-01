@@ -34,10 +34,11 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::list::{ListDelegate, ListItem, ListState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
+use gpui_kit::component::switch::Switch;
 use gpui_kit::component::FocusableExt as _;
 use gpui_kit::component::{
-    h_flex, v_flex, ActiveTheme as _, Icon, IconName, IndexPath, Sizable as _, StyledExt as _,
-    Theme,
+    h_flex, v_flex, ActiveTheme as _, Icon, IconName, IndexPath, Sizable as _, Size,
+    StyledExt as _, Theme,
 };
 use gpui_kit::prelude::*;
 use gpui_kit::{
@@ -181,6 +182,14 @@ const COUNT_BOX_ID: &str = "workers-count-box";
 const COUNT_FIELD_ID: &str = "workers-count-field";
 const COUNT_MINUS_ID: &str = "workers-count-minus";
 const COUNT_PLUS_ID: &str = "workers-count-plus";
+/// The workers card's own switch and the kit's control behind it (§7.2): a swarm from
+/// here, or one `evo-agent`.
+pub(crate) const SWARM_TOGGLE_ID: &str = "workers-use-swarm";
+pub(crate) const SWARM_SWITCH_ID: &str = "workers-use-swarm-switch";
+/// How far the switch greys what it turned off: the count, the lanes' model and its
+/// effort. In place — the card keeps every box where it is, so flipping the switch moves
+/// nothing under the pointer that flipped it.
+const OFF_OPACITY: f32 = 0.55;
 
 /// The history region and its states.
 const HISTORY_ID: &str = "history";
@@ -189,6 +198,11 @@ const HISTORY_LIST_ID: &str = "history-list";
 /// named so that it can (a `group_hover` needs its own state) and so a probe can watch it.
 const HISTORY_ARROW_ID: &str = "history-arrow";
 const HISTORY_ROW_ID: &str = "history-row";
+/// The glyph a row leads with says which program wrote the session it resumes (§2), and
+/// the two are named one each so that a probe — and the test below — can say which kind a
+/// row wears without reading the SVG. A row wears one of them, never both.
+const HISTORY_KIND_AGENT_ID: &str = "history-kind-agent";
+const HISTORY_KIND_SWARM_ID: &str = "history-kind-swarm";
 const HISTORY_HINT_ID: &str = "history-hint";
 const HISTORY_COUNT_ID: &str = "history-count";
 /// What the history section is called, for a screen reader: the rows name themselves, but
@@ -211,6 +225,7 @@ const WORKERS_TITLE: &str = "Workers";
 const MODEL_LABEL: &str = "Model";
 const EFFORT_LABEL: &str = "Effort";
 const COUNT_LABEL: &str = "Count";
+const USE_SWARM_LABEL: &str = "Use swarm";
 const FOLDER_LABEL: &str = "Select folder…";
 const HISTORY_TITLE: &str = "History";
 
@@ -248,6 +263,71 @@ fn row_hover_fill(dark: bool) -> Hsla {
 
 /// How much of the page's ink the design mixes into it for a hovered row: 5%.
 const ROW_HOVER_MIX: f32 = 0.05;
+
+/// What a session of this kind is called, where the row says it in words: the tooltip's
+/// first line, and part of the name the row gives a screen reader. The row's glyph says it
+/// without them (§2) — this is the same fact for anyone the glyph does not reach.
+fn kind_label(swarm: bool) -> &'static str {
+    if swarm {
+        "Swarm session"
+    } else {
+        "Agent session"
+    }
+}
+
+/// The glyph a session of this kind leads its row with: one person for the session of one
+/// agent, a graph of nodes for the swarm's — both from the icons the app ships
+/// (`gpui_kit::assets::Assets` embeds the kit's default bundle, and these two are in it).
+fn kind_glyph(swarm: bool) -> IconName {
+    if swarm {
+        IconName::Network
+    } else {
+        IconName::User
+    }
+}
+
+/// The element a row's kind glyph wears, per row: named after the kind, so that the two
+/// are told apart wherever the row is looked at — by a probe, a capture's own tree, or a
+/// test that says the agent row has no swarm glyph on it.
+fn kind_icon_id(swarm: bool, row: usize) -> ElementId {
+    let name = if swarm {
+        HISTORY_KIND_SWARM_ID
+    } else {
+        HISTORY_KIND_AGENT_ID
+    };
+    ElementId::NamedInteger(name.into(), row as u64)
+}
+
+/// One row's tooltip lines: what kind of session this is, then the facts the session model
+/// knows (`fact · fact · …`), which is what the design's row-tooltip would carry.
+fn tooltip_lines(row: &session::HistoryRow) -> Vec<SharedString> {
+    std::iter::once(SharedString::from(kind_label(row.swarm)))
+        .chain(
+            row.tooltip
+                .split(" · ")
+                .map(|line| SharedString::from(line.to_string())),
+        )
+        .collect()
+}
+
+/// One row's name for a screen reader: its title, then what kind of session it is, then the
+/// facts it shows — what a person reads off the row, in the order they read it, and the
+/// badge as the last word when the row wears one. The name is given rather than computed
+/// from the parts, so the kind is in it whether or not the glyph drew.
+fn row_aria_label(row: &session::HistoryRow) -> SharedString {
+    let mut label = format!(
+        "{}, {}, {}, {}",
+        row.title,
+        kind_label(row.swarm),
+        row.folder_short,
+        row.when
+    );
+    if row.open_at_quit {
+        label.push_str(", ");
+        label.push_str(OPEN_AT_QUIT_TEXT);
+    }
+    SharedString::from(label)
+}
 
 /// `font-weight:500`, as much of it as this app can draw — [`widgets::text::MEDIUM`].
 ///
@@ -398,6 +478,17 @@ enum FolderPicker {
     Fixed(Option<PathBuf>),
 }
 
+/// Where a single agent's catalog comes from: the binary, or an answer already known.
+#[derive(Clone, Default)]
+enum CatalogProbe {
+    /// Run it: `evo-agent catalog --json`, on the app's own executor.
+    #[default]
+    Command,
+    /// Answer with this body, starting no process. For tests, which must not run a
+    /// binary to see what the page does with a catalog.
+    Fixed(Value),
+}
+
 /// Where a check's answer comes from: the swarm binary, or an answer already known.
 #[derive(Clone, Default)]
 enum CheckProbe {
@@ -525,8 +616,15 @@ struct EmptyTabState {
     /// The catalog has arrived, from the cache or from a server: until it has, the model
     /// fields hold nothing to choose from.
     catalog: bool,
-    /// The catalog could not be read: shown under the cards, where the check's lines are.
-    catalog_error: Option<String>,
+    /// The app's own catalog read failed: `evo-swarm catalog --json`, or a running
+    /// server's body. The swarm's list, and so the swarm's trouble — shown under the cards
+    /// while the workers card's switch is on.
+    app_catalog_error: Option<String>,
+    /// This page's own `evo-agent catalog --json` failed. The other program's list, and
+    /// so its own trouble — shown while the switch is off. Both are kept, so a switch
+    /// either way shows the trouble of the read that is now this launch's
+    /// ([`EmptyTabState::catalog_error`]).
+    agent_catalog_error: Option<String>,
     /// Nobody has touched this page since it opened.
     ///
     /// The app hands the keyboard to the page's first control when a tab is shown — the
@@ -537,6 +635,17 @@ struct EmptyTabState {
     /// The `evo-swarm` a check runs. The app's own path from Settings, so the check is
     /// about the swarm this app would really spawn.
     swarm_bin: PathBuf,
+    /// The `evo-agent` a single-agent launch would spawn, and the binary its own catalog
+    /// is read from: the app's own path from Settings (§13), so what the page shows is
+    /// what it would really run.
+    agent_bin: PathBuf,
+    /// The catalog the app learned — `evo-swarm catalog --json`, or a running server's
+    /// body — kept as it arrived.
+    ///
+    /// Which list the fields resolve from is the workers card's switch: this one while it
+    /// is on, and `evo-agent`'s own while it is off (§7.2). Switching back needs the
+    /// swarm's body again, and the app's read is not re-asked for on a switch.
+    swarm_catalog: Option<Value>,
     /// What the last check found wrong with the launch the controls describe (§9). One
     /// line each, in evo's own words; empty when the launch is fine.
     problems: Vec<Problem>,
@@ -545,6 +654,8 @@ struct EmptyTabState {
     check_revision: u64,
     /// Where a check's answer comes from.
     check_probe: CheckProbe,
+    /// Where a single agent's own catalog comes from.
+    catalog_probe: CatalogProbe,
     /// Where a folder pick answers from.
     picker: FolderPicker,
     /// The history list's two states (§2): still being fetched, or it could not be read.
@@ -612,14 +723,18 @@ impl EmptyTabState {
             fields_stale: false,
             home: std::env::var("HOME").ok(),
             catalog: false,
-            catalog_error: None,
+            app_catalog_error: None,
+            agent_catalog_error: None,
             untouched: true,
             // The app hands its own path in as soon as it can; until then this is where
             // the installed binary is (§1).
             swarm_bin: cli::swarm_bin(),
+            agent_bin: cli::agent_bin(),
+            swarm_catalog: None,
             problems: Vec::new(),
             check_revision: 0,
             check_probe: CheckProbe::default(),
+            catalog_probe: CatalogProbe::default(),
             picker: FolderPicker::Dialog,
             history_loading: false,
             history_error: None,
@@ -735,10 +850,119 @@ impl EmptyTabState {
     /// — so nothing here has to compare API sets.
     fn set_catalog(&mut self, catalog: &Value, window: &mut Window, cx: &mut Context<Self>) {
         self.catalog = true;
-        self.catalog_error = None;
-        self.launcher.set_catalog(catalog);
+        self.app_catalog_error = None;
+        // The app's own read is the swarm's — `evo-swarm catalog --json`, or a running
+        // server's body — and it is what the fields resolve from while the workers card's
+        // switch is on. Off, they resolve from the one `evo-agent` prints for itself, so
+        // this body is kept and waits for the switch to come back
+        // ([`EmptyTabState::set_use_swarm`]).
+        self.swarm_catalog = Some(catalog.clone());
+        if self.launcher.swarm() {
+            self.launcher.set_catalog(catalog);
+        }
         self.sync_fields(window, cx);
         self.run_check(cx);
+        cx.notify();
+    }
+
+    /// The workers card's switch (§7.2): a swarm from here, or one `evo-agent`.
+    ///
+    /// The value is the window's — one for the app, remembered in `app.json`, so the next
+    /// tab opens with it too — and this is the window handing it back. What the page does
+    /// with it is everything the switch is for: the lanes' controls grey and go inert, and
+    /// the launch is asked about itself again, which off is no `check` at all.
+    fn set_use_swarm(&mut self, swarm: bool, cx: &mut Context<Self>) {
+        if !self.launcher.set_swarm(swarm) {
+            return;
+        }
+        // Which model list the fields resolve from is the switch's own business: the
+        // app's read while it is on, `evo-agent`'s while it is off. Coming back needs the
+        // swarm's body again — this page asked the app for it once, and a switch is not a
+        // reason to ask again.
+        if swarm {
+            if let Some(catalog) = self.swarm_catalog.clone() {
+                self.launcher.set_catalog(&catalog);
+            }
+        }
+        // The two fields resolved differently — a check's answer dropped, or one asked for
+        // again — so the selects showing them are rebuilt on the next frame, which is
+        // where a window is ([`EmptyTabState::fields_stale`]).
+        self.fields_stale = true;
+        self.run_check(cx);
+        cx.notify();
+    }
+
+    /// The `evo-agent` a single-agent launch runs, and the binary its own catalog comes
+    /// from: the app's own path from Settings (§13).
+    fn set_agent_bin(&mut self, bin: PathBuf, cx: &mut Context<Self>) {
+        if self.agent_bin == bin {
+            return;
+        }
+        self.agent_bin = bin;
+        // A path fixed in Settings has to take effect on the page the person is looking
+        // at: with the switch off that is the catalog this page reads for itself.
+        if !self.launcher.swarm() {
+            self.run_check(cx);
+        }
+    }
+
+    /// Ask `evo-agent catalog --json` — one agent's own model list, from its own init
+    /// file, off the thread that draws.
+    ///
+    /// The body is the one `evo-swarm catalog --json` prints minus `lanes`: the
+    /// registrations with their `ready` and `reason`, the levels a `--thinking` may carry,
+    /// the registration evo would resolve with no flags. There is no `check` to ask
+    /// ([`EmptyTabState::run_check`]), so a registration evo cannot reach is the one line
+    /// this probe puts under the cards — in evo's own words, and about the coordinator
+    /// alone: a single agent has no lanes to report on.
+    fn probe_single_agent(&mut self, revision: u64, cx: &mut Context<Self>) {
+        if let CatalogProbe::Fixed(catalog) = self.catalog_probe.clone() {
+            self.settle_single_agent(Ok(catalog), revision, cx);
+            return;
+        }
+        let bin = self.agent_bin.clone();
+        let argv = crate::launch::agent_catalog_argv();
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            let answer = cx
+                .background_executor()
+                .spawn(async move { cli::run_json(&bin, &argv) })
+                .await;
+            let _ = this.update(cx, move |state, cx| {
+                state.settle_single_agent(answer, revision, cx)
+            });
+        })
+        .detach();
+    }
+
+    /// Take a single agent's catalog, if it is still the answer to the question this page
+    /// is asking: the switch is still off, and nothing has been asked since.
+    ///
+    /// A body that is no longer wanted is dropped: the switch can move while the process
+    /// runs, and a list read for one program is not the other's.
+    fn settle_single_agent(
+        &mut self,
+        answer: Result<Value, CliError>,
+        revision: u64,
+        cx: &mut Context<Self>,
+    ) {
+        if self.check_revision != revision || self.launcher.swarm() {
+            return;
+        }
+        match answer {
+            Ok(catalog) => {
+                self.catalog = true;
+                self.agent_catalog_error = None;
+                self.fields_stale |= self.launcher.set_catalog(&catalog);
+                self.problems = agent_problems(&self.launcher);
+            }
+            Err(error) => {
+                // The one read a single agent has could not be made: one line of the same
+                // kind the catalog's own trouble wears, with the process's own words in
+                // the hover.
+                self.problems = agent_problems(&self.launcher);
+                self.agent_catalog_error = Some(error.summary());
+            }
+        }
         cx.notify();
     }
 
@@ -759,18 +983,37 @@ impl EmptyTabState {
         self.run_check(cx);
     }
 
-    /// Ask `evo-swarm check --json` about the launch the controls describe (§9), off the
-    /// thread that draws: are the models resolvable, can a lane reach its API, is the key
-    /// there. The answer is both the lines under the cards and what the fields resolve to.
+    /// A single agent's catalog, without running one: the tab's answer for a test, and
+    /// the probe's own source from then on.
+    #[allow(dead_code)]
+    fn set_agent_catalog(&mut self, catalog: &Value, cx: &mut Context<Self>) {
+        self.catalog_probe = CatalogProbe::Fixed(catalog.clone());
+        self.run_check(cx);
+    }
+
+    /// Ask the launch the controls describe about itself (§9), off the thread that
+    /// draws: are the models resolvable, can a lane reach its API, is the key there. The
+    /// answer is both the lines under the cards and what the fields resolve to.
     ///
-    /// A check that cannot run at all — the binary is not there, or is not one that runs —
-    /// is one more line of the same kind: it wears evo's own shape, says which path it
-    /// tried, and a click on it opens Settings, which is where a path is fixed (§13).
+    /// With the workers card's switch on that is `evo-swarm check --json` — a check that
+    /// cannot run at all, because the binary is not there or is not one that runs, is one
+    /// more line of the same kind: it wears evo's own shape, says which path it tried, and
+    /// a click on it opens Settings, which is where a path is fixed (§13).
+    ///
+    /// Off, there is nothing to ask: `evo-agent` has no `check` subcommand, and
+    /// `--workers` and `--lane-model` are not flags it takes. The lines under the cards
+    /// come from its catalog instead ([`EmptyTabState::probe`]).
     fn run_check(&mut self, cx: &mut Context<Self>) {
-        let plan = self.launcher.plan();
-        let spec = crate::launch::check_spec(&plan);
+        // The revision moves whatever happens next: an answer to a question this page has
+        // stopped asking is dropped, not rendered.
         self.check_revision += 1;
         let revision = self.check_revision;
+        if !self.launcher.swarm() {
+            self.probe_single_agent(revision, cx);
+            return;
+        }
+        let plan = self.launcher.plan();
+        let spec = crate::launch::check_spec(&plan);
 
         if let CheckProbe::Fixed(report) = self.check_probe.clone() {
             self.fields_stale |= self.launcher.set_check(&check_body(&report));
@@ -856,15 +1099,38 @@ impl EmptyTabState {
     }
 
     /// The catalog could not be learned: one more line under the cards, in evo's own words.
+    /// This is the app's own read — the swarm's — and it is the line while the switch is on.
     fn set_catalog_error(&mut self, error: Option<String>, cx: &mut Context<Self>) {
-        self.catalog_error = error.filter(|error| !error.trim().is_empty());
+        self.app_catalog_error = error.filter(|error| !error.trim().is_empty());
         cx.notify();
+    }
+
+    /// The trouble with the list this launch would run on, in the words of the read that
+    /// had it: the app's own while the workers card's switch is on, and this page's own
+    /// `evo-agent catalog --json` while it is off.
+    fn catalog_error(&self) -> Option<&str> {
+        let read = if self.launcher.swarm() {
+            &self.app_catalog_error
+        } else {
+            &self.agent_catalog_error
+        };
+        read.as_deref()
     }
 
     /// The cfg the folder dialog starts in, and the `~` the history rows shorten around.
     fn set_home(&mut self, home: Option<String>, cx: &mut Context<Self>) {
         self.home = home;
         cx.notify();
+    }
+
+    /// The switch was flipped on this page: the value is the app's and every tab's, so
+    /// the window is asked for it rather than this page deciding alone. The window hands
+    /// it straight back — [`EmptyTabState::set_use_swarm`] — and writes it down for the
+    /// next launch.
+    fn set_swarm(&mut self, swarm: bool, cx: &mut Context<Self>) {
+        let _ = self
+            .tab
+            .update(cx, |tab, cx| tab.request_use_swarm(swarm, cx));
     }
 
     /// A folder pick, synchronously: what a test injects in place of the dialog.
@@ -935,9 +1201,11 @@ impl EmptyTabState {
             )
     }
 
-    /// One role card: its title, the count control when it has one, and the two fields.
+    /// One role card: its title, the switch and the count control when it has them, and
+    /// the two fields.
     fn role_card(&self, role: Card, window: &Window, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
+        let off = self.card_off(role);
         let (title, id) = match role {
             Card::Coordinator => (COORDINATOR_TITLE, COORDINATOR_CARD_ID),
             Card::Lanes => (WORKERS_TITLE, WORKERS_CARD_ID),
@@ -971,10 +1239,11 @@ impl EmptyTabState {
                             .child(title),
                     )
                     .when(role == Card::Lanes, |heading| {
-                        heading.child(
+                        heading.child(self.swarm_toggle(cx)).child(
                             div()
                                 .w(FIELD_COLUMN)
                                 .flex_none()
+                                .when(off, |count| count.opacity(OFF_OPACITY))
                                 .child(self.count_box(window, cx)),
                         )
                     }),
@@ -985,6 +1254,7 @@ impl EmptyTabState {
                     .min_w_0()
                     .gap(FIELD_GAP)
                     .items_end()
+                    .when(off, |fields| fields.opacity(OFF_OPACITY))
                     .child(self.model_field(role, window, cx))
                     .child(
                         div()
@@ -995,9 +1265,54 @@ impl EmptyTabState {
             )
     }
 
+    /// The workers card's own switch (§7.2): a whole swarm behind this launch, or one
+    /// `evo-agent`.
+    ///
+    /// The design's card is a title, a count and two fields; running a single agent needs
+    /// one more control, and this is it — the kit's own switch, checked in the palette's
+    /// primary, with the page's label beside it. It sits in the heading row, left of the
+    /// count, and what it turns off is greyed **in place**: the card keeps its shape, so
+    /// nothing on the page moves under the pointer that flipped it.
+    fn swarm_toggle(&self, cx: &Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        h_flex()
+            .id(SWARM_TOGGLE_ID)
+            .test_support()
+            .flex_none()
+            .items_center()
+            .gap(px(8.))
+            .child(
+                div()
+                    .text_size(SMALL)
+                    .line_height(SMALL_LINE)
+                    .text_color(theme.muted_foreground)
+                    .child(USE_SWARM_LABEL),
+            )
+            .child(
+                // The text above is the label a reader sees; the switch carries the same
+                // words as its accessible name, because the two are separate elements.
+                Switch::new(SWARM_SWITCH_ID)
+                    .checked(self.launcher.swarm())
+                    .with_size(Size::Small)
+                    .accessibility_label(USE_SWARM_LABEL)
+                    .on_change(cx.listener(|this, on, _window, cx| this.set_swarm(*on, cx))),
+            )
+    }
+
+    /// Whether one card's controls are greyed and inert — the workers card with its switch
+    /// off, where the lanes' model, their effort and their count are not this launch's: a
+    /// single `evo-agent` runs no lanes.
+    fn card_off(&self, role: Card) -> bool {
+        role == Card::Lanes && !self.launcher.swarm()
+    }
+
     /// The model field: the design's `.field` — a label, then the select's own box.
+    ///
+    /// A field the workers card's switch turned off keeps its box, its label and its
+    /// value, and takes nothing: the kit's own disabled face, and no tab stop to land on.
     fn model_field(&self, role: Card, window: &Window, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
+        let off = self.card_off(role);
         let (id, field, label) = match role {
             Card::Coordinator => (COORDINATOR_MODEL_ID, &self.coordinator, "Coordinator model"),
             Card::Lanes => (WORKERS_MODEL_ID, &self.workers, "Workers model"),
@@ -1011,9 +1326,8 @@ impl EmptyTabState {
         let border = theme.border;
         let primary = theme.primary;
         let muted = theme.muted;
-        let untouched = self.untouched;
-        // A field that resolved no model says so in the box, in evo's own words: the click
-        // still opens the menu, which is where another registration would come from.
+        let untouched = self.untouched; // A field that resolved no model says so in the box, in evo's own words: the click
+                                        // still opens the menu, which is where another registration would come from.
         let note = self
             .launcher
             .unresolved_note(role)
@@ -1046,7 +1360,7 @@ impl EmptyTabState {
                     .border_1()
                     .border_color(border)
                     .bg(theme.background)
-                    .track_focus(&handle)
+                    .when(!off, |box_| box_.track_focus(&handle))
                     // `.shad-select-wrap:focus-within .select-summary{border-color:
                     // var(--primary);box-shadow:0 0 0 2px var(--muted)}`. Painted by the
                     // element that carries the handle, so it follows the keyboard without a
@@ -1057,7 +1371,7 @@ impl EmptyTabState {
                     // has touched the page, and the design shows nothing until someone
                     // does. So the ring is attached only once a person has been here
                     // (`EmptyTabState::untouched`).
-                    .when(!untouched, |box_| {
+                    .when(!untouched && !off, |box_| {
                         box_.focus(move |style| {
                             style.border_color(primary).shadow(vec![ring(2., muted)])
                         })
@@ -1082,6 +1396,9 @@ impl EmptyTabState {
                             .id(id)
                             .appearance(false)
                             .focus_ring(false)
+                            // The switch turned this card off: the kit's own disabled face,
+                            // which is also what keeps the menu shut.
+                            .disabled(off)
                             // A field that resolved no model says so in the box, in evo's
                             // own words: the click still opens the menu, which is where
                             // another registration would come from.
@@ -1155,11 +1472,15 @@ impl EmptyTabState {
     ///
     /// `--thinking` / `--lane-thinking` take the levels the catalog lists, so the slider
     /// offers exactly those — the caller owns the label, the widget the rail.
+    ///
+    /// A slider the workers card's switch turned off is drawn where it is and hands the
+    /// widget nothing: no arrow, no drag, no click, and no tab stop.
     fn effort_slider(&self, role: Card, window: &Window, cx: &Context<Self>) -> AnyElement {
         let id = match role {
             Card::Coordinator => COORDINATOR_EFFORT_ID,
             Card::Lanes => WORKERS_EFFORT_ID,
         };
+        let off = self.card_off(role);
         let levels: Vec<SharedString> = self
             .launcher
             .levels()
@@ -1169,7 +1490,7 @@ impl EmptyTabState {
         let weak = cx.entity().downgrade();
         // The slider is named with the page's own id: it registers `<id>`, `<id>-rail`,
         // `<id>-thumb` and `<id>-fill` itself, which is what a test finds them by.
-        widgets::EffortSlider::with_levels(
+        let slider = widgets::EffortSlider::with_levels(
             id,
             levels,
             self.launcher.effort(role),
@@ -1177,27 +1498,33 @@ impl EmptyTabState {
         )
         .palette(design::palette(cx.theme().is_dark()))
         .reduce_motion(cx.reduce_motion())
-        .focus(self.effort_focus[slot(role)].clone())
-        .notify({
-            let weak = weak.clone();
-            move |cx: &mut App| {
-                let _ = weak.update(cx, |_, cx| cx.notify());
-            }
-        })
-        .on_change(move |level, _window, cx| {
-            let _ = weak.update(cx, |state, cx| {
-                if state.launcher.set_effort(role, level) {
-                    cx.notify();
+        .disabled(off);
+        if off {
+            return slider.render(window);
+        }
+        slider
+            .focus(self.effort_focus[slot(role)].clone())
+            .notify({
+                let weak = weak.clone();
+                move |cx: &mut App| {
+                    let _ = weak.update(cx, |_, cx| cx.notify());
                 }
-            });
-        })
-        .render(window)
+            })
+            .on_change(move |level, _window, cx| {
+                let _ = weak.update(cx, |state, cx| {
+                    if state.launcher.set_effort(role, level) {
+                        cx.notify();
+                    }
+                });
+            })
+            .render(window)
     }
 
     /// The count control: `.worker-count` — a label, then the box the `−`/`+` steppers and
     /// the field share.
     fn count_box(&self, _window: &Window, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
+        let off = self.card_off(Card::Lanes);
         let handle = self.count.read(cx).focus_handle(cx);
         let border = theme.border;
         let primary = theme.primary;
@@ -1219,7 +1546,9 @@ impl EmptyTabState {
                 .line_height(px(design::FONT_BASE * 1.5))
                 .child(label)
                 // The design's own `onClick`: a click steps, and a focused button's
-                // `Enter` or `Space` is a click too.
+                // `Enter` or `Space` is a click too. A stepper the workers card's switch
+                // turned off takes neither.
+                .disabled(off)
                 .on_click(cx.listener(move |this, _, window, cx| this.step_count(up, window, cx)))
         };
         h_flex()
@@ -1253,9 +1582,13 @@ impl EmptyTabState {
                     // gpui paints one under the element, so without a surface of its own
                     // the focus ring's `muted` filled the whole field.
                     .bg(theme.background)
-                    .track_focus(&handle)
+                    .when(!off, |box_| box_.track_focus(&handle))
                     // `.number-input:focus-within{border-color:var(--primary);box-shadow:0 0 0 2px var(--muted)}`
-                    .focus(move |style| style.border_color(primary).shadow(vec![ring(2., muted)]))
+                    .when(!off, |box_| {
+                        box_.focus(move |style| {
+                            style.border_color(primary).shadow(vec![ring(2., muted)])
+                        })
+                    })
                     .child(step(COUNT_MINUS_ID, "−", false, cx))
                     .child(
                         div()
@@ -1277,6 +1610,7 @@ impl EmptyTabState {
                                 // the box's own height and centres its one line in it.
                                 Input::new(&self.count)
                                     .appearance(false)
+                                    .disabled(off)
                                     .bg(theme.transparent)
                                     .h_full()
                                     .px(px(0.))
@@ -1370,13 +1704,13 @@ impl EmptyTabState {
                 .collect();
         // The catalog's own trouble is one more line of the same kind: what the page does
         // without it, with the server's own words in the hover.
-        if let Some(error) = &self.catalog_error {
+        if let Some(error) = self.catalog_error() {
             let text = if self.catalog {
                 CATALOG_STALE
             } else {
                 CATALOG_FAILED
             };
-            let detail = SharedString::from(error.clone());
+            let detail = SharedString::from(error);
             lines.push(
                 div()
                     .id("catalog-problem")
@@ -1558,7 +1892,7 @@ impl EmptyTabState {
             .into_any_element()
     }
 
-    /// One history row: the folder glyph, the title with the badge the app's own recents
+    /// One history row: the kind's glyph, the title with the badge the app's own recents
     /// earn, the path and how long ago under it, and the arrow that says what a click does.
     ///
     /// `count` is how many rows the list has, which is what the first and last rows need:
@@ -1578,6 +1912,8 @@ impl EmptyTabState {
         let fill = row_hover_fill(cx.theme().mode.is_dark());
         let session = PathBuf::from(&row.session_path);
         let folder = PathBuf::from(&row.folder);
+        // What a click opens: the program that wrote this journal (§7.2, §9.5).
+        let swarm = row.swarm;
         let badge = row.open_at_quit.then(|| {
             div()
                 .id(ElementId::NamedInteger(OPEN_AT_QUIT_ID.into(), ix as u64))
@@ -1611,16 +1947,18 @@ impl EmptyTabState {
             .when(ix == 0, |row| row.rounded_t(ROW_INNER_RADIUS))
             .when(ix + 1 == count, |row| row.rounded_b(ROW_INNER_RADIUS))
             .when(ix > 0, |row| row.border_t_1().border_color(theme.border))
+            .aria_label(row_aria_label(row))
             .tooltip({
                 // One fact per line (the row's tooltip is `fact · fact · …`), each
                 // wrapping inside the box: as one run the kit's flex row laid the
                 // text out on a single line that ran past its own 460px box and the
                 // window's edge (a folder, a session file name, a date, the models).
-                let lines: Vec<SharedString> = row
-                    .tooltip
-                    .split(" · ")
-                    .map(|line| SharedString::from(line.to_string()))
-                    .collect();
+                //
+                // Its first line is what kind of session this is, which the glyph
+                // says without words (§2): a click resumes either kind's journal the
+                // same way, so the kind is the one fact a person cannot read off the
+                // title, the path and the clock.
+                let lines: Vec<SharedString> = tooltip_lines(row);
                 move |window, cx| {
                     widgets::tooltip::wrapped(
                         HISTORY_TOOLTIP_ID,
@@ -1633,16 +1971,27 @@ impl EmptyTabState {
             })
             .on_click(cx.listener(move |this, _, _, cx| {
                 let _ = this.tab.update(cx, |tab, cx| {
-                    tab.request_resume(session.clone(), folder.clone(), cx)
+                    tab.request_resume(session.clone(), folder.clone(), swarm, cx)
                 });
             }))
             .child(
                 // `.history-icon{color:var(--muted-fg)}`: the row's own glyph is quiet,
                 // the title beside it is not.
+                //
+                // The glyph is the *kind* the row is — one agent's session or a swarm's
+                // (§2) — and it sits on the title's line rather than in the middle of
+                // the two the row holds: it is the title's own mark, and the path and
+                // the clock under it have none.
                 div()
+                    .id(kind_icon_id(row.swarm, ix))
+                    .test_support()
                     .flex_none()
+                    .self_start()
+                    .h(BODY_LINE)
+                    .flex()
+                    .items_center()
                     .text_color(muted)
-                    .child(Icon::new(IconName::Folder).with_size(ROW_ICON)),
+                    .child(Icon::new(kind_glyph(row.swarm)).with_size(ROW_ICON)),
             )
             .child(
                 v_flex()
@@ -1780,6 +2129,31 @@ fn put_count(
     }
 }
 
+/// What a single-agent launch has to say about itself, from a catalog alone.
+///
+/// One line at most: the coordinator's registration, when evo cannot reach it, in evo's
+/// own words — the same `reason` its menu row carries. A registration evo gave no reason
+/// for says nothing rather than inventing one; a lane's own judgement is not asked, since
+/// one agent has no lanes; and the count and the effort are `check`'s answers, which
+/// `evo-agent` is never asked for.
+fn agent_problems(launcher: &Launcher) -> Vec<Problem> {
+    let Some(model) = launcher.chosen(Card::Coordinator) else {
+        return Vec::new();
+    };
+    if model.ready {
+        return Vec::new();
+    }
+    model
+        .ready_reason
+        .clone()
+        .map(|reason| Problem {
+            code: "model_not_ready".to_string(),
+            message: reason,
+        })
+        .into_iter()
+        .collect()
+}
+
 /// The registrations one card's menu offers.
 fn model_items(launcher: &Launcher, role: Card) -> Vec<ModelItem> {
     launcher
@@ -1912,6 +2286,32 @@ impl TabContent {
         cx.notify();
     }
 
+    /// The `evo-agent` this app would spawn, which is the binary a single-agent launch
+    /// runs and the one its catalog is read from (§9, §13).
+    pub fn set_agent_bin(&mut self, bin: PathBuf, cx: &mut Context<Self>) {
+        let state = self.choosers.state.clone();
+        state.update(cx, |state, cx| state.set_agent_bin(bin, cx));
+        cx.notify();
+    }
+
+    /// The workers card's switch, as the window holds it (§7.2): one value for the app,
+    /// remembered in `app.json`, so every tab and the next launch open with it.
+    pub fn set_use_swarm(&mut self, swarm: bool, cx: &mut Context<Self>) {
+        let state = self.choosers.state.clone();
+        state.update(cx, |state, cx| state.set_use_swarm(swarm, cx));
+        cx.notify();
+    }
+
+    /// Whether this tab is a swarm or one agent (§7.2): what it launched, once it has —
+    /// a running tab keeps the program it started with — and the workers card's switch
+    /// until then.
+    pub fn swarm(&self, cx: &App) -> bool {
+        self.last_launch
+            .as_ref()
+            .map(crate::launch::Launch::swarm)
+            .unwrap_or_else(|| self.choosers.state.read(cx).launcher.swarm())
+    }
+
     /// The catalog could not be learned: say so under the cards, where the check's own
     /// lines are.
     pub fn set_catalog_error(&mut self, error: Option<String>, cx: &mut Context<Self>) {
@@ -1983,6 +2383,13 @@ impl TabContent {
         self.choosers.plan(cx)
     }
 
+    /// Ask the window for a different program: whether a launch from here is a swarm or
+    /// one agent is the app's own setting, so this page reports the intent like every
+    /// other control that belongs to the window.
+    pub fn request_use_swarm(&mut self, swarm: bool, cx: &mut Context<Self>) {
+        cx.emit(TabContentEvent::UseSwarm(swarm));
+    }
+
     /// A folder is chosen: hand the window the launch it asked for — the models, the
     /// efforts and the worker count are fixed when the swarm starts (§7.2). The window
     /// starts the swarm; this only reports the intent.
@@ -2002,16 +2409,19 @@ impl TabContent {
         self.emit_launch(folder, plan, cx);
     }
 
-    /// A history row is clicked: resume that session in the folder it ran in (§2).
+    /// A history row is clicked: resume that session in the folder it ran in, with the
+    /// program that wrote it (§2).
     pub(crate) fn request_resume(
         &mut self,
         session_path: PathBuf,
         folder: PathBuf,
+        swarm: bool,
         cx: &mut Context<Self>,
     ) {
         cx.emit(TabContentEvent::Resume {
             session_path,
             folder,
+            swarm,
         });
     }
 
@@ -2102,6 +2512,31 @@ mod tests {
 
     /// A window wide enough for the 800 px block, and tall enough for the whole page.
     const WINDOW: (f32, f32) = (1200., 800.);
+
+    /// An `evo-agent catalog --json` body (§5.6): the same shape as the swarm's, minus
+    /// `lanes` — a single agent has no lane judgement to offer — and its registrations
+    /// are its own init file's, which is why one of them is a model the swarm's catalog
+    /// does not list at all.
+    fn agent_catalog_body() -> Value {
+        serde_json::json!({
+            "models": [
+                {"id": "evo-agent-model", "provider": "acme", "name": "Agent Model",
+                 "api": "chat-model", "context_window": 128000,
+                 "reasoning": false, "images": false, "ready": true, "reason": null},
+                {"id": "claude-sonnet-5", "provider": "proxy", "name": "Claude Sonnet 5",
+                 "api": "anthropic-oauth-messages", "context_window": 1000000,
+                 "reasoning": true, "images": true, "ready": false,
+                 "reason": "no credential for proxy"},
+                {"id": "claude-opus-4.5", "provider": "anthropic", "name": "Claude Opus 4.5",
+                 "api": "anthropic-messages", "context_window": 200000,
+                 "reasoning": true, "images": true, "ready": false,
+                 "reason": "anthropic-messages is not registered for evo-agent"}
+            ],
+            "default_model": {"id": "evo-agent-model", "provider": "acme"},
+            "thinking_levels": ["low", "medium", "high"],
+            "warnings": []
+        })
+    }
 
     /// A `/catalog` body as `evo-swarm catalog --json` prints it (§5.6): the default
     /// registration, one every lane may run, one no lane may run, and the ladder.
@@ -2194,6 +2629,23 @@ mod tests {
             });
         }
 
+        /// The catalog a single agent's own probe answers with, from now on: no process
+        /// runs in a test.
+        fn set_agent_catalog(&self, cx: &mut TestAppContext, catalog: &Value) {
+            let state = self.state(cx);
+            self.act(cx, |_, cx| {
+                state.update(cx, |state, cx| state.set_agent_catalog(catalog, cx))
+            });
+        }
+
+        /// The workers card's switch, as the window hands it down (§7.2).
+        fn set_use_swarm(&self, cx: &mut TestAppContext, swarm: bool) {
+            let tab = self.tab.clone();
+            self.act(cx, |_, cx| {
+                tab.update(cx, |tab, cx| tab.set_use_swarm(swarm, cx))
+            });
+        }
+
         fn history(&self, cx: &mut TestAppContext, entries: &[HistoryEntry], home: &str) {
             let tab = self.tab.clone();
             self.act(cx, |_, cx| {
@@ -2226,6 +2678,7 @@ mod tests {
                         // by `set_check`, and the resolution never reaches a binary.
                         Arc::new(crate::LaunchEnv {
                             swarm_bin: PathBuf::from("/nonexistent/evo-swarm"),
+                            agent_bin: PathBuf::from("/nonexistent/evo-agent"),
                             ..crate::LaunchEnv::default()
                         }),
                         window,
@@ -2260,8 +2713,50 @@ mod tests {
             lanes: Some(4),
             coordinator_model: Some("claude-opus-4.5@anthropic".to_string()),
             lanes_model: None,
+            swarm: true,
             source: session::HistorySource::Index,
             open_at_quit: open,
+        }
+    }
+
+    /// Whether the bundle the app installs carries `path` — `gpui_kit::assets::Assets`,
+    /// which is what `main` hands the application (`with_assets`). An `IconName` the
+    /// bundle does not carry is a glyph that draws nothing, so the kind's two are asked
+    /// for here rather than assumed.
+    fn is_bundled(path: &str) -> bool {
+        use gpui_kit::AssetSource as _;
+        matches!(gpui_kit::assets::Assets.load(path), Ok(Some(bytes)) if !bytes.is_empty())
+    }
+
+    /// A history row's own id, for the row at `row`.
+    fn history_row_id(row: usize) -> ElementId {
+        ElementId::NamedInteger(HISTORY_ROW_ID.into(), row as u64)
+    }
+
+    /// The same row, for the other kind: the session of one agent (§2).
+    fn agent_entry(session: &str, folder: &str, open: bool) -> HistoryEntry {
+        HistoryEntry {
+            swarm: false,
+            lanes: None,
+            ..entry(session, folder, open)
+        }
+    }
+
+    /// One row of the session model's shape, for the two things a row says in words: the
+    /// tooltip's first line and its name for a screen reader.
+    fn session_row(swarm: bool) -> session::HistoryRow {
+        session::HistoryRow {
+            title: "project".to_string(),
+            folder_short: "~/coding/project".to_string(),
+            when: "just now".to_string(),
+            tooltip: "~/coding/project · /j/1.sexp · 2026-09-29 09:25:44 UTC (+00:00)".to_string(),
+            swarm,
+            session_path: "/j/1.sexp".to_string(),
+            folder: "~/coding/project".to_string(),
+            coordinator_model: Some("stub-a".to_string()),
+            lanes_model: None,
+            source: session::HistorySource::Index,
+            open_at_quit: false,
         }
     }
 
@@ -3114,8 +3609,135 @@ mod tests {
             vec![TabContentEvent::Resume {
                 session_path: PathBuf::from("/j/2.sexp"),
                 folder: PathBuf::from("/Users/you/coding/bar"),
+                swarm: true,
             }]
         );
+    }
+
+    /// §2: the two kinds are told apart by the glyph a row leads with, chosen from the
+    /// icons the app ships — one person for one agent's session, a graph of nodes for a
+    /// swarm's — and by the words the row says the same thing in.
+    #[test]
+    fn each_kind_leads_with_its_own_glyph_and_says_so_in_words() {
+        // The glyph is a name, not a shape: what a row draws is the SVG at this path,
+        // out of the bundle the app installs — so the test pins the path, and asks the
+        // bundle for it rather than trusting that the name exists.
+        use gpui_kit::component::IconNamed as _;
+        assert_eq!(
+            kind_glyph(true).path(),
+            "icons/network.svg",
+            "a swarm's session"
+        );
+        assert_eq!(
+            kind_glyph(false).path(),
+            "icons/user.svg",
+            "one agent's session"
+        );
+        assert_ne!(kind_glyph(true).path(), kind_glyph(false).path());
+        for path in [kind_glyph(true).path(), kind_glyph(false).path()] {
+            assert!(is_bundled(&path), "the app ships {path}");
+        }
+        assert_eq!(kind_label(true), "Swarm session");
+        assert_eq!(kind_label(false), "Agent session");
+        // The row's own name for the two, which is also what a probe looks for.
+        assert_ne!(kind_icon_id(true, 0), kind_icon_id(false, 0));
+        assert_eq!(kind_icon_id(true, 3).to_string(), "history-kind-swarm-3");
+        assert_eq!(kind_icon_id(false, 3).to_string(), "history-kind-agent-3");
+
+        // What the row says without the glyph: the kind leads its tooltip, and the
+        // facts the session model knows follow it, none of them lost.
+        for swarm in [true, false] {
+            let row = session_row(swarm);
+            let lines = tooltip_lines(&row);
+            assert_eq!(lines[0], kind_label(swarm), "the kind is the first line");
+            assert_eq!(lines[1], "~/coding/project");
+            assert_eq!(
+                lines.len(),
+                1 + row.tooltip.split(" · ").count(),
+                "one line more than the facts: {:?}",
+                lines
+            );
+            // And the name a screen reader reads: what the row shows, with the kind
+            // in it — a person who cannot see the glyph is told the same thing.
+            let aria = row_aria_label(&row);
+            assert!(
+                aria.contains(kind_label(swarm)),
+                "the row's name says its kind: {aria}"
+            );
+            assert!(aria.starts_with("project, "), "{aria}");
+            assert!(aria.contains("~/coding/project") && aria.contains("just now"));
+            assert!(!aria.contains(OPEN_AT_QUIT_TEXT), "this row wears no badge");
+        }
+        // A row the app had open says so in its name too, as its badge does.
+        let open = session::HistoryRow {
+            open_at_quit: true,
+            ..session_row(true)
+        };
+        assert!(
+            row_aria_label(&open).ends_with(OPEN_AT_QUIT_TEXT),
+            "{}",
+            row_aria_label(&open)
+        );
+    }
+
+    /// §2: a history row of either kind renders its own glyph and wears the kind in its
+    /// own name — read off the tree, the way a screen reader and a probe read it.
+    #[gpui_kit::test]
+    fn a_history_row_of_either_kind_wears_its_own_glyph_and_name(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.history(
+            cx,
+            &[
+                entry("/j/swarm.sexp", "/Users/you/coding/foo", false),
+                agent_entry("/j/agent.sexp", "/Users/you/coding/bar", false),
+            ],
+            "/Users/you",
+        );
+        f.render(cx);
+        f.act(cx, |window, cx| {
+            // Each row leads with its own kind's glyph, and with no other.
+            assert!(
+                window.find(kind_icon_id(true, 0)).visible(),
+                "the swarm's row leads with the swarm's glyph"
+            );
+            assert!(window.try_find(kind_icon_id(false, 0)).is_none());
+            assert!(
+                window.find(kind_icon_id(false, 1)).visible(),
+                "the agent's row leads with the agent's glyph"
+            );
+            assert!(window.try_find(kind_icon_id(true, 1)).is_none());
+
+            // The glyph sits on the row's first line: its own box is that line's, so
+            // its middle is the title's middle, not the middle of the two lines.
+            let glyph = window.find(kind_icon_id(true, 0)).bounds();
+            let row = window.find(history_row_id(0)).bounds();
+            assert_eq!(
+                glyph.size.height, BODY_LINE,
+                "the glyph's box is the title's own line"
+            );
+            assert_eq!(
+                glyph.top() - row.top(),
+                ROW_PAD_Y,
+                "at the row's head, where the title is — not in the middle of the two lines"
+            );
+
+            // And each row names itself with the kind in it.
+            let swarm = window.find(history_row_id(0)).label().unwrap().to_string();
+            assert!(swarm.starts_with("foo, Swarm session"), "{swarm}");
+            let agent = window.find(history_row_id(1)).label().unwrap().to_string();
+            assert!(agent.starts_with("bar, Agent session"), "{agent}");
+
+            window.hover(history_row_id(0), cx);
+        });
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(1500));
+        cx.run_until_parked();
+        f.render(cx);
+        f.act(cx, |window, _| {
+            // The row keeps the tooltip it had — the one whose first line is now the
+            // kind (`tooltip_lines`, above, is what says which line that is).
+            assert!(window.find(HISTORY_TOOLTIP_ID).visible());
+        });
     }
 
     /// A history row's tooltip lists its facts one per line, and a line longer than
@@ -3266,6 +3888,290 @@ mod tests {
             assert_eq!(
                 effort.origin.x,
                 coordinator.origin.x + coordinator.size.width + FIELD_GAP
+            );
+        });
+    }
+
+    /// §7.2: the workers card's own switch, and what it turns off. It opens checked — a
+    /// swarm is what this app starts — and flipping it greys the card's other controls
+    /// **in place**: the model box, the effort slider and the count keep every box exactly
+    /// where they were, so nothing moves under the pointer that flipped it, and none of
+    /// them takes anything. The intent itself is the window's, which owns the value for
+    /// every tab and for `app.json`.
+    #[gpui_kit::test]
+    fn the_workers_switch_turns_the_cards_controls_off_in_place(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.set_catalog(cx, &catalog_body());
+        f.render(cx);
+        let state = f.state(cx);
+        let model_box = ElementId::Name(format!("{WORKERS_MODEL_ID}-box").into());
+        let where_they_are = |window: &mut Window| {
+            (
+                window.find(model_box.clone()).bounds(),
+                window.find(WORKERS_EFFORT_ID).bounds(),
+                window.find(COUNT_BOX_ID).bounds(),
+            )
+        };
+        let before = f.act(cx, |window, _| {
+            assert!(
+                window.find(SWARM_TOGGLE_ID).visible(),
+                "the workers card carries the switch"
+            );
+            assert_eq!(
+                window.find(SWARM_SWITCH_ID).checked(),
+                Some(true),
+                "and it opens on a swarm"
+            );
+            assert_eq!(
+                window.find(SWARM_SWITCH_ID).label(),
+                Some(USE_SWARM_LABEL),
+                "with the page's own words on it"
+            );
+            where_they_are(window)
+        });
+
+        f.act(cx, |window, cx| window.click(SWARM_SWITCH_ID, cx));
+        assert_eq!(
+            f.events().last(),
+            Some(&TabContentEvent::UseSwarm(false)),
+            "the switch asks the window, which owns the value"
+        );
+        // What the window answers with comes back through `set_use_swarm`; the fixture has
+        // no window of its own to answer, so this is that answer.
+        let tab = f.tab.clone();
+        f.act(cx, |_, cx| {
+            tab.update(cx, |tab, cx| tab.set_use_swarm(false, cx))
+        });
+        f.render(cx);
+
+        let after = f.act(cx, |window, cx| {
+            assert!(!state.read(cx).launcher.swarm(), "the launch is one agent");
+            assert_eq!(
+                window.find(SWARM_SWITCH_ID).checked(),
+                Some(false),
+                "and the switch says so"
+            );
+            let after = where_they_are(window);
+            // The count's own stepper and the lanes' slider are the two controls a person
+            // reaches for by hand: off, neither of them moves anything.
+            let count = state.read(cx).launcher.workers();
+            window.click(COUNT_PLUS_ID, cx);
+            window.click(WORKERS_EFFORT_ID, cx);
+            assert_eq!(
+                state.read(cx).launcher.workers(),
+                count,
+                "a greyed stepper steps nothing"
+            );
+            assert_eq!(
+                state.read(cx).launcher.level(Card::Lanes),
+                Some("medium"),
+                "a greyed slider stays on the rung it was showing"
+            );
+            after
+        });
+        assert_eq!(
+            after, before,
+            "and every box on the card is exactly where it was"
+        );
+    }
+
+    /// §5.6, §7.2: a single-agent launch runs on the list `evo-agent` prints for itself —
+    /// its own init file, its own registrations — not on the app's own read, which is the
+    /// swarm's. And the switch coming back brings the swarm's list with it, without asking
+    /// the app a second time.
+    #[gpui_kit::test]
+    fn a_single_agent_launch_resolves_from_its_own_catalog(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.set_catalog(cx, &catalog_body());
+        f.render(cx);
+        let state = f.state(cx);
+        f.act(cx, |_, cx| {
+            assert_eq!(
+                state.read(cx).launcher.chosen_key(Card::Coordinator),
+                Some("claude-opus-4.5@anthropic"),
+                "the swarm's own default registration, from the app's read"
+            )
+        });
+
+        f.set_agent_catalog(cx, &agent_catalog_body());
+        f.set_use_swarm(cx, false);
+        f.render(cx);
+        f.act(cx, |_, cx| {
+            let state = state.read(cx);
+            let keys: Vec<&str> = state
+                .launcher
+                .models()
+                .iter()
+                .map(|model| model.key.as_str())
+                .collect();
+            assert_eq!(
+                keys,
+                vec![
+                    "evo-agent-model@acme",
+                    "claude-sonnet-5@proxy",
+                    "claude-opus-4.5@anthropic"
+                ],
+                "the agent's own registrations, in its own order"
+            );
+            assert_eq!(
+                state.launcher.chosen_key(Card::Coordinator),
+                Some("evo-agent-model@acme"),
+                "and its own default registration"
+            );
+            assert!(state.problems.is_empty(), "nothing is wrong with it");
+        });
+
+        // Back on: the swarm's list, as the app handed it over, and its own default.
+        f.set_use_swarm(cx, true);
+        f.render(cx);
+        f.act(cx, |window, cx| {
+            let state = state.read(cx);
+            assert_eq!(
+                state.launcher.chosen_key(Card::Coordinator),
+                Some("claude-opus-4.5@anthropic")
+            );
+            assert!(
+                state
+                    .launcher
+                    .models()
+                    .iter()
+                    .any(|model| model.key == "deepseek-v4.1-flash@acme"),
+                "the swarm's registrations are back"
+            );
+            assert!(
+                window.try_find("catalog-problem").is_none(),
+                "and the read that worked is not complained about"
+            );
+        });
+    }
+
+    /// §9: with the switch off there is no `check` to ask, so the one line the page can
+    /// put under the cards is evo's own reason for the coordinator's registration — in
+    /// evo's own words, and about nothing else. A registration the person picked while
+    /// the switch was on is the case that has one: evo-agent's own list says it cannot be
+    /// reached.
+    #[gpui_kit::test]
+    fn a_single_agents_line_is_evos_own_reason_for_the_model(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.set_catalog(cx, &catalog_body());
+        f.render(cx);
+        let state = f.state(cx);
+        // The person's own pick: the swarm's catalog can reach it, and it stands across
+        // the switch, as a pick does.
+        f.act(cx, |_, cx| {
+            state.update(cx, |state, cx| {
+                state
+                    .launcher
+                    .choose(Card::Coordinator, "claude-opus-4.5@anthropic");
+                cx.notify();
+            })
+        });
+        f.set_agent_catalog(cx, &agent_catalog_body());
+        f.set_use_swarm(cx, false);
+        f.render(cx);
+
+        f.act(cx, |window, cx| {
+            let state = state.read(cx);
+            assert_eq!(
+                state.launcher.chosen_key(Card::Coordinator),
+                Some("claude-opus-4.5@anthropic"),
+                "the pick is still the launch's model"
+            );
+            assert_eq!(
+                state.problems,
+                vec![Problem {
+                    code: "model_not_ready".to_string(),
+                    message: "anthropic-messages is not registered for evo-agent".to_string(),
+                }],
+                "and evo-agent's own reason for it is the one line"
+            );
+            assert_eq!(
+                window
+                    .find(ElementId::NamedInteger(PROBLEM_ID.into(), 0))
+                    .label(),
+                Some("anthropic-messages is not registered for evo-agent")
+            );
+        });
+    }
+
+    /// §9: a check is the swarm's own answer. With the switch off, the page asks for no
+    /// check and takes none — a lane's problem is not a single agent's, and a report that
+    /// arrived anyway resolves nothing.
+    #[gpui_kit::test]
+    fn a_swarms_check_has_nothing_to_say_once_the_switch_is_off(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.set_catalog(cx, &catalog_body());
+        f.set_agent_catalog(cx, &agent_catalog_body());
+        f.set_use_swarm(cx, false);
+        f.render(cx);
+        let state = f.state(cx);
+        f.set_check(
+            cx,
+            CheckReport {
+                ok: false,
+                problems: vec![Problem {
+                    code: "lane_model_not_found".to_string(),
+                    message: "no such lane model".to_string(),
+                }],
+                ..CheckReport::default()
+            },
+        );
+        f.render(cx);
+        f.act(cx, |window, cx| {
+            let state = state.read(cx);
+            assert!(
+                state.problems.is_empty(),
+                "a lane's problem is not a single agent's"
+            );
+            assert_eq!(
+                state.launcher.chosen_key(Card::Coordinator),
+                Some("evo-agent-model@acme"),
+                "and the check resolved nothing into the fields"
+            );
+            assert!(
+                window
+                    .try_find(ElementId::NamedInteger(PROBLEM_ID.into(), 0))
+                    .is_none(),
+                "nothing of it was drawn either"
+            );
+        });
+    }
+
+    /// §5.6: an answer read for one program is not the other's. A probe that comes back
+    /// after the switch moved is dropped, and what the page holds stays what it is.
+    #[gpui_kit::test]
+    fn a_single_agents_answer_is_dropped_once_the_switch_moves_back(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.set_catalog(cx, &catalog_body());
+        f.set_use_swarm(cx, false);
+        f.render(cx);
+        let state = f.state(cx);
+        let stale = f.act(cx, |_, cx| state.read(cx).check_revision);
+        f.set_use_swarm(cx, true);
+        f.act(cx, |_, cx| {
+            state.update(cx, |state, cx| {
+                state.settle_single_agent(Ok(agent_catalog_body()), stale, cx)
+            })
+        });
+        f.render(cx);
+        f.act(cx, |_, cx| {
+            let state = state.read(cx);
+            assert!(state.launcher.swarm(), "the switch is on again");
+            assert!(
+                state
+                    .launcher
+                    .models()
+                    .iter()
+                    .any(|model| model.key == "deepseek-v4.1-flash@acme"),
+                "the swarm's registrations are what the page holds"
+            );
+            assert!(
+                !state
+                    .launcher
+                    .models()
+                    .iter()
+                    .any(|model| model.key == "evo-agent-model@acme"),
+                "and the answer read for the other program never landed"
             );
         });
     }

@@ -575,8 +575,11 @@ impl TabContent {
     fn render_agent_header(&self, cx: &mut Context<Self>) -> AnyElement {
         let palette = design::palette(cx.theme().mode.is_dark());
         let agent = self.selected_agent();
+        // What the band calls the agent it is over: a swarm's coordinator, or the one
+        // agent a single-agent session has — there is nobody to coordinate (§7.2).
         let name = match agent {
-            AgentKey::Coordinator => SharedString::from("coordinator"),
+            AgentKey::Coordinator if self.swarm(cx) => SharedString::from("coordinator"),
+            AgentKey::Coordinator => SharedString::from("Main"),
             AgentKey::Lane(n) => SharedString::from(format!("lane {n}")),
         };
         let task = self.header_task(agent);

@@ -25,6 +25,10 @@ pub struct HistoryRow {
     pub when: SharedString,
     /// Everything known about the session, for the row's tooltip.
     pub tooltip: SharedString,
+    /// Whether this session is a swarm's or one agent's (§2): the row's own glyph, and
+    /// the program a click resumes it with — only the program that wrote a journal can
+    /// run it again.
+    pub swarm: bool,
     /// The app had this session open when it last quit: the row wears a badge for it.
     pub open_at_quit: bool,
 }
@@ -39,6 +43,7 @@ impl HistoryRow {
             folder_short: SharedString::from(row.folder_short.clone()),
             when: SharedString::from(row.when.clone()),
             tooltip: SharedString::from(row.tooltip.clone()),
+            swarm: row.swarm,
             open_at_quit: row.open_at_quit,
         }
     }
@@ -77,6 +82,7 @@ mod tests {
             folder_short: "~/coding/foo".to_string(),
             when: "2h ago".to_string(),
             tooltip: "/Users/you/coding/foo · 2026-09-29 09:25:44 UTC (+00:00)".to_string(),
+            swarm: true,
             session_path: "/Users/you/.evo/sessions/x/1.sexp".to_string(),
             folder: "/Users/you/coding/foo".to_string(),
             coordinator_model: Some("gpt-5".to_string()),

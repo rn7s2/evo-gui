@@ -173,6 +173,10 @@ pub struct Recent {
     pub models: TabModels,
     /// Lane count, as the swarm was started.
     pub lanes: u32,
+    /// Whether the session was a swarm's or one agent's (§7.2). Absent in a file
+    /// written before a tab could start one agent: a swarm, which is what this app
+    /// started then.
+    pub swarm: bool,
     /// The tab was still open when the app last quit (§6, §9.5).
     ///
     /// The session scan cannot know this: a swarm that is still up has not
@@ -190,6 +194,7 @@ impl Default for Recent {
             when: crate::time::now_rfc3339(),
             models: TabModels::default(),
             lanes: 0,
+            swarm: true,
             open_at_quit: false,
         }
     }
@@ -203,6 +208,7 @@ impl Recent {
             when: crate::time::now_rfc3339(),
             models: TabModels::default(),
             lanes,
+            swarm: true,
             open_at_quit: false,
         }
     }
@@ -275,6 +281,10 @@ pub struct AppState {
     /// leave behind. Absent in a file written before the View menu existed, which
     /// reads as the design's own size.
     pub zoom: f32,
+    /// Whether a new session is a swarm or one agent: the New Swarm page's own
+    /// switch (§7.2), remembered the way the splits and the zoom are. Absent in a
+    /// file written before the switch existed, which reads as a swarm.
+    pub use_swarm: bool,
 }
 
 impl Default for AppState {
@@ -289,6 +299,7 @@ impl Default for AppState {
             theme: Theme::System,
             panes: Panes::default(),
             zoom: ZOOM_DEFAULT,
+            use_swarm: true,
         }
     }
 }
@@ -509,6 +520,25 @@ mod tests {
         assert_eq!(state.selected, None); // selection that is not a tab
         assert_eq!(state.window.width, DEFAULT_SIZE.0);
         assert_eq!(state.window.height, DEFAULT_SIZE.1);
+        fs::remove_dir_all(root.path()).unwrap();
+    }
+
+    /// §7.2: the New Swarm page's own switch, remembered. A file written before
+    /// there was one opens on a swarm — the app's own default — and the switch
+    /// only ever names one of the two programs.
+    #[test]
+    fn the_swarm_switch_is_remembered() {
+        let root = temp_root("use-swarm");
+        let mut state = sample();
+        state.use_swarm = false;
+        state.save(&root).unwrap();
+        assert!(!AppState::load(&root).use_swarm);
+
+        // A file from before the switch existed: a swarm.
+        root.ensure().unwrap();
+        fs::write(root.app_json(), r#"{"version":1,"theme":"dark"}"#).unwrap();
+        assert!(AppState::load(&root).use_swarm);
+        assert!(AppState::default().use_swarm);
         fs::remove_dir_all(root.path()).unwrap();
     }
 
