@@ -47,7 +47,10 @@ impl Host {
 
 impl Render for Host {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div().size_full().child(self.transcript.clone())
+        div().size_full().child(
+            gpui_kit::AnyView::from(self.transcript.clone())
+                .cached(gpui_kit::StyleRefinement::default().size_full()),
+        )
     }
 }
 
