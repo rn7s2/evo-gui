@@ -2918,6 +2918,144 @@ fn a_tool_calls_arguments_and_result_are_not_links(cx: &mut TestAppContext) {
     });
 }
 
+/// What a message's own text is made of: the words the reader wrote, and the files
+/// `session` names under them. The reading is exact — a heading, then absolute paths,
+/// and nothing else — because everything else is the reader's own prose.
+#[test]
+fn the_files_a_message_names_are_read_off_the_end_of_it() {
+    let block = |text: &str| {
+        session::attachment_turn(text, &[session::Attached::File("/tmp/one.csv".into())]).0
+    };
+    let read = |text: &str| {
+        crate::rows::sent(text).map(|sent| {
+            (
+                sent.words.to_string(),
+                sent.files
+                    .iter()
+                    .map(|file| file.to_string())
+                    .collect::<Vec<_>>(),
+            )
+        })
+    };
+
+    // What session writes, the row reads back.
+    assert_eq!(
+        read(&block("summarise these")),
+        Some((
+            "summarise these".to_string(),
+            vec!["/tmp/one.csv".to_string()]
+        ))
+    );
+    // A message that is only the files it carries has no words.
+    assert_eq!(
+        read(&block("   \n")),
+        Some(("".to_string(), vec!["/tmp/one.csv".to_string()]))
+    );
+    // One path per line, spaces and all, and a trailing blank line is not a line.
+    assert_eq!(
+        read("here\n\nAttached files:\n- /tmp/a b.pdf\n- /opt/x.tar.gz\n"),
+        Some((
+            "here".to_string(),
+            vec!["/tmp/a b.pdf".to_string(), "/opt/x.tar.gz".to_string()]
+        ))
+    );
+
+    // Nothing else is a block.
+    assert_eq!(read("here are the words alone"), None);
+    assert_eq!(read("no files were attached"), None);
+    // A heading inside the prose is the reader's own line, and so is a list that runs
+    // on past it.
+    assert_eq!(
+        read("Attached files:\n- /tmp/one.csv\nand that is that"),
+        None
+    );
+    assert_eq!(
+        read("the words\n\nAttached files:\n- /tmp/one.csv\nthe words carry on"),
+        None
+    );
+    assert_eq!(read("the words\nAttached files:\n- /tmp/one.csv"), None);
+    // A path that is not absolute is prose, and so is a line that is not a path.
+    assert_eq!(read("the words\n\nAttached files:\n- notes.txt"), None);
+    assert_eq!(read("the words\n\nAttached files:\n- ~/notes.txt"), None);
+    assert_eq!(read("the words\n\nAttached files:\nnothing at all"), None);
+    // A heading with no file under it names nothing.
+    assert_eq!(read("the words\n\nAttached files:"), None);
+    // And a heading that is not exactly the one session writes.
+    assert_eq!(read("the words\n\nAttached file:\n- /tmp/one.csv"), None);
+    assert_eq!(
+        read("the words\n\nAttached files: and more\n- /tmp/one.csv"),
+        None
+    );
+}
+
+/// The files a message carries are chips under its words: the file's name, the whole
+/// path a hover away, and a press that opens the file itself — the same opening a link
+/// in the words gets. A file that is gone is drawn, dimmed, and presses nothing.
+#[gpui_kit::test]
+fn a_messages_files_are_chips_under_its_words(cx: &mut TestAppContext) {
+    let disk = Disk::new("files");
+    // A message names the file where the file system says it is, not where the draft
+    // that picked it said: `session` writes the canonical path (`attachments::absolute`).
+    let real = std::fs::canonicalize(disk.file())
+        .expect("the file's own path")
+        .display()
+        .to_string();
+    let text = session::attachment_turn(
+        "summarise these",
+        &[
+            session::Attached::File(disk.file().into()),
+            session::Attached::File(disk.gone().into()),
+        ],
+    )
+    .0;
+    let (view, cx) = open!(cx, vec![user("u_1", &text)]);
+    let pressed = presses(&view, cx);
+    for _ in 0..2 {
+        cx.update(|window, cx| window.render_frame(cx));
+    }
+    cx.read(|cx| {
+        let data = view.read(cx).data.read(cx);
+        let drawn = |key| {
+            data.plain_document(&"u_1".to_string(), key)
+                .expect("the row's text is read from a document")
+                .read(cx)
+                .rendered_text()
+        };
+        assert_eq!(
+            drawn(crate::rows::USER_WORDS).as_str().trim_end(),
+            "summarise these",
+            "the row draws the reader's words, without the line meant for the agent"
+        );
+        assert_eq!(
+            drawn(crate::rows::USER_TEXT).as_str().trim_end(),
+            text.trim_end(),
+            "and what a copy of the row takes is the message as it was written"
+        );
+    });
+    cx.update(|window, cx| {
+        let there = row_id("transcript-file-0", "u_1");
+        let gone = row_id("transcript-file-1", "u_1");
+        let chip = window.find(there.clone());
+        assert!(chip.visible(), "the file that is there has a chip");
+        assert!(
+            chip.bounds().size.width > px(0.),
+            "and the chip is drawn, not a hole"
+        );
+        assert_eq!(chip.label(), Some(real.as_str()), "the path is its own");
+        assert!(
+            window.find(gone.clone()).visible(),
+            "and so does the file that is gone"
+        );
+        window.click_at(there, gpui_kit::point(px(4.), px(10.)), cx);
+        window.click_at(gone, gpui_kit::point(px(4.), px(10.)), cx);
+    });
+    assert_eq!(
+        *pressed.lock().unwrap(),
+        [real],
+        "the chip opens the file it names, and a file that is gone opens nothing"
+    );
+}
+
 /// The app embeds a transcript as a *cached* view (§7.3), so a folder that arrives has
 /// to be the transcript's own news: the view renders again and reads its rows against the
 /// new folder. (That they are links then is
