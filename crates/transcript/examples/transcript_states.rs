@@ -492,14 +492,20 @@ fn context() -> HeadlessAppContext {
     cx
 }
 
-/// Open the capture window with the record in it, at its tail.
-fn open(cx: &mut HeadlessAppContext, items: &[Item]) -> (AnyWindowHandle, Entity<Page>) {
+/// Open the capture window with the record in it, at its tail, `width` pixels wide: the
+/// transcript's pane is what bounds its measure, so how wide the window is is part of what
+/// a state is a picture of.
+fn open(
+    cx: &mut HeadlessAppContext,
+    items: &[Item],
+    width: f32,
+) -> (AnyWindowHandle, Entity<Page>) {
     cx.update(|cx| {
         gpui_kit::open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds::new(
                     gpui_kit::point(px(0.), px(0.)),
-                    size(px(WINDOW_SIZE.0), px(WINDOW_SIZE.1)),
+                    size(px(width), px(WINDOW_SIZE.1)),
                 ))),
                 focus: false,
                 show: false,
@@ -738,7 +744,7 @@ fn say(name: &str, report: &Report) {
 // The states.
 // ---------------------------------------------------------------------------
 
-/// The zoom a state draws at, for the two zoom states.
+/// The zoom a state draws at, for the zoom states.
 fn set_zoom(cx: &mut HeadlessAppContext, scale: f32) {
     cx.update(|cx| TranscriptZoom(scale).set(cx));
 }
@@ -851,9 +857,12 @@ fn main() {
     // A state says how many rows the record it opened holds: the link states replace the
     // long record with a short one whose rows carry links.
     type Setup = fn(&mut HeadlessAppContext, AnyWindowHandle, &Entity<Page>) -> usize;
-    let states: [(&str, f32, Setup); 18] = [
-        ("bottom", 1., |_, _, _| ITEMS),
-        ("tool-hover", 1., |cx, window, _| {
+    // One entry per state: what it is called, the zoom it draws at, how wide its
+    // window is (the reading measure's own bound is the pane, so a picture of the
+    // measure needs a pane wider than it), and how it is reached.
+    let states: [(&str, f32, f32, Setup); 23] = [
+        ("bottom", 1., WINDOW_SIZE.0, |_, _, _| ITEMS),
+        ("tool-hover", 1., WINDOW_SIZE.0, |cx, window, _| {
             // A folded card under the pointer: the head's hover ink is the whole of
             // the card's inside, so all four of its corners are the card's own.
             settle(cx, window);
@@ -865,7 +874,7 @@ fn main() {
             }
             ITEMS
         }),
-        ("tool-open", 1., |cx, window, _| {
+        ("tool-open", 1., WINDOW_SIZE.0, |cx, window, _| {
             // An open card: the head's own ink reaches the top corners, and the body's
             // fill the bottom ones, with the head's underside square between them.
             settle(cx, window);
@@ -878,7 +887,7 @@ fn main() {
             }
             ITEMS
         }),
-        ("image-row", 1., |cx, window, page| {
+        ("image-row", 1., WINDOW_SIZE.0, |cx, window, page| {
             // A turn that carried a picture, at the tail: the thumbnail sits in a
             // rounded frame, and the picture's own corners must follow it rather than
             // fill the frame's corners with the picture's square edge.
@@ -904,13 +913,13 @@ fn main() {
             settle(cx, window);
             ITEMS
         }),
-        ("scrolled-up", 1., |cx, window, _| {
+        ("scrolled-up", 1., WINDOW_SIZE.0, |cx, window, _| {
             for _ in 0..3 {
                 wheel(cx, window, SCREEN);
             }
             ITEMS
         }),
-        ("top", 1., |cx, window, _| {
+        ("top", 1., WINDOW_SIZE.0, |cx, window, _| {
             match wheel_to_the_head(cx, window) {
                 Some(wheels) => println!(
                     "[states] top: {wheels} wheels of {}px reached the head",
@@ -920,7 +929,7 @@ fn main() {
             }
             ITEMS
         }),
-        ("jump-back", 1., |cx, window, page| {
+        ("jump-back", 1., WINDOW_SIZE.0, |cx, window, page| {
             for _ in 0..3 {
                 wheel(cx, window, SCREEN);
             }
@@ -931,11 +940,11 @@ fn main() {
             run_animation(cx, window, Duration::from_millis(240));
             ITEMS
         }),
-        ("streaming", 1., |cx, window, page| {
+        ("streaming", 1., WINDOW_SIZE.0, |cx, window, page| {
             stream(cx, window, page);
             ITEMS
         }),
-        ("loading-older", 1., |cx, window, page| {
+        ("loading-older", 1., WINDOW_SIZE.0, |cx, window, page| {
             let view = transcript_of(cx, page);
             cx.update(|cx| view.update(cx, |view, cx| view.set_history(true, true, cx)));
             match wheel_to_the_head(cx, window) {
@@ -947,33 +956,33 @@ fn main() {
             }
             ITEMS
         }),
-        ("zoom-150-bottom", 1.5, |cx, window, _| {
+        ("zoom-150-bottom", 1.5, WINDOW_SIZE.0, |cx, window, _| {
             frames(cx, window, 3);
             ITEMS
         }),
-        ("zoom-75-bottom", 0.75, |cx, window, _| {
+        ("zoom-75-bottom", 0.75, WINDOW_SIZE.0, |cx, window, _| {
             frames(cx, window, 3);
             ITEMS
         }),
-        ("mid", 1., |cx, window, _| {
+        ("mid", 1., WINDOW_SIZE.0, |cx, window, _| {
             for _ in 0..2 {
                 wheel(cx, window, SCREEN);
             }
             ITEMS
         }),
-        ("zoom-150-mid", 1.5, |cx, window, _| {
+        ("zoom-150-mid", 1.5, WINDOW_SIZE.0, |cx, window, _| {
             for _ in 0..2 {
                 wheel(cx, window, SCREEN);
             }
             ITEMS
         }),
-        ("zoom-75-mid", 0.75, |cx, window, _| {
+        ("zoom-75-mid", 0.75, WINDOW_SIZE.0, |cx, window, _| {
             for _ in 0..2 {
                 wheel(cx, window, SCREEN);
             }
             ITEMS
         }),
-        ("resize", 1., |cx, window, _| {
+        ("resize", 1., WINDOW_SIZE.0, |cx, window, _| {
             cx.update_window(window, |_, window, _| {
                 window.resize(size(px(WINDOW_SIZE.0), px(WINDOW_SIZE.1 - 240.)));
             })
@@ -981,7 +990,7 @@ fn main() {
             frames(cx, window, 3);
             ITEMS
         }),
-        ("resize-back", 1., |cx, window, _| {
+        ("resize-back", 1., WINDOW_SIZE.0, |cx, window, _| {
             cx.update_window(window, |_, window, _| {
                 window.resize(size(px(WINDOW_SIZE.0), px(WINDOW_SIZE.1 - 240.)));
             })
@@ -994,13 +1003,25 @@ fn main() {
             frames(cx, window, 3);
             ITEMS
         }),
+        // The reading measure at the reader's zoom (§7.2): the same closing message in a
+        // pane wider than the measure, so what the picture shows is the measure itself —
+        // the paragraph breaks in the same places and the display formula is the same
+        // block of the column, four sizes over. Unscaled, the paragraph would be half
+        // again as many lines at 200% and its lines half as long at 75%.
+        ("zoom-075-wide", 0.75, 1800., |_, _, _| ITEMS),
+        ("zoom-100-wide", 1.0, 1800., |_, _, _| ITEMS),
+        ("zoom-150-wide", 1.5, 1800., |_, _, _| ITEMS),
+        ("zoom-200-wide", 2.0, 1800., |_, _, _| ITEMS),
+        // And narrower than the measure, where the column is the pane at every zoom:
+        // 150% asks for 1200px and the window has 700.
+        ("zoom-150-narrow", 1.5, 700., |_, _, _| ITEMS),
         // The links: every row that draws a reader's or an agent's own words — a turn, an
         // answer's prose, a notice, a lane's line, a report's field — with the addresses
         // and paths in them underlined. The call below it is the contrast: its arguments
         // and its result hold the same kinds of words, and none of them is a link.
-        ("links", 1., links_setup),
+        ("links", 1., WINDOW_SIZE.0, links_setup),
         // The same record with the call opened: what a call carried is drawn as data.
-        ("links-call", 1., |cx, window, page| {
+        ("links-call", 1., WINDOW_SIZE.0, |cx, window, page| {
             let rows = links_setup(cx, window, page);
             cx.update_window(window, |_, window, cx| {
                 window.click(named_row_id("transcript-tool", &item_id(rows - 1)), cx);
@@ -1012,11 +1033,11 @@ fn main() {
     ];
 
     let mut cx = context();
-    for (name, scale, setup) in states {
+    for (name, scale, width, setup) in states {
         if only.as_deref().is_some_and(|only| only != name) {
             continue;
         }
-        let (window, page) = open(&mut cx, &items);
+        let (window, page) = open(&mut cx, &items, width);
         // The zoom is one global for the whole app (§7.2), so every state says which
         // scale it draws at rather than inheriting the last state's.
         set_zoom(&mut cx, scale);
