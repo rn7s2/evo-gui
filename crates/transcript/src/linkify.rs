@@ -735,10 +735,19 @@ mod tests {
             links("see crates/transcript/src/lib.rs:42", &disk)[0].1,
             "/work/project/crates/transcript/src/lib.rs"
         );
-        // The line is part of what the reader sees, not of the path.
+        // The line is part of what the reader sees, not of the path: one line, or a
+        // line and a column, is the file the link names.
         assert_eq!(
             links("see crates/transcript/src/lib.rs:42", &disk)[0].0,
             "crates/transcript/src/lib.rs:42"
+        );
+        assert_eq!(
+            links("see crates/transcript/src/lib.rs:42:7 for the rest", &disk)[0].0,
+            "crates/transcript/src/lib.rs:42:7"
+        );
+        assert_eq!(
+            links("see crates/transcript/src/lib.rs:42:7", &disk)[0].1,
+            "/work/project/crates/transcript/src/lib.rs"
         );
     }
 

@@ -2779,6 +2779,43 @@ fn a_tool_calls_arguments_and_result_are_not_links(cx: &mut TestAppContext) {
     });
 }
 
+/// The app embeds a transcript as a *cached* view (§7.3), so a folder that arrives has
+/// to be the transcript's own news: the view renders again and reads its rows against the
+/// new folder. (That they are links then is
+/// `a_relative_path_is_measured_from_the_tabs_folder`'s business — the elements inside a
+/// cached subtree are not observable in this harness, so this test holds the frame.)
+#[gpui_kit::test]
+fn a_folder_that_arrives_renders_the_cached_transcript_again(cx: &mut TestAppContext) {
+    let disk = Disk::new("cached");
+    cx.update(gpui_kit::init);
+    let (host, cx) = cx.add_window_view(|_window, cx| CachedHost::new(cx));
+    let view = cx.read(|cx| host.read(cx).transcript.clone());
+    view.update(cx, |view, cx| {
+        view.replace(vec![user("u_1", "notes/report.md is where it went")], cx)
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let rendered = cx.read(|cx| view.read(cx).renders());
+    assert!(rendered > 0, "the cached view rendered when it was shown");
+
+    view.update(cx, |view, cx| view.set_folder(Some(disk.root.clone()), cx));
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        cx.read(|cx| view.read(cx).renders()) > rendered,
+        "a folder that arrives is the transcript's own news, so the cached view is drawn again"
+    );
+
+    // The same folder a second time is not news: a tab that reports its state over and
+    // over does not re-read the rows.
+    let settled = cx.read(|cx| view.read(cx).renders());
+    view.update(cx, |view, cx| view.set_folder(Some(disk.root.clone()), cx));
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert_eq!(
+        cx.read(|cx| view.read(cx).renders()),
+        settled,
+        "the same folder again changes nothing"
+    );
+}
+
 /// A relative path is measured from the folder the tab works in, and a tab that moves
 /// reads its rows again: the same words name a file in one folder and nothing in none.
 #[gpui_kit::test]
