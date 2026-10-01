@@ -154,7 +154,7 @@ fn the_environment_names_the_binaries() {
 #[test]
 fn sessions_json_becomes_history_rows() {
     let stub = Stub::new("sessions");
-    let sessions = history::fetch(&stub.bin(), &SessionsQuery::swarms()).unwrap();
+    let sessions = history::fetch(&stub.bin(), &SessionsQuery::resumable()).unwrap();
     assert_eq!(sessions.len(), 3, "the fixture lists three sessions");
     assert_eq!(sessions[0].id, "ed99c60d1dee3c3f");
     assert_eq!(sessions[0].program, "evo-swarm");
@@ -165,21 +165,58 @@ fn sessions_json_becomes_history_rows() {
     assert_eq!(sessions[0].cwd, PathBuf::from("/Users/x/coding/evo"));
     assert_eq!(sessions[0].updated_epoch(), 1_790_674_196);
     assert_eq!(sessions[0].updated_text(), "2026-09-29T09:29:56Z");
-    // The argv is exactly the contract's (§2): the resumable swarms, wherever
-    // they are.
-    assert_eq!(
-        stub.argvs(),
-        vec!["sessions --json --all --program evo-swarm".to_string()]
-    );
+    // The argv is exactly the contract's (§2): every program, wherever these
+    // sessions are — which one a row is, and whether it may be one at all, is the
+    // list's own business (`merge`), not a flag's.
+    assert_eq!(stub.argvs(), vec!["sessions --json --all".to_string()]);
 }
 
+/// §2, §7.2: the index carries the lanes' own journals too, and a lane is the
+/// swarm's — its own session is not a row of the list — while a single agent's is,
+/// and says so: a row's own kind is both what a glyph shows and what a click
+/// resumes it with.
 #[test]
-fn a_session_whose_journal_is_gone_is_not_a_row() {
-    let stub = Stub::new("gone");
-    // The fixture's paths point at /Users/x/…, which this machine does not have.
-    let sessions = history::fetch(&stub.bin(), &SessionsQuery::swarms()).unwrap();
-    assert_eq!(sessions.len(), 3, "the index lists them all");
-    assert!(history::merge(sessions, &[]).is_empty());
+fn a_rows_program_decides_whether_it_is_listed_and_what_resumes_it() {
+    let stub = Stub::new("programs");
+    let dir = stub.dir.join("journals");
+    fs::create_dir_all(&dir).unwrap();
+    let mut sessions = fixture_with_journals(&dir, &[0, 1, 2]);
+    sessions[0].program = "evo-swarm".to_owned();
+    sessions[1].program = "lane".to_owned();
+    sessions[2].program = "evo-agent".to_owned();
+    let swarm_session = sessions[0].path.clone();
+    let lane_session = sessions[1].path.clone();
+    let agent_session = sessions[2].path.clone();
+
+    let old_record = sessions[0].clone();
+    let entries = history::merge(sessions, &[]);
+    assert_eq!(
+        entries.len(),
+        2,
+        "a lane's journal belongs to the swarm that started it: {entries:?}"
+    );
+    assert!(
+        !entries.iter().any(|entry| entry.session == lane_session),
+        "and is not a row of its own"
+    );
+    let swarm = entries
+        .iter()
+        .find(|entry| entry.session == swarm_session)
+        .expect("the swarm's own session is a row");
+    assert!(swarm.swarm);
+    let agent = entries
+        .iter()
+        .find(|entry| entry.session == agent_session)
+        .expect("a single agent's session is a row");
+    assert!(!agent.swarm, "and says what wrote it");
+
+    // A record too old to name a program is read as a swarm, which is what this app
+    // started before it could start one agent.
+    let mut old = old_record;
+    old.program = String::new();
+    let entries = history::merge(vec![old], &[]);
+    assert_eq!(entries.len(), 1);
+    assert!(entries[0].swarm);
 }
 
 #[test]
@@ -201,6 +238,7 @@ fn the_index_and_the_apps_recents_become_one_list() {
             lanes: Some("deepseek-v4.1-flash".to_owned()),
         },
         lanes: 6,
+        swarm: true,
         open_at_quit: true,
     }];
     let entries = history::merge(sessions, &recents);

@@ -195,11 +195,20 @@ impl ModelOption {
 /// `None`, so evo resolves it itself, exactly as the check reported it. A launch whose
 /// plan [`is_default`](LaunchPlan::is_default) passes no flags at all.
 ///
-/// This is a **new** swarm's plan. A swarm resumed from history takes the coordinator's
-/// own record instead — its models are the session's, not the empty tab's — so the
-/// workspace passes none of this for a [`HistoryRow`].
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// This is a **new** session's plan. One resumed from history takes the coordinator's own
+/// record instead — its models are the session's, not the empty tab's — so the workspace
+/// passes none of this for a [`HistoryRow`].
+///
+/// The workers card's own switch is in here too, because it is a control a person sets on
+/// the page: it decides **which binary** runs, and nothing else — an `evo-agent` launch
+/// passes the same `--model` and `--thinking` and no lane flag at all, since it has no
+/// lanes to give them to. It is not one of the five, so [`LaunchPlan::is_default`] — what
+/// a check is asked about — is the same question whether the switch is on or off.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LaunchPlan {
+    /// Whether this launch is a swarm (`evo-swarm`) or one agent (`evo-agent`): the
+    /// workers card's switch (§7.2). Not a flag — the program.
+    pub swarm: bool,
     /// The coordinator's `--model`.
     pub model: Option<(String, String)>,
     /// The coordinator's `--thinking`.
@@ -210,6 +219,21 @@ pub struct LaunchPlan {
     pub lanes_model: Option<(String, String)>,
     /// The lanes' `--lane-thinking`.
     pub lane_thinking: Option<String>,
+}
+
+impl Default for LaunchPlan {
+    /// A plan with nobody's hand on it — and a swarm, which is what the page opens on
+    /// (§7.2).
+    fn default() -> LaunchPlan {
+        LaunchPlan {
+            swarm: true,
+            model: None,
+            thinking: None,
+            workers: None,
+            lanes_model: None,
+            lane_thinking: None,
+        }
+    }
 }
 
 impl LaunchPlan {
@@ -407,6 +431,10 @@ fn effort_levels(model: &Value) -> Vec<String> {
 /// resolved are left to evo.
 #[derive(Clone, Debug, Default)]
 pub struct Launcher {
+    /// Whether this launch is a swarm (`evo-swarm`) or one agent (`evo-agent`): the New
+    /// Swarm page's own switch (§7.2). A swarm is what the page opens on, and the switch
+    /// is the one control that is not a flag — it picks the program.
+    swarm: bool,
     /// The last `/catalog` body, and what `check --json` resolved the launch to: the
     /// two documents the fields are resolved from.
     check: Option<Value>,
@@ -433,11 +461,37 @@ impl Launcher {
     pub fn new() -> Launcher {
         let levels = thinking_levels(&Value::Null);
         Launcher {
+            swarm: true,
             efforts: [middle(&levels); 2],
             levels,
             workers: DEFAULT_WORKERS,
             ..Launcher::default()
         }
+    }
+
+    /// Whether this tab would start a swarm or one agent — what the workers card's own
+    /// switch says (§7.2), and what decides which binary a launch spawns.
+    pub fn swarm(&self) -> bool {
+        self.swarm
+    }
+
+    /// Flip the switch: a swarm from here, or one `evo-agent`. Returns whether anything
+    /// the window renders changed.
+    ///
+    /// `check` is a swarm's own answer — `--workers`, `--lane-model` and each lane's
+    /// reachability are questions a single agent does not ask — so turning the switch off
+    /// drops it, and the two model fields fall back to what the catalog says. A check's
+    /// answer that arrives after the switch moved is dropped by key ([`Launcher::set_check`]).
+    pub fn set_swarm(&mut self, swarm: bool) -> bool {
+        if self.swarm == swarm {
+            return false;
+        }
+        self.swarm = swarm;
+        if !swarm {
+            self.check = None;
+        }
+        self.resolve();
+        true
     }
 
     /// The model catalog: the `/catalog` body `evo-swarm catalog --json` prints (§5.6).
@@ -462,7 +516,14 @@ impl Launcher {
 
     /// What `evo-swarm check --json` resolved the launch to (§9): the models, and the
     /// words it would use if it could resolve none. Returns whether anything changed.
+    ///
+    /// A check is a swarm's own answer, and only a swarm's: with the workers card's
+    /// switch off there is nothing to ask (`evo-agent` has no `check`), and an answer
+    /// from the other program is dropped rather than resolved against.
     pub fn set_check(&mut self, check: &Value) -> bool {
+        if !self.swarm {
+            return false;
+        }
         let before = self.clone();
         self.check = Some(check.clone());
         self.resolve();
@@ -605,6 +666,7 @@ impl Launcher {
     /// A launch whose plan is [`LaunchPlan::is_default`] passes no flag at all.
     pub fn plan(&self) -> LaunchPlan {
         LaunchPlan {
+            swarm: self.swarm,
             model: self.by_hand_model(Role::Coordinator),
             thinking: self.by_hand_level(Role::Coordinator),
             workers: self.count_by_hand.then_some(self.workers),
@@ -724,7 +786,8 @@ impl Launcher {
     /// Everything the empty tab renders. The history is not in it: it has its own entry
     /// point, from data that arrives separately (§2).
     fn differs(&self, before: &Launcher) -> bool {
-        self.models != before.models
+        self.swarm != before.swarm
+            || self.models != before.models
             || self.levels != before.levels
             || self.fields != before.fields
             || self.efforts != before.efforts
@@ -858,6 +921,10 @@ pub struct HistoryEntry {
     pub lanes: Option<u32>,
     pub coordinator_model: Option<String>,
     pub lanes_model: Option<String>,
+    /// Whether this session is a swarm's or one agent's: what a resume opens it with —
+    /// only the program that wrote a journal can run it — and what a row's own glyph
+    /// says (§2, §7.2).
+    pub swarm: bool,
     pub source: HistorySource,
     /// The app had this session open when it last quit. Only the app's own recents can
     /// say so — a swarm that never came down wrote no new journal — so a row the index
@@ -886,6 +953,9 @@ pub struct HistoryRow {
     pub folder: String,
     pub coordinator_model: Option<String>,
     pub lanes_model: Option<String>,
+    /// Whether this session is a swarm's or one agent's (§2): the row's own glyph, and
+    /// the program a click resumes it with.
+    pub swarm: bool,
     pub source: HistorySource,
     /// The app had this session open when it last quit: the row wears a badge for it.
     pub open_at_quit: bool,
@@ -957,6 +1027,7 @@ fn history_row(
         folder: entry.folder.clone(),
         coordinator_model: entry.coordinator_model.clone(),
         lanes_model: entry.lanes_model.clone(),
+        swarm: entry.swarm,
         source: entry.source,
         open_at_quit: entry.open_at_quit,
     }

@@ -959,6 +959,7 @@ fn resuming_from_the_history_replaces_the_new_swarm_page(cx: &mut TestAppContext
                     session_path: folder.join("session.sexp"),
                     // As the session index keeps a cwd: with a trailing slash.
                     folder: PathBuf::from(format!("{}/", folder.display())),
+                    swarm: true,
                 })
             });
             tab
@@ -1207,6 +1208,7 @@ fn resuming_a_session_open_in_another_tab_shows_that_tab(cx: &mut TestAppContext
                 Launch::Resume {
                     folder: folder.clone(),
                     session: session.clone(),
+                    swarm: true,
                 },
                 window,
                 cx,
@@ -1218,6 +1220,7 @@ fn resuming_a_session_open_in_another_tab_shows_that_tab(cx: &mut TestAppContext
             cx.emit(TabContentEvent::Resume {
                 session_path: spelled_otherwise.clone(),
                 folder: folder.clone(),
+                swarm: true,
             })
         });
     })

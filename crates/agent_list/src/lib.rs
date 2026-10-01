@@ -167,6 +167,10 @@ pub struct AgentList {
     /// The row the pointer is on, for the dot's `--row-surface`: the dot paints a colour
     /// fixed when the row was built, so the row says where the pointer is.
     hovered: Option<AgentKey>,
+    /// Whether this session is a swarm (§7.2): its first row is the swarm's
+    /// *coordinator*, and one agent's is simply **Main** — there is nobody to
+    /// coordinate — and the column counts lanes, which a single agent has none of.
+    swarm: bool,
 }
 
 impl EventEmitter<AgentListEvent> for AgentList {}
@@ -185,6 +189,26 @@ impl AgentList {
             now_millis: 0,
             focus_handle: cx.focus_handle(),
             hovered: None,
+            swarm: true,
+        }
+    }
+
+    /// Which program this column is showing (§7.2): a swarm's coordinator, or the one
+    /// agent a single-agent session has. It is the difference between the first row's
+    /// name — `coordinator` against `Main` — and whether the lane count is drawn at all.
+    pub fn set_swarm(&mut self, swarm: bool, cx: &mut Context<Self>) {
+        if self.swarm != swarm {
+            self.swarm = swarm;
+            cx.notify();
+        }
+    }
+
+    /// What this column calls its first row: a swarm is coordinated, one agent is not.
+    fn main_name(&self) -> &'static str {
+        if self.swarm {
+            "coordinator"
+        } else {
+            "Main"
         }
     }
 
@@ -296,7 +320,7 @@ impl AgentList {
         self.selected == key
     }
 
-    /// The agents in the order the rows are drawn: the coordinator first, then the lanes.
+    /// The agents in the order the rows are drawn: the first row first, then the lanes.
     /// The arrows move through this, so the order on screen is the order they walk.
     fn keys(&self) -> Vec<AgentKey> {
         std::iter::once(AgentKey::Coordinator)
@@ -310,7 +334,7 @@ impl AgentList {
     /// knows what a selection means.
     fn key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         let keys = self.keys();
-        // A list with nothing highlighted starts from the top; there is always a coordinator
+        // A list with nothing highlighted starts from the top; there is always a first
         // row, so `keys` is never empty and the last index is a real one.
         let at = keys
             .iter()
@@ -338,7 +362,11 @@ impl AgentList {
     /// the conversation, so the rule under the two runs straight across the page.
     fn header(&self, palette: &'static Palette) -> impl IntoElement {
         let lanes = self.lanes.lanes.len();
-        let meta = format!("{} of {} busy", self.lanes.busy(), lanes);
+        // A count of lanes is a swarm's own: a single-agent session has none to count,
+        // and `0 of 0 busy` is not a thing to read.
+        let meta = self
+            .swarm
+            .then(|| format!("{} of {} busy", self.lanes.busy(), lanes));
         h_flex()
             .h(px(HEADER_HEIGHT))
             .flex_none()
@@ -356,32 +384,35 @@ impl AgentList {
                     .text_color(paint::color(palette.fg))
                     .child("Lanes"),
             )
-            .child(
-                div()
-                    .id(SUMMARY_ID)
-                    .test_support()
-                    .ml_auto()
-                    .text_size(META_SIZE)
-                    .text_color(paint::color(palette.muted_fg))
-                    .aria_label(meta.clone())
-                    .child(meta),
-            )
+            .when_some(meta, |header, meta| {
+                header.child(
+                    div()
+                        .id(SUMMARY_ID)
+                        .test_support()
+                        .ml_auto()
+                        .text_size(META_SIZE)
+                        .text_color(paint::color(palette.muted_fg))
+                        .aria_label(meta.clone())
+                        .child(meta),
+                )
+            })
     }
 
-    /// The coordinator's row: `main`, its task cell says what it is (the swarm's
-    /// coordinator), and the state cell says what it is doing.
+    /// The first row: a swarm's coordinator or one agent's `Main`, with the state cell
+    /// saying what it is doing.
     fn coordinator_view(&self, palette: &'static Palette) -> RowView {
         let status = activity_status(self.activity);
         let word = activity_word(self.activity);
-        // The clock sits in the state cell while the coordinator is actually working,
-        // as a lane's does: an idle `main` says `idle`, not the seconds since a run
-        // that already ended.
+        let name = self.main_name();
+        // The clock sits in the state cell while this row is actually working, as a
+        // lane's does: an idle row says `idle`, not the seconds since a run that
+        // already ended.
         let busy = matches!(self.activity, Status::Running | Status::Compacting);
         let clock = busy.then(|| self.coordinator_clock.clone()).flatten();
         let badge = self
             .coordinator_reconnecting
             .then(|| SharedString::from("reconnecting"));
-        let mut tooltip = format!("coordinator · {word}");
+        let mut tooltip = format!("{name} · {word}");
         if let Some(clock) = &clock {
             tooltip.push_str(&format!(" · step {clock}"));
         }
@@ -395,7 +426,7 @@ impl AgentList {
         let state: SharedString = clock.unwrap_or_else(|| word.to_string()).into();
         RowView {
             key: AgentKey::Coordinator,
-            name: "coordinator".into(),
+            name: name.into(),
             busy: status.is_busy(),
             task: None,
             task_color: paint::color(palette.muted_fg),
@@ -405,7 +436,7 @@ impl AgentList {
             stop: None,
             dot_surface: self.dot_surface(AgentKey::Coordinator, palette),
             tooltip: tooltip.into(),
-            aria: format!("coordinator, {word}{step}").into(),
+            aria: format!("{name}, {word}{step}").into(),
         }
     }
 
@@ -680,13 +711,19 @@ impl Render for AgentList {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = design::palette(cx.theme().mode.is_dark());
         let coordinator = self.coordinator_view(palette);
-        let lanes: Vec<RowView> = self
-            .lanes
-            .lanes
-            .clone()
-            .iter()
-            .map(|row| self.lane_view(row, palette))
-            .collect();
+        // §7.2: one agent has no lanes, so the column is its single row. The rows come
+        // from the swarm's own topic, which an `evo-agent` server never publishes, so
+        // this only ever drops what a swarm's snapshot left behind.
+        let lanes: Vec<RowView> = if self.swarm {
+            self.lanes
+                .lanes
+                .clone()
+                .iter()
+                .map(|row| self.lane_view(row, palette))
+                .collect()
+        } else {
+            Vec::new()
+        };
 
         let mut rows = v_flex()
             .id(ROWS_ID)
@@ -1742,6 +1779,54 @@ mod tests {
                 "the clock counted on: {}",
                 clock(window)
             );
+        });
+    }
+
+    /// §7.2: the one-agent program. The column's first row is `Main` — there is nobody
+    /// to coordinate — and the lane count is not drawn at all: a count of lanes a single
+    /// agent does not have is not a thing to read. A swarm's column is unchanged: its
+    /// coordinator, and its count of lanes.
+    #[gpui_kit::test]
+    fn a_single_agents_column_is_one_row_named_main(cx: &mut TestAppContext) {
+        // A lane in the list to begin with, so the count and the lane row are both
+        // there to be dropped.
+        let f = open(
+            cx,
+            lanes(vec![lane(1, LaneStatus::Working, Some("the build"))]),
+        );
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find(row_id(AgentKey::Coordinator)).label(),
+                Some("coordinator, idle"),
+                "a swarm's first row is its coordinator"
+            );
+            assert!(
+                window.find(SUMMARY_ID).visible(),
+                "and the column counts its lanes"
+            );
+
+            f.list.update(cx, |list, cx| {
+                list.set_swarm(false, cx);
+                list.set_coordinator(Status::Running, false, cx);
+            });
+            window.render_frame(cx);
+            assert_eq!(
+                window.find(row_id(AgentKey::Coordinator)).label(),
+                Some("Main, running"),
+                "one agent's first row is Main"
+            );
+            assert!(
+                window.try_find(SUMMARY_ID).is_none(),
+                "and there are no lanes to count"
+            );
+            assert!(
+                window.try_find(row_id(AgentKey::Lane(1))).is_none(),
+                "and no lane rows: whatever a swarm's snapshot left in the list, a \
+                 single agent's column is one row"
+            );
+            // The row is still the list's own: it is the one a click selects.
+            assert!(window.find(row_id(AgentKey::Coordinator)).visible());
         });
     }
 

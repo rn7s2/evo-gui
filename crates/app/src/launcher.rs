@@ -124,6 +124,7 @@ pub fn history_entries(entries: &[store::history::HistoryEntry]) -> Vec<HistoryE
             lanes: (entry.lanes > 0).then_some(entry.lanes),
             coordinator_model: entry.models.coordinator.clone(),
             lanes_model: entry.models.lanes.clone(),
+            swarm: entry.swarm,
             source: match entry.source {
                 StoreSource::Index => HistorySource::Index,
                 StoreSource::Recent => HistorySource::Recent,
@@ -242,6 +243,7 @@ mod tests {
                 coordinator: Some("coord-1".to_owned()),
                 lanes: Some("lane-1".to_owned()),
             },
+            swarm: true,
             source,
             open_at_quit: false,
         }
