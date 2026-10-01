@@ -43,10 +43,11 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    anchored, deferred, div, point, px, radians, Anchor, Animation, AnimationExt as _, AnyElement,
-    App, Bounds, BoxShadow, ClickEvent, ClipboardItem, Context, ElementId, Entity, EventEmitter,
-    FocusHandle, Global, IntoElement, KeyBinding, Keystroke, KeystrokeEvent, Pixels, Point, Render,
-    ScrollHandle, SharedString, Subscription, Task, TestSupportExt as _, WeakEntity, Window,
+    anchored, deferred, div, point, px, radians, AbsoluteLength, Anchor, Animation,
+    AnimationExt as _, AnyElement, App, Bounds, BoxShadow, ClickEvent, ClipboardItem, Context,
+    ElementId, Entity, EventEmitter, FocusHandle, FontWeight, Global, HighlightStyle, IntoElement,
+    KeyBinding, Keystroke, KeystrokeEvent, Pixels, Point, Render, ScrollHandle, SharedString,
+    StyledText, Subscription, Task, TestSupportExt as _, WeakEntity, Window,
 };
 use session::{ordered_segments, GoalInfo, Segment, Todo, TodoStatus, TopicState};
 use store::design::{self, Palette, INSET, MEASURE, RADIUS};
@@ -143,12 +144,17 @@ const ITEM_CHOSEN_MIX: f32 = 9.;
 /// The completion popup: a drawer's item list, but floating over the box at the
 /// caret rather than folded out of it, so it wears the drawer's own surface, a
 /// radius of its own and the shadow the box has.
-const POPUP_WIDTH: f32 = 320.;
 const POPUP_RADIUS: Pixels = px(10.);
 const POPUP_PAD: f32 = 6.;
 const POPUP_ROW: f32 = 28.;
-/// How far above the caret the popup's own edge stands.
+/// The row's own inset, and the gap between its label and its description: the
+/// label starts at `POPUP_PAD + POPUP_ROW_PAD + the border` from the popup's left
+/// edge, which is what the popup is placed by.
+const POPUP_ROW_PAD: f32 = 8.;
+const POPUP_ROW_GAP: f32 = 10.;
+/// How far the popup's own edges stand off the caret's line, and the window's.
 const POPUP_GAP: f32 = 6.;
+const POPUP_MARGIN: f32 = 8.;
 const POPUP_FONT: Pixels = px(12.5);
 /// The row the counter under the list is set on, when the list is longer than the
 /// popup shows.
@@ -156,6 +162,16 @@ const POPUP_COUNTER: f32 = 18.;
 /// The list's own fold: the rows the popup shows at once, and nothing else — the
 /// popup's padding and its counter stand outside it.
 const POPUP_LIST_MAX: Pixels = px(POPUP_ROW * complete::MAX_ROWS as f32);
+/// How wide the popup stands: as wide as its widest row, and no wider — a list of
+/// short names is a narrow list — between a floor that keeps it a list and a
+/// ceiling that keeps it out of the way of what it is drawn over. Past the ceiling
+/// (and past the window) a description is truncated, which is the one case a row
+/// has to give something up.
+const POPUP_MIN_W: f32 = 240.;
+const POPUP_MAX_W: f32 = 560.;
+/// Where a row's label starts, from the popup's left edge: the popup's own padding,
+/// the row's, and the popup's hairline.
+const POPUP_LABEL_INSET: f32 = POPUP_PAD + POPUP_ROW_PAD + 1.;
 
 /// How long the caret has to rest on a token before the image is asked about it:
 /// a keystroke in the middle of a word is not a question, and one round trip per
@@ -295,6 +311,22 @@ fn end_position(text: &str) -> Position {
     Position::new(line as u32, character as u32)
 }
 
+/// How wide one line of text is, as the text system measures it: what the popup is
+/// sized by before any of it is laid out.
+fn text_width(text: &str, size: Pixels, weight: FontWeight, window: &Window) -> Pixels {
+    if text.is_empty() {
+        return px(0.);
+    }
+    let mut style = window.text_style();
+    style.font_size = AbsoluteLength::Pixels(size);
+    style.font_weight = weight;
+    let run = style.to_run(text.len());
+    window
+        .text_system()
+        .shape_line(SharedString::from(text.to_string()), size, &[run], None)
+        .width
+}
+
 /// Whether a keystroke is the plain `Enter` that submits a draft — the chord the
 /// input's own `Enter` is bound to, with no modifier on it.
 fn is_submit(keystroke: &Keystroke) -> bool {
@@ -377,8 +409,11 @@ pub struct Composer {
     /// The commands the catalog lists: what a `/word` word completes against.
     /// The registry is the server's — a client never writes a command down (§8).
     commands: Vec<Candidate>,
-    /// The inline completion popup, while the caret's word has candidates.
+    /// The inline completion popup, while the caret's word has candidates, and how
+    /// wide it stands — measured when the rows are new, since a row cannot change
+    /// without the popup being rebuilt.
     popup: Option<Popup>,
+    popup_width: Option<Pixels>,
     /// The popup's own scroll position, kept across frames, and the prefix `Esc`
     /// has put the popup away for: it comes back when the word moves on.
     popup_scroll: ScrollHandle,
@@ -528,6 +563,7 @@ impl Composer {
             models: Vec::new(),
             commands: Vec::new(),
             popup: None,
+            popup_width: None,
             popup_scroll: ScrollHandle::new(),
             dismissed: None,
             symbols: Symbols::default(),
@@ -669,12 +705,14 @@ impl Composer {
         };
         let Some(target) = target else {
             self.popup = None;
+            self.popup_width = None;
             return;
         };
         // Esc puts the popup away for the word it was on: a word that has moved
         // on is a new one, and asks again.
         if self.dismissed.as_deref() == Some(target.prefix.as_str()) {
             self.popup = None;
+            self.popup_width = None;
             return;
         }
         self.dismissed = None;
@@ -687,6 +725,7 @@ impl Composer {
         // back, and would capture the ↑/↓ that browse the history with it.
         if rows.is_empty() || complete::settled(&target.prefix, &rows) {
             self.popup = None;
+            self.popup_width = None;
             return;
         }
         // The highlight stays where it was while the same word is still being
@@ -700,6 +739,8 @@ impl Composer {
         let mut popup = Popup::new(&target, rows);
         popup.index = index.min(popup.rows.len() - 1);
         self.popup = Some(popup);
+        // New rows, and a new width to measure: the popup is as wide as what it holds.
+        self.popup_width = None;
     }
 
     /// What the image has to say for a token being typed, asking it if it has not
@@ -1497,6 +1538,7 @@ impl Composer {
     fn completion_popup(
         &self,
         palette: &'static Palette,
+        width: Pixels,
         cx: &Context<Self>,
     ) -> Option<AnyElement> {
         let popup = self.popup.as_ref()?;
@@ -1507,6 +1549,27 @@ impl Composer {
         let rows = popup.rows.iter().enumerate().map(|(index, candidate)| {
             let chosen = index == popup.index;
             let label = SharedString::from(popup.label(candidate));
+            // The characters the word matched are drawn heavier, so a row says why it
+            // is on the list: a `/lo` that offers `/reload` is a subsequence match, and
+            // which letters it hit is the whole of the explanation.
+            //
+            // `/catalog`'s own `args_hint` is not drawn here, and today it is `null` for
+            // every command evo registers (`evo-agent src/serve/catalog.lisp`): there is
+            // nothing to put beside the label, and a client that invented one would be
+            // writing the argument syntax evo owns.
+            let highlights = complete::matched_ranges(&candidate.name, &popup.prefix)
+                .into_iter()
+                .map(|range| {
+                    (
+                        range,
+                        HighlightStyle {
+                            font_weight: Some(widgets::text::MEDIUM),
+                            color: Some(paint::color(palette.fg)),
+                            ..Default::default()
+                        },
+                    )
+                })
+                .collect::<Vec<_>>();
             let description = SharedString::from(candidate.description.clone());
             let mut row = h_flex()
                 .id(ElementId::from(format!("completion-row-{index}")))
@@ -1519,8 +1582,8 @@ impl Composer {
                 .h(px(POPUP_ROW))
                 .w_full()
                 .items_center()
-                .gap(px(10.))
-                .px(px(8.))
+                .gap(px(POPUP_ROW_GAP))
+                .px(px(POPUP_ROW_PAD))
                 .rounded(DRAWER_ITEM_RADIUS)
                 .text_size(POPUP_FONT)
                 .text_color(paint::color(palette.fg))
@@ -1528,9 +1591,22 @@ impl Composer {
                 // `.drawer-item.chosen` is written after `.drawer-item:hover`: the
                 // chosen row keeps its own fill under the pointer.
                 .when(!chosen, |row| row.hover(move |row| row.bg(hover)))
-                .child(div().flex_none().child(label))
+                // The label's own box is what the popup is placed by: its left edge is
+                // the x the typed word begins at.
                 .child(
                     div()
+                        .id(ElementId::from(format!("completion-label-{index}")))
+                        .test_support()
+                        .flex_none()
+                        .child(StyledText::new(label).with_highlights(highlights)),
+                )
+                .child(
+                    // `flex_1` rather than its content width: the popup is as wide as
+                    // its widest row, so this one has exactly its own room — and the
+                    // room past the popup's ceiling is where a description truncates.
+                    div()
+                        .id(ElementId::from(format!("completion-description-{index}")))
+                        .test_support()
                         .flex_1()
                         .min_w_0()
                         .truncate()
@@ -1575,8 +1651,8 @@ impl Composer {
                 .h(px(POPUP_COUNTER))
                 .w_full()
                 .items_center()
-                .gap(px(10.))
-                .px(px(8.))
+                .gap(px(POPUP_ROW_GAP))
+                .px(px(POPUP_ROW_PAD))
                 .border_t_1()
                 .border_color(paint::faded(palette.border, 0.7))
                 .text_size(POPUP_FONT)
@@ -1592,7 +1668,7 @@ impl Composer {
             v_flex()
                 .id("completion-popup")
                 .test_support()
-                .w(px(POPUP_WIDTH))
+                .w(width)
                 .flex_none()
                 .p(px(POPUP_PAD))
                 .rounded(POPUP_RADIUS)
@@ -1609,6 +1685,62 @@ impl Composer {
                 .children(counter)
                 .into_any_element(),
         )
+    }
+
+    /// How wide the popup stands: the widest row of the *whole* list — every
+    /// candidate, not only the rows it is showing, so walking it never resizes it —
+    /// measured in the size and weight the rows are drawn in, between
+    /// [`POPUP_MIN_W`] and [`POPUP_MAX_W`].
+    ///
+    /// Measured once per list, when the rows are new: a row cannot change without the
+    /// popup being rebuilt, and text shaping is not work to repeat every frame.
+    fn measure_popup(&mut self, window: &Window) -> Pixels {
+        let Some(popup) = self.popup.as_ref() else {
+            return px(POPUP_MIN_W);
+        };
+        let widest = popup
+            .rows
+            .iter()
+            .map(|candidate| {
+                // The label is measured in the heavier face it is drawn in where the
+                // word matched — the widest it can be — and the description as it is.
+                text_width(
+                    &popup.label(candidate),
+                    POPUP_FONT,
+                    widgets::text::MEDIUM,
+                    window,
+                ) + px(POPUP_ROW_GAP)
+                    + text_width(
+                        &candidate.description,
+                        POPUP_FONT,
+                        FontWeight::default(),
+                        window,
+                    )
+            })
+            .fold(px(0.), |widest, row| widest.max(row));
+        // A pixel of slack: what is measured must fit in what is drawn, and the
+        // measurement and the layout are two different shapes of the same text.
+        let width = widest + px(2. * POPUP_LABEL_INSET + 1.);
+        width.clamp(px(POPUP_MIN_W), px(POPUP_MAX_W))
+    }
+
+    /// Where the caret's word begins, as the box the popup is placed by: the x its
+    /// rows line their labels up with, and the line they stand over.
+    ///
+    /// The word's own beginning, not the caret: a caret at the end of `/ev` would put
+    /// the list two characters to the right of what it completes.
+    fn word_bounds(&self, cx: &App) -> Option<Bounds<Pixels>> {
+        let word = self.popup.as_ref()?.word.clone();
+        let input = self.input.read(cx);
+        input
+            .range_to_bounds(&(word.start..word.start))
+            // Nothing laid out yet, or the word is scrolled out of sight: the caret's
+            // own line is still the line to stand over.
+            .or_else(|| {
+                input.cursor_layout().map(|(caret, line_height)| {
+                    Bounds::new(caret.origin, gpui_kit::size(caret.size.width, line_height))
+                })
+            })
     }
 
     /// The model drawer: the catalog's models, and the effort ladder under them.
@@ -2093,28 +2225,57 @@ impl Render for Composer {
         // the transcript under it can cut it. Its *layout* is still the box's, which
         // is why the anchored element it draws is positioned absolutely — taken out
         // of the flow, it moves nothing.
-        let popup = self.completion_popup(palette, cx).map(|popup| {
-            // The caret's own line, as the input last laid it out; failing that — an
-            // input not yet laid out, a caret that is not in it — the box's own left
-            // edge, on the first line of it.
-            let caret = self.input.read(cx).cursor_layout().map(|(caret, _)| caret);
-            let (left, top, bottom) = match caret {
-                Some(caret) => (caret.left(), caret.top(), caret.bottom()),
+        // The popup floats over the caret's *word* and is as wide as its own rows,
+        // and both are decided here, where the window and the input's own layout are.
+        // A deferred draw is painted after its ancestors, so neither the box's fold nor
+        // the transcript under it can cut it; its layout is still the box's, which is
+        // why the anchored element it draws is positioned absolutely — out of the flow,
+        // it moves nothing.
+        let popup = if self.popup.is_some() {
+            let width = match self.popup_width {
+                Some(width) => width,
+                None => {
+                    let width = self.measure_popup(window);
+                    self.popup_width = Some(width);
+                    width
+                }
+            };
+            // Never wider than the window it floats in, never hanging off either side.
+            let window_width = window.bounds().size.width;
+            let width = width.min(window_width - px(2. * POPUP_MARGIN));
+            // The word's own beginning, as the input last laid it out; failing that —
+            // an input not yet laid out, a word scrolled out of the box — the box's own
+            // left edge, on the first line of it.
+            let (word_left, top, bottom) = match self.word_bounds(cx) {
+                Some(bounds) => (bounds.left(), bounds.top(), bounds.bottom()),
                 None => {
                     let bounds = self.input.read(cx).input_bounds();
                     let line = bounds.top() + INPUT_LINE;
                     (bounds.left(), line, line)
                 }
             };
-            // Over the caret's own line, a gap off it — where the room is: under it
-            // when the window runs out above, as it does for a box at the top of one.
+            // The popup is placed by its rows' *labels*: every label starts at the x
+            // the typed word does, so the list reads as an expansion of the word rather
+            // than a box that happens to be near it.
+            let left = (word_left - px(POPUP_LABEL_INSET))
+                .max(px(POPUP_MARGIN))
+                .min(window_width - width - px(POPUP_MARGIN));
+            // Over the word's own line, a gap off it — where the room is: under it when
+            // the window runs out above, as it does for a box at the top of one.
             let (anchor, at) = if top - px(POPUP_GAP) - self.completion_height() >= px(0.) {
                 (Anchor::BottomLeft, point(left, top - px(POPUP_GAP)))
             } else {
                 (Anchor::TopLeft, point(left, bottom + px(POPUP_GAP)))
             };
-            deferred(anchored().anchor(anchor).position(at).child(popup))
-        });
+            let popup = self
+                .completion_popup(palette, width, cx)
+                .expect("the popup is up");
+            Some(deferred(
+                anchored().anchor(anchor).position(at).child(popup),
+            ))
+        } else {
+            None
+        };
 
         // Where the box was painted: the page asks this against the press it sees, so
         // that a press in the box and a press outside it are told apart by where they
@@ -2382,6 +2543,14 @@ mod tests {
         fn set_agent(&self, state: &TopicState, cx: &mut App) {
             self.composer.update(cx, |composer, cx| {
                 composer.set_agent(state, "Coordinator", true, cx)
+            });
+        }
+
+        /// The registry's commands, as the catalog hands them in: the popup's own
+        /// candidates, and the width they give it.
+        fn set_commands(&self, commands: Vec<Candidate>, cx: &mut App) {
+            self.composer.update(cx, |composer, cx| {
+                composer.set_catalog(catalog_levels(), catalog_models(), commands, cx)
             });
         }
 
@@ -3985,6 +4154,28 @@ mod tests {
             .unwrap_or_default()
     }
 
+    /// The x the typed word begins at: what the popup's rows line up with.
+    fn word_left(f: &Fixture, cx: &App) -> Pixels {
+        f.composer
+            .read(cx)
+            .word_bounds(cx)
+            .expect("the word's own box, as the input laid it out")
+            .left()
+    }
+
+    /// The x row `index`'s label begins at.
+    fn label_left(window: &Window, index: usize) -> Pixels {
+        window
+            .find(format!("completion-label-{index}"))
+            .bounds()
+            .left()
+    }
+
+    /// The popup's own width.
+    fn popup_width(window: &Window) -> Pixels {
+        window.find("completion-popup").bounds().size.width
+    }
+
     /// Which row the popup has highlighted, out of how many.
     fn popup_index(f: &Fixture, cx: &App) -> Option<(usize, usize)> {
         f.composer
@@ -4081,17 +4272,240 @@ mod tests {
                 "the popup stands over the line being typed: {popup:?} vs {caret:?}"
             );
             assert!(
-                caret.top() - popup.bottom() <= px(POPUP_GAP + 1.),
+                caret.top() - popup.bottom() <= px(POPUP_GAP + 2.),
                 "and a gap off it, not a distance: {popup:?} vs {caret:?}"
             );
             assert!(
-                (popup.left() - caret.left()).abs() <= px(1.),
-                "the popup starts where the word does: {popup:?} vs {caret:?}"
+                (label_left(window, 0) - word_left(&f, cx)).abs() <= px(1.),
+                "the first row's label starts where the typed word does: \
+                 {:?} vs {:?}",
+                label_left(window, 0),
+                word_left(&f, cx)
             );
+            // The rows' labels are one column: what is lined up is the list, not one
+            // row of it.
+            assert_eq!(label_left(window, 0), label_left(window, 1));
             assert!(
                 popup.top() >= px(0.) && popup.bottom() <= px(PANE.height.into()),
                 "and the whole of it is inside the window: {popup:?}"
             );
+        });
+    }
+
+    /// A page with the box at its foot, the catalog in it, and the caret in the input
+    /// after typing `text`.
+    fn typed_footer(cx: &mut TestAppContext, text: &str) -> Fixture {
+        let f = open_footer(cx);
+        f.act(cx, |_window, cx| f.set_catalog(cx));
+        f.act(cx, |window, cx| f.type_draft(text, window, cx));
+        f
+    }
+
+    /// The rows are a column that starts where the word does — at the message's start,
+    /// mid-prose with the caret inside the word, and over a `/eval` token — so the list
+    /// reads as the word being expanded rather than a box beside it.
+    #[gpui_kit::test]
+    fn the_rows_line_up_with_the_word_being_completed(cx: &mut TestAppContext) {
+        // At the message's start.
+        let f = typed_footer(cx, "/");
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            let word = word_left(&f, cx);
+            assert!(
+                (label_left(window, 0) - word).abs() <= px(1.),
+                "the label starts at the word: {:?} vs {word:?}",
+                label_left(window, 0)
+            );
+            let popup_left = popup_left_edge(window);
+            assert!(
+                (label_left(window, 0) - popup_left - px(POPUP_LABEL_INSET)).abs() <= px(1.),
+                "a row's own inset in from the popup's edge: {:?} vs {popup_left:?}",
+                label_left(window, 0)
+            );
+        });
+
+        // Mid-prose, with the caret at the end of the word rather than the message.
+        let g = typed_footer(cx, "please run /he now");
+        g.act(cx, |window, cx| {
+            for _ in 0..4 {
+                window.press("left", cx);
+            }
+        });
+        g.act(cx, |window, cx| {
+            window.render_frame(cx);
+            let word = word_left(&g, cx);
+            assert!(
+                (label_left(window, 0) - word).abs() <= px(1.),
+                "the label starts at the word, not at the caret: \
+                 {:?} vs {word:?}",
+                label_left(window, 0)
+            );
+        });
+
+        // Inside `/eval`: the word is the token, not the command word before it.
+        let h = typed_footer(cx, "/eval (evo.eval:");
+        h.act(cx, |_window, cx| {
+            h.composer.update(cx, |composer, cx| {
+                composer.set_symbols(
+                    "evo.eval:",
+                    vec![Candidate {
+                        name: "evo.eval:completions-for".to_string(),
+                        description: "function".to_string(),
+                    }],
+                    cx,
+                )
+            })
+        });
+        h.act(cx, |window, cx| {
+            window.render_frame(cx);
+            let word = word_left(&h, cx);
+            assert!(
+                (label_left(window, 0) - word).abs() <= px(1.),
+                "the label starts at the token: {:?} vs {word:?}",
+                label_left(window, 0)
+            );
+        });
+    }
+
+    /// The popup's own left edge: what a label sits inside of.
+    fn popup_left_edge(window: &Window) -> Pixels {
+        window.find("completion-popup").bounds().left()
+    }
+
+    /// A word far enough right that the popup would hang off the window: it is pulled
+    /// back instead, and stays whole.
+    #[gpui_kit::test]
+    fn a_word_near_the_windows_edge_keeps_the_popup_inside_it(cx: &mut TestAppContext) {
+        // Long enough that the word being completed starts near the right edge, short
+        // enough to still be on one line of the box.
+        let text = format!("{} /", "x".repeat(70));
+        let f = typed_footer(cx, &text);
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            let window_width = window.bounds().size.width;
+            let popup = window.find("completion-popup").bounds();
+            let word = word_left(&f, cx);
+            assert!(
+                word - px(POPUP_LABEL_INSET) + popup.size.width > window_width - px(POPUP_MARGIN),
+                "the word is far enough right that the popup would overflow: \
+                 {word:?} + {popup:?} in {window_width:?}"
+            );
+            assert!(
+                popup.right() <= window_width - px(POPUP_MARGIN),
+                "so it is pulled back inside the window: {popup:?} in {window_width:?}"
+            );
+            assert!(
+                popup.left() >= px(POPUP_MARGIN - 1.),
+                "and never off the other side: {popup:?}"
+            );
+            assert_eq!(
+                popup.size.width,
+                window.find("completion-popup").bounds().size.width,
+                "its width is its rows', not the room left over"
+            );
+        });
+    }
+
+    /// The popup is as wide as its widest row — the whole list's, so walking it never
+    /// resizes it — and past the ceiling a description is what gives.
+    #[gpui_kit::test]
+    fn the_popup_is_as_wide_as_its_own_rows(cx: &mut TestAppContext) {
+        let f = typed_footer(cx, "/");
+        let short = f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            popup_width(window)
+        });
+
+        // A description long enough to need a wider popup, and short enough to fit under
+        // the ceiling: the popup grows to hold it rather than truncating it, and the
+        // server's own words are drawn whole.
+        let long = "ask the agent to refine what it remembers";
+        f.act(cx, |_window, cx| {
+            f.set_commands(
+                vec![
+                    Candidate {
+                        name: "global-memory".to_string(),
+                        description: long.to_string(),
+                    },
+                    Candidate {
+                        name: "help".to_string(),
+                        description: "commands and keys".to_string(),
+                    },
+                ],
+                cx,
+            )
+        });
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            let wide = popup_width(window);
+            assert!(
+                wide > short,
+                "a longer row is a wider popup: {wide:?} vs {short:?}"
+            );
+            assert!(wide <= px(POPUP_MAX_W), "and no wider than the ceiling");
+            // The description is drawn whole: its own box is as wide as the text is.
+            let drawn = window.find("completion-description-0").bounds().size.width;
+            let text = text_width(long, POPUP_FONT, FontWeight::default(), window);
+            assert!(
+                drawn >= text - px(1.),
+                "the server's own words are not cut: {drawn:?} vs {text:?}"
+            );
+        });
+
+        // Past the ceiling there is nothing left to give but the words themselves: the
+        // popup stops at the ceiling and the description is what truncates.
+        let enormous = "x".repeat(400);
+        f.act(cx, |_window, cx| {
+            f.set_commands(
+                vec![Candidate {
+                    name: "helped".to_string(),
+                    description: enormous.clone(),
+                }],
+                cx,
+            )
+        });
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                popup_width(window),
+                px(POPUP_MAX_W),
+                "the popup stops at its ceiling"
+            );
+            let drawn = window.find("completion-description-0").bounds().size.width;
+            let text = text_width(&enormous, POPUP_FONT, FontWeight::default(), window);
+            assert!(
+                drawn < text,
+                "and the row it cannot hold is truncated: {drawn:?} vs {text:?}"
+            );
+        });
+
+        // A list whose widest row is not the first: walking it does not resize it.
+        f.act(cx, |_window, cx| {
+            f.set_commands(
+                vec![
+                    Candidate {
+                        name: "new".to_string(),
+                        description: "start a new session".to_string(),
+                    },
+                    Candidate {
+                        name: "global-memory".to_string(),
+                        description: long.to_string(),
+                    },
+                ],
+                cx,
+            )
+        });
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            let before = popup_width(window);
+            window.press("down", cx);
+            window.render_frame(cx);
+            assert_eq!(
+                popup_width(window),
+                before,
+                "the width is the list's, whatever row is highlighted"
+            );
+            assert_eq!(popup_index(&f, cx).map(|(index, _)| index), Some(1));
         });
     }
 

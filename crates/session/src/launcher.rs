@@ -321,6 +321,11 @@ pub struct CommandOption {
 
 /// The commands `catalog.commands` lists, in the server's own order. A body with
 /// no such list offers none.
+///
+/// An entry's `args_hint` is deliberately not carried: evo registers every command
+/// without one (`"args_hint": null` from a real `evo-agent catalog --json`), so a row
+/// that drew it would draw nothing — and a client that invented argument syntax would
+/// be writing the one thing the registry owns.
 pub fn command_options(catalog: &Value) -> Vec<CommandOption> {
     let Some(commands) = catalog.get("commands").and_then(Value::as_array) else {
         return Vec::new();

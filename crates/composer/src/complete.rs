@@ -277,6 +277,38 @@ pub(crate) fn settled(prefix: &str, rows: &[Candidate]) -> bool {
     rows.len() == 1 && rows[0].name == prefix
 }
 
+/// The parts of NAME the prefix actually matched, as byte ranges of NAME: one run
+/// for a name the prefix begins, and one run per character for a name the prefix is
+/// a subsequence of.
+///
+/// These are the ranges a row draws heavier — the reader sees *why* a candidate is
+/// on the list, which for a `/lo` that finds `reload` is not obvious.
+pub(crate) fn matched_ranges(name: &str, prefix: &str) -> Vec<Range<usize>> {
+    if prefix.is_empty() {
+        return Vec::new();
+    }
+    if begins_with(name, prefix) {
+        return std::iter::once(0..prefix.len()).collect();
+    }
+    // The same walk `is_subsequence` does, keeping the positions it passed.
+    let mut wanted = prefix.chars().flat_map(char::to_lowercase).peekable();
+    let mut ranges = Vec::new();
+    for (offset, c) in name.char_indices() {
+        let Some(want) = wanted.peek().copied() else {
+            break;
+        };
+        if c.to_lowercase().eq([want]) {
+            wanted.next();
+            ranges.push(offset..offset + c.len_utf8());
+        }
+    }
+    // A walk that ran out of name is not a match at all: nothing is drawn heavier.
+    if wanted.next().is_some() {
+        return Vec::new();
+    }
+    ranges
+}
+
 /// The message after accepting `name` over `word`, and where the caret lands.
 ///
 /// A command replaces its whole word — and at the message's own start opens its
@@ -472,6 +504,41 @@ mod tests {
         assert!(matches(&catalogue(), "zz").is_empty());
         // Case-insensitively, both groups.
         assert_eq!(names(matches(&catalogue(), "RE")), vec!["reload", "lore"]);
+    }
+
+    /// The ranges as the text they cover, so a test reads like the row it draws.
+    fn highlighted(name: &str, prefix: &str) -> Vec<String> {
+        matched_ranges(name, prefix)
+            .into_iter()
+            .map(|range| name[range].to_string())
+            .collect()
+    }
+
+    #[test]
+    fn a_name_the_prefix_begins_emphasizes_its_own_beginning() {
+        assert_eq!(highlighted("reload", "re"), vec!["re"]);
+        assert_eq!(
+            highlighted("reload", "RE"),
+            vec!["re"],
+            "what is drawn is the name's own characters, whatever case was typed"
+        );
+        assert_eq!(highlighted("reload", "reload"), vec!["reload"]);
+        assert!(highlighted("reload", "").is_empty(), "nothing was typed");
+    }
+
+    #[test]
+    fn a_name_the_prefix_is_a_subsequence_of_emphasizes_the_characters_it_hit() {
+        // `lo` finds `reload`: the l and the o, and nothing between them.
+        assert_eq!(highlighted("reload", "lo"), vec!["l", "o"]);
+        assert_eq!(
+            highlighted("global-memory", "mo"),
+            vec!["m", "o"],
+            "the first m in the name, then the first o after it"
+        );
+        assert_eq!(highlighted("memory", "mo"), vec!["m", "o"]);
+        // A walk that runs out is not a match, and emphasizes nothing.
+        assert!(highlighted("reload", "zz").is_empty());
+        assert!(highlighted("car", "lo").is_empty());
     }
 
     #[test]

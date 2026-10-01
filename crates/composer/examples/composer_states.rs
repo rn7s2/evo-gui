@@ -297,7 +297,7 @@ fn main() {
     // the word at the message's start, the same list walked down its own rows, a word
     // mid-prose, and the image's own symbols inside `/eval`.
     type Setup = fn(&mut HeadlessAppContext, AnyWindowHandle, &Entity<Page>);
-    let states: [(&str, Setup); 10] = [
+    let states: [(&str, Setup); 11] = [
         ("goal-open", |cx, window, _| {
             click(cx, window, "goal-strip-row")
         }),
@@ -356,6 +356,17 @@ fn main() {
             for _ in 0..4 {
                 press(cx, window, "left");
             }
+        }),
+        // A word started near the right-hand edge of the box: the list is pulled back
+        // inside the window instead of hanging off it — its labels are no longer on the
+        // word, which is the price of staying whole.
+        ("completion-right-edge", |cx, window, page| {
+            type_into(
+                cx,
+                window,
+                page,
+                "please check the docs and the run outcomes before you answer, then /re",
+            );
         }),
         // `/eval` content completes against the live image: here the package's own
         // exported names, as `evo.eval:completions-for` answers for `evo.eval:`.
