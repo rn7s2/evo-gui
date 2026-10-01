@@ -443,6 +443,40 @@ fn a_compaction_is_drawn_as_a_divider(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn a_running_agent_shows_pips_from_the_requests_start(cx: &mut TestAppContext) {
+    let (view, cx) = open!(cx, vec![user("e_1", "go")]);
+    let pending = |cx: &mut gpui_kit::VisualTestContext| {
+        cx.update(|window, cx| window.render_frame(cx));
+        cx.update(|window, _| window.try_find("transcript-pending").is_some())
+    };
+    assert!(!pending(cx), "an idle agent shows no pips");
+
+    // The request is in flight: nothing of the turn has arrived yet.
+    view.update(cx, |view, cx| view.set_running(true, cx));
+    assert!(pending(cx), "pips from the moment the request starts");
+
+    // A message streaming carries its own pips, then its words.
+    view.update(cx, |view, cx| {
+        view.upsert(assistant("e_2", "", "streaming"), cx)
+    });
+    assert!(!pending(cx), "the streaming message shows the work itself");
+
+    // The message is done and its tool has answered: the next request is on its way.
+    view.update(cx, |view, cx| {
+        view.upsert(assistant("e_2", "Running the tests.", "final"), cx);
+        view.upsert(tool("t_1", "c_1", "bash", "ok", false), cx);
+    });
+    assert!(pending(cx), "pips while the next request is in flight");
+
+    // A queued input below the turn does not end it.
+    view.update(cx, |view, cx| view.upsert(queued("e_3", "later"), cx));
+    assert!(pending(cx));
+
+    view.update(cx, |view, cx| view.set_running(false, cx));
+    assert!(!pending(cx), "the run is over");
+}
+
+#[gpui_kit::test]
 fn the_history_header_asks_for_older_items_only_when_there_are_some(cx: &mut TestAppContext) {
     let (view, cx) = open!(cx, vec![user("e_1", "the tail")]);
     let asked = std::rc::Rc::new(std::cell::RefCell::new(0));

@@ -107,6 +107,9 @@ pub(crate) struct TranscriptData {
     /// `GET /items/<id>` the first time the reader opens one.
     pub(crate) full_results: HashMap<ItemId, String>,
     pub(crate) show_thinking: bool,
+    /// Whether the agent is running (`status: running`): the list's foot shows the
+    /// working pips until a row of the turn shows the work itself.
+    pub(crate) running: bool,
     pub(crate) copy_feedback: Arc<CopyFeedback>,
     pub(crate) focus: FocusHandle,
     /// What the owner does for each thing a row can ask for.
@@ -244,6 +247,7 @@ impl TranscriptView {
                 expanded: HashSet::new(),
                 full_results: HashMap::new(),
                 show_thinking: false,
+                running: false,
                 copy_feedback: Arc::new(CopyFeedback::default()),
                 on_load_older: RefCell::new(None),
                 on_fetch_item: RefCell::new(None),
@@ -282,6 +286,23 @@ impl TranscriptView {
     /// The items currently shown, in order.
     pub fn items<'a>(&'a self, cx: &'a App) -> &'a [Item] {
         &self.data.read(cx).items
+    }
+
+    /// Whether the agent is running. While it is, the transcript shows its working
+    /// pips from the moment the request starts — before the first delta, through
+    /// reasoning the provider does not stream, and between a tool's result and the
+    /// next request — not only once a message is streaming.
+    pub fn set_running(&mut self, running: bool, cx: &mut Context<Self>) {
+        let changed = self.data.update(cx, |data, _| {
+            std::mem::replace(&mut data.running, running) != running
+        });
+        if changed {
+            cx.notify();
+        }
+    }
+
+    pub fn is_running(&self, cx: &App) -> bool {
+        self.data.read(cx).running
     }
 
     /// Whether there is history behind the oldest item, and whether a page is in flight.
@@ -787,23 +808,25 @@ impl Render for TranscriptView {
             rows
         };
 
-        let mut measure = div()
+        // The way back into older history heads the list: it is what is above the
+        // oldest row held.
+        let header = if self.has_older {
+            let oldest = self.data.read(cx).items.first().map(|item| item.id.clone());
+            let weak = cx.weak_entity();
+            history_header(self.loading_older, oldest, &palette, &self.data, &weak, cx)
+        } else {
+            None
+        };
+        let measure = div()
             .id("transcript-measure")
             .flex()
             .flex_col()
             .w_full()
             .max_w(px(MEASURE))
             .px(px(INSET))
-            .children(before);
-        if self.has_older {
-            let oldest = self.data.read(cx).items.first().map(|item| item.id.clone());
-            let weak = cx.weak_entity();
-            if let Some(header) =
-                history_header(self.loading_older, oldest, &palette, &self.data, &weak, cx)
-            {
-                measure = measure.child(header);
-            }
-        }
+            .children(header)
+            .children(before)
+            .children(rows::pending_row(self.data.read(cx), cx));
         // Every frame the list is painted is a chance for the design's rule to run
         // — the same chance a scroll event gives it in a browser, and the one that
         // catches a pane that changed height under a reader who is following.

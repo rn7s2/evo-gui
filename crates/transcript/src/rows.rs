@@ -1213,15 +1213,73 @@ fn copy_offset(id: &str) -> usize {
 /// The pips that hold an assistant row's place between the message starting and its first
 /// delta.
 fn waiting_dots(id: &ItemId, palette: &Palette) -> AnyElement {
+    pips(
+        row_id("transcript-waiting", id),
+        row_id("transcript-waiting-pulse", id),
+        palette,
+    )
+}
+
+/// Whether the agent's current turn already shows that it is working: an assistant
+/// message still streaming (its own pips, its thinking or its words) or a tool call
+/// still running (the card's pips). The turn is everything after the last user input
+/// evo took.
+fn turn_shows_work(items: &[Item]) -> bool {
+    items
+        .iter()
+        .rev()
+        .take_while(|item| !opens_a_turn(&item.kind))
+        .any(|item| match &item.kind {
+            ItemKind::Assistant(assistant) => assistant.is_streaming(),
+            ItemKind::Tool(tool) => tool.status.is_running(),
+            _ => false,
+        })
+}
+
+/// The pips at the foot of the list while the agent is running and nothing in its turn
+/// says so yet: the request is in flight, the model is reasoning without streaming it,
+/// or the next request after a tool is on its way. `None` once a row of the turn shows
+/// the work itself, or while the agent is not running.
+pub(crate) fn pending_row(data: &TranscriptData, cx: &App) -> Option<AnyElement> {
+    if !data.running || turn_shows_work(&data.items) {
+        return None;
+    }
+    let palette = Palette::from_app(cx);
+    let gap = data
+        .items
+        .last()
+        .map(|previous| {
+            Group::of(&previous.kind)
+                .margin()
+                .max(Group::Assistant.margin())
+        })
+        .unwrap_or(px(0.));
+    Some(
+        div()
+            .id("transcript-pending-row")
+            .w_full()
+            .pt(gap)
+            .child(pips(
+                ElementId::from("transcript-pending"),
+                ElementId::from("transcript-pending-pulse"),
+                &palette,
+            ))
+            .test_support()
+            .into_any_element(),
+    )
+}
+
+/// Three pips swelling in turn: the transcript's "working" mark.
+fn pips(id: ElementId, pulse: ElementId, palette: &Palette) -> AnyElement {
     let ink = palette.muted_foreground;
     h_flex()
-        .id(row_id("transcript-waiting", id))
+        .id(id)
         .items_center()
         .gap_1()
         .py(px(8.))
         .test_support()
         .with_animation(
-            row_id("transcript-waiting-pulse", id),
+            pulse,
             Animation::new(DOT_CYCLE).repeat(),
             move |pips, delta| {
                 pips.children(DOT_PHASES.map(|phase| {

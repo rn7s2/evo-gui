@@ -1075,7 +1075,14 @@ impl TabContent {
                 .as_ref()
                 .and_then(|live| live.model.agent_topic(agent))
                 .is_some_and(|topic| topic.has_older());
+            // A running agent shows its working pips from the request's start.
+            let running = self
+                .live
+                .as_ref()
+                .and_then(|live| live.model.state(agent))
+                .is_some_and(|state| state.status == session::Status::Running);
             view.update(cx, |view, cx| {
+                view.set_running(running, cx);
                 if let Some(items) = plan.reset {
                     view.replace(items, cx);
                     view.set_history(has_older, view.is_loading_older(), cx);
