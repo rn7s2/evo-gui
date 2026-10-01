@@ -81,6 +81,11 @@ impl TranscriptZoom {
 /// message share it, so the whole transcript reads as one column.
 pub(crate) const MEASURE: f32 = 800.;
 
+/// The markdown table's frame radius (`Rows.css`'s
+/// `.measure table{border-radius:8px}`) — the header row's own fill carries it, less
+/// that frame's 1px border, because gpui paints a child's fill square.
+const TABLE_RADIUS: f32 = 8.;
+
 /// Space before a row, decided by what came before it. Consecutive rows of one
 /// kind (tool calls, dim lines) are tight, the parts of one turn are a little
 /// apart, and turns are further apart still.
@@ -233,7 +238,7 @@ pub(crate) fn text_style(cx: &App) -> TextViewStyle {
     let table = table
         .border_1()
         .border_color(rule)
-        .rounded(px(8.))
+        .rounded(px(TABLE_RADIUS))
         .bg(palette.input)
         .text_size(px(13.5 * zoom))
         .font_weight(FontWeight::NORMAL);
@@ -241,8 +246,14 @@ pub(crate) fn text_style(cx: &App) -> TextViewStyle {
     // The header row: the chrome surface, the second voice, and a touch smaller
     // than the cells under it. `Rows.css`'s `.measure th{…font-weight:500}` — the
     // design's medium, which this stack draws with `widgets::text::MEDIUM`.
+    //
+    // Its fill is what a reader sees at the frame's top corners, and gpui paints a
+    // fill square: the row carries the frame's own curve, less the border it sits
+    // inside (`TABLE_RADIUS`), or its ink sits square in the corner the frame leaves
+    // round — the same wedge `rows.rs`'s cards carry (`CARD_INNER_RADIUS`).
     let table_head = StyleRefinement::default()
         .bg(palette.sidebar)
+        .rounded_t(px(TABLE_RADIUS - 1.))
         .text_color(palette.muted_foreground)
         .text_size(px(12.5 * zoom))
         .font_weight(widgets::text::MEDIUM);

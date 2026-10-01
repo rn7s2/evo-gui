@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use gpui_kit::{img, px, ImageSource, IntoElement, RenderImage, Styled as _, StyledImage as _};
+use gpui_kit::{img, px, ImageSource, RenderImage, Styled as _, StyledImage as _};
 
 /// The bytes of one image, decoded. `None` when they are not an image GPUI can draw —
 /// the row then says so rather than showing nothing.
@@ -18,7 +18,7 @@ pub fn decode_image(bytes: &[u8]) -> Option<Arc<RenderImage>> {
 
 /// One picture at `max` tall, keeping its own aspect ratio, with a fallback for a frame
 /// GPUI cannot draw.
-pub fn picture(image: Arc<RenderImage>, max: gpui_kit::Pixels) -> impl IntoElement {
+pub fn picture(image: Arc<RenderImage>, max: gpui_kit::Pixels) -> gpui_kit::Img {
     img(ImageSource::Render(image))
         .object_fit(gpui_kit::ObjectFit::Contain)
         .max_h(max)

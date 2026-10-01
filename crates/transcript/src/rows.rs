@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use gpui_kit::base::{Easing, SelectableText, TextView, TextViewMotion};
 use gpui_kit::component::{h_flex, Icon, IconName};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::TestSupportExt as _;
 use gpui_kit::{
     div, linear_color_stop, linear_gradient, point, px, Animation, AnimationExt as _, AnyElement,
@@ -699,10 +700,13 @@ fn image_row(
                         "{name} — click to {}",
                         if full { "shrink" } else { "open" }
                     ))
-                    .child(picture(
-                        frame.clone(),
-                        if full { FULL_IMAGE } else { THUMBNAIL },
-                    ))
+                    // The frame's `overflow_hidden` does not round what it clips, so the
+                    // picture carries the frame's radius less its border itself — or its
+                    // square corners show outside the frame's curve.
+                    .child(
+                        picture(frame.clone(), if full { FULL_IMAGE } else { THUMBNAIL })
+                            .rounded(palette.radius - px(1.)),
+                    )
                     .test_support()
                     .into_any_element()
             }
@@ -1574,6 +1578,12 @@ fn tool_row(
         .pr(px(10.))
         .text_size(palette.scaled(TC_HEAD_SIZE))
         .cursor_default()
+        // Folded, the head is the whole of the card's inside, and its hover ink is
+        // what a reader sees at all four corners; open, the body is under it and only
+        // its top corners are the card's. Either way the corner it reaches carries the
+        // card's own curve (see [`CARD_INNER_RADIUS`]).
+        .when(expanded, |head| head.rounded_t(px(CARD_INNER_RADIUS)))
+        .when(!expanded, |head| head.rounded(px(CARD_INNER_RADIUS)))
         .hover({
             let sidebar = palette.sidebar;
             move |style| style.bg(mix(palette.foreground, 4., sidebar))
@@ -1641,7 +1651,7 @@ fn tool_row(
         .id(row_id("transcript-tool-row", &id))
         .w_full()
         .min_w_0()
-        .rounded(px(10.))
+        .rounded(px(CARD_RADIUS))
         .border_1()
         .border_color(palette.rule_soft())
         .bg(palette.sidebar)
@@ -1661,6 +1671,9 @@ fn tool_row(
                 .border_t_1()
                 .border_color(palette.rule_soft())
                 .bg(palette.input)
+                // The body's own fill reaches the card's bottom corners, so it carries
+                // that curve (`CARD_INNER_RADIUS`); the head above it opens the card.
+                .rounded_b(px(CARD_INNER_RADIUS))
                 .pt(px(10.))
                 .pr(px(12.))
                 .pb(px(12.))
@@ -1708,6 +1721,19 @@ pub(crate) const TC_BODY_INDENT: f32 = TC_HEAD_PAD + DISCLOSURE_WIDTH + TC_HEAD_
 /// name, which is the one run in the row set in the mono face.
 const TC_HEAD_SIZE: f32 = 13.;
 const TC_NAME_SIZE: f32 = 12.5;
+
+/// The two cards the transcript draws — a tool call (`.tc`) and a lane's report
+/// (`.rp`) — are each a 10px frame with a 1px border, and each clips what it holds
+/// (`.tc{overflow:hidden}`).
+///
+/// gpui does not clip a child to its parent's rounded corners: an element paints its
+/// own fill as a square, so a child that reaches one of the card's corners draws the
+/// square corner *over* the card's curve — the head's `:hover` ink, or an open card's
+/// body, showing the page's colour through the wedge the card's radius leaves. A child
+/// that paints a fill at a corner therefore carries the curve itself: the card's own
+/// radius, less the border it sits inside.
+const CARD_RADIUS: f32 = 10.;
+const CARD_INNER_RADIUS: f32 = CARD_RADIUS - 1.;
 
 /// What the call was aimed at, and what it was asked to do — the two halves of the
 /// design's sentence, read out of the call's own arguments.
@@ -2150,7 +2176,7 @@ fn report_row(
         .min_w_0()
         .flex()
         .flex_col()
-        .rounded(px(10.))
+        .rounded(px(CARD_RADIUS))
         .border_1()
         .border_color(palette.rule_soft())
         .bg(palette.input)
@@ -2166,6 +2192,9 @@ fn report_row(
                 .border_b_1()
                 .border_color(palette.rule_soft())
                 .bg(palette.sidebar)
+                // The head's own fill is what a reader sees at the card's top corners,
+                // so it carries that curve (`CARD_INNER_RADIUS`).
+                .rounded_t(px(CARD_INNER_RADIUS))
                 .text_size(palette.scaled(REPORT_SIZE))
                 .aria_label(format!("Lane {} report", report.lane))
                 .child(
