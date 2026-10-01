@@ -40,7 +40,7 @@ cargo test -p store                   # one crate
 scripts/check.sh                      # the gate: fmt --check, clippy, every crate's tests
 scripts/check.sh --head               # the same, against HEAD in a worktree of its own
 
-scripts/bundle.sh                     # → dist/evo-desktop.app (ad-hoc signed)
+scripts/bundle.sh                     # → "dist/Evo Desktop.app" (ad-hoc signed)
 scripts/bundle.sh --no-build          # bundle the binary already built
 ```
 
@@ -62,7 +62,7 @@ scripted model (`../evo-agent/tests/stub-messages.py`) — no API key, no
 network, and nothing written to your real `~/.evo`:
 
 ```sh
-scripts/stub_home.sh run -- ./dist/evo-desktop.app/Contents/MacOS/evo-desktop
+scripts/stub_home.sh run -- "./dist/Evo Desktop.app/Contents/MacOS/evo-desktop"
 scripts/stub_home.sh start          # for a long session; prints the exports
 scripts/stub_home.sh stop <dir>
 ```
@@ -130,6 +130,6 @@ What is genuinely not here:
 Two things worth knowing when you run it:
 
 - The app icon lives in the bundle, not in the binary: launch
-  `dist/evo-desktop.app` (after `scripts/bundle.sh`) to see it in the Dock.
+  `dist/Evo Desktop.app` (after `scripts/bundle.sh`) to see it in the Dock.
 - The `evo-agent` sources this app is built against are strictly read-only; see
   `docs/PROMPT.md` §10.

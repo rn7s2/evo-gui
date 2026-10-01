@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Build evo-desktop and assemble the launchable bundle: dist/evo-desktop.app.
+# Build evo-desktop and assemble the launchable bundle: dist/Evo Desktop.app.
 #
 #   scripts/bundle.sh              build (release) and bundle
 #   scripts/bundle.sh --no-build   bundle the release binary that is already built
@@ -19,7 +19,7 @@ case "${1:-}" in
 esac
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-APP="$ROOT/dist/evo-desktop.app"
+APP="$ROOT/dist/Evo Desktop.app"
 BINARY="${CARGO_TARGET_DIR:-$ROOT/target}/release/evo-desktop"
 ICON="$ROOT/assets/icon/AppIcon.icns"
 

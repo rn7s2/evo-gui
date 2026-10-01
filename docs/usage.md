@@ -422,7 +422,7 @@ everything on the tab page. Model names are never hardcoded.
 stub provider — no API key, no network, nothing written to your real `~/.evo`:
 
 ```sh
-scripts/stub_home.sh run -- ./dist/evo-desktop.app/Contents/MacOS/evo-desktop
+scripts/stub_home.sh run -- "./dist/Evo Desktop.app/Contents/MacOS/evo-desktop"
 ```
 
 The model answers `ok: <your text>` unless you script it in the prompt:
