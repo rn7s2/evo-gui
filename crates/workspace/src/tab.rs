@@ -2014,6 +2014,18 @@ impl TabContent {
                     self.composer.update(cx, |composer, cx| {
                         composer.request_finished(reply.ok, window, cx)
                     });
+                    // A message the server took answers the refusal above it: the
+                    // reader fixed what was wrong and sent again, and a red line that
+                    // stays for the rest of its four seconds would say the fix failed.
+                    if reply.ok
+                        && self
+                            .notice
+                            .as_ref()
+                            .is_some_and(|notice| notice.text.starts_with("input.send"))
+                    {
+                        self.notice = None;
+                        cx.notify();
+                    }
                 }
                 Pending::Command => {
                     // A command that hands text back — `/rewind`, `/tree <id>` on a

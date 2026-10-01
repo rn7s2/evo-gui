@@ -310,6 +310,20 @@ fn attachments_end_to_end(cx: &mut TestAppContext) {
     );
     assert_eq!(kept.1, 0, "and no picture, since the tile was taken off");
     assert_eq!(user_rows(cx, &tab), before + 1, "now it went");
+    // And the refusal it answered is gone: a red line still standing over a message
+    // that went would say the fix had failed.
+    let refusal = cx
+        .update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window
+                .try_find("composer-notice-error")
+                .and_then(|line| line.label().map(str::to_owned))
+        })
+        .expect("the window");
+    assert_eq!(
+        refusal, None,
+        "the accepted send took the refusal's line away"
+    );
 
     // The tab's server is told to stop while the window is still here, so its engine
     // thread's last update lands on a context that is still running: a test scheduler
