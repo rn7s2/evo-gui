@@ -204,10 +204,14 @@ const HISTORY_ROW_ID: &str = "history-row";
 const HISTORY_KIND_AGENT_ID: &str = "history-kind-agent";
 const HISTORY_KIND_SWARM_ID: &str = "history-kind-swarm";
 const HISTORY_HINT_ID: &str = "history-hint";
+/// The page's headline, named so that a probe — and the tests — can read the words the
+/// workers switch puts there.
+pub(crate) const HEADLINE_ID: &str = "empty-title";
 const HISTORY_COUNT_ID: &str = "history-count";
 /// What the history section is called, for a screen reader: the rows name themselves, but
-/// the list around them has no name of its own.
-const HISTORY_LABEL: &str = "Resumable swarms";
+/// the list around them has no name of its own. Sessions, not swarms: the list holds both
+/// kinds whatever the workers switch says (§2).
+const HISTORY_LABEL: &str = "Resumable sessions";
 const ROW_ICON: Pixels = px(16.);
 /// A history row's tooltip: one fact per line, never wider than this.
 const HISTORY_TOOLTIP_ID: &str = "history-tooltip";
@@ -219,8 +223,15 @@ const RESUME_ARROW: &str = "›";
 /// What the words in the page are: the design's own copy, and the two labels the fields
 /// wear.
 const TITLE: &str = "New Swarm";
+/// The same headline when the workers switch is off (§7.2): one `evo-agent` is a session,
+/// not a swarm, and the page's title is where the switch's own choice is read back as
+/// words. Only the title follows it — everything else on the page is true of either.
+const TITLE_AGENT: &str = "New Session";
 const SUBTITLE: &str = "Choose how it runs, then select a project folder.";
 const COORDINATOR_TITLE: &str = "Coordinator";
+/// The same card when the session is one agent: there is nothing for it to
+/// coordinate, and the running tab names that agent `Main`.
+const MAIN_TITLE: &str = "Main";
 const WORKERS_TITLE: &str = "Workers";
 const MODEL_LABEL: &str = "Model";
 const EFFORT_LABEL: &str = "Effort";
@@ -1153,7 +1164,7 @@ impl EmptyTabState {
                 let tab = self.tab.clone();
                 cx.spawn(async move |_this: WeakEntity<Self>, cx| {
                     let mut dialog = rfd::AsyncFileDialog::new()
-                        .set_title("Choose the folder this swarm runs in");
+                        .set_title("Choose the folder this session runs in");
                     if let Some(folder) = starting_folder {
                         dialog = dialog.set_directory(folder);
                     }
@@ -1180,6 +1191,14 @@ impl EmptyTabState {
     // --- the pieces the page is made of ---------------------------------------------
 
     fn header(&self, cx: &Context<Self>) -> impl IntoElement {
+        // The page's own headline: a heading, and a reader's name for it — which is the
+        // words themselves, so the one place the switch's choice is read back is also
+        // where a screen reader hears it (§7.2).
+        let headline = if self.launcher.swarm() {
+            TITLE
+        } else {
+            TITLE_AGENT
+        };
         v_flex()
             .id("empty-head")
             .test_support()
@@ -1187,10 +1206,14 @@ impl EmptyTabState {
             .mb(HEAD_GAP)
             .child(
                 div()
+                    .id(HEADLINE_ID)
+                    .test_support()
+                    .role(gpui_kit::Role::Heading)
+                    .aria_label(headline)
                     .text_size(TITLE_SIZE)
                     .line_height(TITLE_LINE)
                     .font_semibold()
-                    .child(TITLE),
+                    .child(headline),
             )
             .child(
                 div()
@@ -1207,7 +1230,8 @@ impl EmptyTabState {
         let theme = cx.theme();
         let off = self.card_off(role);
         let (title, id) = match role {
-            Card::Coordinator => (COORDINATOR_TITLE, COORDINATOR_CARD_ID),
+            Card::Coordinator if self.launcher.swarm() => (COORDINATOR_TITLE, COORDINATOR_CARD_ID),
+            Card::Coordinator => (MAIN_TITLE, COORDINATOR_CARD_ID),
             Card::Lanes => (WORKERS_TITLE, WORKERS_CARD_ID),
         };
         v_flex()
@@ -1232,6 +1256,9 @@ impl EmptyTabState {
                     .items_center()
                     .child(
                         div()
+                            .id(ElementId::Name(format!("{id}-title").into()))
+                            .test_support()
+                            .aria_label(title)
                             .flex_1()
                             .min_w_0()
                             .text_size(CARD_TITLE)
@@ -1827,7 +1854,7 @@ impl EmptyTabState {
             let note = match (&self.history_error, self.history_loading) {
                 (Some(error), _) => SharedString::from(error.clone()),
                 (None, true) => SharedString::from("Looking for sessions…"),
-                (None, false) => SharedString::from("No swarms to resume yet."),
+                (None, false) => SharedString::from("No sessions to resume yet."),
             };
             return div()
                 .id(HISTORY_HINT_ID)
@@ -1837,6 +1864,7 @@ impl EmptyTabState {
                 .text_size(CARD_TITLE)
                 .line_height(BODY_LINE)
                 .text_color(cx.theme().muted_foreground)
+                .aria_label(note.clone())
                 .child(note)
                 .into_any_element();
         }
@@ -3822,6 +3850,58 @@ mod tests {
         f.render(cx);
         f.act(cx, |window, _| {
             assert!(window.find(HISTORY_HINT_ID).visible());
+        });
+    }
+
+    /// §7.2: the page's own words follow the workers switch — one `evo-agent` is a
+    /// session, not a swarm, and the headline is where the switch's choice is read back
+    /// as words. The history's empty line does not follow it: the list holds both kinds
+    /// whatever the switch says (§2), so it is about sessions either way.
+    #[gpui_kit::test]
+    fn the_pages_words_follow_the_workers_switch(cx: &mut TestAppContext) {
+        let f = open(cx);
+        let tab = f.tab.clone();
+        f.render(cx);
+        f.act(cx, |window, _| {
+            assert_eq!(window.find(HEADLINE_ID).label(), Some(TITLE));
+            assert_eq!(
+                window.find(HISTORY_HINT_ID).label(),
+                Some("No sessions to resume yet."),
+                "a session is what both kinds are"
+            );
+        });
+
+        f.act(cx, |_, cx| {
+            tab.update(cx, |tab, cx| tab.set_use_swarm(false, cx))
+        });
+        f.render(cx);
+        f.act(cx, |window, _| {
+            assert_eq!(
+                window.find(HEADLINE_ID).label(),
+                Some(TITLE_AGENT),
+                "one agent's page is a session"
+            );
+            assert_eq!(
+                window.find(HISTORY_HINT_ID).label(),
+                Some("No sessions to resume yet."),
+                "and the history's line is the same either way"
+            );
+            assert_eq!(
+                window.find(format!("{COORDINATOR_CARD_ID}-title")).label(),
+                Some(MAIN_TITLE),
+                "one agent has nothing to coordinate: its card is the one the tab calls Main"
+            );
+        });
+        f.act(cx, |_, cx| {
+            tab.update(cx, |tab, cx| tab.set_use_swarm(true, cx))
+        });
+        f.render(cx);
+        f.act(cx, |window, _| {
+            assert_eq!(
+                window.find(format!("{COORDINATOR_CARD_ID}-title")).label(),
+                Some(COORDINATOR_TITLE),
+                "a swarm's card is its coordinator's again"
+            );
         });
     }
 

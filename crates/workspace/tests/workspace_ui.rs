@@ -119,7 +119,7 @@ fn the_app_opens_with_one_empty_tab(cx: &mut TestAppContext) {
 
         let tab = view.selected_tab().read(cx);
         assert_eq!(tab.state(), &TabState::Empty);
-        assert_eq!(tab.title().as_ref(), "New Swarm");
+        assert_eq!(tab.title(cx).as_ref(), "New Swarm");
         assert_eq!(tab.folder(), None, "an empty tab has no folder yet");
     });
 
@@ -980,7 +980,7 @@ fn resuming_from_the_history_replaces_the_new_swarm_page(cx: &mut TestAppContext
         let shown = view.selected_tab().read(cx);
         assert_eq!(shown.id(), tab.read(cx).id(), "the same tab, not a new one");
         assert_ne!(shown.state(), &TabState::Empty, "no New Swarm page is left");
-        assert_eq!(shown.title().as_ref(), "resumed-here");
+        assert_eq!(shown.title(cx).as_ref(), "resumed-here");
         assert_eq!(
             shown.folder(),
             Some(folder.as_path()),
@@ -1120,7 +1120,7 @@ fn settle_terminating(cx: &mut TestAppContext, view: &Entity<WorkspaceView>, tab
 }
 
 /// §7.1: closing a tab whose swarm is running does not drop it out of sight — the tab
-/// stays on the strip, frozen under "Terminating swarm.", and leaves once its swarm
+/// stays on the strip, frozen under "Terminating session.", and leaves once its session
 /// has exited. A second × meanwhile does nothing.
 #[gpui_kit::test]
 fn closing_a_swarm_tab_freezes_it_until_the_swarm_exits(cx: &mut TestAppContext) {
@@ -1163,7 +1163,7 @@ fn closing_a_swarm_tab_freezes_it_until_the_swarm_exits(cx: &mut TestAppContext)
         window.render_frame(cx);
         assert_eq!(
             window.find("tab-terminating-label").label(),
-            Some("Terminating swarm."),
+            Some("Terminating session."),
             "the frozen page says what is happening"
         );
         assert!(window.find("tab-terminating").visible());
@@ -1348,8 +1348,8 @@ fn the_quitting_screen_says_what_is_being_terminated(cx: &mut TestAppContext) {
         assert!(window.find("quit-screen").visible());
         assert_eq!(
             window.find("quit-screen-label").label(),
-            Some("Terminating swarms."),
-            "two swarms are being terminated"
+            Some("Terminating sessions."),
+            "two sessions are being terminated"
         );
         assert_eq!(
             window.find("quit-screen").focused(),
@@ -1361,8 +1361,8 @@ fn the_quitting_screen_says_what_is_being_terminated(cx: &mut TestAppContext) {
         window.render_frame(cx);
         assert_eq!(
             window.find("quit-screen-label").label(),
-            Some("Terminating swarm."),
-            "one swarm is not several"
+            Some("Terminating session."),
+            "one session is not several"
         );
     })
     .unwrap();
@@ -1411,7 +1411,7 @@ fn the_gear_opens_one_settings_tab_and_shows_it_again(cx: &mut TestAppContext) {
             assert_eq!(view.selected_index(), 1, "and Settings is what is shown");
             let tab = view.selected_tab().read(cx);
             assert_eq!(tab.state(), &TabState::Settings);
-            assert_eq!(tab.title(), "Settings", "the strip's own label for it");
+            assert_eq!(tab.title(cx), "Settings", "the strip's own label for it");
             window.find(tab_label(tab.id().get()));
             tab.id()
         };

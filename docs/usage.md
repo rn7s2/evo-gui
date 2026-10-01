@@ -56,14 +56,16 @@ nobody hears is worse than one the window handles.
 ## Tabs
 
 The title bar **is** the tab strip: one tab per session, labelled with the folder's
-name (a tab nothing has been launched from says `New Swarm`), and hovering one
-shows the whole path plus what the tab is doing — `no folder chosen`, `starting
-the swarm…`, `swarm: running`, `swarm: reconnecting…`, `stopping the swarm…`,
-`failed to start`, or `swarm gone: the server exited`.
+name — a tab nothing has been launched from says `New Swarm`, or `New Session`
+while the workers switch is off — and hovering one shows the whole path plus what
+the tab is doing — `no folder chosen`, `starting the session…`, `session: running`,
+`session: reconnecting…`, `terminating the session…`, `failed to start`, or
+`session gone: the server exited`. The words are the session's rather than a
+swarm's because a tab may hold either program.
 
 A middle click closes a tab, the way a browser's does. The `+` after the last tab
-opens a New Swarm tab — and when the strip already has one, it shows that one
-instead: there is one New Swarm tab at a time, and ⌘T is the same button. When the
+opens an empty tab — and when the strip already has one, it shows that one
+instead: there is one empty tab at a time, and ⌘T is the same button. When the
 tabs need more room than there is, they scroll inside the strip and the `+` stays
 at the strip's right edge. Closing a tab stops its server; the session stays on
 disk and comes back in the history list.
@@ -81,8 +83,11 @@ Two small marks answer questions a label cannot:
 
 ## The empty tab: choosing a session
 
-Every new tab opens on the New Swarm page (`design/doc28/NewSwarm.tsx`): what the
-launch will be, then the folder to run it in, then what can be resumed.
+Every new tab opens on the empty page (`design/doc28/NewSwarm.tsx`): what the
+launch will be, then the folder to run it in, then what can be resumed. Its
+headline says which program the switch has chosen — `New Swarm`, or `New Session`
+with **Use swarm** off, when the first card is titled `Main` rather than
+`Coordinator` — and everything else on the page is true of either.
 
 ```
 New Swarm
@@ -220,7 +225,7 @@ agent, a swarm's as a swarm, because only the program that wrote a journal can
 open it — so two tabs in one folder can never cross sessions. The list scrolls
 inside the height that is left, under the fixed head and cards; and it has three
 quiet states of its own: `Looking for sessions…` while the index is read, `No
-swarms to resume yet.`, and the read's error in words. The calm one is what a
+sessions to resume yet.`, and the read's error in words. The calm one is what a
 first run shows: there is nothing to resume yet, which is not a failure.
 
 
@@ -547,7 +552,7 @@ following; `app.json`'s `theme` field is what is stored (`system`, `light`,
 
 ## Failures
 
-- **The swarm does not boot.** The tab shows *Could not start a swarm*, the
+- **Nothing boots.** The tab shows *Could not start a session* (either program), the
   folder, the engine's one-line reason, the server's log tail in a monospace box,
   and **Retry** and **Close**. That log is
   `~/.evo/desktop/tabs/<id>/swarm.log`.
@@ -575,7 +580,7 @@ The app keeps its own data in `~/.evo/desktop/`:
 |---|---|
 | `app.json` | window bounds, the recorded tab set, binary paths, the workers switch, recent sessions, theme |
 | `lock`, `activate.sock` | the single-instance lock and its activation socket |
-| `model-cache.json` | the last `catalog --json` body, for the New Swarm page's controls |
+| `model-cache.json` | the last `catalog --json` body, for the empty page's controls |
 | `tabs/<id>/ready.json` | where the server publishes its port, URL and bearer token (0600) |
 | `tabs/<id>/swarm.log` | the server's stdout and stderr (either program's) |
 | `app.log` | the app's own log, one line per event, each with a UTC timestamp |

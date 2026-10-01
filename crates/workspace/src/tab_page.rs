@@ -194,18 +194,18 @@ impl TabContent {
                     .id("tab-terminating-label")
                     .text_size(px(13.))
                     .text_color(theme.muted_foreground)
-                    .aria_label("Terminating swarm.")
-                    .child("Terminating swarm.")
+                    .aria_label("Terminating session.")
+                    .child("Terminating session.")
                     .test_support(),
             )
             .test_support()
             .into_any_element()
     }
 
-    /// While the swarm starts: what is starting, and where (§3).
+    /// While the session starts: what is starting, and where (§3).
     fn render_booting(&self, folder: &Path, cx: &App) -> AnyElement {
         centered_region(
-            "starting swarm…",
+            "starting session…",
             Some(path_text(
                 "boot-folder",
                 folder,
@@ -213,15 +213,15 @@ impl TabContent {
                 true,
                 cx,
             )),
-            "the swarm's log tail appears here if it fails to come up",
+            "the session's log tail appears here if it fails to come up",
             Some(Spinner::new().xsmall().color(cx.theme().muted_foreground)),
             cx,
         )
     }
 
-    /// A failed swarm: the tail of its log, and a way to try again (§9.7).
+    /// A failed launch: the tail of its log, and a way to try again (§9.7).
     ///
-    /// Two failures wear this screen, and `was_up` is which: a swarm that never
+    /// Two failures wear this screen, and `was_up` is which: a session that never
     /// answered `/health`, and one that was up and went away. The second is not
     /// a boot that failed — the session it was writing is still there, and Retry
     /// resumes it — so it says so.
@@ -253,9 +253,9 @@ impl TabContent {
             .gap_3()
             .p_6()
             .child(div().font_semibold().child(SharedString::from(if was_up {
-                "The swarm is gone"
+                "The session is gone"
             } else {
-                "Could not start a swarm"
+                "Could not start a session"
             })))
             .child(path_text(
                 "failure-folder",

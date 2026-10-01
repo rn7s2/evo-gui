@@ -176,8 +176,8 @@ fn quitting_with_a_swarm_shows_the_screen_and_waits_for_it(cx: &mut TestAppConte
         .expect("a drawn frame");
     assert_eq!(
         screen,
-        (true, Some("Terminating swarm.".to_owned()), Some(true)),
-        "the screen covers the window, names one swarm, and holds the keyboard"
+        (true, Some("Terminating session.".to_owned()), Some(true)),
+        "the screen covers the window, names one session, and holds the keyboard"
     );
 
     // And the app waits: while the engine's thread is there, there is no exit.
