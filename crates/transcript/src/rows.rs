@@ -19,9 +19,10 @@ use gpui_kit::base::{Easing, SelectableText, TextView, TextViewMotion};
 use gpui_kit::component::{h_flex, Icon, IconName};
 use gpui_kit::TestSupportExt as _;
 use gpui_kit::{
-    div, point, px, Animation, AnimationExt as _, AnyElement, App, ClipboardItem, Context, Div,
-    ElementId, FontWeight, Hsla, InteractiveElement as _, IntoElement, ParentElement, Pixels,
-    Point, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, WeakEntity,
+    div, linear_color_stop, linear_gradient, point, px, Animation, AnimationExt as _, AnyElement,
+    App, ClipboardItem, Context, Div, ElementId, FontWeight, Hsla, InteractiveElement as _,
+    IntoElement, ParentElement, Pixels, Point, SharedString, Stateful,
+    StatefulInteractiveElement as _, Styled as _, WeakEntity,
 };
 use serde_json::Value;
 use session::{
@@ -1159,7 +1160,7 @@ fn assistant_row(
     }
 
     if assistant.is_streaming() && assistant.text.trim().is_empty() {
-        row = row.child(waiting_dots(&id, palette));
+        row = row.child(waiting_line(&id, assistant, data.show_thinking, palette));
     } else {
         row = match data.documents.get(&id) {
             Some(document) => {
@@ -1248,6 +1249,127 @@ fn waiting_dots(id: &ItemId, palette: &Palette) -> AnyElement {
         row_id("transcript-waiting-pulse", id),
         palette,
     )
+}
+
+/// How much of the model's thinking the ticker holds. It is one line, so only the
+/// tail of it can ever be seen: the rest is not worth laying out every frame. The
+/// TUI cuts its tail to the columns its terminal gives it (`tui.lisp`); this is the
+/// same idea with the app's own bound.
+pub(crate) const THINKING_TAIL_CHARS: usize = 400;
+/// The ticker's own size: a size under the message's, so a line running past stays
+/// quiet beside the pips.
+const TICKER_SIZE: Pixels = px(13.);
+/// The line box the ticker's one line sits on.
+const TICKER_LINE: Pixels = px(18.);
+/// How far the fade over the ticker's left edge reaches — where the words that
+/// have run past are cut.
+const TICKER_FADE: Pixels = px(24.);
+
+/// The line an assistant row holds its place with between the message starting and
+/// its first delta: the pips, and — while the thinking is hidden and there is
+/// thinking to show — the model's own last words running past beside them.
+///
+/// It reads as the TUI's activity line (`tui.lisp`'s `thinking · <tail>`): the
+/// newest text is at the right end and the older text slides off the left as the
+/// deltas come in, the cut end fading into the page rather than stopping flat.
+/// With the thinking shown, or nothing thought yet, the line is the pips alone.
+fn waiting_line(
+    id: &ItemId,
+    assistant: &AssistantItem,
+    show_thinking: bool,
+    palette: &Palette,
+) -> AnyElement {
+    let pips = waiting_dots(id, palette);
+    let tail = if show_thinking {
+        None
+    } else {
+        thinking_tail(&assistant.thinking)
+    };
+    let Some(tail) = tail else {
+        return pips;
+    };
+
+    let background = palette.background;
+    h_flex()
+        .w_full()
+        .min_w_0()
+        .items_center()
+        .gap(px(8.))
+        .child(pips)
+        .child(
+            div()
+                .id(row_id("transcript-thinking-ticker", id))
+                .relative()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .aria_label(tail.clone())
+                .test_support()
+                .child(
+                    // `justify_end` on a line wider than its box puts the newest
+                    // words at the right edge and pushes the rest out of the left
+                    // one, which is where the box clips it.
+                    h_flex().w_full().min_w_0().justify_end().child(
+                        div()
+                            .id(row_id("transcript-thinking-ticker-text", id))
+                            .flex_shrink_0()
+                            .whitespace_nowrap()
+                            .text_size(TICKER_SIZE)
+                            .line_height(TICKER_LINE)
+                            .italic()
+                            .text_color(palette.muted_foreground)
+                            .test_support()
+                            .child(tail),
+                    ),
+                )
+                .child(
+                    // The page's own colour over the cut end, thinning to nothing
+                    // to the right: the words that have run past fade out instead
+                    // of being chopped off.
+                    div()
+                        .absolute()
+                        .left_0()
+                        .top_0()
+                        .bottom_0()
+                        .w(TICKER_FADE)
+                        .bg(linear_gradient(
+                            90.,
+                            linear_color_stop(background, 0.),
+                            linear_color_stop(background.alpha(0.), 1.),
+                        )),
+                ),
+        )
+        .into_any_element()
+}
+
+/// The last of what the model is saying to itself, as one line: every newline, tab
+/// and run of spaces folds into a single space, and only a bounded tail is kept, so
+/// the newest words are at the right end and the older ones slide off the left as
+/// the deltas arrive. `None` when there is nothing but whitespace to show.
+pub(crate) fn thinking_tail(thinking: &str) -> Option<SharedString> {
+    let mut line = String::new();
+    for ch in thinking.chars() {
+        if ch.is_whitespace() {
+            if !line.is_empty() && !line.ends_with(' ') {
+                line.push(' ');
+            }
+        } else {
+            line.push(ch);
+        }
+    }
+    let line = line.trim_end();
+    if line.is_empty() {
+        return None;
+    }
+    // The byte the tail starts at: the character `THINKING_TAIL_CHARS` from the
+    // end, so a cut never lands inside one.
+    let start = line
+        .char_indices()
+        .rev()
+        .nth(THINKING_TAIL_CHARS - 1)
+        .map(|(index, _)| index)
+        .unwrap_or(0);
+    Some(SharedString::from(line[start..].to_owned()))
 }
 
 /// Whether the agent's current turn already shows that it is working: an assistant

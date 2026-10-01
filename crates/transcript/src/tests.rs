@@ -11,8 +11,8 @@ use serde_json::{json, Value};
 use session::{Item, ItemKind};
 
 use crate::rows::{
-    cap_fields, cap_text, json_fields, row_id, take_chars, Cap, FieldValue, CONTEXT_BLOCK_LINES,
-    RESULT_LIMIT, TURN_LABEL_OVERHANG, VALUE_LIMIT,
+    cap_fields, cap_text, json_fields, row_id, take_chars, thinking_tail, Cap, FieldValue,
+    CONTEXT_BLOCK_LINES, RESULT_LIMIT, THINKING_TAIL_CHARS, TURN_LABEL_OVERHANG, VALUE_LIMIT,
 };
 use crate::TranscriptView;
 
@@ -39,6 +39,14 @@ fn assistant_with_thinking(id: &str, text: &str, thinking: &str) -> Item {
     item(json!({
         "id": id, "ts": 1, "kind": "assistant", "text": text,
         "thinking": thinking, "status": "final"
+    }))
+}
+
+/// A message still being written, whose thinking has started to arrive.
+fn streaming_with_thinking(id: &str, text: &str, thinking: &str) -> Item {
+    item(json!({
+        "id": id, "ts": 1, "kind": "assistant", "text": text,
+        "thinking": thinking, "status": "streaming"
     }))
 }
 
@@ -293,6 +301,144 @@ fn a_streaming_message_shows_waiting_pips_until_its_first_word(cx: &mut TestAppC
             .try_find(row_id("transcript-waiting", "e_1"))
             .is_none());
     });
+}
+
+/// With the thinking hidden, the pips a streaming message waits behind carry the
+/// model's own last words past beside them, the way the TUI's activity line does:
+/// one line, the newest text at the right edge, the older cut off at the left.
+#[gpui_kit::test]
+fn a_hidden_thinking_streams_past_beside_the_waiting_pips(cx: &mut TestAppContext) {
+    let kept = "alpha  beta\n\tgamma\tdelta\n\nepsilon";
+    let filler = "z".repeat(200);
+    let thinking = format!("{kept}\n{filler}");
+    let expected = format!(
+        "{} {filler}",
+        kept.split_whitespace().collect::<Vec<_>>().join(" ")
+    );
+    let (view, cx) = open!(cx, vec![streaming_with_thinking("e_1", "", &thinking)]);
+    for _ in 0..2 {
+        cx.update(|window, cx| window.render_frame(cx));
+    }
+    cx.update(|window, _| {
+        let ticker = window.find(row_id("transcript-thinking-ticker", "e_1"));
+        assert_eq!(
+            ticker.label(),
+            Some(expected.as_str()),
+            "the collapsed tail"
+        );
+        assert_eq!(ticker.bounds().size.height, px(18.), "one line");
+
+        // The line is longer than the box it is drawn in: its right end is the
+        // box's right end, and its left end is past the box's left one, where it
+        // is clipped — the newest words are the ones in sight.
+        let text = window
+            .find(row_id("transcript-thinking-ticker-text", "e_1"))
+            .bounds();
+        let ticker = ticker.bounds();
+        assert!(
+            text.size.width > ticker.size.width,
+            "the tail is longer than the row: {text:?} in {ticker:?}"
+        );
+        assert!(
+            text.origin.x < ticker.origin.x,
+            "and cut off at its left: {text:?} in {ticker:?}"
+        );
+        assert!(
+            (text.right() - ticker.right()).abs() <= px(0.5),
+            "with the newest words at the right edge: {text:?} in {ticker:?}"
+        );
+
+        // The pips are still what holds the place, and the thinking block is not
+        // drawn beside them.
+        assert!(window
+            .try_find(row_id("transcript-waiting", "e_1"))
+            .is_some());
+        assert!(window
+            .try_find(row_id("transcript-thinking", "e_1"))
+            .is_none());
+    });
+
+    // A message that has started writing is its own words, not a ticker.
+    view.update(cx, |view, cx| {
+        view.upsert(streaming_with_thinking("e_1", "Here we go.", &thinking), cx);
+    });
+    cx.update(|window, cx| window.render_frame(cx));
+    cx.update(|window, _| {
+        assert!(window
+            .try_find(row_id("transcript-thinking-ticker", "e_1"))
+            .is_none());
+    });
+}
+
+/// The ticker is the hidden thinking's double, so it steps aside when the thinking
+/// is shown and when there is nothing to show but whitespace.
+#[gpui_kit::test]
+fn the_ticker_steps_aside_for_the_shown_thinking(cx: &mut TestAppContext) {
+    let (view, cx) = open!(cx, vec![streaming_with_thinking("e_1", "", "a thought")]);
+    cx.update(|window, cx| window.render_frame(cx));
+    cx.update(|window, _| {
+        assert!(window
+            .try_find(row_id("transcript-thinking-ticker", "e_1"))
+            .is_some());
+    });
+
+    view.update(cx, |view, cx| view.set_show_thinking(true, cx));
+    cx.update(|window, cx| window.render_frame(cx));
+    cx.update(|window, _| {
+        assert!(
+            window
+                .try_find(row_id("transcript-thinking-ticker", "e_1"))
+                .is_none(),
+            "the thinking block carries it instead"
+        );
+        assert!(window
+            .try_find(row_id("transcript-thinking", "e_1"))
+            .is_some());
+        assert!(window
+            .try_find(row_id("transcript-waiting", "e_1"))
+            .is_some());
+    });
+
+    view.update(cx, |view, cx| view.set_show_thinking(false, cx));
+    view.update(cx, |view, cx| {
+        view.upsert(streaming_with_thinking("e_1", "", "  \n\t "), cx);
+    });
+    cx.update(|window, cx| window.render_frame(cx));
+    cx.update(|window, _| {
+        assert!(
+            window
+                .try_find(row_id("transcript-thinking-ticker", "e_1"))
+                .is_none(),
+            "whitespace is nothing to run past"
+        );
+        assert!(window
+            .try_find(row_id("transcript-waiting", "e_1"))
+            .is_some());
+    });
+}
+
+/// The ticker's line: whitespace folds to single spaces, and only a bounded tail of
+/// a long think is kept, cut on a character boundary.
+#[test]
+fn the_ticker_keeps_a_collapsed_tail_of_the_thinking() {
+    assert_eq!(thinking_tail(""), None);
+    assert_eq!(thinking_tail("  \n\t "), None);
+    assert_eq!(
+        thinking_tail("one\ntwo").as_deref(),
+        Some("one two"),
+        "a newline is a space"
+    );
+    assert_eq!(
+        thinking_tail(" a\t\tb   c\n\nd ").as_deref(),
+        Some("a b c d"),
+        "runs of whitespace are one space, and the ends are trimmed"
+    );
+
+    let long = format!("start {}", "é".repeat(1_000));
+    let tail = thinking_tail(&long).expect("a tail");
+    assert_eq!(tail.chars().count(), THINKING_TAIL_CHARS);
+    assert!(tail.ends_with(&"é".repeat(20)), "the newest words are kept");
+    assert!(!tail.contains("start"), "and the oldest are not");
 }
 
 #[gpui_kit::test]
