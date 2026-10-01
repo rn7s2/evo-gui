@@ -755,7 +755,7 @@ fn main() {
     // two corners, then the pill and the walk back, then a message growing, then the
     // scrollback's quiet line, then the reader's zoom, then a window that changes shape.
     type Setup = fn(&mut HeadlessAppContext, AnyWindowHandle, &Entity<Page>);
-    let states: [(&str, f32, Setup); 15] = [
+    let states: [(&str, f32, Setup); 16] = [
         ("bottom", 1., |_, _, _| {}),
         ("tool-hover", 1., |cx, window, _| {
             // A folded card under the pointer: the head's hover ink is the whole of
@@ -779,6 +779,31 @@ fn main() {
                 settle(cx, window);
                 hover(cx, window, head);
             }
+        }),
+        ("image-row", 1., |cx, window, page| {
+            // A turn that carried a picture, at the tail: the thumbnail sits in a
+            // rounded frame, and the picture's own corners must follow it rather than
+            // fill the frame's corners with the picture's square edge.
+            let view = transcript_of(cx, page);
+            let shot = picture_bytes();
+            cx.update(|cx| {
+                view.update(cx, |view, cx| {
+                    view.upsert(
+                        session::Item::from_json(&json!({
+                            "id": "e_image", "ts": 1, "kind": "user", "status": "sent",
+                            "text": "this is what the pane looked like",
+                            "images": [{ "name": "pane.png", "media_type": "image/png",
+                                         "bytes": shot.len(), "href": "/media/e_image/0" }]
+                        }))
+                        .expect("an image turn"),
+                        cx,
+                    );
+                    if let Some(frame) = transcript::decode_image(&shot) {
+                        view.set_image("e_image", 0, frame, cx);
+                    }
+                })
+            });
+            settle(cx, window);
         }),
         ("scrolled-up", 1., |cx, window, _| {
             for _ in 0..3 {
@@ -909,4 +934,17 @@ fn main() {
             );
         }
     }
+}
+
+/// A picture with something to see at its corners: a saturated diagonal gradient, so a
+/// corner the frame does not clip shows as a square of colour against the frame's curve.
+fn picture_bytes() -> Vec<u8> {
+    let image = image::RgbaImage::from_fn(240, 160, |x, y| {
+        image::Rgba([(x * 255 / 240) as u8, 90, (y * 255 / 160) as u8, 255])
+    });
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image
+        .write_to(&mut bytes, image::ImageFormat::Png)
+        .expect("encode the fixture picture");
+    bytes.into_inner()
 }

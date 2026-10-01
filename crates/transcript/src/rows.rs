@@ -700,10 +700,13 @@ fn image_row(
                         "{name} — click to {}",
                         if full { "shrink" } else { "open" }
                     ))
-                    .child(picture(
-                        frame.clone(),
-                        if full { FULL_IMAGE } else { THUMBNAIL },
-                    ))
+                    // The frame's `overflow_hidden` does not round what it clips, so the
+                    // picture carries the frame's radius less its border itself — or its
+                    // square corners show outside the frame's curve.
+                    .child(
+                        picture(frame.clone(), if full { FULL_IMAGE } else { THUMBNAIL })
+                            .rounded(palette.radius - px(1.)),
+                    )
                     .test_support()
                     .into_any_element()
             }
