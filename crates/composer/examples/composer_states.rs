@@ -32,11 +32,12 @@ use composer::{Composer, ModelRow};
 /// gives it, so the box is docked on the reading measure it is drawn on.
 const WINDOW_SIZE: (f32, f32) = (1000., 720.);
 
-/// The topic's own state, as a server would publish it (`GET /snapshot`).
-fn state(busy: bool) -> TopicState {
+/// The topic's own state, as a server would publish it (`GET /snapshot`), run on
+/// one of the catalog's registrations.
+fn state(busy: bool, model: &str) -> TopicState {
     TopicState::from_json(&serde_json::json!({
         "status": if busy { "running" } else { "idle" },
-        "model": {"id": "stub-a", "provider": "openai", "ready": true},
+        "model": {"id": model, "provider": "openai", "ready": true},
         "thinking": "high",
         "context": {"tokens": 48000, "window": 936000, "source": "usage"},
         "goal": {"goal_id": "a1b2c3d4", "objective": "Ship the redesign: every screen taken \
@@ -48,7 +49,7 @@ fn state(busy: bool) -> TopicState {
             {"text": "re-take the screens", "status": "pending"},
         ],
         "segments": [
-            {"name": "model", "order": 100, "side": "left", "text": "stub-a", "data": {}},
+            {"name": "model", "order": 100, "side": "left", "text": model, "data": {}},
             {"name": "thinking", "order": 200, "side": "left", "text": "high", "data": {}},
             {"name": "context", "order": 300, "side": "left",
              "text": "ctx 48k/936k (5%)", "data": {}},
@@ -58,6 +59,14 @@ fn state(busy: bool) -> TopicState {
              "text": "goal a1b2c3d4 (active) 12k/50k", "data": {}},
         ],
     }))
+}
+
+/// The effort ladder evo's own registration declares (`/catalog.thinking_levels`).
+fn levels() -> Vec<String> {
+    ["low", "medium", "high", "xhigh", "max"]
+        .iter()
+        .map(|level| level.to_string())
+        .collect()
 }
 
 /// The models the drawer offers, as `GET /catalog` lists them (§5.6): one chosen,
@@ -78,11 +87,26 @@ fn models() -> Vec<ModelRow> {
         },
         ModelRow {
             id: "stub-c".to_string(),
-            provider: "ark".to_string(),
+            provider: "acme".to_string(),
             detail: "1M ctx".to_string(),
             reason: Some("no credential".to_string()),
         },
     ]
+}
+
+/// A catalog long enough to need the drawer's region: ten registrations, so the
+/// list scrolls inside its seven rows whatever the window's height. The state that
+/// runs it is on `stub-j` — the last row, which is the one a region of seven rows
+/// would not show without the reveal.
+fn many_models() -> Vec<ModelRow> {
+    (0..10u8)
+        .map(|n| ModelRow {
+            id: format!("stub-{}", char::from(b'a' + n)),
+            provider: ["openai", "proxy", "acme"][n as usize % 3].to_string(),
+            detail: format!("{}k ctx · effort low–max", (n as u32 + 1) * 100),
+            reason: (n % 5 == 2).then(|| "no credential".to_string()),
+        })
+        .collect()
 }
 
 /// The column the box is docked at the foot of: what the app renders above it.
@@ -95,18 +119,8 @@ impl Page {
         let composer = cx.new(|cx| Composer::new(window, cx));
         composer.update(cx, |composer, cx| {
             composer.set_pane_height(px(WINDOW_SIZE.1 - 200.), cx);
-            composer.set_agent(&state(false), "Coordinator", true, cx);
-            composer.set_catalog(
-                vec![
-                    "low".to_string(),
-                    "medium".to_string(),
-                    "high".to_string(),
-                    "xhigh".to_string(),
-                    "max".to_string(),
-                ],
-                models(),
-                cx,
-            );
+            composer.set_agent(&state(false, "stub-a"), "Coordinator", true, cx);
+            composer.set_catalog(levels(), models(), cx);
         });
         Self { composer }
     }
@@ -191,10 +205,11 @@ fn main() {
     std::fs::create_dir_all(&dir).expect("the capture directory");
 
     // The states, in the order the design reads them: the goal's objective folded
-    // out, then the todo list, then the model drawer, then the one button's other
-    // face, then a lane's own box — which changes nothing, and says so.
+    // out, then the todo list, then the model drawer — the catalog's own three
+    // models, and a catalog long enough that the models scroll — then the one
+    // button's other face, then a lane's own box, which changes nothing, and says so.
     type Setup = fn(&mut HeadlessAppContext, AnyWindowHandle, &Entity<Page>);
-    let states: [(&str, Setup); 5] = [
+    let states: [(&str, Setup); 6] = [
         ("goal-open", |cx, window, _| {
             click(cx, window, "goal-strip-row")
         }),
@@ -204,6 +219,18 @@ fn main() {
         ("model-drawer", |cx, window, _| {
             click(cx, window, "composer-chip-model")
         }),
+        ("model-drawer-many", |cx, window, page| {
+            let composer = composer_of(cx, page);
+            cx.update(|cx| {
+                composer.update(cx, |composer, cx| {
+                    // The last registration, so the drawer opens on the row that
+                    // only the region's own scroll can show.
+                    composer.set_agent(&state(false, "stub-j"), "Coordinator", true, cx);
+                    composer.set_catalog(levels(), many_models(), cx);
+                })
+            });
+            click(cx, window, "composer-chip-model");
+        }),
         ("busy", |cx, _window, page| {
             let composer = composer_of(cx, page);
             cx.update(|cx| composer.update(cx, |composer, cx| composer.set_swarm_busy(true, cx)));
@@ -212,7 +239,7 @@ fn main() {
             let composer = composer_of(cx, page);
             cx.update(|cx| {
                 composer.update(cx, |composer, cx| {
-                    composer.set_agent(&state(false), "lane 1", false, cx)
+                    composer.set_agent(&state(false, "stub-a"), "lane 1", false, cx)
                 })
             });
             click(cx, window, "composer-chip-model");

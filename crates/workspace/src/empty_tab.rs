@@ -2403,7 +2403,7 @@ mod tests {
         f.set_catalog(cx, &catalog_body());
         f.render(cx);
         let state = f.state(cx);
-        // The person picks the ark registration in the coordinator's field: the event the
+        // The person picks the acme registration in the coordinator's field: the event the
         // select itself emits when a row is clicked.
         f.act(cx, |window, cx| {
             state.update(cx, |state, cx| {

@@ -38,10 +38,10 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    div, px, radians, Animation, AnimationExt as _, AnyElement, App, Bounds, BoxShadow, ClickEvent,
-    ClipboardItem, Context, ElementId, Entity, EventEmitter, FocusHandle, Global, IntoElement,
-    KeyBinding, Keystroke, KeystrokeEvent, Pixels, Point, Render, ScrollHandle, SharedString,
-    Subscription, TestSupportExt as _, WeakEntity, Window,
+    div, point, px, radians, Animation, AnimationExt as _, AnyElement, App, Bounds, BoxShadow,
+    ClickEvent, ClipboardItem, Context, ElementId, Entity, EventEmitter, FocusHandle, Global,
+    IntoElement, KeyBinding, Keystroke, KeystrokeEvent, Pixels, Point, Render, ScrollHandle,
+    SharedString, Subscription, TestSupportExt as _, WeakEntity, Window,
 };
 use session::{ordered_segments, GoalInfo, Segment, Todo, TodoStatus, TopicState};
 use store::design::{self, Palette, INSET, MEASURE, RADIUS};
@@ -119,6 +119,11 @@ const DRAWER_ITEM: Pixels = px(30.);
 const DRAWER_ITEM_RADIUS: Pixels = px(RADIUS);
 const DRAWER_EFFORT_ROW: Pixels = px(36.);
 const DRAWER_LABEL_MIN: Pixels = px(112.);
+/// How many of the drawer's rows the models take before they scroll: seven of
+/// them is the region's whole height, so a catalog long enough to need a scroll
+/// bar costs the box these rows and not one row more — the title above and the
+/// effort below stay where they are.
+const MODEL_LIST_ROWS: usize = 7;
 
 /// Where an item's hover and its chosen fill come from: the ink a few percent into
 /// the surface the drawer sits on (`--sidebar`), as the design's rows do it.
@@ -365,6 +370,9 @@ pub struct Composer {
     /// The goal's objective scrolls under the strip's own cap, and its handle is the
     /// composer's for the same reason the todo list's is.
     goal_scroll: ScrollHandle,
+    /// The drawer's model list, when the catalog is long enough to scroll it: the
+    /// region's own position, kept per composer like the strips'.
+    models_scroll: ScrollHandle,
     /// The effort slider's own motion: the level's move along the rail, the press,
     /// the hover and the focus fades. One per composer, handed back every render.
     effort_motion: Rc<Motion>,
@@ -459,6 +467,7 @@ impl Composer {
             room: px(320.),
             todos_scroll: ScrollHandle::new(),
             goal_scroll: ScrollHandle::new(),
+            models_scroll: ScrollHandle::new(),
             effort_motion: Rc::new(Motion::new()),
             box_bounds: Rc::new(Cell::new(Bounds::default())),
             effort_focus: cx.focus_handle(),
@@ -601,6 +610,48 @@ impl Composer {
             self.model_open = false;
             cx.notify();
         }
+    }
+
+    /// Fold the model drawer out, showing the model it is on.
+    ///
+    /// The catalog can be long — every provider registered is thirty rows — so the
+    /// models scroll inside a region seven rows tall; the row this box runs is
+    /// often not among the seven it opens on, so it is brought into view.
+    ///
+    /// The reveal is arithmetic rather than `ScrollHandle::scroll_to_item`, which
+    /// answers a reveal against the layout the frame before it is asked in left
+    /// behind: the frame the drawer opens in is the first the region exists in, so
+    /// an ask in it is an ask about a region that was not there — the list opens
+    /// where it was left, at its top, with the ticked row under the fold (the same
+    /// trap `WorkspaceView::reveal_selected_tab` documents for the strip, which
+    /// waits a frame for it). Every row is `DRAWER_ITEM` tall and the region shows
+    /// `MODEL_LIST_ROWS` of them, so the least scroll that puts the chosen row in
+    /// whole is a sum the composer can do itself, in the frame the drawer opens in.
+    fn open_drawer(&mut self, cx: &mut Context<Self>) {
+        self.model_open = true;
+        if self.models.len() > MODEL_LIST_ROWS {
+            if let Some(offset) = self.reveal_chosen_model() {
+                self.models_scroll.set_offset(point(px(0.), offset));
+            }
+        }
+        cx.notify();
+    }
+
+    /// The offset that shows the ticked model: `None` when the box runs a model the
+    /// catalog does not list, and zero when the region already holds it whole.
+    fn reveal_chosen_model(&self) -> Option<Pixels> {
+        let (id, provider) = self.agent.model.as_ref()?;
+        let index = self
+            .models
+            .iter()
+            .position(|model| model.id == *id && model.provider == *provider)?;
+        let region = DRAWER_ITEM * MODEL_LIST_ROWS;
+        let bottom = DRAWER_ITEM * index + DRAWER_ITEM;
+        Some(if bottom <= region {
+            px(0.)
+        } else {
+            region - bottom
+        })
     }
 
     /// How tall the conversation pane is: what the input may grow to half of
@@ -1231,7 +1282,34 @@ impl Composer {
             }
             row
         });
-        body = body.children(items);
+        // A catalog longer than the drawer may draw: the models scroll inside a
+        // region exactly `MODEL_LIST_ROWS` rows tall, in the host-and-bar shape the
+        // todo list and the goal's objective use — the host holds the height and
+        // the bar, the box inside it scrolls, and the handle is the composer's, so
+        // two tabs' drawers do not share a position. The title row above and the
+        // effort below are outside it and stay where they are.
+        body = if self.models.len() > MODEL_LIST_ROWS {
+            body.child(
+                div()
+                    .id(("drawer-models-host", cx.entity_id()))
+                    .relative()
+                    .w_full()
+                    .flex_none()
+                    .child(
+                        div()
+                            .id("drawer-models")
+                            .test_support()
+                            .w_full()
+                            .h(DRAWER_ITEM * MODEL_LIST_ROWS)
+                            .overflow_y_scroll()
+                            .track_scroll(&self.models_scroll)
+                            .children(items),
+                    )
+                    .vertical_scrollbar(&self.models_scroll),
+            )
+        } else {
+            body.children(items)
+        };
         body.child(self.effort_row(palette, window, cx))
             .into_any_element()
     }
@@ -1394,8 +1472,7 @@ impl Composer {
                             if this.model_open {
                                 this.close_drawer(cx);
                             } else {
-                                this.model_open = true;
-                                cx.notify();
+                                this.open_drawer(cx);
                             }
                         });
                     }
@@ -1757,6 +1834,32 @@ mod tests {
             .iter()
             .map(|level| level.to_string())
             .collect()
+    }
+
+    /// A catalog longer than the drawer draws: ten registrations, `stub-a` first.
+    fn many_models() -> Vec<ModelRow> {
+        (0..10u8)
+            .map(|n| ModelRow {
+                id: format!("stub-{}", char::from(b'a' + n)),
+                provider: "openai".to_string(),
+                detail: format!("{}k ctx", (n as u32 + 1) * 100),
+                reason: None,
+            })
+            .collect()
+    }
+
+    /// The same topic, running another of the catalog's registrations: what the
+    /// drawer ticks.
+    fn state_running(id: &str) -> TopicState {
+        TopicState::from_json(&serde_json::json!({
+            "model": {"id": id, "provider": "openai", "ready": true},
+            "thinking": "high",
+            "segments": [
+                {"name": "model", "order": 100, "side": "left", "text": id, "data": {}},
+                {"name": "thinking", "order": 200, "side": "left", "text": "high",
+                 "data": {}},
+            ],
+        }))
     }
 
     struct Fixture {
@@ -2660,6 +2763,134 @@ mod tests {
             "the rail picked a rung: {:?}",
             f.events()
         );
+    }
+
+    /// A catalog longer than the drawer may draw puts the models in a region exactly
+    /// seven rows tall that scrolls: the title row above it and the effort row below
+    /// it stay put, and the model this box runs is in view from the frame the drawer
+    /// opens in.
+    #[gpui_kit::test]
+    fn a_long_catalog_scrolls_under_a_seven_row_region(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.act(cx, |window, cx| {
+            f.composer.update(cx, |composer, cx| {
+                composer.set_catalog(catalog_levels(), many_models(), cx)
+            });
+            // The tenth registration: the row a drawer of seven would not show.
+            let state = state_running("stub-j");
+            f.set_agent(&state, cx);
+            window.render_frame(cx);
+            window.click(chip_id("model"), cx);
+            window.render_frame(cx);
+
+            let region = window.find("drawer-models").bounds();
+            assert_eq!(
+                region.size.height,
+                DRAWER_ITEM * MODEL_LIST_ROWS,
+                "seven rows, whatever the catalog holds: {region:?}"
+            );
+            let title = window.find("drawer-row").bounds();
+            assert!(
+                title.bottom() <= region.top(),
+                "the title row is above the region: {title:?} vs {region:?}"
+            );
+            let effort = window.find("drawer-effort");
+            assert!(
+                effort.visible() && effort.bounds().top() >= region.bottom(),
+                "and the effort row is still under it, in the drawer: {:?} vs \
+                 {region:?}",
+                effort.bounds()
+            );
+
+            // The reveal is the composer's own arithmetic, done in the frame the
+            // region is born in: `scroll_to_item` asked here is answered against the
+            // frame before it, when the region was not there, and leaves the list at
+            // its top with the ticked row under the fold.
+            let chosen = window.find("drawer-model-stub-j");
+            assert!(
+                chosen.visible()
+                    && chosen.bounds().top() >= region.top()
+                    && chosen.bounds().bottom() <= region.bottom(),
+                "the model this box runs is in view: {:?} in {region:?}",
+                chosen.bounds()
+            );
+        });
+        let max = cx.read(|cx| f.composer.read(cx).models_scroll.max_offset().y);
+        assert!(
+            max > px(0.),
+            "the region has three rows under it to scroll to: {max:?}"
+        );
+
+        // A model the region already shows is not scrolled for: the reveal is the
+        // least scroll that puts the row in whole, not a jump to its own row.
+        f.act(cx, |window, cx| {
+            window.click(chip_id("model"), cx);
+            window.render_frame(cx);
+            let state = state_running("stub-c");
+            f.set_agent(&state, cx);
+            window.render_frame(cx);
+            window.click(chip_id("model"), cx);
+            window.render_frame(cx);
+            assert_eq!(
+                f.composer.read(cx).models_scroll.offset().y,
+                px(0.),
+                "the third row is one the region opens on"
+            );
+            let region = window.find("drawer-models").bounds();
+            let chosen = window.find("drawer-model-stub-c").bounds();
+            assert!(
+                chosen.top() >= region.top() && chosen.bottom() <= region.bottom(),
+                "and it is in view: {chosen:?} in {region:?}"
+            );
+        });
+    }
+
+    /// Seven models or fewer: the drawer is the rows it has — no region, no bar, and
+    /// no height the catalog cannot fill.
+    #[gpui_kit::test]
+    fn a_short_catalog_is_laid_out_whole(cx: &mut TestAppContext) {
+        let f = open(cx);
+        for count in [5u8, 7] {
+            f.act(cx, |window, cx| {
+                let models = many_models()[..count as usize].to_vec();
+                f.composer.update(cx, |composer, cx| {
+                    composer.set_catalog(catalog_levels(), models, cx)
+                });
+                let state = state_running("stub-e");
+                f.set_agent(&state, cx);
+                window.render_frame(cx);
+                window.click(chip_id("model"), cx);
+                window.render_frame(cx);
+
+                assert!(
+                    window.try_find("drawer-models").is_none(),
+                    "{count} models are not a region"
+                );
+                let first = window.find("drawer-model-stub-a").bounds();
+                let last = window
+                    .find(format!(
+                        "drawer-model-stub-{}",
+                        char::from(b'a' + count - 1)
+                    ))
+                    .bounds();
+                assert_eq!(
+                    last.bottom() - first.top(),
+                    DRAWER_ITEM * count as usize,
+                    "{count} rows are the block's whole height, as they were before \
+                     the region"
+                );
+                let effort = window.find("drawer-effort");
+                assert!(
+                    effort.visible() && effort.bounds().top() >= last.bottom(),
+                    "and the effort row is under them: {:?} vs {last:?}",
+                    effort.bounds()
+                );
+
+                // Folded back for the next count's pass.
+                window.click(chip_id("model"), cx);
+                window.render_frame(cx);
+            });
+        }
     }
 
     /// A lane's drawer states what that lane runs and offers no change: `model.set`
