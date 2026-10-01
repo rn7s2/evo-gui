@@ -265,11 +265,25 @@ tables, quotes, rules, inline code — with four decisions worth knowing:
 - an **image reference** is drawn as `[image: alt]` and nothing is fetched: an
   `<img>` would make the app request a URL a model chose;
 - **raw HTML** is shown as its source, mono and muted — markup reads as markup;
-- a **link** opens only `http`, `https` or `mailto`; a `file:`, `javascript:`,
-  relative or bare-fragment target is left alone.
+- a **link** opens only `http`, `https`, `mailto` or a path that is really there;
+  a `file:`, `javascript:` or bare-fragment target is left alone.
 
-A tool call's payload is expanded as rows: a nested object is indented under its
-key, a long list gets a row per item, and past four levels (or for an array of
+The same is true of the rows that say something in a person's or an agent's own words —
+your turns, an assistant's prose, a notice, a lane's line, a report's field, the body of
+a quiet row. An address or a path in them is underlined and pressable, including a path
+written as `inline code` and including the `:42` (or `:42:7`) line at the end of one.
+Pressing an address opens it in its own application — the browser, the mail client —
+and pressing a path opens the file, or the folder in the Finder. A path is read the way
+the tab is: `~/…` from your home, and a relative path from the folder the tab runs in,
+so `crates/transcript/src/lib.rs` in a tab on `~/coding/evo-gui` opens that file, and a
+tab that moves re-reads its rows. A path that is not there stays words: the transcript
+asks the disk once per path and remembers the answer for a few seconds, so scrolling
+never stats the world.
+
+What a **tool call** says is not prose: its arguments and its result are drawn exactly as
+they came, and no address or path in them is a link. They are data a model chose, not the
+app's own words. A tool call's payload is expanded as rows: a nested object is indented
+under its key, a long list gets a row per item, and past four levels (or for an array of
 more than twenty), a muted `{…3 keys}` / `[…42 items]` row keeps the whole thing
 in its tooltip.
 

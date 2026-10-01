@@ -36,6 +36,7 @@
 
 mod imgcheck;
 mod link;
+mod linkify;
 mod markdown;
 mod math;
 pub mod normalize_math;
@@ -52,6 +53,7 @@ pub use style::TranscriptZoom;
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -118,6 +120,12 @@ pub type ItemHandler = Rc<dyn Fn(&str, &mut Window, &mut App)>;
 /// [`TranscriptView::set_image`].
 pub type ImageHandler = Rc<dyn Fn(&str, u32, &mut Window, &mut App)>;
 
+/// What the app does when the reader presses a link: the address or the path the link
+/// named. Shared with the rows (`Send + Sync`, since a text view keeps its handler for
+/// the life of a document), and replaceable so that a test can hold what was pressed
+/// without opening anything.
+pub type LinkHandler = Arc<dyn Fn(&str, &mut Window, &mut App) + Send + Sync>;
+
 /// What is known about one image an item carries.
 #[derive(Clone)]
 pub(crate) enum ImageState {
@@ -170,6 +178,14 @@ pub(crate) struct TranscriptData {
     pub(crate) on_fetch_item: RefCell<Option<ItemHandler>>,
     pub(crate) on_cancel_input: RefCell<Option<ItemHandler>>,
     pub(crate) on_fetch_image: RefCell<Option<ImageHandler>>,
+    /// Where a path in a row is resolved from, and what the file system said the last
+    /// time it was asked: a row's text is read every frame it is on screen, and a `stat`
+    /// per token per frame would put the disk in the middle of every scroll.
+    pub(crate) paths: Rc<linkify::Paths>,
+    /// What the app does when a link is pressed. The owner may replace it — a test says
+    /// what was pressed without opening anything — and without one the platform opens
+    /// the address or the path.
+    pub(crate) on_open_link: RefCell<Option<LinkHandler>>,
     /// What is known about each image, keyed by the item that carries it and the image's
     /// own index. Decoded once, kept for the life of the view.
     pub(crate) images: HashMap<(ItemId, u32), ImageState>,
@@ -235,6 +251,8 @@ impl TranscriptData {
         // the message, so a streamed one settles on the same document it would
         // have had all at once.
         let text = normalize_math::normalize(&assistant.text);
+        // A path in the message that is really there is a link the reader can press.
+        let text = self.paths.prose(&text);
         match self.documents.get(&id).cloned() {
             Some(document) => document.update(cx, |state, cx| state.set_text(&text, cx)),
             None => {
@@ -260,6 +278,55 @@ impl TranscriptData {
         self.expanded.retain(|id| held.contains(id.as_str()));
     }
 
+    /// Bring one piece of a row's own plain text up to date — a user's words, a notice,
+    /// the body of a quiet row — creating its document the first time the row is on
+    /// screen.
+    ///
+    /// The text is read as Markdown that draws exactly the characters it holds
+    /// ([`linkify::literal`]), so that an address or a path in it is a link the reader
+    /// can press without the row reading as anything but what was said.
+    pub(crate) fn sync_plain_documents(&mut self, index: usize, cx: &mut Context<Self>) {
+        let expanded = self.expanded.contains(&self.items[index].id);
+        for (key, text) in rows::plain_texts(&self.items[index], expanded) {
+            self.sync_plain_document(index, key, &text, cx);
+        }
+    }
+
+    /// The same, for one named piece of a row's text.
+    pub(crate) fn sync_plain_document(
+        &mut self,
+        index: usize,
+        key: &'static str,
+        text: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let paths = self.paths.clone();
+        let id = self.items[index].id.clone();
+        let source = paths.literal(text);
+        let key = (id, key);
+        match self.field_documents.get(&key).cloned() {
+            Some(document) => document.update(cx, |state, cx| state.set_text(&source, cx)),
+            None => {
+                let document = cx.new(|cx| TextViewState::markdown(&source, cx));
+                self.field_documents.insert(key, document);
+            }
+        }
+    }
+
+    /// Who opens a link in a row: the owner's handler, or none — which is the platform.
+    pub(crate) fn open_link(&self) -> Option<LinkHandler> {
+        self.on_open_link.borrow().clone()
+    }
+
+    /// The document one piece of a row's own plain text was given, for the row to draw.
+    pub(crate) fn plain_document(
+        &self,
+        id: &ItemId,
+        key: &'static str,
+    ) -> Option<Entity<TextViewState>> {
+        self.field_documents.get(&(id.clone(), key)).cloned()
+    }
+
     /// Bring one of a report's fields up to date, creating its document the first
     /// time the row is on screen: the design draws `.rp-row`'s body as markdown
     /// (an evidence line is a list, a path is a code span), not as plain text.
@@ -281,6 +348,7 @@ impl TranscriptData {
         };
         let key = (item.id.clone(), label);
         let text = normalize_math::normalize(text);
+        let text = self.paths.prose(&text);
         match self.field_documents.get(&key).cloned() {
             Some(document) => document.update(cx, |state, cx| state.set_text(&text, cx)),
             None => {
@@ -401,6 +469,8 @@ impl TranscriptView {
                 on_fetch_item: RefCell::new(None),
                 on_cancel_input: RefCell::new(None),
                 on_fetch_image: RefCell::new(None),
+                paths: Rc::new(linkify::Paths::new()),
+                on_open_link: RefCell::new(None),
                 images: HashMap::new(),
                 full_images: HashSet::new(),
             }),
@@ -517,6 +587,37 @@ impl TranscriptView {
         let handler: ItemHandler = Rc::new(handler);
         self.data.update(cx, |data, _| {
             *data.on_cancel_input.borrow_mut() = Some(handler)
+        });
+    }
+
+    /// The folder the tab runs the swarm in: what a relative path in a row's text is
+    /// measured from (`crates/transcript/src/lib.rs` in the project it names).
+    ///
+    /// A folder that moves re-reads every row: the paths that were links are measured
+    /// from somewhere else now, and some that were not are.
+    pub fn set_folder(&mut self, folder: Option<PathBuf>, cx: &mut Context<Self>) {
+        if !self.data.read(cx).paths.set_folder(folder) {
+            return;
+        }
+        // The rows' own documents are derived from the text and the file system: the
+        // next frame reads them again, for the rows it builds.
+        self.data.update(cx, |data, _| {
+            data.documents.clear();
+            data.field_documents.clear();
+        });
+        cx.notify();
+    }
+
+    /// What the app does when the reader presses a link, in place of the platform.
+    /// A test says what was pressed without opening anything.
+    pub fn on_open_link(
+        &mut self,
+        handler: impl Fn(&str, &mut Window, &mut App) + Send + Sync + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        let handler: LinkHandler = Arc::new(handler);
+        self.data.update(cx, |data, _| {
+            *data.on_open_link.borrow_mut() = Some(handler)
         });
     }
 
