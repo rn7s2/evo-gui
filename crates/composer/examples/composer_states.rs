@@ -29,7 +29,8 @@ use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
     div, px, size, AnyWindowHandle, AppContext as _, Bounds, Context, Entity, HeadlessAppContext,
-    IntoElement, ParentElement as _, Render, Styled as _, Window, WindowBounds, WindowOptions,
+    IntoElement, ParentElement as _, Render, Styled as _, Task, Window, WindowBounds,
+    WindowOptions,
 };
 use session::TopicState;
 
@@ -377,6 +378,113 @@ fn click(cx: &mut HeadlessAppContext, window: AnyWindowHandle, id: &'static str)
     .unwrap();
 }
 
+/// The files the example's own picker answers with, written once for the whole sweep
+/// into the capture directory: three images of three shapes — so a thumbnail has a
+/// picture to scale, and no two tiles look alike — and the documents beside them, one
+/// with a name longer than a tile can hold.
+///
+/// They are real files because the tiles are real tiles: a picture is loaded from its
+/// path and drawn, and an image is told from a file by reading the file.
+fn attachment_files(dir: &std::path::Path) -> &'static Vec<PathBuf> {
+    static FILES: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
+    FILES.get_or_init(|| {
+        let files = dir.join("attachments");
+        std::fs::create_dir_all(&files).expect("the attachments directory");
+        let png = |name: &str, width: u32, height: u32| -> PathBuf {
+            let image = image::RgbaImage::from_fn(width, height, |x, y| {
+                // Bands and a corner, so a scaled-down thumbnail still reads as a
+                // picture rather than a field of one colour.
+                let stripe = ((x / 8) + (y / 8)) % 2 == 0;
+                let ink = if x < width / 3 { 0x2A } else { 0xD8 };
+                let shade = if stripe { ink } else { ink / 2 };
+                image::Rgba([shade, (0xB0u32 + y / 3).min(255) as u8, 0x40, 0xFF])
+            });
+            let path = files.join(name);
+            let mut bytes = std::io::Cursor::new(Vec::new());
+            image
+                .write_to(&mut bytes, image::ImageFormat::Png)
+                .expect("encode a PNG");
+            std::fs::write(&path, bytes.into_inner()).expect("write a PNG");
+            path
+        };
+        let write = |name: &str, bytes: &[u8]| -> PathBuf {
+            let path = files.join(name);
+            std::fs::write(&path, bytes).expect("write a file");
+            path
+        };
+        vec![
+            png("screenshot 2026-10-02 at 14.03.11.png", 320, 200),
+            png("portrait.png", 180, 260),
+            png("app-icon.png", 96, 96),
+            write(
+                "a very long name a tile has to truncate.md",
+                b"# notes\n\nThe document the message is about.\n",
+            ),
+            write("plan.txt", b"the plan, in plain words\n"),
+        ]
+    })
+}
+
+/// The answer itself, taken out of the statics so it can be called from a `fn` state.
+fn files(count: usize) -> Vec<PathBuf> {
+    // The directory the sweep was told to write into: the same one `main` made.
+    let dir: PathBuf = std::env::args()
+        .skip_while(|arg| arg != "--capture")
+        .nth(1)
+        .unwrap_or_else(|| "/tmp/composer-states".to_string())
+        .into();
+    attachment_files(&dir).iter().take(count).cloned().collect()
+}
+
+/// Attach these files the way a reader does: press the `+`, whose picker this example
+/// injected, and let the answer land.
+fn attach_files(
+    cx: &mut HeadlessAppContext,
+    window: AnyWindowHandle,
+    page: &Entity<Page>,
+    paths: Vec<PathBuf>,
+) {
+    let composer = composer_of(cx, page);
+    cx.update(|cx| {
+        composer.update(cx, |composer, cx| {
+            composer.set_picker(Arc::new(move |_, _| Task::ready(Some(paths.clone()))), cx);
+        })
+    });
+    click(cx, window, composer::ATTACH_ID);
+    cx.run_until_parked();
+}
+
+/// The first `n` of those files, attached.
+fn attach(cx: &mut HeadlessAppContext, window: AnyWindowHandle, page: &Entity<Page>, n: usize) {
+    attach_files(cx, window, page, files(n));
+}
+
+/// Move the pointer onto an element: what a state has to do for the one thing a picture
+/// of it cannot do by itself — the hover fill a control wears under the pointer.
+fn hover(cx: &mut HeadlessAppContext, window: AnyWindowHandle, id: &'static str) {
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.hover(id, cx);
+    })
+    .unwrap();
+}
+
+/// A wheel over an element: what a state has to do for a region that holds more than it
+/// shows — the tiles move under the cap, and the bar a scrolled region wears comes with
+/// them.
+fn wheel(cx: &mut HeadlessAppContext, window: AnyWindowHandle, id: &'static str, dy: f32) {
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.scroll(
+            id,
+            gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(dy))),
+            cx,
+        );
+        window.render_frame(cx);
+    })
+    .unwrap();
+}
+
 fn main() {
     let dir: PathBuf = std::env::args()
         .skip_while(|arg| arg != "--capture")
@@ -384,17 +492,23 @@ fn main() {
         .unwrap_or_else(|| "/tmp/composer-states".to_string())
         .into();
     std::fs::create_dir_all(&dir).expect("the capture directory");
+    // The files the attachment states attach, beside the pictures: written before the
+    // sweep, so every state's picker answers from the same five.
+    attachment_files(&dir);
 
     // The states, in the order the design reads them: the goal's objective folded
     // out, then the todo list, then the model drawer — the catalog's own three
     // models, on a registration whose ladder is a subset and on one that takes no
     // effort at all, and a catalog long enough that the models scroll — then the one
     // button's other face, then a lane's own box, which changes nothing, and says so.
-    // Then the completion popup, one picture per thing it does: the commands over
-    // the word at the message's start, the same list walked down its own rows, a word
-    // mid-prose, and the image's own symbols inside `/eval`.
+    // Then what the message carries: the `+` at rest and under the pointer, its strip
+    // folded, unfolded over the five files a picker might really answer with, and over
+    // more tiles than the panel shows at once. Then the completion popup, one picture
+    // per thing it does: the commands over the word at the message's start, the same
+    // list walked down its own rows, a word mid-prose, and the image's own symbols
+    // inside `/eval`.
     type Setup = fn(&mut HeadlessAppContext, AnyWindowHandle, &Entity<Page>);
-    let states: [(&str, Setup); 13] = [
+    let states: [(&str, Setup); 18] = [
         ("goal-open", |cx, window, _| {
             click(cx, window, "goal-strip-row")
         }),
@@ -458,6 +572,34 @@ fn main() {
                 })
             });
             click(cx, window, "composer-chip-model");
+        }),
+        // The `+` in the foot row: at rest, and under the pointer. The design has no `+`
+        // to copy, so it is drawn as the chips it stands beside — their pill, their
+        // height, their three fills — and the pointer's fill is the one thing a picture
+        // of it has to be moved for.
+        ("attach-button", |_, _, _| {}),
+        ("attach-button-hover", |cx, window, _| {
+            hover(cx, window, composer::ATTACH_ID)
+        }),
+        // What the message carries: the strip folded, and unfolded over the five files a
+        // picker might really answer with — three pictures of three shapes and two
+        // documents, one of them named longer than a tile is wide.
+        ("attachments-folded", |cx, window, page| {
+            attach(cx, window, page, 5);
+            click(cx, window, "attachments-strip-row");
+        }),
+        ("attachments-open", |cx, window, page| {
+            attach(cx, window, page, 5)
+        }),
+        // More tiles than the panel shows at once: the todo list's own 156px cap, with
+        // the tiles a row and a half down under it — and a wheel over them, so the bar
+        // the panel's own scroll wears is in the picture too.
+        ("attachments-panel-max", |cx, window, page| {
+            let mut paths = files(5);
+            paths.extend(files(5));
+            paths.extend(files(2));
+            attach_files(cx, window, page, paths);
+            wheel(cx, window, "attachments-panel", -26.);
         }),
         // The registry's fourteen commands over the word being started at the
         // message's own start: the first row highlighted, the list's own counter
