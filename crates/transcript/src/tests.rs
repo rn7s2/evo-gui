@@ -1113,6 +1113,105 @@ fn the_room_between_rows_is_the_designs(cx: &mut TestAppContext) {
     });
 }
 
+/// A user row that opens no turn — queued, or cancelled before evo took it —
+/// gets no turn rule above it, so it must carry the ordinary block air itself:
+/// without that it is drawn flush against the row above it.
+#[gpui_kit::test]
+fn a_row_that_opens_no_turn_keeps_the_air_between_blocks(cx: &mut TestAppContext) {
+    let (_view, cx) = open!(
+        cx,
+        vec![
+            user("u_1", "a turn"),
+            assistant("a_1", "an answer", "final"),
+            queued("e_1", "and then"),
+            tool("t_1", "c1", "bash", "all tests passed", false),
+            queued("e_2", "one more"),
+            queued("e_3", "and another"),
+            assistant("a_2", "an answer to the queued words", "final"),
+            user("u_2", "a second turn"),
+        ]
+    );
+    for _ in 0..3 {
+        cx.update(|window, cx| window.render_frame(cx));
+    }
+    cx.update(|window, _| {
+        let room = |above: gpui_kit::ElementId, below: gpui_kit::ElementId| {
+            room_between(window, above, below)
+        };
+        let card = |name: &str, id: &str| row_id(name, id);
+
+        // The cards themselves, not their row wrappers: a card's top edge is what
+        // the reader sees against the row above it.
+        assert_eq!(
+            room(
+                card("transcript-assistant", "a_1"),
+                card("transcript-user", "e_1")
+            ),
+            px(10.),
+            "a queued row under a message: p's own margin"
+        );
+        assert_eq!(
+            room(
+                card("transcript-user", "e_1"),
+                card("transcript-tool-row", "t_1")
+            ),
+            px(10.),
+            "and a tool call under a queued row keeps its own"
+        );
+        let above_tool = room(
+            card("transcript-tool-row", "t_1"),
+            card("transcript-user", "e_2"),
+        );
+        assert_eq!(
+            above_tool,
+            px(10.),
+            "a queued row under a tool card: .tc's own margin"
+        );
+        assert!(
+            above_tool >= px(10.),
+            "and never a bare edge: {above_tool:?}"
+        );
+        assert_eq!(
+            room(
+                card("transcript-user", "e_2"),
+                card("transcript-user", "e_3")
+            ),
+            px(10.),
+            "two queued rows are two blocks"
+        );
+        assert_eq!(
+            room(
+                card("transcript-user", "e_3"),
+                card("transcript-assistant", "a_2")
+            ),
+            px(10.),
+            "and what follows a queued row keeps its own spacing"
+        );
+
+        // A sent turn is untouched: the rule above the card is still what carries
+        // its space, so the card's own row adds none of its own and the card sits
+        // exactly the design's 7px overhang below the line.
+        let line = box_of(window, ("transcript-turn-line", 2usize).into());
+        let row = box_of(window, row_id("transcript-row", "u_2"));
+        let second = box_of(window, card("transcript-user", "u_2"));
+        let first = box_of(window, card("transcript-assistant", "a_2"));
+        assert_eq!(
+            row.origin.y - first.bottom(),
+            px(0.),
+            "a sent turn takes no air of its own — the rule above it does"
+        );
+        assert!(
+            line.origin.y >= first.bottom() + px(26.),
+            "the rule keeps its own 26px above it: {line:?} vs {first:?}"
+        );
+        assert_eq!(
+            second.origin.y - line.bottom(),
+            px(TURN_LABEL_OVERHANG),
+            "and the card still starts at the line, not below extra air"
+        );
+    });
+}
+
 /// The tool card, to the numbers `Rows.css` gives it: a 34px head with the
 /// caret's own 16px column, a body inset 42px from the card's left and 10px from
 /// its top, a caption on a 17.25px line box 4px above a `72px 1fr` key/value

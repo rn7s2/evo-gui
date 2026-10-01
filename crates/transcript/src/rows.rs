@@ -266,20 +266,35 @@ impl Group {
 
     /// The air the design puts above and below this kind of row, as a block
     /// margin: `.tc{margin:10px 0}`, `.rp{margin:14px 0}`, `p{margin:10px 0}`,
-    /// `.thinking{margin:10px 0}`. A user row has none of its own — the turn
-    /// rule above it carries that space.
+    /// `.thinking{margin:10px 0}`.
     ///
     /// The quiet lines and the context rows have no counterpart in the design
     /// (the app draws a lane event, a goal transition, a notice and an injected
     /// context note itself), so they keep the app's own quieter rhythm.
     fn margin(self) -> Pixels {
         match self {
+            // A user row's own margin depends on whether it opens a turn: see
+            // `row_margin`.
             Self::User => px(0.),
             Self::Assistant | Self::Tool => px(10.),
             Self::Report => px(14.),
             Self::Quiet | Self::Context => BLOCK_GAP,
             Self::Divider => BLOCK_GAP,
         }
+    }
+}
+
+/// The air a row asks for above and below itself.
+///
+/// A user row that opens a turn has none of its own — the turn rule above it
+/// carries that space — but one that does not (queued, or cancelled before evo
+/// ever took it) is an ordinary block in the flow, so it keeps the ordinary
+/// block air. Without that a queued row butts straight up against the row above
+/// it, since it gets neither the rule nor a margin.
+fn row_margin(item: &Item) -> Pixels {
+    match Group::of(&item.kind) {
+        Group::User if !opens_a_turn(&item.kind) => BLOCK_GAP,
+        group => group.margin(),
     }
 }
 
@@ -294,12 +309,15 @@ fn gap_before(previous: Option<&Item>, row: &Item) -> Pixels {
     let Some(previous) = previous else {
         return px(0.);
     };
-    let (previous, current) = (Group::of(&previous.kind), Group::of(&row.kind));
+    let group = Group::of(&previous.kind);
+    let current = Group::of(&row.kind);
     match current {
-        Group::User => px(0.),
+        // A sent turn opens with its own rule, which carries the space itself;
+        // a queued or cancelled one opens none and is spaced like any block.
+        Group::User if opens_a_turn(&row.kind) => px(0.),
         Group::Divider => BLOCK_GAP,
-        Group::Quiet | Group::Context if previous == current => TIGHT_GAP,
-        _ => previous.margin().max(current.margin()),
+        Group::Quiet | Group::Context if group == current => TIGHT_GAP,
+        _ => row_margin(previous).max(row_margin(row)),
     }
 }
 
