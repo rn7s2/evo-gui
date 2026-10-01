@@ -42,6 +42,7 @@ what tells each swarm its tab is gone.
 | `⌘,` | Settings… |
 | `⌘Q` | quit |
 | `⌘C` `⌘V` `⌘X` `⌘A` `⌘Z` | the Edit menu: cut/copy/paste/select all/undo, in whatever field has the caret |
+| `⌘V`, image on the clipboard | attaches it to the message instead of pasting (see the composer) |
 
 The File, Edit and Window items are also in the menu bar. The Window menu carries
 the three tab actions — Select Next Tab, Select Previous Tab, Select Last Tab —
@@ -301,6 +302,13 @@ its markdown source (it appears on hover, at the top of the message, and answers
 `Copied` when pressed), with a separate **Copy** on every fenced code block for
 the code alone.
 
+**Your turn's pictures** are drawn under its words as thumbnails, and a click
+opens one at full size (a second click shrinks it back). The bytes come from the
+session itself (`GET /media/<id>/<n>`), fetched while the row is on screen, so a
+picture sent in a session you resume is there again; one still on its way says
+`name — loading…` where the thumbnail will be, and one the session cannot produce
+says `name — could not be shown` rather than leaving a hole.
+
 Scrolling back reaches the whole session, not the model's current context: the transcript holds
 every item the session has and draws it with a virtual list, so only the rows you can see are
 built (a journal of thousands of items scrolls like a short one). Older items behind the oldest
@@ -377,8 +385,10 @@ row folds the goal's objective out under it — never the goal's own id, which i
 evo's handle on it — and the strip is hidden when that agent has no goal), the
 todo strip under it (`Todos 1/3`, and a click on the row folds the list out under
 it — `☑` done, `◐` in progress, `☐` pending — hidden when that agent has no
-todos), then the drawer a chip folds out, then the input, then one row of chips
-and the button.
+todos), the attachments strip under that while your draft carries anything
+(`Attachments 2`, and a click folds the tiles out: the picture, the file's name
+under it, and a `×` that takes that one back off the message), then the drawer a
+chip folds out, then the input, then one row of chips, the `+` and the button.
 
 The chips are the server's own status line for that agent, one chip per segment
 and in its order — the model with its effort beside it, the context, and how much
@@ -390,6 +400,38 @@ click outside the box, or selecting another agent, folds it back — while the g
 and todo strips stay where their own rows put them. The model and effort are the
 coordinator's own to change — a lane's chip states what the swarm runs, and the
 drawer says so.
+
+**Attachments ride with the message**, and there are three ways to add one: the
+**`+`** beside the Send button opens the platform's file dialog (several files at
+a time; never a folder), **⌘V** with an image on the clipboard attaches that
+image instead of pasting it — text on the clipboard still pastes as text — and
+files dragged onto the box are attached the same way. The first one unfolds the
+strip; after that it opens and closes as you leave it. Each tile is the picture
+(a file glyph when there is no picture to draw), the file's name under it,
+truncated when it is long with the whole of it on hover, and a `×` at its
+top-right that takes it off the message — the one way back from a file picked by
+mistake. Adding one sends nothing, and a message carrying one is never a slash
+command, however it begins: a command has nowhere to put a file.
+
+What the agent gets depends on what the file is:
+
+- An **image** — a file whose name says image, or whose own first bytes do, so a
+  screenshot with a name of its own is one — rides with the turn. evo reads it,
+  sniffs its type and keeps its bytes in the session, so it is in the transcript
+  under your words and it is there again when you resume, even if the file has
+  moved or gone by then. A pasted image has no file name to offer, so it is named
+  `pasted image.png`.
+- Anything **else** — a `.csv`, a PDF, a file of source — is not sent as bytes
+  at all: its absolute path goes into your message, one line per file under
+  `Attached files:`, after your own words. The agent reads it with its tools if it
+  wants to, so a file it cannot read is a file it says it cannot read rather than
+  an attachment that vanished. A file needs no words: a draft with an attachment
+  and nothing typed sends the file block alone.
+
+An image evo cannot read — a path that is not there, or bytes that are not a
+picture — is refused: nothing is sent, the refusal is a dim notice above the box
+in evo's own words, and the draft and its tiles are still there, so you can take
+the picture out or attach another and send the same message again.
 
 The input grows from two rows to half the pane, and scrolls after that.
 **Enter** sends, **Shift+Enter** is a newline, **Esc** interrupts the
@@ -449,7 +491,8 @@ edited and resubmitted.
 Sending while the agent is working is normal: the text is queued and lands at the
 running turn's next boundary, exactly as typing into the TUI does — the queued
 row is in the transcript, cancellable, until then. The draft is cleared only when
-the server accepted the send, and **Esc never touches it**.
+the server accepted the send — its attachments go with it — and **Esc never
+touches it**.
 
 The single button's face is what it does: **Send** while nothing is going on, **■
 Stop swarm** while anything is — the coordinator running its own turn, held while

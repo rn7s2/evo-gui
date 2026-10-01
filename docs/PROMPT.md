@@ -233,7 +233,11 @@ the agent header are the same height on the same surface, so the rule under them
   Rows: a `user` item; an `assistant` as markdown; a `tool` as a collapsed one-liner
   (`name — ok/error`, expandable to the whole result, `/items/<id>` when the snapshot truncated it);
   a lane's `lane_report` as a distinct report row; `notice`, `lane_event`, `run_outcome` and
-  `command_note` items as their own lines. The list holds the agent's **whole journal** and draws it
+  `command_note` items as their own lines. A `user` item's pictures are drawn under its words as
+  thumbnails, fetched from `GET /media/<id>/<n>` only while the row is on screen: a click opens one at
+  full size and a second click shrinks it back, a picture still on its way says `name — loading…`
+  where it will be, and one the session cannot produce says `name — could not be shown` rather than
+  leaving a hole. The list holds the agent's **whole journal** and draws it
   with a virtual list: only the rows the pane can reach are built and measured, so a record of
   thousands of items costs a pane of rows a frame. Older items behind the oldest one held are **paged
   in by the view itself** — one `GET /items?before=<oldest>` in flight at a time, for as long as the
@@ -272,16 +276,27 @@ the agent header are the same height on the same surface, so the rule under them
      chrome that says only that there is nothing to say. The todos come from the selected agent's
      topic state — `state.todos` of `session`, or of that lane — seeded by the snapshot and kept
      current by `state.patch`.
-  3. the **model drawer** a chip folds out, inside the box, in the strips' own style: a 32 px title
+  3. the **attachments strip** of the draft being written, under both of them and closest of the
+     three strips to the input: a 32 px row reading `Attachments n` with a chevron that turns over
+     120 ms, and, folded out under it, one tile per attachment, scrolling past the same 156 px —
+     a 112×72 thumbnail with the name on one line under it, truncated when it is long with the whole
+     of it on hover, and the `×` at the tile's top-right taking that one off the message. A tile with
+     no picture to draw — any file that is not an image — shows its own file glyph instead. No
+     attachments, no strip: `Attachments 0` over nothing is chrome that says only that there is
+     nothing to say. It is the *draft's* own state where the goal (item 1) and the plan (item 2) are
+     the topic's, which is why it stands below them and next to the input the message is written in,
+     and it unfolds itself on the first attachment — the tiles are where a reader checks what they
+     just picked, and where a file picked by mistake is taken back — the reader's own after that.
+  4. the **model drawer** a chip folds out, inside the box, in the strips' own style: a 32 px title
      row that folds it back, and the body under it. A click outside the box, or selecting another
      agent, folds it back too.
-  4. the **input** (plain multiline text editor for now — `Textarea` + `TextareaState`, 14 px on a
+  5. the **input** (plain multiline text editor for now — `Textarea` + `TextareaState`, 14 px on a
      20 px line): two rows at rest, growing with what is typed to **half the conversation pane**,
      and scrolling inside itself past that. Enter sends, Shift+Enter is a newline, `Esc` interrupts
      the coordinator's turn, and `↑`/`↓` walk the prompts this tab has sent while the input is
      empty. An empty box says what it is addressed to: `Message the coordinator…` in a swarm, and
      `Message the agent…` in a single-agent session (§7.2), where there is no coordinator to name.
-  5. the **completion popup**: a word being typed is completed inline, as an editor does — the
+  6. the **completion popup**: a word being typed is completed inline, as an editor does — the
      commands `GET /catalog` lists for a `/word`, and the *running image's* own symbols for a
      token inside `/eval `. What the caret is on is evo's own answer (`complete`, §5.6): the box
      asks with its text and its caret, and the reply is the kind, the range a candidate's name
@@ -331,7 +346,7 @@ the agent header are the same height on the same surface, so the rule under them
      copy is not drawn — one line, one place — and of the rest of that reply one field is
      read: `data.draft`, the message `/rewind` and `/tree` hand back for editing, which is the
      whole point of those commands and cannot be read off the topic.
-  6. the **foot row**: the agent's status line as chips, then the one action button.
+  7. the **foot row**: the agent's status line as chips, then the `+` and the one action button.
 - **The chips** are the topic's **`segments`**, one chip per segment and in the order the server
   publishes them — the same core registry (`evo:define-status-segment`) the TUI's status line uses,
   so the two cannot drift apart, and an extension's own segment (cache-stats, say) arrives the same
@@ -355,6 +370,16 @@ the agent header are the same height on the same surface, so the rule under them
   model and effort with `model.set` / `thinking.set` (§5.5) —
   the session's, not a lane's: for a lane the drawer states what the swarm runs and says so
   read-only.
+- **The `+`** stands immediately left of the button, with nothing between them but the row's own gap,
+  and it is a chip rather than a second action button — what it opens is the platform's file dialog
+  (files, several of them, never a folder: an attachment is something evo can carry, and a folder is
+  not), and what it makes is an attachment the action button then carries. It is one of three ways
+  in, all of them landing in the same strip (item 3): `⌘V` with an image on the clipboard attaches
+  the image rather than pasting it — the input can draw nothing of a picture, and the reader means to
+  send it — while text on the clipboard is the input's own paste, untouched, and a copied file is
+  what the dialog and a drop are for; files dropped on the box are attachments, the same as the
+  dialog's answer. Adding one never sends: what each kind becomes when the message goes is §9.2, and
+  a send the server refuses leaves the draft and its tiles where they are.
 - **The button** shares that row, and its face and function follow what is going on — never a
   Send and a Stop side by side:
   - nothing going on: the button reads **Send**, in the primary face at rest whatever the draft
@@ -395,11 +420,26 @@ unknown command is `unknown_op`. None of it is re-validated locally.
    topic says there is more behind the oldest item it holds — one page in flight at a
    time, no button; the model's own context is `GET /debug/context`, which is
    never rendered.
-2. **Sending, and the one button.** Enter posts `input.send {text, queue}`: idle →
+2. **Sending, and the one button.** Enter posts `input.send {text, images, queue}`: idle →
    the run starts, running → the input is queued and arrives as a `user` item whose
-   `status` is `queued` until evo drains it. Clear the input only once the reply
-   says `ok`; a queued row can be taken back with `input.cancel`. The button's face
-   tracks what is going on (Send when nothing is, Stop while the coordinator runs,
+   `status` is `queued` until evo drains it. Clear the input **and its attachments** only once the
+   reply says `ok`; a queued row can be taken back with `input.cancel`. The attachments are two
+   kinds, and only one of them rides with the turn: an **image** — a file whose name says image, or
+   whose own first bytes do: a screenshot's name is whatever took it chose, so its bytes are read,
+   and a `.png` that is not one is an image still, because the refusal that comes back names the
+   file — is one entry of `images`, in the order they were attached: `{path}` for a file on disk,
+   which evo reads, sniffs its type and journals **by value** (the bytes are in the session, so
+   `/media` serves them, the row is built from them, and a resumed session has the picture with
+   nothing left on disk to read),
+   and `{name, media_type, data}` for bytes off the clipboard, base64, named `pasted image.png`
+   because the clipboard has no file name to offer. A **file** — anything else — is embedded
+   nowhere: `input.send` has no shape for one, so its **absolute** path is named in the message's
+   own `text`, the reader's words followed by an `Attached files:` block of one `- /abs/path` line
+   per file, and nothing else — the agent reads it with its tools if it wants to, and a message of
+   nothing but whitespace is that block alone. An image evo cannot read refuses the whole op
+   (`invalid_args`): nothing runs, no row is added, the draft and its tiles stay, and the server's
+   own sentence is the notice above the box, as it is for a refusal of any other op (§8). The
+   button's face tracks what is going on (Send when nothing is, Stop while the coordinator runs,
    compacts or waits on its lanes, or while any lane is working) and a click never
    does something other than what that face says: Stop posts `run.interrupt` with
    scope `swarm`. A single-agent session (§7.2) has no lanes to wait on: there the
@@ -503,7 +543,7 @@ on-disk layout, the offline CLI reads, the launch argv).
 
 ## 13. Non-goals (v1)
 
-Rich-text composer, image paste, a command *palette* (a `/word` completes inline and runs —
+Rich-text composer, a command *palette* (a `/word` completes inline and runs —
 §7.3 — but there is no list of every command to browse, no argument hinting, and no surface
 for a command's own `choices`), lane control endpoints, remote/non-loopback servers, TLS,
 multiple windows, Windows/Linux packaging, an embedded browser, editing evo's journals, a
