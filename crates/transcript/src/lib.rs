@@ -75,7 +75,7 @@ use widgets::paint;
 use crate::pin::{Action, Pin};
 use crate::rows::CopyFeedback;
 use crate::style::Palette;
-use store::design::{palette as design_palette, INSET, MEASURE};
+use store::design::{palette as design_palette, INSET};
 
 /// How much of the record the virtual list keeps built around the pane, above and below
 /// it: enough that a wheel's next screenful is already measured, and small enough that a
@@ -1315,6 +1315,10 @@ impl Render for TranscriptView {
             // lays every row out at the pane's own width and offsets them by nothing, so
             // the column and the air above the first row and below the last are the
             // rows' own boxes.
+            //
+            // The measure is the one the reader's zoom asks for (§7.2): a `max_w`, never
+            // a width, so a pane narrower than it fills the pane as it always has.
+            let measure = palette.measure();
             let within_measure = move |index: usize, element: AnyElement| -> AnyElement {
                 let column = div()
                     .w_full()
@@ -1324,9 +1328,11 @@ impl Render for TranscriptView {
                     .when(index + 1 == count, |box_| box_.pb(px(INSET)))
                     .child(
                         div()
+                            .id(("transcript-column", index))
                             .w_full()
-                            .max_w(px(MEASURE))
+                            .max_w(measure)
                             .px(px(INSET))
+                            .test_support()
                             .child(element),
                     );
                 column.into_any_element()
