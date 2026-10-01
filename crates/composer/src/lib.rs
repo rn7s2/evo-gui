@@ -4932,7 +4932,9 @@ mod tests {
             prepare_thumbnail(&std::fs::read(&path).expect("the picture")).expect("a thumbnail");
         let pixels = thumb.as_bytes(0).expect("the frame's pixels");
         let opaque = pixels
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .find(|pixel| pixel[3] == 0xFF)
             .expect("an opaque pixel");
         assert_eq!(

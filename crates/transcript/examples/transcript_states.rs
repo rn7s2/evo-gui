@@ -904,7 +904,7 @@ fn main() {
     // One entry per state: what it is called, the zoom it draws at, how wide its
     // window is (the reading measure's own bound is the pane, so a picture of the
     // measure needs a pane wider than it), and how it is reached.
-    let states: [(&str, f32, f32, Setup); 25] = [
+    let states: [(&str, f32, f32, Setup); 26] = [
         ("bottom", 1., WINDOW_SIZE.0, |_, _, _| ITEMS),
         ("tool-hover", 1., WINDOW_SIZE.0, |cx, window, _| {
             // A folded card under the pointer: the head's hover ink is the whole of
