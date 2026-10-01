@@ -7,7 +7,7 @@ app is a *client*: it drives evo over one loopback protocol (a ready file, a sna
 stream of ops, and `POST /ops` — `CONTRACT.md` at the workspace root) and reimplements none of
 it.
 
-![evo-desktop icon](assets/icon/icon-1024.png)
+<img src="assets/icon/icon-1024.png" height="100px" />
 
 ![The empty tab as the app opens it: the choosers on Default, the folder card, and the history](docs/screens/01-empty-light.png)
 ![Six lanes, one of them working: the agents column, the delegate call, and the Stop swarm button](docs/screens/02-lanes-working-light.png)
