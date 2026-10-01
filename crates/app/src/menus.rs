@@ -21,9 +21,12 @@
 //! free again.
 
 use gpui_kit::{App, KeyBinding, Menu, MenuItem, OsAction, Window};
+use store::app_state::AppState;
+use transcript::TranscriptZoom;
 
 use crate::launcher;
 use crate::quit;
+use crate::Shell;
 
 gpui_kit::actions!(
     evo_desktop,
@@ -49,6 +52,12 @@ gpui_kit::actions!(
         MinimizeWindow,
         /// Zoom (maximize) the window.
         ZoomWindow,
+        /// Draw the transcripts' text larger (⌘=, ⌘+): the View menu (§7.2).
+        ZoomIn,
+        /// Draw the transcripts' text smaller (⌘−).
+        ZoomOut,
+        /// Back to the design's own size (⌘0), as macOS's View menu words it.
+        ActualSize,
     ]
 );
 
@@ -69,6 +78,17 @@ pub fn install(cx: &mut App) {
         KeyBinding::new("cmd-w", CloseTab, None),
         KeyBinding::new("cmd-m", MinimizeWindow, None),
         KeyBinding::new("cmd-,", SettingsApp, None),
+        // The View menu's three. macOS fires the menu item's own key equivalent
+        // before any window sees the key, and a menu item shows the *first*
+        // binding its action has, so ⌘+ is bound first: that is the equivalent
+        // the View menu draws (⇧ is implied by a key that needs it). The other
+        // two are the same action by the keystrokes a keyboard actually sends —
+        // AppKit reports ⌘⇧= as `cmd-+` — and what a non-macOS keymap asks for.
+        KeyBinding::new("cmd-+", ZoomIn, None),
+        KeyBinding::new("cmd-shift-=", ZoomIn, None),
+        KeyBinding::new("cmd-=", ZoomIn, None),
+        KeyBinding::new("cmd--", ZoomOut, None),
+        KeyBinding::new("cmd-0", ActualSize, None),
     ]);
     // The Window menu's tab items are the workspace's actions, and their key
     // equivalents come from the same place: the app's keymap, read once, when
@@ -120,11 +140,67 @@ pub fn install(cx: &mut App) {
     cx.on_action(|_: &ZoomWindow, cx: &mut App| {
         in_window_later(cx, |window, _cx| window.zoom_window());
     });
+    // The View menu's three (§7.2): the reader's zoom, live and remembered.
+    cx.on_action(|_: &ZoomIn, cx: &mut App| {
+        let zoom = TranscriptZoom::get(cx).zoom_in();
+        set_zoom(cx, zoom);
+    });
+    cx.on_action(|_: &ZoomOut, cx: &mut App| {
+        let zoom = TranscriptZoom::get(cx).zoom_out();
+        set_zoom(cx, zoom);
+    });
+    cx.on_action(|_: &ActualSize, cx: &mut App| {
+        set_zoom(cx, TranscriptZoom::default());
+    });
+
+    // What `app.json` remembered, before any transcript draws a row: the actions
+    // above go on to change it, and every open transcript follows. A host that
+    // installs the menu bar without a [`Shell`] — a test — opens at the design's
+    // own size.
+    if let Some(stored) = cx.try_global::<Shell>().map(|shell| shell.zoom) {
+        TranscriptZoom::clamped(stored).set(cx);
+    }
 
     cx.set_menus(menus());
 }
 
-/// The menu bar itself: the app menu, File, Edit, Window — the order macOS shows.
+/// What a View-menu item does: the reader's zoom, and `app.json` (§7.2).
+///
+/// The global is what every open transcript reads — a view that is showing rows
+/// observes it and measures them again — and `app.json` is what the next launch
+/// opens with. The [`Shell`] keeps the number too, so the panel-less half of the
+/// app (the quit path, a second menu action) sees the same one.
+fn set_zoom(cx: &mut App, zoom: TranscriptZoom) {
+    if zoom == TranscriptZoom::get(cx) {
+        // A step at the top or the bottom of the range: nothing to draw differently
+        // and nothing to write.
+        return;
+    }
+    zoom.set(cx);
+    // A host that installed the menu bar without a [`Shell`] — a test — has no
+    // `app.json` to remember the size in; the global is still what this window
+    // draws its transcripts at.
+    let Some((root, log)) = cx
+        .try_global::<Shell>()
+        .map(|shell| (shell.root.clone(), shell.log.clone()))
+    else {
+        return;
+    };
+    cx.global_mut::<Shell>().zoom = zoom.0;
+
+    let mut state = AppState::load(&root);
+    state.zoom = zoom.0;
+    match state.save(&root) {
+        Ok(()) => log.info(format!("zoom: {:.0}%", zoom.0 * 100.)),
+        Err(error) => log.error(format!(
+            "could not save {}: {error}",
+            root.app_json().display()
+        )),
+    }
+}
+
+/// The menu bar itself: the app menu, File, Edit, View, Window — the order macOS
+/// shows.
 pub fn menus() -> Vec<Menu> {
     vec![
         Menu::new("Evo Desktop").items([
@@ -151,6 +227,15 @@ pub fn menus() -> Vec<Menu> {
             MenuItem::os_action("Copy", input::Copy, OsAction::Copy),
             MenuItem::os_action("Paste", input::Paste, OsAction::Paste),
             MenuItem::os_action("Select All", input::SelectAll, OsAction::SelectAll),
+        ]),
+        // The View menu: macOS's own three, in its own words, and they are the
+        // transcript's text size rather than the window's — its key equivalents
+        // are the bindings above, and its Zoom In is ⌘+ as every Mac app's is.
+        Menu::new("View").items([
+            MenuItem::action("Zoom In", ZoomIn),
+            MenuItem::action("Zoom Out", ZoomOut),
+            MenuItem::separator(),
+            MenuItem::action("Actual Size", ActualSize),
         ]),
         Menu::new("Window").items([
             // The window's tabs. The keys (⌃⇥, ⌃⇧⇥, ⌘9) are the workspace's own
@@ -217,12 +302,149 @@ fn log(cx: &App, what: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui_kit::TestAppContext;
+
+    /// A temp app root, as the settings tests make one.
+    fn temp_root(name: &str) -> store::paths::Root {
+        let dir =
+            std::env::temp_dir().join(format!("evo-desktop-menus-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        store::paths::Root::at(dir)
+    }
 
     #[test]
-    fn the_menu_bar_has_the_four_menus_in_order() {
+    fn the_menu_bar_has_the_five_menus_in_order() {
         let menus = menus();
         let names: Vec<&str> = menus.iter().map(|menu| menu.name.as_ref()).collect();
-        assert_eq!(names, ["Evo Desktop", "File", "Edit", "Window"]);
+        assert_eq!(
+            names,
+            ["Evo Desktop", "File", "Edit", "View", "Window"],
+            "the View menu sits between the editing items and the window's, as it does in every Mac app"
+        );
+    }
+
+    /// §7.2: the transcript's own zoom, in macOS's own words — and the separator
+    /// between the two steps and the way back is Apple's placement.
+    #[test]
+    fn the_view_menu_is_macoss_own_three() {
+        let menus = menus();
+        let view = &menus[3];
+        assert_eq!(view.name.as_ref(), "View");
+        let items: Vec<String> = view
+            .items
+            .iter()
+            .map(|item| match item {
+                MenuItem::Action { name, .. } => name.to_string(),
+                MenuItem::Separator => "—".to_string(),
+                _ => "?".to_string(),
+            })
+            .collect();
+        assert_eq!(items, ["Zoom In", "Zoom Out", "—", "Actual Size"]);
+
+        let actions: Vec<&str> = view
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                MenuItem::Action { action, .. } => Some(action.name()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            actions,
+            [
+                "evo_desktop::ZoomIn",
+                "evo_desktop::ZoomOut",
+                "evo_desktop::ActualSize"
+            ]
+        );
+    }
+
+    /// The keys the View menu draws: ⌘+ first, which is the equivalent macOS shows
+    /// for Zoom In, and the two other ways a keyboard can ask for the same thing.
+    /// ⌘0 is the app's own — the tab strip stopped at ⌘8 — and none of the three
+    /// is a key something else already had.
+    #[gpui_kit::test]
+    fn the_zoom_keys_are_bound_and_collide_with_nothing(cx: &mut TestAppContext) {
+        cx.update(install);
+        let keymap = cx.update(|cx| cx.key_bindings());
+        let keymap = keymap.borrow();
+        let keys = |action: &dyn gpui_kit::Action| -> Vec<String> {
+            keymap
+                .bindings_for_action(action)
+                .flat_map(|binding| binding.keystrokes())
+                .map(|keystroke| keystroke.to_string())
+                .collect()
+        };
+
+        // The rendered form is what macOS draws beside the item: ⇧ is implied by
+        // the "+" a keyboard needs shift for, so Zoom In reads ⌘+ — Apple's own.
+        assert_eq!(keys(&ZoomIn), ["⌘+", "⌘⇧=", "⌘="]);
+        assert_eq!(keys(&ZoomOut), ["⌘-"]);
+        assert_eq!(keys(&ActualSize), ["⌘0"]);
+
+        // Nothing else in the keymap answers to them: every binding the zoom keys
+        // reach belongs to a zoom action.
+        let zoom = [
+            "evo_desktop::ZoomIn",
+            "evo_desktop::ZoomOut",
+            "evo_desktop::ActualSize",
+        ];
+        for key in ["cmd-+", "cmd-shift-=", "cmd-=", "cmd--", "cmd-0"] {
+            let keystroke = gpui_kit::Keystroke::parse(key).expect("a keystroke");
+            let (bindings, _) = keymap.bindings_for_input(&[keystroke], &[]);
+            let owners: Vec<&str> = bindings
+                .iter()
+                .map(|binding| binding.action().name())
+                .collect();
+            assert!(!owners.is_empty(), "{key} is bound to nothing");
+            assert!(
+                owners.iter().all(|name| zoom.contains(name)),
+                "{key} is also bound to {owners:?}"
+            );
+        }
+    }
+
+    /// §7.2: a launch opens the transcripts at the size the reader last left them
+    /// at, and a file nothing has zoomed opens at the design's own.
+    #[gpui_kit::test]
+    fn the_stored_zoom_is_the_one_the_transcripts_open_at(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let root = temp_root("zoom-install");
+        let mut state = AppState::default();
+        state.zoom = 1.4;
+        state.save(&root).unwrap();
+        assert_eq!(AppState::load(&root).zoom, 1.4);
+
+        cx.update(|cx| {
+            let log = crate::AppLog::open(&root);
+            crate::Shell::new(
+                root.clone(),
+                log,
+                state,
+                store::model_cache::ModelCache::default(),
+            )
+            .install(cx);
+            install(cx);
+            assert_eq!(
+                TranscriptZoom::get(cx),
+                TranscriptZoom(1.4),
+                "the reader's own size"
+            );
+        });
+
+        // A file that never had one: the design's.
+        std::fs::remove_file(root.app_json()).unwrap();
+        cx.update(|cx| {
+            cx.set_global(crate::Shell::new(
+                root.clone(),
+                crate::AppLog::open(&root),
+                AppState::default(),
+                store::model_cache::ModelCache::default(),
+            ));
+            install(cx);
+            assert_eq!(TranscriptZoom::get(cx), TranscriptZoom::default());
+        });
+        let _ = std::fs::remove_dir_all(root.path());
     }
 
     #[test]

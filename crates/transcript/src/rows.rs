@@ -55,8 +55,9 @@ const COMMAND_KEY: &str = "command";
 /// Longest a one-line value shows before it is elided; the whole text stays a
 /// hover away.
 pub(crate) const VALUE_LIMIT: usize = 96;
-/// Height of a collapsed tool row, so a long run of them stays a list.
-pub(crate) const TOOL_ROW_HEIGHT: Pixels = px(24.);
+/// Height of a collapsed tool row, so a long run of them stays a list. It holds
+/// one line of the row's own text, so it follows the reader's zoom (§7.2).
+pub(crate) const TOOL_ROW_HEIGHT: f32 = 24.;
 /// The caret's column in a tool row's head: `Rows.css`'s `.tc-caret` is 16px
 /// square, holding the design's 12px chevron. A plain number so the head's own
 /// geometry can be added up in a `const`: [`TC_BODY_INDENT`] is derived from it.
@@ -77,18 +78,28 @@ pub(crate) const MAX_ARRAY: usize = 20;
 /// The gap between a key and its value — `Rows.css`'s `.tc-kv{gap:3px 12px}` —
 /// and so the indent of a block whose content has no keys of its own.
 pub(crate) const COLUMN_GAP: Pixels = px(12.);
-/// The size a key is drawn at, in the UI font: a key is a label, not payload.
-const KEY_SIZE: Pixels = px(12.);
+/// The size a key is drawn at, in the UI font: a key is a label, not payload. The
+/// text sizes and line heights here are the design's own numbers at a zoom of 1.0;
+/// every one is drawn through [`Palette::scaled`] (§7.2).
+const KEY_SIZE: f32 = 12.;
 /// The size a panel's caption is drawn at: `Rows.css`'s `.tc-caption`, 11.5px.
-const CAPTION_SIZE: Pixels = px(11.5);
+const CAPTION_SIZE: f32 = 11.5;
 /// The size a tool row's name is drawn at, and the size of the status word
 /// beside it.
-const NAME_SIZE: Pixels = px(13.);
-const STATUS_SIZE: Pixels = px(12.);
+const NAME_SIZE: f32 = 13.;
+const STATUS_SIZE: f32 = 12.;
+const STATUS_LINE: f32 = 18.;
 /// The line height of payload text, as a multiple of its size.
 pub(crate) const PAYLOAD_LINE_HEIGHT: f32 = 1.45;
 /// Width of the label column of a report row.
 const REPORT_LABEL_WIDTH: Pixels = px(80.);
+/// `.rp`: its head's height and type, and the type of one field's row — the label
+/// and the value under it share the design's 20px line box.
+const REPORT_HEAD: f32 = 36.;
+const REPORT_SIZE: f32 = 13.;
+const REPORT_LABEL_SIZE: f32 = 12.;
+const REPORT_VALUE_SIZE: f32 = 13.5;
+const REPORT_VALUE_LINE: f32 = 20.;
 
 /// The waiting pips that hold an assistant row's place between `message-start`
 /// and the first delta: one cycle of the pulse, and how long each pip is.
@@ -114,8 +125,9 @@ pub(crate) const COPY_GROUP: &str = "transcript-copy";
 /// How long a copy button says "Copied" after it was used.
 const COPIED_HOLD: Duration = Duration::from_millis(1_200);
 
-/// The size of a copy button's icon and label.
-const COPY_SIZE: Pixels = px(11.);
+/// The size of a copy button's icon and label, and the line box under it.
+const COPY_SIZE: f32 = 11.;
+const COPY_LINE: f32 = 14.;
 
 /// Which copy button was used.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -162,13 +174,19 @@ fn copy_face() -> Div {
 
 /// Fill a copy button's face: the resting one, or the acknowledgement it shows
 /// while `copied`.
-fn fill_copy_face<E: ParentElement>(face: E, copied: bool, with_label: bool, key: &ElementId) -> E {
+fn fill_copy_face<E: ParentElement>(
+    face: E,
+    copied: bool,
+    with_label: bool,
+    key: &ElementId,
+    size: Pixels,
+) -> E {
     let icon = if copied {
         IconName::Check
     } else {
         IconName::Copy
     };
-    let mut face = face.child(Icon::new(icon).size(COPY_SIZE));
+    let mut face = face.child(Icon::new(icon).size(size));
     if copied {
         face = face.child(
             div()
@@ -195,6 +213,7 @@ fn copy_button(
     let id = id.into();
     let feedback = feedback.clone();
     let uses = feedback.uses(target);
+    let size = palette.scaled(COPY_SIZE);
 
     let button = div()
         .id(id.clone())
@@ -204,8 +223,8 @@ fn copy_button(
         .bg(palette.muted)
         .border_1()
         .border_color(palette.border)
-        .text_size(COPY_SIZE)
-        .line_height(px(14.))
+        .text_size(size)
+        .line_height(palette.scaled(COPY_LINE))
         .text_color(palette.muted_foreground)
         .cursor_pointer()
         .hover(|style| style.text_color(palette.foreground))
@@ -219,12 +238,12 @@ fn copy_button(
 
     let key = id.clone();
     if uses == 0 {
-        button.child(fill_copy_face(copy_face(), false, with_label, &key))
+        button.child(fill_copy_face(copy_face(), false, with_label, &key, size))
     } else {
         button.child(copy_face().with_animation(
             (id, uses.to_string()),
             Animation::new(COPIED_HOLD),
-            move |face, delta| fill_copy_face(face, delta < 1., with_label, &key),
+            move |face, delta| fill_copy_face(face, delta < 1., with_label, &key, size),
         ))
     }
 }
@@ -454,13 +473,20 @@ pub(crate) fn render_row(
                     retry.attempt, retry.max, retry.delay_ms
                 ),
             };
-            quiet_line(item.id.clone(), "transcript-retry", &text, palette.info)
+            quiet_line(
+                item.id.clone(),
+                "transcript-retry",
+                &text,
+                palette.info,
+                &palette,
+            )
         }
         ItemKind::Unknown { kind, text } => quiet_line(
             item.id.clone(),
             "transcript-unknown",
             &format!("{kind} · {text}"),
             palette.muted_foreground,
+            &palette,
         ),
     });
 
@@ -476,6 +502,11 @@ pub(crate) fn render_row(
                 .w_full()
                 .min_w_0()
                 .max_w(px(MEASURE))
+                // The body size of the transcript, at the reader's zoom (§7.2):
+                // what a row does not set a size of its own inherits this — the
+                // message's markdown among them, which reads it off the ambient
+                // text style when its document is laid out.
+                .text_size(palette.font_size)
                 .test_support()
                 .child(stack),
         )
@@ -501,22 +532,28 @@ fn turn_separator(turn: usize, palette: &Palette) -> AnyElement {
     // surface. The geometry the design cares about is exactly kept — the label's
     // centre is on the line, the row after it starts below the line — and what
     // the reserve costs is 7px of page colour under the line.
+    //
+    // The band, the label's own line box and the 7px it hangs all follow the
+    // reader's zoom (the hairline does not: a rule is a rule); the 26px of air
+    // above it is space, and stays as the design drew it.
+    let rule = palette.scaled(TURN_RULE);
+    let overhang = palette.scaled(TURN_LABEL_OVERHANG);
     div()
         .id(("transcript-turn", turn))
         .relative()
         .w_full()
         // 26px of band, the 1px hairline on its floor, and the 7px the label hangs
         // below the line reserved under it.
-        .h(px(TURN_RULE + TURN_LINE + TURN_LABEL_OVERHANG))
+        .h(rule + px(TURN_LINE) + overhang)
         .mt(TURN_GAP)
-        .text_size(px(12.))
+        .text_size(palette.scaled(TURN_LABEL_SIZE))
         .child(
             div()
                 .id(("transcript-turn-line", turn))
                 .absolute()
                 .left(px(0.))
                 .right(px(0.))
-                .top(px(TURN_RULE))
+                .top(rule)
                 .h(px(TURN_LINE))
                 .bg(palette.border)
                 .test_support(),
@@ -530,7 +567,7 @@ fn turn_separator(turn: usize, palette: &Palette) -> AnyElement {
                 .pl(px(8.))
                 // The design's own line box for a 12px label: `line-height: 1.5`,
                 // which is what puts its centre a hair above the line.
-                .line_height(px(18.))
+                .line_height(palette.scaled(TURN_LABEL_LINE))
                 .bg(palette.background)
                 .text_color(palette.muted_foreground)
                 .child(format!("turn {turn}"))
@@ -548,12 +585,21 @@ pub(crate) const TURN_LINE: f32 = 1.;
 /// reserved under it.
 pub(crate) const TURN_LABEL_OVERHANG: f32 = 7.;
 
-/// The turn rule's own height: `.turn-rule { height: 26px }`.
+/// The turn rule's own height: `.turn-rule { height: 26px }`, and the label's own
+/// type — 12px on the page's `line-height: 1.5`.
 const TURN_RULE: f32 = 26.;
+const TURN_LABEL_SIZE: f32 = 12.;
+const TURN_LABEL_LINE: f32 = 18.;
 
 /// A user turn: plain text on a muted card, with the accent bar that marks where the turn
 /// starts. A queued turn is held back (muted, said so, and cancellable); a cancelled one is
 /// drawn as what it is rather than removed, so the reader sees what became of their words.
+///
+/// `.user-row{font-size:14px;line-height:1.5}` — the two numbers, at the design's
+/// own zoom.
+const USER_SIZE: f32 = 14.;
+const USER_LINE: f32 = 21.;
+
 fn user_row(
     id: ItemId,
     user: &UserItem,
@@ -590,9 +636,9 @@ fn user_row(
         .flex()
         .flex_col()
         .gap_1()
-        .text_size(px(14.))
+        .text_size(palette.scaled(USER_SIZE))
         // `.user-row{font-size:14px}` under the page's `line-height: 1.5`.
-        .line_height(px(21.))
+        .line_height(palette.scaled(USER_LINE))
         .text_color(text_color)
         .child(SelectableText::new(
             row_id("transcript-user-text", &id),
@@ -697,7 +743,7 @@ fn placeholder(id: ElementId, text: &str, palette: &Palette) -> AnyElement {
         .py_1()
         .rounded(palette.radius)
         .bg(palette.muted)
-        .text_size(CAPTION_SIZE)
+        .text_size(palette.scaled(CAPTION_SIZE))
         .text_color(palette.muted_foreground)
         .child(text.to_string())
         .test_support()
@@ -727,7 +773,7 @@ fn queued_footer(
         .child(
             div()
                 .id(caption_id)
-                .text_size(CAPTION_SIZE)
+                .text_size(palette.scaled(CAPTION_SIZE))
                 .text_color(palette.muted_foreground)
                 .aria_label(caption)
                 .child(caption)
@@ -741,8 +787,8 @@ fn queued_footer(
                 .rounded(palette.radius)
                 .border_1()
                 .border_color(palette.border)
-                .text_size(CAPTION_SIZE)
-                .line_height(px(14.))
+                .text_size(palette.scaled(CAPTION_SIZE))
+                .line_height(palette.scaled(COPY_LINE))
                 .text_color(palette.muted_foreground)
                 .cursor_pointer()
                 .hover(|style| style.text_color(palette.destructive))
@@ -798,7 +844,7 @@ fn quiet_row(
         .flex()
         .items_center()
         .gap_2()
-        .h(TOOL_ROW_HEIGHT)
+        .h(palette.scaled(TOOL_ROW_HEIGHT))
         .cursor_pointer()
         .aria_label(aria)
         .aria_expanded(expanded)
@@ -811,7 +857,7 @@ fn quiet_row(
                 .min_w_0()
                 .flex_shrink(1.)
                 .truncate()
-                .text_size(NAME_SIZE)
+                .text_size(palette.scaled(NAME_SIZE))
                 .text_color(palette.muted_foreground)
                 .child(head),
         )
@@ -819,7 +865,7 @@ fn quiet_row(
             div()
                 .id(row_id(format!("{name}-trailing"), &id))
                 .flex_none()
-                .text_size(NAME_SIZE)
+                .text_size(palette.scaled(NAME_SIZE))
                 .text_color(palette.muted_foreground)
                 .child(trailing)
                 .test_support()
@@ -968,6 +1014,7 @@ fn lane_event_row(id: ItemId, event: &LaneEvent, palette: &Palette) -> AnyElemen
         palette.muted_foreground,
         &text,
         severity_color(event.severity, palette),
+        palette,
     )
 }
 
@@ -981,6 +1028,7 @@ fn notice_row(id: ItemId, notice: &Notice, palette: &Palette) -> AnyElement {
         palette.muted_foreground,
         &notice.text,
         severity_color(notice.severity, palette),
+        palette,
     )
 }
 
@@ -990,7 +1038,13 @@ fn run_outcome_row(id: ItemId, outcome: &RunOutcome, palette: &Palette) -> AnyEl
         "error" => palette.destructive,
         _ => palette.info,
     };
-    quiet_line(id, "transcript-run-outcome", &outcome.text(), color)
+    quiet_line(
+        id,
+        "transcript-run-outcome",
+        &outcome.text(),
+        color,
+        palette,
+    )
 }
 
 /// The point the scrollback pages across: a divider naming what was compacted away.
@@ -1025,7 +1079,7 @@ fn compaction_row(id: ItemId, compaction: &Compaction, palette: &Palette) -> Any
                     div()
                         .id(row_id("transcript-compaction-label", &id))
                         .flex_none()
-                        .text_size(CAPTION_SIZE)
+                        .text_size(palette.scaled(CAPTION_SIZE))
                         .text_color(palette.muted_foreground)
                         .aria_label(format!("context {label}, {tokens}"))
                         .child(format!("context {label} · {tokens}"))
@@ -1040,8 +1094,8 @@ fn compaction_row(id: ItemId, compaction: &Compaction, palette: &Palette) -> Any
                 .w_full()
                 .min_w_0()
                 .px_3()
-                .text_size(STATUS_SIZE)
-                .line_height(px(18.))
+                .text_size(palette.scaled(STATUS_SIZE))
+                .line_height(palette.scaled(STATUS_LINE))
                 .text_color(palette.muted_foreground)
                 .child(SelectableText::new(
                     "transcript-compaction-text",
@@ -1101,6 +1155,13 @@ fn quiet_block(name: &'static str, id: ItemId, text: &str, palette: &Palette) ->
         .into_any_element()
 }
 
+/// `.thinking-label`'s own type and the line box under it, and `.thinking-text`'s
+/// — the design's numbers, scaled by the reader's zoom where they are drawn.
+const THINKING_LABEL_SIZE: f32 = 12.;
+const THINKING_LABEL_LINE: f32 = 18.;
+const THINKING_SIZE: f32 = 14.;
+const THINKING_LINE: f32 = 21.;
+
 /// An assistant message: the retained markdown document, its optional thinking
 /// text, and the error that ended it, if any.
 ///
@@ -1141,8 +1202,8 @@ fn assistant_row(
                     // `.thinking-label`: 12px, on the muted ink, with the design's
                     // 1.5 line box under it.
                     div()
-                        .text_size(px(12.))
-                        .line_height(px(18.))
+                        .text_size(palette.scaled(THINKING_LABEL_SIZE))
+                        .line_height(palette.scaled(THINKING_LABEL_LINE))
                         .child("thinking"),
                 )
                 .child(
@@ -1152,8 +1213,8 @@ fn assistant_row(
                         .test_support()
                         .w_full()
                         .min_w_0()
-                        .text_size(px(14.))
-                        .line_height(px(21.))
+                        .text_size(palette.scaled(THINKING_SIZE))
+                        .line_height(palette.scaled(THINKING_LINE))
                         .italic()
                         .child(SelectableText::new(
                             row_id("transcript-thinking-run", &id),
@@ -1263,9 +1324,9 @@ fn waiting_dots(id: &ItemId, palette: &Palette) -> AnyElement {
 pub(crate) const THINKING_TAIL_CHARS: usize = 400;
 /// The ticker's own size: a size under the message's, so a line running past stays
 /// quiet beside the pips.
-const TICKER_SIZE: Pixels = px(13.);
+const TICKER_SIZE: f32 = 13.;
 /// The line box the ticker's one line sits on.
-const TICKER_LINE: Pixels = px(18.);
+const TICKER_LINE: f32 = 18.;
 /// How far the fade over the ticker's left edge reaches — where the words that
 /// have run past are cut.
 const TICKER_FADE: Pixels = px(24.);
@@ -1319,8 +1380,8 @@ fn waiting_line(
                             .id(row_id("transcript-thinking-ticker-text", id))
                             .flex_shrink_0()
                             .whitespace_nowrap()
-                            .text_size(TICKER_SIZE)
-                            .line_height(TICKER_LINE)
+                            .text_size(palette.scaled(TICKER_SIZE))
+                            .line_height(palette.scaled(TICKER_LINE))
                             .italic()
                             .text_color(palette.muted_foreground)
                             .test_support()
@@ -1496,14 +1557,14 @@ fn tool_row(
     let click_id = id.clone();
     let mut head = div()
         .id(row_id("transcript-tool", &id))
-        .h(px(TC_HEAD))
+        .h(palette.scaled(TC_HEAD))
         .w_full()
         .flex()
         .items_center()
         .gap(px(TC_HEAD_GAP))
         .pl(px(TC_HEAD_PAD))
         .pr(px(10.))
-        .text_size(px(13.))
+        .text_size(palette.scaled(TC_HEAD_SIZE))
         .cursor_default()
         .hover({
             let sidebar = palette.sidebar;
@@ -1519,7 +1580,7 @@ fn tool_row(
                 .flex_shrink_0()
                 .font_family(palette.mono.clone())
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_size(px(12.5))
+                .text_size(palette.scaled(TC_NAME_SIZE))
                 .test_support()
                 .child(tool.name.clone()),
         );
@@ -1635,6 +1696,10 @@ const TC_HEAD: f32 = 34.;
 const TC_HEAD_PAD: f32 = 8.;
 const TC_HEAD_GAP: f32 = 8.;
 pub(crate) const TC_BODY_INDENT: f32 = TC_HEAD_PAD + DISCLOSURE_WIDTH + TC_HEAD_GAP;
+/// The head's text — the design's `.tc-head{font-size:13px}` — and the tool's own
+/// name, which is the one run in the row set in the mono face.
+const TC_HEAD_SIZE: f32 = 13.;
+const TC_NAME_SIZE: f32 = 12.5;
 
 /// What the call was aimed at, and what it was asked to do — the two halves of the
 /// design's sentence, read out of the call's own arguments.
@@ -1708,14 +1773,14 @@ const TC_SUMMARY_LIMIT: usize = 120;
 fn status_pill(status: &str, colour: Hsla, palette: &Palette, tick: bool) -> AnyElement {
     let mut pill = div()
         .flex_shrink_0()
-        .h(px(20.))
+        .h(palette.scaled(PILL_HEIGHT))
         .flex()
         .items_center()
         .gap_1()
         .pl(px(5.))
         .pr(px(7.))
         .rounded_full()
-        .text_size(px(11.5))
+        .text_size(palette.scaled(PILL_SIZE))
         .text_color(mix(colour, 85., palette.foreground))
         .bg(mix(colour, 12., palette.sidebar));
     if tick {
@@ -1734,6 +1799,10 @@ fn status_pill(status: &str, colour: Hsla, palette: &Palette, tick: bool) -> Any
 /// The tick's own size, from the design's 11px glyph at a 3-in-24 stroke.
 const TICK_GLYPH: f32 = 11.;
 const TICK_STROKE: f32 = 1.4;
+
+/// The pill's own box and type: the design's fixed 20px height at 11.5px.
+const PILL_HEIGHT: f32 = 20.;
+const PILL_SIZE: f32 = 11.5;
 
 /// The tick `m5 12 5 5L20 7`, scaled to [`TICK_GLYPH`].
 fn tick_lines() -> Vec<(Point<Pixels>, Point<Pixels>)> {
@@ -1935,8 +2004,8 @@ fn load_more_row(id: ItemId, view: &WeakEntity<TranscriptView>, palette: &Palett
         .rounded(palette.radius)
         .border_1()
         .border_color(palette.border)
-        .text_size(CAPTION_SIZE)
-        .line_height(px(14.))
+        .text_size(palette.scaled(CAPTION_SIZE))
+        .line_height(palette.scaled(COPY_LINE))
         .text_color(palette.muted_foreground)
         .cursor_pointer()
         .hover(|style| style.text_color(palette.foreground))
@@ -1950,13 +2019,25 @@ fn load_more_row(id: ItemId, view: &WeakEntity<TranscriptView>, palette: &Palett
 }
 
 /// One quiet line of the transcript, in a colour the caller chose.
-fn quiet_line(id: ItemId, name: &'static str, text: &str, color: gpui_kit::Hsla) -> AnyElement {
-    quiet_source_line(id, name, None, color, text, color)
+fn quiet_line(
+    id: ItemId,
+    name: &'static str,
+    text: &str,
+    color: gpui_kit::Hsla,
+    palette: &Palette,
+) -> AnyElement {
+    quiet_source_line(id, name, None, color, text, color, palette)
 }
 
 /// The same, with who said it in front: the source is chrome and stays in the
 /// muted ink, while what it says takes the line's own colour — a system line that
 /// shouts its source in the accent reads as a link, which is not what it is.
+///
+/// Its own type: the design's 13px on its 1.5 line box (`Rows.css`'s
+/// `.notice{font-size:13px}`), at the reader's zoom.
+const QUIET_SIZE: f32 = 13.;
+const QUIET_LINE: f32 = 18.;
+
 fn quiet_source_line(
     id: ItemId,
     name: &'static str,
@@ -1964,6 +2045,7 @@ fn quiet_source_line(
     source_ink: gpui_kit::Hsla,
     text: &str,
     color: gpui_kit::Hsla,
+    palette: &Palette,
 ) -> AnyElement {
     let full: SharedString = match source {
         Some(source) => format!("{source} · {text}").into(),
@@ -1975,8 +2057,8 @@ fn quiet_source_line(
         .w_full()
         .min_w_0()
         .truncate()
-        .text_size(px(13.))
-        .line_height(px(18.))
+        .text_size(palette.scaled(QUIET_SIZE))
+        .line_height(palette.scaled(QUIET_LINE))
         .text_color(color)
         .aria_label(full.clone());
     if let Some(source) = source {
@@ -2068,7 +2150,7 @@ fn report_row(
         .child(
             div()
                 .id(row_id("transcript-report-heading", &id))
-                .h(px(36.))
+                .h(palette.scaled(REPORT_HEAD))
                 .flex()
                 .items_center()
                 .gap_2()
@@ -2076,7 +2158,7 @@ fn report_row(
                 .border_b_1()
                 .border_color(palette.rule_soft())
                 .bg(palette.sidebar)
-                .text_size(px(13.))
+                .text_size(palette.scaled(REPORT_SIZE))
                 .aria_label(format!("Lane {} report", report.lane))
                 .child(
                     div()
@@ -2119,16 +2201,16 @@ fn report_row(
                 .py(px(9.))
                 .border_t_1()
                 .border_color(palette.rule_soft())
-                .text_size(px(13.5))
-                .line_height(px(20.))
+                .text_size(palette.scaled(REPORT_VALUE_SIZE))
+                .line_height(palette.scaled(REPORT_VALUE_LINE))
                 .child(
                     div()
                         .id((line_id.clone(), "label"))
                         .test_support()
                         .w(REPORT_LABEL_WIDTH)
                         .flex_shrink_0()
-                        .text_size(px(12.))
-                        .line_height(px(20.))
+                        .text_size(palette.scaled(REPORT_LABEL_SIZE))
+                        .line_height(palette.scaled(REPORT_VALUE_LINE))
                         .text_color(palette.muted_foreground)
                         .child(label),
                 )
@@ -2451,7 +2533,7 @@ fn cap_note(id: impl Into<ElementId>, hidden: usize, palette: &Palette) -> AnyEl
         .id(id)
         .w_full()
         .min_w_0()
-        .text_size(CAPTION_SIZE)
+        .text_size(palette.scaled(CAPTION_SIZE))
         .text_color(palette.muted_foreground)
         .aria_label(note.clone())
         .child(note)
@@ -2477,10 +2559,10 @@ fn caption(id: &ElementId, label: &str, palette: &Palette) -> AnyElement {
     div()
         .id((id.clone(), "caption"))
         .mb(px(4.))
-        .text_size(CAPTION_SIZE)
+        .text_size(palette.scaled(CAPTION_SIZE))
         // `.tc-caption` inherits the page's `line-height: 1.5`: 17.25px under an
         // 11.5px caption.
-        .line_height(px(17.25))
+        .line_height(palette.scaled(17.25))
         .text_color(palette.muted_foreground)
         .aria_label(label.to_string())
         .child(label.to_string())
@@ -2615,7 +2697,7 @@ fn key_cell(id: &ElementId, key: &str, palette: &Palette) -> AnyElement {
         // `.tc-kv dt`: a key is payload syntax, so it is set in the mono face at
         // 12px — the values beside it stay in the UI font.
         .font_family(palette.mono.clone())
-        .text_size(KEY_SIZE)
+        .text_size(palette.scaled(KEY_SIZE))
         .text_color(palette.muted_foreground)
         .child(SelectableText::new((id.clone(), "key"), key.to_string()))
         .tooltip(move |window, cx| {
@@ -2665,7 +2747,7 @@ fn value_cell(id: &ElementId, value: &FieldValue, palette: &Palette) -> AnyEleme
             .id((id.clone(), "value"))
             .flex_1()
             .min_w_0()
-            .text_size(KEY_SIZE)
+            .text_size(palette.scaled(KEY_SIZE))
             .text_color(palette.muted_foreground)
             .child(SelectableText::new((id.clone(), "value"), summary.clone()))
             .test_support()

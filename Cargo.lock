@@ -1756,6 +1756,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-channel",
+ "composer",
  "gpui-kit",
  "image",
  "libc",
@@ -1769,6 +1770,7 @@ dependencies = [
  "settings",
  "store",
  "tab_engine",
+ "transcript",
  "workspace",
 ]
 

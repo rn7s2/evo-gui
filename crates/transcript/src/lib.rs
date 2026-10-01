@@ -42,6 +42,8 @@ mod style;
 mod tests;
 
 pub use imgcheck::decode_image;
+/// The reader's font zoom for every transcript (§7.2): what the View menu sets.
+pub use style::TranscriptZoom;
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -347,7 +349,7 @@ pub struct TranscriptView {
 
 impl TranscriptView {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        Self {
+        let view = Self {
             data: cx.new(|cx| TranscriptData {
                 focus: cx.focus_handle(),
                 items: Vec::new(),
@@ -380,7 +382,13 @@ impl TranscriptView {
             at_head: false,
             anchor: None,
             agent: AgentKey::Coordinator,
-        }
+        };
+        // A zoom the reader chose redraws every transcript on screen at once (§7.2).
+        // On this branch the transcript is not cached yet, so a notified frame is
+        // the whole of it: lane 1's virtual list will want `view.remeasure_all(cx)`.
+        cx.observe_global::<TranscriptZoom>(|_view, cx| cx.notify())
+            .detach();
+        view
     }
 
     /// Whose transcript this view shows.

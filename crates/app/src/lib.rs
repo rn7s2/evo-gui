@@ -36,7 +36,9 @@ pub use housekeeping::{prune_tab_dirs, Pruned, TAB_DIR_TTL};
 pub use launcher::{history_entries, push_launcher_data, tab_count, Launcher};
 pub use logging::{AppLog, Level, LOG_NAME};
 pub use menus::open_about;
-pub use menus::{install as install_menus, open_settings, CloseTab, NewTab, QuitApp};
+pub use menus::{
+    install as install_menus, open_settings, ActualSize, CloseTab, NewTab, QuitApp, ZoomIn, ZoomOut,
+};
 pub use quit::{
     begin as begin_quit, is_quitting, open_tabs, remember_tab_set, swarms, watch_held_quit,
     TabRecord,
@@ -84,6 +86,10 @@ pub struct Shell {
     /// The recents `app.json` held at launch; the session scan merges with them
     /// (§9.5).
     pub recents: Vec<Recent>,
+    /// The transcript's font zoom `app.json` held at launch (§7.2). The live one is
+    /// the [`transcript::TranscriptZoom`] global; this is what the menu reads when
+    /// it steps from it, and what a test asserts against.
+    pub zoom: f32,
     /// Set once the quit sequence has begun.
     pub quitting: bool,
     /// Subscriptions that must outlive the closure that made them.
@@ -103,6 +109,7 @@ impl Shell {
             theme: state.theme,
             binaries: state.binaries,
             recents: state.recents,
+            zoom: state.zoom,
             launcher: Launcher::new(cache),
             view: None,
             tracker: None,

@@ -5,9 +5,74 @@ use gpui_kit::base::TextViewStyle;
 use gpui_kit::component::ActiveTheme as _;
 
 use gpui_kit::{
-    px, rems, App, FontWeight, Hsla, Overflow, Pixels, SharedString, StyleRefinement, Styled as _,
+    px, rems, App, FontWeight, Global, Hsla, Overflow, Pixels, SharedString, StyleRefinement,
+    Styled as _,
 };
 use store::design;
+
+/// The transcript's font zoom: the scale every text size and line height the
+/// transcript draws is multiplied by (§7.2).
+///
+/// One gpui global, so the View menu's Zoom In / Zoom Out / Actual Size reach every
+/// open transcript in every tab at once: [`Palette::from_app`] reads it, and a view
+/// that must re-measure itself observes it. `1.0` is the design's own size; the
+/// range the menu works in, and the number `app.json` remembers, are the schema's
+/// ([`store::app_state::ZOOM_MIN`] and friends), so a stored scale and a stepped
+/// one cannot disagree.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TranscriptZoom(pub f32);
+
+impl Global for TranscriptZoom {}
+
+impl Default for TranscriptZoom {
+    fn default() -> Self {
+        TranscriptZoom(Self::DEFAULT)
+    }
+}
+
+impl TranscriptZoom {
+    pub const DEFAULT: f32 = store::app_state::ZOOM_DEFAULT;
+    pub const MIN: f32 = store::app_state::ZOOM_MIN;
+    pub const MAX: f32 = store::app_state::ZOOM_MAX;
+    /// One press of Zoom In or Zoom Out.
+    pub const STEP: f32 = 0.1;
+
+    /// The reader's zoom, or the design's own size where nothing has set one.
+    pub fn get(cx: &App) -> Self {
+        cx.try_global::<Self>().copied().unwrap_or_default()
+    }
+
+    /// Make it the reader's zoom, for every transcript on screen (§7.2).
+    pub fn set(self, cx: &mut App) {
+        cx.set_global(self);
+    }
+
+    /// `scale` brought into the range the View menu works in — a stored number, or
+    /// one this menu is about to write.
+    pub fn clamped(scale: f32) -> Self {
+        if scale.is_finite() {
+            TranscriptZoom(scale.clamp(Self::MIN, Self::MAX))
+        } else {
+            Self::default()
+        }
+    }
+
+    /// One step in, one step out.
+    pub fn zoom_in(self) -> Self {
+        Self::clamped(self.stepped(1.))
+    }
+
+    pub fn zoom_out(self) -> Self {
+        Self::clamped(self.stepped(-1.))
+    }
+
+    /// The scale `steps` steps away, snapped onto the 10% grid first: a run of
+    /// presses lands on whole tenths instead of drifting, and the bottom step is
+    /// the floor ([`Self::MIN`]) rather than 0.7.
+    fn stepped(self, steps: f32) -> f32 {
+        ((self.0 / Self::STEP).round() + steps) * Self::STEP
+    }
+}
 
 /// The widest a row's content gets.
 ///
@@ -46,6 +111,10 @@ pub(crate) struct Palette {
     pub(crate) warning: Hsla,
     pub(crate) info: Hsla,
     pub(crate) mono: SharedString,
+    /// The reader's font zoom, in force for this render (§7.2). Every size below
+    /// is already scaled by it; [`Palette::scaled`] is what the transcript's own
+    /// numbers go through.
+    pub(crate) zoom: f32,
     /// The theme's body size: what a row measures itself against.
     pub(crate) font_size: Pixels,
     /// The size a tool's payload — its arguments, its result — is drawn at, and
@@ -71,6 +140,13 @@ pub(crate) fn mix(a: Hsla, pct: f32, b: Hsla) -> Hsla {
 }
 
 impl Palette {
+    /// A text size or a line height — a hard-coded number in the design, like a
+    /// caption's 11.5 — at the reader's zoom. Spacing, gaps and the geometry
+    /// around text are *not* scaled: they stay the design's own.
+    pub(crate) fn scaled(&self, value: f32) -> Pixels {
+        px(value * self.zoom)
+    }
+
     /// A card's hairline: `color-mix(in srgb, var(--fg) 17%, var(--bg))` — the
     /// rule a table's frame is drawn with, strong enough to read on the warm
     /// surface.
@@ -86,6 +162,7 @@ impl Palette {
     pub(crate) fn from_app(cx: &App) -> Self {
         let theme = cx.theme();
         let colors = theme.semantic_tokens().colors;
+        let zoom = TranscriptZoom::get(cx).0;
         let color = |token: store::design::Rgb| {
             let rgba = gpui_kit::Rgba {
                 r: f32::from(token.r) / 255.,
@@ -114,11 +191,12 @@ impl Palette {
             warning: theme.warning,
             info: theme.info,
             mono: theme.mono_font_family.clone(),
-            font_size: theme.font_size,
+            zoom,
+            font_size: px(f32::from(theme.font_size) * zoom),
             // `Rows.css`: `.tc-kv{font-size:13px;line-height:19px}`, which is the
             // design's mono size (`--mono`, 13) and the line box it sets under it.
-            payload_size: px(design::FONT_MONO),
-            payload_line: px(19.),
+            payload_size: px(design::FONT_MONO * zoom),
+            payload_line: px(19. * zoom),
             radius: theme.radius,
         }
     }
@@ -136,8 +214,11 @@ impl Palette {
 /// with `--rule` (`Rows.css`).
 pub(crate) fn text_style(cx: &App) -> TextViewStyle {
     let theme = cx.theme();
-    let base = theme.font_size;
     let palette = Palette::from_app(cx);
+    // The body size at the reader's zoom: a heading steps up from *that*, so the
+    // whole document moves together.
+    let base = palette.font_size;
+    let zoom = palette.zoom;
     let rule = palette.rule();
     let rule_soft = palette.rule_soft();
 
@@ -154,7 +235,7 @@ pub(crate) fn text_style(cx: &App) -> TextViewStyle {
         .border_color(rule)
         .rounded(px(8.))
         .bg(palette.input)
-        .text_size(px(13.5))
+        .text_size(px(13.5 * zoom))
         .font_weight(FontWeight::NORMAL);
 
     // The header row: the chrome surface, the second voice, and a touch smaller
@@ -163,7 +244,7 @@ pub(crate) fn text_style(cx: &App) -> TextViewStyle {
     let table_head = StyleRefinement::default()
         .bg(palette.sidebar)
         .text_color(palette.muted_foreground)
-        .text_size(px(12.5))
+        .text_size(px(12.5 * zoom))
         .font_weight(widgets::text::MEDIUM);
 
     // Leave border widths to the kit: it omits the last column's right rule and
@@ -314,6 +395,103 @@ mod tests {
             .or(style.table().text.font_weight);
         assert_eq!(body_weight, Some(FontWeight::NORMAL));
     }
+    /// §7.2: Zoom In and Zoom Out move a tenth at a time, the bottom of the range
+    /// is the schema's floor rather than 0.7, and neither end runs past its bound —
+    /// however many times it is pressed.
+    #[test]
+    fn the_zoom_steps_are_tenths_inside_the_schemas_range() {
+        let mut zoom = TranscriptZoom::default();
+        assert_eq!(zoom, TranscriptZoom(1.0), "the design's own size");
+
+        for expected in [1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 1.9, 2.0] {
+            zoom = zoom.zoom_in();
+            assert!(
+                (zoom.0 - expected).abs() < 1e-6,
+                "{zoom:?} is not {expected}"
+            );
+        }
+        assert_eq!(zoom.zoom_in(), TranscriptZoom(2.0), "the top holds");
+
+        let mut zoom = TranscriptZoom::default();
+        for expected in [0.9, 0.8, 0.75] {
+            zoom = zoom.zoom_out();
+            assert!(
+                (zoom.0 - expected).abs() < 1e-6,
+                "{zoom:?} is not {expected}"
+            );
+        }
+        assert_eq!(
+            zoom.zoom_out(),
+            TranscriptZoom(0.75),
+            "and so does the bottom"
+        );
+
+        // A stored number is read back into the same range, and a nonsense one is
+        // the design's own size rather than a scale nothing can be drawn at.
+        assert_eq!(TranscriptZoom::clamped(9.0), TranscriptZoom(2.0));
+        assert_eq!(TranscriptZoom::clamped(0.1), TranscriptZoom(0.75));
+        assert_eq!(TranscriptZoom::clamped(1.25), TranscriptZoom(1.25));
+        assert_eq!(TranscriptZoom::clamped(f32::NAN), TranscriptZoom(1.0));
+        assert_eq!(TranscriptZoom::MIN, 0.75);
+        assert_eq!(TranscriptZoom::MAX, 2.0);
+    }
+
+    /// The sizes the transcript draws with are the design's own at 1.0 and follow
+    /// the zoom everywhere else: the body, the payload's own size and line box, a
+    /// hard-coded caption, and the markdown's table and headings.
+    #[gpui_kit::test]
+    fn the_palettes_sizes_follow_the_zoom(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(|cx: &mut App| {
+            // At the design's own size: every number is the one the design writes.
+            let theme_body = cx.theme().font_size;
+            let palette = Palette::from_app(cx);
+            let style = text_style(cx);
+            assert_eq!(palette.font_size, theme_body);
+            assert_eq!(palette.payload_size, px(design::FONT_MONO));
+            assert_eq!(palette.payload_line, px(19.));
+            assert_eq!(palette.scaled(11.5), px(11.5));
+            assert_eq!(
+                style.heading(1).text.font_size,
+                Some((theme_body * 1.25).into()),
+                "a heading steps up from the body size it is drawn over"
+            );
+
+            let zoom = 1.5;
+            TranscriptZoom(zoom).set(cx);
+            let palette = Palette::from_app(cx);
+            let style = text_style(cx);
+            assert_eq!(
+                palette.font_size,
+                theme_body * zoom,
+                "the body size is the reader's"
+            );
+            assert_eq!(palette.payload_size, px(design::FONT_MONO * zoom));
+            assert_eq!(palette.payload_line, px(19. * zoom));
+            assert_eq!(
+                palette.scaled(11.5),
+                px(11.5 * zoom),
+                "and so is a number the design hard-codes"
+            );
+            assert_eq!(palette.zoom, zoom);
+            assert_eq!(
+                style.heading(1).text.font_size,
+                Some((theme_body * zoom * 1.25).into()),
+                "a heading steps up from the zoomed body size"
+            );
+            assert_eq!(
+                style.table().text.font_size,
+                Some(px(13.5 * zoom).into()),
+                "`Rows.css`: `.measure table{{font-size:13.5px}}`"
+            );
+            assert_eq!(
+                style.table_head().text.font_size,
+                Some(px(12.5 * zoom).into()),
+                "`Rows.css`: `.measure th{{font-size:12.5px}}`"
+            );
+        });
+    }
+
     /// The table the scene test draws: a header and two body rows, two columns.
     ///
     /// Two columns is what makes the count readable: each row's first cell is one the
