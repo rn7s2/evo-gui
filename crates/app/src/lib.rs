@@ -37,7 +37,8 @@ pub use logging::{AppLog, Level, LOG_NAME};
 pub use menus::open_about;
 pub use menus::{install as install_menus, open_settings, CloseTab, NewTab, QuitApp};
 pub use quit::{
-    begin as begin_quit, is_quitting, open_tabs, remember_tab_set, take_engines, TabRecord,
+    begin as begin_quit, is_quitting, open_tabs, remember_tab_set, swarms, watch_held_quit,
+    TabRecord,
 };
 pub use settings::{apply as apply_settings, open as open_settings_panel, DIALOG_CONTENT_ID};
 pub use startup::{refresh_catalog, start as start_background_loads};
@@ -249,20 +250,23 @@ pub fn run() {
                     shell.subscriptions.push(appearance);
                 }
             });
-            // Closing the window: the workspace hands the tabs' engines over, and
-            // the app owns stopping them.
+            // Closing the window: the app owns the quit, so the close is vetoed
+            // while it runs — the window is the screen the swarms' exit is shown
+            // on, and the app ends the process itself (§9.8).
             view.update(cx, |view, _cx| {
                 view.set_quit_hook(Box::new(|request, _window, cx| {
-                    quit::begin_with(cx, request.engines);
-                    // Let the close go ahead: the quit sequence ends the process
-                    // itself (the quit mode is explicit).
-                    false
+                    quit::begin_with(cx, request.swarms);
+                    true
                 }));
             });
+            // A held ⌘Q: the window sees the key down and up — the menu item
+            // cannot — and this is what the hold runs when it is complete (§9.8).
+            let held = quit::watch_held_quit(cx, &view);
             let closing = cx.on_window_closed(|cx: &mut App, _id| quit::begin(cx));
             cx.update_global::<Shell, _>(|shell, _| {
                 shell.view = Some(view.downgrade());
                 shell.subscriptions.push(closing);
+                shell.subscriptions.push(held);
             });
 
             // A launch while we are already running does nothing but raise this.

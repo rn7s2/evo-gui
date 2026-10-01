@@ -9,7 +9,7 @@
 
 use std::time::{Duration, Instant};
 
-use evo_desktop::{begin_quit, is_quitting, take_engines, AppLog, Shell};
+use evo_desktop::{begin_quit, is_quitting, swarms, AppLog, Shell};
 use gpui_kit::{App, TestAppContext};
 use store::app_state::{AppState, Binaries, SCHEMA_VERSION};
 use store::model_cache::ModelCache;
@@ -47,10 +47,7 @@ fn quitting_starts_once_and_runs_to_the_end(cx: &mut TestAppContext) {
         assert!(!is_quitting(cx), "nothing has asked to quit yet");
         begin_quit(cx);
         assert!(is_quitting(cx), "the quit sequence has begun");
-        assert!(
-            take_engines(cx).is_empty(),
-            "no tab has a swarm in this test"
-        );
+        assert!(swarms(cx).is_empty(), "no tab has a swarm in this test");
         // Idempotent: a window close followed by Cmd-Q must not start a second.
         begin_quit(cx);
     });

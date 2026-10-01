@@ -38,7 +38,8 @@ gpui_kit::actions!(
         HideOthers,
         /// Show every hidden app.
         ShowAll,
-        /// Choose the quit sequence (window close and ⌘Q both end here).
+        /// Quit now: what the menu item does, with no hold in front of it (§9.8).
+        /// ⌘Q is [`workspace::HoldToQuit`] and ends in the same quit.
         QuitApp,
         /// Open a new empty tab (⌘T).
         NewTab,
@@ -56,8 +57,14 @@ pub fn install(cx: &mut App) {
     // The shortcuts the titles advertise. macOS draws a menu item's key
     // equivalent from these bindings, and they are what make ⌘T/⌘W/⌘M work when
     // the menu is not in play.
+    //
+    // ⌘Q is the exception, and it is bound to the *hold*: a menu item that carries
+    // a key equivalent is fired by AppKit before any window sees the key, and a
+    // hold is a key-down and a key-up. So the Quit item shows no shortcut of its
+    // own — it is the deliberate path, and it quits the moment it is chosen — and
+    // ⌘Q goes to the window, which is what can tell a tap from a hold (§9.8).
     cx.bind_keys([
-        KeyBinding::new("cmd-q", QuitApp, None),
+        KeyBinding::new("cmd-q", workspace::HoldToQuit, None),
         KeyBinding::new("cmd-t", NewTab, None),
         KeyBinding::new("cmd-w", CloseTab, None),
         KeyBinding::new("cmd-m", MinimizeWindow, None),
@@ -341,5 +348,38 @@ mod tests {
             })
             .collect();
         assert_eq!(names, ["New Tab", "Close Tab"]);
+    }
+
+    /// §9.8: ⌘Q is the *window's* key — a hold — and not the Quit item's. A menu
+    /// item's key equivalent is fired by AppKit before any window sees the key,
+    /// and a hold is both halves of the keystroke, so the item carries none: the
+    /// keymap is where the shortcut is, and this is what keeps it that way.
+    #[gpui_kit::test]
+    fn the_quit_item_has_no_key_of_its_own(cx: &mut gpui_kit::TestAppContext) {
+        cx.update(install);
+        let keymap = cx.update(|cx| cx.key_bindings());
+        let keymap = keymap.borrow();
+
+        // Exactly what the menu bar draws for the item: nothing.
+        let quit: Vec<String> = keymap
+            .bindings_for_action(&QuitApp)
+            .flat_map(|binding| binding.keystrokes())
+            .map(|keystroke| keystroke.to_string())
+            .collect();
+        assert!(
+            quit.is_empty(),
+            "the Quit item must show no shortcut, or macOS quits on the key-down: {quit:?}"
+        );
+
+        let hold: Vec<(String, bool)> = keymap
+            .bindings_for_action(&workspace::HoldToQuit)
+            .flat_map(|binding| binding.keystrokes())
+            .map(|keystroke| (keystroke.key().to_owned(), keystroke.modifiers().platform))
+            .collect();
+        assert_eq!(
+            hold,
+            [("q".to_owned(), true)],
+            "and ⌘Q is the window's own hold"
+        );
     }
 }

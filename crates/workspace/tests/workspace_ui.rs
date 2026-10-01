@@ -4,17 +4,22 @@
 //! ([`workspace::window_options`] plus [`workspace::WorkspaceView`]) in a headless
 //! GPUI test window and drives it the way a user would.
 
+use std::cell::Cell;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
-    base::Root, px, size, App, AppContext, Bounds, ElementId, Entity, InputEvent as _, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Point, TestAppContext, WindowBounds,
-    WindowHandle, WindowOptions,
+    base::Root, px, size, App, AppContext, Bounds, ElementId, Entity, InputEvent as _, KeyBinding,
+    KeyUpEvent, Keystroke, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Point,
+    TestAppContext, WindowBounds, WindowHandle, WindowOptions,
 };
 use session::LaunchPlan;
-use workspace::{Launch, LaunchEnv, TabContentEvent, TabState, WorkspaceView};
+use workspace::{
+    HoldToQuit, Launch, LaunchEnv, QuitHeld, TabContentEvent, TabState, WorkspaceView, QUIT_HOLD,
+};
 
 /// Opens the app's window with one empty tab, at a deterministic size.
 fn open_workspace(cx: &mut TestAppContext) -> (WindowHandle<Root>, Entity<WorkspaceView>) {
@@ -71,15 +76,23 @@ fn tab_id(view: &Entity<WorkspaceView>, index: usize, cx: &App) -> u64 {
 /// A tab with a process behind it has a thread of its own, and that thread wakes
 /// the view when it has something to say — a wake from another thread is what
 /// gpui's test scheduler calls non-deterministic, and it fires the instant the
-/// wake lands after the test's last frame. Joining the engine before the frames
-/// end is what makes a test that launches a tab (a binary that is not there
-/// reaches its folder without a process) deterministic.
+/// wake lands after the test's last frame. Waiting the engine out before the
+/// frames end is what makes a test that launches a tab (a binary that is not
+/// there reaches its folder without a process) deterministic.
+///
+/// The handle is shared — the page's own rows hold one — so this waits on what
+/// the tab handed back rather than joining it: `is_running` is false the moment
+/// the engine's thread is over, which is the join a test needs.
 macro_rules! retire_engine {
     ($tab:expr, $cx:expr) => {{
         let engine = $tab.update($cx, |tab, cx| tab.take_engine(cx));
         if let Some(engine) = engine {
             engine.shutdown();
-            engine.join();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while engine.is_running() && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            assert!(!engine.is_running(), "the engine's thread never ended");
         }
     }};
 }
@@ -1134,6 +1147,13 @@ fn closing_a_swarm_tab_freezes_it_until_the_swarm_exits(cx: &mut TestAppContext)
             "the tab stays while its swarm stops"
         );
         assert!(tab.read(cx).is_terminating());
+        // A quit asked for now waits for this engine too: the session it holds is
+        // still being written, even though the tab has stopped showing it (§9.8).
+        assert_eq!(
+            view.read(cx).swarms(cx).len(),
+            1,
+            "the window still has the terminating tab's engine"
+        );
         // A second × on a tab already on its way out changes nothing.
         view.update(cx, |view, cx| view.close_tab(id, window, cx));
         assert_eq!(view.read(cx).tabs().len(), 2);
@@ -1220,6 +1240,127 @@ fn resuming_a_session_open_in_another_tab_shows_that_tab(cx: &mut TestAppContext
             "the New Swarm page that asked starts nothing"
         );
         retire_engine!(running, cx);
+    })
+    .unwrap();
+}
+
+/// §9.8: ⌘Q is a hold, not a tap. The key going down puts the toast up and
+/// starts the clock; letting it go before the hold is over takes the toast away
+/// and quits nothing; holding it through is the quit.
+#[gpui_kit::test]
+fn a_tap_of_the_quit_key_does_not_quit_and_a_hold_does(cx: &mut TestAppContext) {
+    let (handle, view) = open_workspace(cx);
+    // What the app binds (menus.rs), and what the window root handles.
+    cx.update(|cx| cx.bind_keys([KeyBinding::new("cmd-q", HoldToQuit, None)]));
+    let quits = Rc::new(Cell::new(0u32));
+    // The subscription lives as long as the test: dropping it unsubscribes.
+    let _quit_events = cx.update(|cx| {
+        let quits = quits.clone();
+        cx.subscribe(&view, move |_, _: &QuitHeld, _| quits.set(quits.get() + 1))
+    });
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        // A tap: down and up in one breath.
+        window.press("cmd-q", cx);
+        window.render_frame(cx);
+        assert!(window.try_find("quit-hold-toast").is_none(), "no toast");
+        assert!(
+            !view.read(cx).is_holding_quit(),
+            "and nothing is still holding"
+        );
+    })
+    .unwrap();
+
+    // The tap is over, so the hold it was not would have run out by now.
+    cx.executor().advance_clock(QUIT_HOLD * 2);
+    cx.run_until_parked();
+    assert_eq!(quits.get(), 0, "a tap of ⌘Q is not a quit");
+
+    // Now hold it: down, and nothing else.
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.dispatch_keystroke(quit_key(), cx);
+        window.render_frame(cx);
+        assert!(view.read(cx).is_holding_quit(), "⌘Q is down");
+        assert_eq!(
+            window.find("quit-hold-toast").label(),
+            Some("Hold ⌘Q to Quit"),
+            "the window says what the key is waiting for"
+        );
+        // The key repeats while it is held: each repeat is answered by the hold
+        // that is already running, and none of them restarts its clock.
+        for _ in 0..3 {
+            window.dispatch_keystroke(quit_key(), cx);
+        }
+    })
+    .unwrap();
+
+    // Just past the hold, and only that far: the repeats did not put the quit
+    // off, and the tap before them did not make one.
+    cx.executor()
+        .advance_clock(QUIT_HOLD + Duration::from_millis(50));
+    cx.run_until_parked();
+    assert_eq!(quits.get(), 1, "a held ⌘Q is the quit");
+    cx.update(|cx| assert!(!view.read(cx).is_holding_quit()));
+
+    // The release after it is not a second one.
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.dispatch_event(
+            KeyUpEvent {
+                keystroke: quit_key(),
+            }
+            .to_platform_input(),
+            cx,
+        );
+        window.render_frame(cx);
+    })
+    .unwrap();
+    cx.executor().advance_clock(QUIT_HOLD * 2);
+    cx.run_until_parked();
+    assert_eq!(quits.get(), 1, "one hold, one quit");
+}
+
+/// ⌘Q as the window's keymap names it.
+fn quit_key() -> Keystroke {
+    Keystroke::parse("cmd-q").expect("a keystroke")
+}
+
+/// §9.8: the quitting screen covers the window, says how many swarms are being
+/// terminated — one is not several — and takes the keyboard off the page under
+/// it, which is a session on its way out.
+#[gpui_kit::test]
+fn the_quitting_screen_says_what_is_being_terminated(cx: &mut TestAppContext) {
+    let (handle, view) = open_workspace(cx);
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(
+            window.try_find("quit-screen").is_none(),
+            "nothing is quitting yet"
+        );
+
+        view.update(cx, |view, cx| view.show_quitting(2, cx));
+        window.render_frame(cx);
+        window.render_frame(cx);
+        assert!(window.find("quit-screen").visible());
+        assert_eq!(
+            window.find("quit-screen-label").label(),
+            Some("Terminating swarms."),
+            "two swarms are being terminated"
+        );
+        assert_eq!(
+            window.find("quit-screen").focused(),
+            Some(true),
+            "the keyboard is the screen's, not the page's"
+        );
+
+        view.update(cx, |view, cx| view.show_quitting(1, cx));
+        window.render_frame(cx);
+        assert_eq!(
+            window.find("quit-screen-label").label(),
+            Some("Terminating swarm."),
+            "one swarm is not several"
+        );
     })
     .unwrap();
 }

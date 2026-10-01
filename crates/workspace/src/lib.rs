@@ -17,8 +17,9 @@ mod tab_strip;
 
 pub use bridge::{Bridge, BridgeSender, Revision, Tagged, Worker};
 pub use chrome::{
-    bind_tab_keys, fit_to_work_area, initial_window_bounds, window_options, LauncherData,
-    SelectLastTab, SelectNextTab, SelectPreviousTab, SelectTab, WorkspaceView,
+    bind_tab_keys, fit_to_work_area, initial_window_bounds, window_options, HoldToQuit,
+    LauncherData, QuitHeld, SelectLastTab, SelectNextTab, SelectPreviousTab, SelectTab,
+    WorkspaceView, QUIT_HOLD,
 };
 pub use empty_tab::OpenSettings;
 pub use history::{placeholder_history, HistoryRow};

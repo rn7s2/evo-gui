@@ -1,17 +1,21 @@
 //! Quitting the app (§9.8, §3).
 //!
-//! Closing the window (or Cmd-Q) does not end the process: it starts *this*.
-//! `app.json` is written while the tabs are handed over, every tab's server is
-//! told to stop, and the process exits.
+//! Closing the window (or holding ⌘Q, or the menu's Quit) does not end the
+//! process: it starts *this*. `app.json` is written, every swarm is told to stop,
+//! and the window says so while they go — the process ends when the last engine's
+//! thread is over, or when the wait has gone on long enough to leave anyway.
 //!
-//! There is no ladder to walk and nothing to wait for. A tab's server stops when
-//! its engine goes: the engine holds the child's stdin (`--watch-stdin`), and
-//! EOF on that pipe is what tells the child its tab is gone — immediate, and
-//! immune to pid reuse (§8).
+//! A tab's server stops when its engine does: the engine holds the child's stdin
+//! (`--watch-stdin`), EOF on that pipe is what tells the child its tab is gone
+//! (§8), and the ladder that follows — EOF, a 10 s wait, SIGTERM, 5 s, SIGKILL —
+//! runs on the engine's own thread. Nothing here blocks on it: the engines are
+//! asked to stop, and then looked at on a timer.
 
 use std::path::PathBuf;
+use std::rc::Rc;
+use std::time::Duration;
 
-use gpui_kit::{App, WeakEntity};
+use gpui_kit::{App, Entity, Subscription, WeakEntity};
 
 use store::app_state::{AppState, Recent};
 use store::paths::TabId as StoredTabId;
@@ -19,23 +23,45 @@ use store::time;
 use tab_engine::EngineHandle;
 use workspace::WorkspaceView;
 
+use crate::logging::AppLog;
 use crate::Shell;
+
+/// How often the quit looks whether the swarms it stopped have gone (§9.8).
+const GOODBYE_POLL: Duration = Duration::from_millis(50);
+
+/// How long the quit waits for them before it leaves anyway: the ladder's own
+/// worst case is 10 s of patience plus 5 s for a server that has to be signalled,
+/// and this leaves room over it (§9.8).
+const GOODBYE_CAP: Duration = Duration::from_secs(20);
 
 /// Whether the quit sequence has begun.
 pub fn is_quitting(cx: &App) -> bool {
     cx.global::<Shell>().quitting
 }
 
-/// Start the quit sequence, taking the tabs' engines out of the workspace.
-/// Idempotent: the second caller (a close, then Cmd-Q) returns at once.
-pub fn begin(cx: &mut App) {
-    let engines = take_engines(cx);
-    begin_with(cx, engines);
+/// Wire a window's half of the hold: a ⌘Q held to its end ends in the same quit
+/// the menu item runs (§9.8).
+///
+/// The key cannot be the menu item's: a menu item's key equivalent is fired by
+/// AppKit before any window sees the key, and a hold is a key-down *and* a
+/// key-up. So ⌘Q is bound to the window's own action (`workspace::HoldToQuit`),
+/// the window works out whether it was held, and this is what it says when it
+/// was. Returns the subscription, which lives as long as the caller keeps it.
+pub fn watch_held_quit(cx: &mut App, view: &Entity<WorkspaceView>) -> Subscription {
+    cx.subscribe(view, |_, _: &workspace::QuitHeld, cx| begin(cx))
 }
 
-/// Start the quit sequence with engines the caller already took — the window's
-/// quit hook is handed them when the user closes the window (§9.8). Idempotent.
-pub fn begin_with(cx: &mut App, engines: Vec<EngineHandle>) {
+/// Start the quit sequence, with every swarm the window still has running.
+/// Idempotent: the second caller (a close, then ⌘Q) returns at once.
+pub fn begin(cx: &mut App) {
+    let swarms = swarms(cx);
+    begin_with(cx, swarms);
+}
+
+/// Start the quit sequence with swarms the caller already collected — the
+/// window's quit hook is handed them when the user closes the window (§9.8).
+/// Idempotent.
+pub fn begin_with(cx: &mut App, swarms: Vec<Rc<EngineHandle>>) {
     if is_quitting(cx) {
         return;
     }
@@ -46,14 +72,61 @@ pub fn begin_with(cx: &mut App, engines: Vec<EngineHandle>) {
 
     // The bounds and the recents are what the next launch needs, and they do not
     // depend on the servers stopping, so they are written first.
-    let tabs = engines.len();
+    let stopping = swarms.len();
     save_state(cx);
 
-    // Dropping a tab's engine closes the pipe its server is watching, which is
-    // the whole of "stop this tab" (§8): no request, no signal, no deadline.
-    drop(engines);
-    log.info(format!("stopped; exiting ({} tab(s))", tabs));
-    cx.defer(|cx| cx.quit());
+    // Every swarm is told to stop now: closing the child's stdin is the server's
+    // own signal (§8), and the ladder that follows runs on the engine's thread.
+    for swarm in &swarms {
+        swarm.shutdown();
+    }
+
+    // Nothing running: there is nothing to show and nothing to wait for.
+    if swarms.is_empty() {
+        log.info("stopped; exiting (0 swarms)");
+        cx.defer(|cx| cx.quit());
+        return;
+    }
+
+    log.info(format!("waiting for {stopping} swarm(s) to stop"));
+    // The window covers itself and says what is happening: the app is what ends
+    // the process, and it does not end under swarms that are still running.
+    if let Some(view) = view(cx) {
+        view.update(cx, |view, cx| view.show_quitting(stopping, cx));
+    }
+    watch(cx, swarms, stopping, log);
+}
+
+/// Wait for the swarms this quit stopped, and end the app when the last has gone
+/// (§9.8).
+///
+/// The wait is a timer, not a join: an engine's thread is what `is_running`
+/// reports on, so nothing here holds the UI thread and nothing here needs a
+/// handle to it. The cap is what keeps a swarm that will not die from keeping the
+/// app alive: the ladder has already been given its chance by then.
+fn watch(cx: &mut App, swarms: Vec<Rc<EngineHandle>>, stopping: usize, log: AppLog) {
+    cx.spawn(async move |cx| {
+        let deadline = cx.background_executor().now() + GOODBYE_CAP;
+        while running(&swarms) > 0 && cx.background_executor().now() < deadline {
+            cx.background_executor().timer(GOODBYE_POLL).await;
+        }
+        let left = running(&swarms);
+        if left > 0 {
+            log.warn(format!(
+                "{left} swarm(s) still running after {GOODBYE_CAP:?}; exiting anyway"
+            ));
+        }
+        drop(swarms);
+        log.info(format!("stopped; exiting ({stopping} swarm(s))"));
+        cx.update(|cx| cx.quit());
+    })
+    .detach();
+}
+
+/// How many of these swarms are still going: one whose engine's thread — its
+/// stop ladder included — has not ended yet (§9.8).
+fn running(swarms: &[Rc<EngineHandle>]) -> usize {
+    swarms.iter().filter(|swarm| swarm.is_running()).count()
 }
 
 /// One open tab, as `app.json` records it (§6).
@@ -201,16 +274,17 @@ fn save_state(cx: &mut App) {
     }
 }
 
-/// Every live tab's engine, taken out of the workspace.
+/// Every swarm the window still has running (§9.8): the live tabs' engines and
+/// the ones a closed tab is still waiting for.
 ///
 /// The tab list owns its engines; this is the one place the app asks for them.
-/// A tab that has already been handed over (the window's quit hook) has none
-/// left, so a later call returns nothing rather than a second copy.
-pub fn take_engines(cx: &mut App) -> Vec<EngineHandle> {
+/// The handles are shared — the window keeps its own — so asking twice is asking
+/// the same question, not taking a second copy.
+pub fn swarms(cx: &App) -> Vec<Rc<EngineHandle>> {
     let Some(view) = view(cx) else {
         return Vec::new();
     };
-    view.update(cx, |view, cx| view.take_engines(cx))
+    view.read(cx).swarms(cx)
 }
 
 /// The window's root view, while it exists.

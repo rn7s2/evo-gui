@@ -9,15 +9,19 @@
 
 use std::collections::{BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
-use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, TitleBar};
+use gpui_kit::component::spinner::Spinner;
+use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, Sizable as _, TitleBar};
 use gpui_kit::component::{ResizablePanelEvent, ResizableState};
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    point, px, size, App, Bounds, Context, Entity, FocusHandle, Global, IntoElement, KeyBinding,
-    Pixels, ScrollHandle, SharedString, Size, Subscription, Task, TestSupportExt as _, Window,
-    WindowBounds, WindowOptions,
+    div, point, px, size, AnyElement, App, Bounds, Context, Entity, EventEmitter, FocusHandle,
+    Global, IntoElement, KeyBinding, KeyUpEvent, ModifiersChangedEvent, Pixels, ScrollHandle,
+    SharedString, Size, Subscription, Task, TestSupportExt as _, Window, WindowBounds,
+    WindowOptions,
 };
 
 use serde_json::Value;
@@ -66,6 +70,24 @@ const WORKSPACE_CONTEXT: &str = "Workspace";
 /// How often a closed tab looks whether its swarm has exited yet.
 const TERMINATE_POLL: std::time::Duration = std::time::Duration::from_millis(100);
 
+/// How long ⌘Q has to be held before it means quit (§9.8).
+///
+/// A keyboard quit is a mistake away from a mouse click's worth of damage — six
+/// swarms and their transcripts — so the shortcut asks for a hold, the way a
+/// browser's does. The menu item is the deliberate path: it quits at once.
+pub const QUIT_HOLD: Duration = Duration::from_secs(1);
+
+/// The toast that says what a held ⌘Q is waiting for (§9.8).
+const HOLD_TOAST_TEXT: &str = "Hold ⌘Q to Quit";
+const HOLD_TOAST_ID: &str = "quit-hold-toast";
+
+/// What the window says while the app's swarms are being stopped (§9.8): one
+/// swarm, or several.
+const QUIT_SCREEN_ID: &str = "quit-screen";
+const QUIT_SCREEN_LABEL_ID: &str = "quit-screen-label";
+const QUIT_ONE_TEXT: &str = "Terminating swarm.";
+const QUIT_MANY_TEXT: &str = "Terminating swarms.";
+
 gpui_kit::actions!(
     workspace,
     [
@@ -75,8 +97,19 @@ gpui_kit::actions!(
         SelectPreviousTab,
         /// Show the last tab, however many are open (⌘9).
         SelectLastTab,
+        /// ⌘Q, held: quit once the hold is complete (§9.8).
+        HoldToQuit,
     ]
 );
+
+/// ⌘Q was held long enough: the window's half of the quit (§9.8).
+///
+/// The key has to be watched where the keys are — the window — because a *hold*
+/// is a key-down and a key-up, and the menu item's own action only ever fires
+/// once. The app subscribes to this and runs the quit sequence; a ⌘Q tapped, or
+/// released before the hold is over, never gets here.
+#[derive(Clone, Debug)]
+pub struct QuitHeld;
 
 /// Show the tab at this index (0-based) — what ⌘1…⌘8 are.
 ///
@@ -186,14 +219,14 @@ pub fn traffic_light_position() -> gpui_kit::Point<Pixels> {
 
 /// What the window is closed with (§9.8).
 ///
-/// The window has already taken every tab's engine out of its tabs and hands
-/// them over: stopping them is the hook's job.
+/// The window hands over every swarm it still has running — the live tabs' own
+/// and the ones a closed tab is still waiting for — and stopping them is the
+/// hook's job.
 ///
-/// The hook answers "am I taking this quit over?". `true` vetoes this close —
-/// the app is doing the work and closes the window itself
-/// (`window.remove_window()`) when it is done, and that close is allowed.
-/// `false` lets the window close now, which is what an app that has nothing
-/// left to do returns.
+/// The hook answers "am I taking this quit over?". `true` vetoes this close: the
+/// app keeps the window up as the screen its swarms' exit is shown on, and ends
+/// the process itself when they have gone. `false` lets the window close now,
+/// which is what an app that has nothing left to do returns.
 pub type QuitHook = Box<dyn Fn(QuitRequest, &mut Window, &mut App) -> bool + 'static>;
 
 /// Everything the app learns about models and past sessions, which every empty
@@ -238,8 +271,10 @@ pub struct TabRecord {
 
 /// What [`QuitHook`] is handed.
 pub struct QuitRequest {
-    /// Every tab's engine, taken out of the tabs, so the app owns stopping them.
-    pub engines: Vec<EngineHandle>,
+    /// Every swarm this window still has running, shared: the app stops them and
+    /// waits for them to go (§9.8). The tabs keep their own handles — the window
+    /// stays on screen, covered by the quitting screen, while they go.
+    pub swarms: Vec<Rc<EngineHandle>>,
 }
 
 /// The window's root view: the tab strip in the title bar, over the selected
@@ -294,6 +329,23 @@ pub struct WorkspaceView {
     /// The task waiting for every tab's swarm to stop; `Some` while the window is
     /// stopping them.
     stopping: Option<Task<()>>,
+    /// The swarms a closed tab is still waiting for (§7.1): one entry per tab on
+    /// the strip that is terminating. A quit waits for these too — the engine is
+    /// what holds the session, and the app may not exit under a swarm that is
+    /// still running (§9.8).
+    terminating: Vec<(TabId, Rc<EngineHandle>)>,
+    /// ⌘Q is down and the hold is still being timed (§9.8): the toast is up while
+    /// this is true. The flag is what a repeated key-down is answered with, so a
+    /// hold that is repeating under the key does not restart its own clock.
+    holding_quit: bool,
+    /// The task timing that hold, held so the timer outlives the keystroke.
+    quit_hold: Option<Task<()>>,
+    /// The app is quitting and this many swarms are still stopping (§9.8): the
+    /// window covers itself with the quitting screen until the last one is gone.
+    quitting_swarms: Option<usize>,
+    /// Where the keyboard goes while that screen is up: the page under it belongs
+    /// to a session on its way out and must not take a keystroke (§9.8).
+    quit_focus: FocusHandle,
     /// True once nothing is left to wait for and the window may close.
     may_close: bool,
     /// The tab page's side columns (§7.3): one pair of widths for the whole
@@ -348,6 +400,11 @@ impl WorkspaceView {
             window_title: None,
             close_hook_installed: false,
             stopping: None,
+            terminating: Vec::new(),
+            holding_quit: false,
+            quit_hold: None,
+            quitting_swarms: None,
+            quit_focus: cx.focus_handle(),
             may_close: false,
             strip_reveal: false,
             strip_content: None,
@@ -458,16 +515,21 @@ impl WorkspaceView {
         self.window_title.as_deref().unwrap_or(APP_NAME)
     }
 
-    /// Take every tab's engine, so the caller can stop them all (§9.8).
+    /// Every swarm this window still has running (§9.8): a live tab's own engine,
+    /// and the engines of the tabs a close is still waiting for.
     ///
-    /// The tabs keep what they show; they stop watching and stop typing to their
-    /// servers. Dropping a handle closes that child's stdin, which is the server's
-    /// own signal to stop, so the caller has nothing else to run.
-    pub fn take_engines(&mut self, cx: &mut Context<Self>) -> Vec<EngineHandle> {
-        self.tabs
+    /// The handles are shared — a tab's page holds its own, and a terminating tab
+    /// has handed its to the close that is watching it — so a caller stops them
+    /// where they are ([`EngineHandle::shutdown`] takes `&self`) rather than taking
+    /// them away from a window that is still on screen.
+    pub fn swarms(&self, cx: &App) -> Vec<Rc<EngineHandle>> {
+        let mut swarms: Vec<Rc<EngineHandle>> = self
+            .tabs
             .iter()
-            .filter_map(|tab| tab.update(cx, |tab, cx| tab.take_engine(cx)))
-            .collect()
+            .filter_map(|tab| tab.read(cx).engine())
+            .collect();
+        swarms.extend(self.terminating.iter().map(|(_, engine)| engine.clone()));
+        swarms
     }
 
     /// What the app does when the window is closed (§9.8). Without a hook the
@@ -866,6 +928,10 @@ impl WorkspaceView {
             self.remove_tab(id, window, cx);
             return;
         };
+        // The window keeps its own hold on the engine while the tab is on its way
+        // out: a quit asks [`WorkspaceView::swarms`] what is still running, and this
+        // one is still running after its tab has stopped showing it (§9.8).
+        self.terminating.push((id, engine.clone()));
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
             // The engine thread ends after the server's own ladder has run; its
@@ -888,6 +954,9 @@ impl WorkspaceView {
         let was_shown = index == self.selected;
         let tab = self.tabs.remove(index);
         self.subscriptions.retain(|(closed, _)| *closed != id);
+        // The engine this close was watching is not the window's to hold any more:
+        // the tab that was running it is gone, and so is the watch.
+        self.terminating.retain(|(closing, _)| *closing != id);
         if self.close_hovered == Some(id) {
             // The button the pointer was on went with the tab.
             self.close_hovered = None;
@@ -907,6 +976,87 @@ impl WorkspaceView {
             // took its place is what is being looked at now.
             self.focus_selected(window, cx);
         }
+        cx.notify();
+    }
+
+    /// The app is quitting: cover the window with the quitting screen while the
+    /// swarms it named are stopped (§9.8).
+    ///
+    /// The app owns the wait and the exit — this is the window's half, and it
+    /// stays up (and takes every click and keystroke) until the process ends.
+    /// Called once per quit: a second call with the same count is nothing new.
+    pub fn show_quitting(&mut self, swarms: usize, cx: &mut Context<Self>) {
+        if self.quitting_swarms == Some(swarms) {
+            return;
+        }
+        self.quitting_swarms = Some(swarms);
+        cx.notify();
+    }
+
+    /// How many swarms the quitting screen says are being terminated, while it is
+    /// up; `None` when the app is not quitting (§9.8).
+    pub fn quitting_swarms(&self) -> Option<usize> {
+        self.quitting_swarms
+    }
+
+    /// Whether ⌘Q is down and its hold is still being timed: what the toast says
+    /// (§9.8).
+    pub fn is_holding_quit(&self) -> bool {
+        self.holding_quit
+    }
+
+    /// ⌘Q went down (§9.8): put the toast up and start timing the hold.
+    ///
+    /// The key repeats while it is held, and every repeat is answered by the hold
+    /// that is already being timed — restarting the clock on each repeat is
+    /// exactly what a hold must not do.
+    fn on_hold_to_quit(&mut self, _: &HoldToQuit, window: &mut Window, cx: &mut Context<Self>) {
+        if self.holding_quit || self.quitting_swarms.is_some() {
+            return;
+        }
+        self.holding_quit = true;
+        self.quit_hold = Some(cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(QUIT_HOLD).await;
+            let _ = this.update_in(cx, |view, _window, cx| view.hold_ran_out(cx));
+        }));
+        cx.notify();
+    }
+
+    /// The hold ran out: if ⌘Q is still down, this is the quit (§9.8).
+    fn hold_ran_out(&mut self, cx: &mut Context<Self>) {
+        if !self.holding_quit {
+            return;
+        }
+        self.holding_quit = false;
+        cx.notify();
+        cx.emit(QuitHeld);
+    }
+
+    /// Any key came up: a hold in progress is over, and so is the toast (§9.8).
+    /// The other half of the pair — ⌘ released with Q still down — arrives as a
+    /// modifier change, below.
+    fn on_key_up(&mut self, _: &KeyUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        self.release_quit_hold(cx);
+    }
+
+    /// The modifiers changed: ⌘ up ends a hold that was waiting on it (§9.8).
+    fn on_modifiers_changed(
+        &mut self,
+        event: &ModifiersChangedEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !event.modifiers.platform {
+            self.release_quit_hold(cx);
+        }
+    }
+
+    /// Let a hold go: nothing quits, and the toast comes down (§9.8).
+    fn release_quit_hold(&mut self, cx: &mut Context<Self>) {
+        if !self.holding_quit {
+            return;
+        }
+        self.holding_quit = false;
         cx.notify();
     }
 
@@ -1052,23 +1202,26 @@ impl WorkspaceView {
             return false;
         }
 
-        let engines = self.take_engines(cx);
+        let swarms = self.swarms(cx);
         if let Some(hook) = self.quit_hook.as_ref() {
             // `true` means the app is closing the window itself, so this close is
-            // vetoed; `false` lets it through.
-            let app_took_over = hook(QuitRequest { engines }, window, cx);
+            // vetoed; `false` lets it through. The app vetoes it while its swarms
+            // stop: the window is the screen that wait is shown on (§9.8).
+            let app_took_over = hook(QuitRequest { swarms }, window, cx);
             self.may_close = !app_took_over;
             return self.may_close;
         }
 
-        // Dropping an engine closes the child's stdin, which is the server's own
-        // signal to stop; the ladder itself runs on the engine's thread, so the
-        // window can close now.
-        drop(engines);
+        // The child's stdin closes when the last handle to it goes; the ladder
+        // itself runs on the engine's thread, so the window can close now. The
+        // tabs are dropped with the window, and their own handles with them.
+        drop(swarms);
         self.stopping = None;
         true
     }
 }
+
+impl EventEmitter<QuitHeld> for WorkspaceView {}
 
 impl Render for WorkspaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1086,6 +1239,33 @@ impl Render for WorkspaceView {
             self.ask_reveal(cx);
         }
         self.reveal_selected_tab(cx);
+        // What the window is showing: the strip over the shown tab's page, under
+        // whichever layer is up — the hold toast while ⌘Q is held, or the quitting
+        // screen while the app's swarms stop (§9.8).
+        let page = v_flex()
+            .size_full()
+            .child(crate::tab_strip::strip(self, window, cx))
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .child(self.selected_tab().clone()),
+            )
+            .into_any_element();
+        let layer = match self.quitting_swarms {
+            Some(swarms) => {
+                // The keyboard leaves the page with the screen: nothing under it
+                // is still taking keystrokes (§9.8). One frame is what this takes
+                // — the screen is focused before it is drawn, and focusing it
+                // again is a no-op.
+                if !self.quit_focus.is_focused(window) {
+                    window.focus(&self.quit_focus, cx);
+                }
+                Some(self.quit_screen(swarms, cx))
+            }
+            None if self.holding_quit => Some(hold_toast(cx)),
+            None => None,
+        };
         v_flex()
             .id("workspace")
             .test_support()
@@ -1102,16 +1282,99 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::on_select_previous_tab))
             .on_action(cx.listener(Self::on_select_last_tab))
             .on_action(cx.listener(Self::on_select_tab))
+            // ⌘Q is the one action whose *release* matters (§9.8): the hold is
+            // timed from the key-down the keymap sends here, and it is over the
+            // moment either the key or the modifier comes up.
+            .on_action(cx.listener(Self::on_hold_to_quit))
+            .on_key_up(cx.listener(Self::on_key_up))
+            .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
+            .relative()
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .child(crate::tab_strip::strip(self, window, cx))
+            .child(page)
+            .when_some(layer, |this, layer| this.child(layer))
+    }
+}
+
+/// The layer a held ⌘Q puts up: a small card in the middle of the window saying
+/// what the key is waiting for (§9.8).
+///
+/// It takes no clicks: it is a hint about a key, not a dialog, and the window
+/// under it is still the window — the hold is the decision, and nothing else is
+/// being asked.
+fn hold_toast(cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    // Near the top, under the strip, where nothing of the page's own sits (the
+    // empty transcript's note is at the middle): a floating hint, as Chrome's is.
+    div()
+        .absolute()
+        .top(px(store::design::STRIP_HEIGHT + 72.))
+        .left_0()
+        .right_0()
+        .flex()
+        .justify_center()
+        .child(
+            div()
+                .id(HOLD_TOAST_ID)
+                .test_support()
+                .px(px(16.))
+                .py(px(10.))
+                .rounded(px(10.))
+                .bg(theme.popover)
+                .border_1()
+                .border_color(theme.border)
+                .shadow_lg()
+                .text_size(px(13.))
+                .text_color(theme.popover_foreground)
+                .aria_label(HOLD_TOAST_TEXT)
+                .child(HOLD_TOAST_TEXT),
+        )
+        .into_any_element()
+}
+
+/// The layer the app's quit puts up: what is happening, over everything, until
+/// the process ends (§9.8).
+///
+/// It takes every click and keystroke — the page under it belongs to a session
+/// on its way out, and nothing there should still answer — and it says how many
+/// swarms are being terminated, since that is the thing being waited for. The
+/// inside of a [`WorkspaceView`].
+impl WorkspaceView {
+    fn quit_screen(&self, swarms: usize, cx: &App) -> AnyElement {
+        let theme = cx.theme();
+        div()
+            .id(QUIT_SCREEN_ID)
+            .test_support()
+            .track_focus(&self.quit_focus)
+            .absolute()
+            .inset_0()
+            .occlude()
+            .bg(theme.background.opacity(0.92))
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_2()
+            .child(Spinner::new().small().color(theme.muted_foreground))
             .child(
-                h_flex()
-                    .flex_1()
-                    .min_h_0()
-                    .child(self.selected_tab().clone()),
+                div()
+                    .id(QUIT_SCREEN_LABEL_ID)
+                    .test_support()
+                    .text_size(px(13.))
+                    .text_color(theme.foreground)
+                    .aria_label(if swarms == 1 {
+                        QUIT_ONE_TEXT
+                    } else {
+                        QUIT_MANY_TEXT
+                    })
+                    .child(if swarms == 1 {
+                        QUIT_ONE_TEXT
+                    } else {
+                        QUIT_MANY_TEXT
+                    }),
             )
+            .into_any_element()
     }
 }
 

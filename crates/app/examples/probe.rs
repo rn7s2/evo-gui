@@ -28,6 +28,8 @@
 //!                                 own handler the way a reader's does
 //! down X Y | up X Y               press / release the left button there
 //! press KEY | input TEXT          keyboard
+//! keydown KEY | keyup KEY         one half of a keystroke: a *held* key is
+//!                                 keydown, a pump past the hold, keyup (§9.8)
 //! focus                           the shown tab's primary control (its composer)
 //! pump MS                         let the app run
 //! find ID                         print the element's bounds
@@ -41,6 +43,9 @@
 //!                                 transition, frame by frame
 //! launch                          launch the shown tab in the world's folder
 //! wait-running                    wait for the shown tab to be running
+//! quit                            ask the app to quit, the menu item's way
+//! quit-wait [SECS]                wait for every swarm the quit stopped to be gone
+//!                                 (25s without a number), then check the screen
 //! activate                        bring the window to the front (the kit paints a
 //!                                 selection, and blinks the caret, only into an
 //!                                 active window, which a headless one is not)
@@ -57,8 +62,9 @@ use gpui_kit::component::theme::ThemeMode;
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
     point, px, size, AnyWindowHandle, AppContext as _, BorrowAppContext as _, Bounds, ElementId,
-    Entity, HeadlessAppContext, InputEvent as _, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Point, ScrollDelta, ScrollWheelEvent, TouchPhase, WindowBounds, WindowOptions,
+    Entity, HeadlessAppContext, InputEvent as _, KeyUpEvent, Keystroke, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Point, ScrollDelta, ScrollWheelEvent, TouchPhase,
+    WindowBounds, WindowOptions,
 };
 use store::app_state::{AppState, Binaries, Theme};
 use store::model_cache::ModelCache;
@@ -135,7 +141,7 @@ fn run(world: &str, out: &Path, script: &str) -> Result<(), Error> {
     );
     cx.update(gpui_kit::init);
     cx.allow_parking();
-    let (window, view) = open(&mut cx, &root, bins)?;
+    let (window, view, _held) = open(&mut cx, &root, bins)?;
     cx.update(evo_desktop::start_background_loads);
     pump(&mut cx, Duration::from_secs(4));
 
@@ -347,6 +353,22 @@ fn run(world: &str, out: &Path, script: &str) -> Result<(), Error> {
                 cx.update_window(window, |_, window, cx| window.press(rest, cx))?;
                 pump(&mut cx, Duration::from_millis(200));
             }
+            // A key held down and let go later: what a *hold* is, and what
+            // `press` (down and up in one breath) is not (§9.8).
+            "keydown" => {
+                let key = Keystroke::parse(rest)?;
+                cx.update_window(window, |_, window, cx| {
+                    window.dispatch_keystroke(key, cx);
+                })?;
+                pump(&mut cx, Duration::from_millis(200));
+            }
+            "keyup" => {
+                let key = Keystroke::parse(rest)?;
+                cx.update_window(window, |_, window, cx| {
+                    window.dispatch_event(KeyUpEvent { keystroke: key }.to_platform_input(), cx);
+                })?;
+                pump(&mut cx, Duration::from_millis(200));
+            }
             "input" => {
                 cx.update_window(window, |_, window, cx| window.input(rest, cx))?;
                 pump(&mut cx, Duration::from_millis(200));
@@ -493,13 +515,53 @@ fn run(world: &str, out: &Path, script: &str) -> Result<(), Error> {
                     pump(&mut cx, Duration::from_millis(100));
                 }
             }
+            "quit" => {
+                // What the menu item and a held ⌘Q both do: the app's own quit
+                // sequence, which covers the window while the swarms stop (§9.8).
+                cx.update(evo_desktop::begin_quit);
+                pump(&mut cx, Duration::from_millis(200));
+                let stopping = cx.update(|cx| view.read(cx).quitting_swarms());
+                println!("[probe]   the quit is up for {stopping:?}");
+            }
+            "quit-wait" => {
+                // Wait for every swarm the quit stopped to be gone — the engine's
+                // thread over, which is what the process ends on (§9.8).
+                let how_long = nums()
+                    .first()
+                    .map(|secs| Duration::from_secs_f32(*secs))
+                    .unwrap_or(Duration::from_secs(25));
+                let started = Instant::now();
+                let mut left = 0;
+                while started.elapsed() < how_long {
+                    left = cx.update(|cx| {
+                        view.read(cx)
+                            .swarms(cx)
+                            .iter()
+                            .filter(|swarm| swarm.is_running())
+                            .count()
+                    });
+                    if left == 0 {
+                        break;
+                    }
+                    pump(&mut cx, Duration::from_millis(50));
+                }
+                println!(
+                    "[probe]   quit: {left} swarm(s) still running after {:?}",
+                    started.elapsed()
+                );
+                if left > 0 {
+                    return Err("a swarm outlived the quit".into());
+                }
+            }
             other => return Err(format!("line {}: unknown step {other:?}", n + 1).into()),
         }
     }
 
-    let engines = cx.update(|cx| view.update(cx, |view, cx| view.take_engines(cx)));
-    for engine in engines {
-        engine.shutdown();
+    // Every swarm the window still has running is stopped the app's way: the pipe
+    // closes, and the engine thread runs the rest of the ladder in its own time.
+    let swarms = cx.update(|cx| view.read(cx).swarms(cx));
+    for swarm in swarms {
+        swarm.shutdown();
     }
     pump(&mut cx, Duration::from_secs(1));
     drop(fixture);
@@ -519,9 +581,16 @@ fn open(
     cx: &mut HeadlessAppContext,
     root: &AppRoot,
     bins: Binaries,
-) -> Result<(AnyWindowHandle, Entity<WorkspaceView>), Error> {
+) -> Result<
+    (
+        AnyWindowHandle,
+        Entity<WorkspaceView>,
+        gpui_kit::Subscription,
+    ),
+    Error,
+> {
     let root = root.clone();
-    let (window, view) = cx.update(move |cx| {
+    let (window, view, held) = cx.update(move |cx| {
         let log = AppLog::open(&root);
         let loaded = AppState::load(&root);
         let state = AppState {
@@ -550,9 +619,14 @@ fn open(
             },
         )?;
         cx.update_global::<Shell, _>(|shell, _| shell.view = Some(view.downgrade()));
-        Ok::<_, Error>((window, view))
+        // The app's own wiring for a held ⌘Q, so a script's key reaches the same
+        // quit the real app runs (§9.8).
+        let held = cx.subscribe(&view, |_, _: &workspace::QuitHeld, cx| {
+            evo_desktop::begin_quit(cx)
+        });
+        Ok::<_, Error>((window, view, held))
     })?;
-    Ok((window, view))
+    Ok((window, view, held))
 }
 
 fn move_to(

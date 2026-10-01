@@ -775,16 +775,27 @@ impl TabContent {
         }
     }
 
+    /// The engine behind this tab's swarm, while it has one — shared, because the
+    /// page's own rows hold a handle to it too (§9.8).
+    ///
+    /// This is what a quit stops and waits for: [`EngineHandle::shutdown`] takes
+    /// `&self`, so the window can watch a swarm out without taking the tab's own
+    /// view of it away.
+    pub fn engine(&self) -> Option<Rc<EngineHandle>> {
+        self.live.as_ref().map(|live| live.engine.clone())
+    }
+
     /// Take the engine out of the tab, so its swarm can be stopped somewhere that
     /// is not the UI thread (§9.8). The tab keeps what it shows; it stops
     /// watching and stops typing to the server.
-    pub fn take_engine(&mut self, cx: &mut Context<Self>) -> Option<EngineHandle> {
+    ///
+    /// The tab hands back the *shared* handle: a row that asked for a read holds
+    /// one of its own, and the last of them is what closes the child's stdin (the
+    /// server's own signal to stop) when the tab goes.
+    pub fn take_engine(&mut self, cx: &mut Context<Self>) -> Option<Rc<EngineHandle>> {
         let live = self.live.take()?;
         cx.notify();
-        // The handle is shared with whatever row asked for a read; when a view still
-        // holds one, dropping the last reference is what closes the child's stdin —
-        // the server's own signal to stop — so the tab has nothing more to hand over.
-        Rc::try_unwrap(live.engine).ok()
+        Some(live.engine)
     }
 
     /// Take a started swarm: keep its engine, start the pump, and show the boot

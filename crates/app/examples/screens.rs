@@ -185,10 +185,10 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
 /// Every tab's server gets the app's own stop: the pipe closes, and the engine
 /// thread runs the rest of the ladder in its own time.
 fn stop_tabs(cx: &mut HeadlessAppContext, view: &Entity<WorkspaceView>) {
-    let engines = cx.update(|cx| view.update(cx, |view, cx| view.take_engines(cx)));
-    println!("[capture] stopping {} tab(s)", engines.len());
-    for engine in engines {
-        engine.shutdown();
+    let swarms = cx.update(|cx| view.read(cx).swarms(cx));
+    println!("[capture] stopping {} tab(s)", swarms.len());
+    for swarm in swarms {
+        swarm.shutdown();
     }
     pump(cx, Duration::from_secs(2));
 }
