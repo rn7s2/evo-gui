@@ -334,6 +334,45 @@ text a draft like any other. **⌘C** with nothing selected in the input copies 
 window's own selection instead, so a passage picked in the transcript can be
 copied while the caret sits in the input.
 
+**A word completes while it is typed**, as it does in the TUI and in an editor. A
+word that starts with `/` — anywhere in the message, not only at its start —
+raises a list of the commands `GET /catalog` lists, drawn over the word's own
+line, with every row's label beginning where the word does and every description
+whole (the list is as wide as its widest row, and only past 560 px does a
+description give). The characters the word matched are drawn heavier, so it is
+clear why a row is there: `/re` offers `/reload` as a prefix match and `/lore` as
+a subsequence one. `↑`/`↓` walk the rows and wrap, **Tab** or **Enter** takes the
+highlighted one — **Enter takes the row instead of sending the message** — and
+**Esc** puts the list away until the word changes. A word started near the right
+edge of the box pulls the list back inside the window rather than off it. A command is taken with a space after it
+when it is at the message's own start, so its arguments can be typed straight on.
+Typing a second `/` in the word ends it: `/usr/local/bin` is a path, and offers
+nothing. The list is the server's registry, so extension commands and skills
+(`skill:lark-doc`, say) are in it exactly as evo has them, and a command evo drops
+stops being offered.
+
+Inside `/eval <form>` the word completes against the **live image** instead:
+`/eval (evo.eval:` lists that package's own names, each with what it is
+(`function`, `variable`, `macro`), asked of the image itself when the caret rests
+on the word — the running image is the only thing that knows what its own packages
+hold, and (`docs/api-gaps.md`) the `eval` op is the only way to ask it. Taking a
+row replaces just the token, leaving the rest of the form — closing parens and all
+— where it is. A list is never drawn when there is nothing to choose: one
+candidate that is the word already typed would only show the reader their own
+input back, and would capture the `↑`/`↓` the history browses with. Recalled
+history raises nothing either, until it is edited.
+
+A message that **is** one slash command from its start goes to the command layer
+(`command.run`), not to the coordinator — `/help`, `/compact`, `/eval (+ 1 2)`, an
+extension's own command — which is exactly what the TUI does with the same line,
+and the server says `not found` for a word it does not know. A message that merely
+mentions one (`run /help now`) is the reader's words, as is one that begins `//`.
+The command's own output (`/eval`'s `⇒ 3`, a command's notes) arrives as the
+session's `notice` items in the transcript, which is where the TUI prints it too.
+A command that hands a message back — `/rewind`, `/tree <id>` on a user message —
+puts that message in the input, as the TUI does: it is the draft again, ready to be
+edited and resubmitted.
+
 Sending while the agent is working is normal: the text is queued and lands at the
 running turn's next boundary, exactly as typing into the TUI does — the queued
 row is in the transcript, cancellable, until then. The draft is cleared only when

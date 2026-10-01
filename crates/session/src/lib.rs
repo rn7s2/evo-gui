@@ -36,6 +36,7 @@ mod launcher;
 mod op;
 mod state;
 mod swarm;
+mod symbols;
 mod tab;
 mod topic;
 
@@ -49,9 +50,9 @@ pub use item::{
     Recovery, RunOutcome, ToolItem, ToolResult, ToolStatus, Usage, UserItem, UserStatus,
 };
 pub use launcher::{
-    history_rows, home_short, model_options, relative_time, thinking_levels, HistoryEntry,
-    HistoryRow, HistorySource, LaunchPlan, Launcher, ModelOption, Role, DEFAULT_WORKERS,
-    WORKERS_MAX, WORKERS_MIN,
+    command_options, history_rows, home_short, model_options, relative_time, thinking_levels,
+    CommandOption, HistoryEntry, HistoryRow, HistorySource, LaunchPlan, Launcher, ModelOption,
+    Role, DEFAULT_WORKERS, WORKERS_MAX, WORKERS_MIN,
 };
 pub use op::{topic_of, LoreScope, Op, OpRequest, OpSink, Queue, Scope};
 pub use state::{
@@ -59,6 +60,7 @@ pub use state::{
     Segment, SessionInfo, Side, Status, SwarmLane, SwarmState, Todo, TodoStatus, TopicState,
 };
 pub use swarm::{lane_list, LaneList, LaneRow, LaneStatus, SwarmInfo};
+pub use symbols::{symbol_options, symbol_request, SymbolOption};
 pub use tab::{AgentKey, Changes, ItemChange, StreamStatus, TabModel, TopicChanges};
 pub use topic::Topic;
 

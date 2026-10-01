@@ -245,7 +245,38 @@ the agent header are the same height on the same surface, so the rule under them
      and scrolling inside itself past that. Enter sends, Shift+Enter is a newline, `Esc` interrupts
      the coordinator's turn, and `↑`/`↓` walk the prompts this tab has sent while the input is
      empty.
-  5. the **foot row**: the agent's status line as chips, then the one action button.
+  5. the **completion popup**: a word being typed is completed inline, as an editor does — the
+     commands `GET /catalog` lists for a `/word`, and the *running image's* own symbols for a
+     token inside `/eval `, which only the image can enumerate (`docs/api-gaps.md`: the `eval`
+     op is the only thing to ask). It is a drawer's item list floating at the word: the sidebar
+     surface, one hairline, a 10 px radius, the box's own shadow, standing over the *word's* own
+     line — not the caret's end — a small gap off it, and under it when the window has no room
+     above (it is a deferred draw, so neither the box nor the page can clip it). Every row's
+     label starts at the x the typed word does, the popup being placed by that column rather
+     than by its own edge; a word near the window's right edge pulls the whole list back inside
+     it, which is the one case the labels leave the word. It is as wide as its widest row —
+     measured over every candidate of the list, not only the rows it shows, so ↑/↓ never
+     resizes it — between 240 and 560 px and never wider than the window, and past that ceiling
+     a description is what truncates. Up to eight rows, the list scrolling inside its own fold
+     and a dim `… n/m` counter under it while there are more. A row reads `label` then the
+     description dim, in the drawer's own shape, with the characters the word matched drawn
+     heavier — the prefix a name begins with, or the positions a fuzzy match took, so `/re`
+     offering `/lore` says which two letters it found; the highlighted row wears the drawer
+     item's chosen fill. The keys are the list's while it is
+     up: `↑`/`↓` walk the rows and wrap, `Tab`/`Enter` take the highlighted one — **Enter takes
+     the row and does not send** — and `Esc` dismisses until the word changes (so it is never
+     the coordinator's interrupt). A `/word` completes anywhere in the message, and a second
+     `/` ends the word, so `/usr/local/bin` offers nothing; the detection and the matching are
+     `crates/composer/src/complete.rs`. Accepting a command replaces the whole `/word` and opens
+     its argument with a space when it stands at the message's start; accepting a symbol replaces the token
+     under the caret alone, leaving the rest of the form where it is. A list whose only
+     candidate is the word already typed is never drawn (it would show the reader their own
+     input back and capture the `↑`/`↓` the history browses with), and neither is one raised
+     by recalled history. A message that **is** one slash command from its start is the
+     command layer's — `command.run`, `/eval` and every extension command included — and the
+     server's `not_found` is what says a word is not one; a message that merely mentions one
+     is the reader's words.
+  6. the **foot row**: the agent's status line as chips, then the one action button.
 - **The chips** are the topic's **`segments`**, one chip per segment and in the order the server
   publishes them — the same core registry (`evo:define-status-segment`) the TUI's status line uses,
   so the two cannot drift apart, and an extension's own segment (cache-stats, say) arrives the same
@@ -390,9 +421,11 @@ on-disk layout, the offline CLI reads, the launch argv).
 
 ## 13. Non-goals (v1)
 
-Rich-text composer, image paste, any command surface, lane control endpoints, remote/non-loopback
-servers, TLS, multiple windows, Windows/Linux packaging, an embedded browser, editing evo's
-journals, a settings UI beyond binary paths and theme.
+Rich-text composer, image paste, a command *palette* (a `/word` completes inline and runs —
+§7.3 — but there is no list of every command to browse, no argument hinting, and no surface
+for a command's own `choices`), lane control endpoints, remote/non-loopback servers, TLS,
+multiple windows, Windows/Linux packaging, an embedded browser, editing evo's journals, a
+settings UI beyond binary paths and theme.
 
 ## 14. Settled decisions
 

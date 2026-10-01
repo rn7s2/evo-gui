@@ -304,6 +304,44 @@ pub fn thinking_levels(catalog: &Value) -> Vec<String> {
     }
 }
 
+/// One command the registry lists: what a `/word` completes against, and the
+/// description the popup shows beside it.
+///
+/// The registry is the server's (`/catalog.commands`, §5.6) — the coordinator's
+/// dispatch table, extension commands and all. Nothing here is hard-coded: a
+/// command this client has never heard of completes like any other, and a
+/// command evo dropped stops completing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommandOption {
+    /// The word, without its slash.
+    pub name: String,
+    /// The line the registry gives it, in the registry's own words.
+    pub description: String,
+}
+
+/// The commands `catalog.commands` lists, in the server's own order. A body with
+/// no such list offers none.
+///
+/// An entry's `args_hint` is deliberately not carried: evo registers every command
+/// without one (`"args_hint": null` from a real `evo-agent catalog --json`), so a row
+/// that drew it would draw nothing — and a client that invented argument syntax would
+/// be writing the one thing the registry owns.
+pub fn command_options(catalog: &Value) -> Vec<CommandOption> {
+    let Some(commands) = catalog.get("commands").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    commands
+        .iter()
+        .filter_map(|command| {
+            let name = string(command, "name")?;
+            Some(CommandOption {
+                name,
+                description: string(command, "description").unwrap_or_default(),
+            })
+        })
+        .collect()
+}
+
 /// One model's detail line: as much of the design's as the catalog can fill — the context
 /// window, then the modalities — `200k ctx · vision`.
 ///

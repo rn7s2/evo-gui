@@ -2,16 +2,21 @@
 //!
 //! The screens in `docs/screens.md` are the app's states: a tab, a lane at work,
 //! a report arriving. They never fold out what the box holds of its own, which is
-//! where the design puts the goal's objective, the todo list and the model drawer
-//! — so this takes those pictures, from the composer the app builds, in both themes.
+//! where the design puts the goal's objective, the todo list, the model drawer and
+//! the completion popup — so this takes those pictures, from the composer the app
+//! builds, in both themes.
 //!
 //! ```sh
 //! cargo run -p composer --example composer_states -- --capture /tmp/composer
 //! ```
 //!
 //! Nothing here pokes a widget's fields: the states are the topic's own
-//! (`set_agent` / `set_catalog` / `set_swarm_busy`) and the fold-outs are opened
-//! by clicking the same rows and chips a person clicks.
+//! (`set_agent` / `set_catalog` / `set_swarm_busy`), the fold-outs are opened by
+//! clicking the same rows and chips a person clicks, and a word is completed by
+//! putting the caret in the input and typing — the popup is raised the way a reader
+//! raises it. The one thing a picture cannot do for itself is the image's answer
+//! about a symbol, so the `/eval` state hands the popup the rows a real
+//! `evo.eval:completions-for` returns for the token it is showing.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -26,7 +31,7 @@ use gpui_kit::{
 };
 use session::TopicState;
 
-use composer::{Composer, ModelRow};
+use composer::{Candidate, Composer, ModelRow};
 
 /// The window the pictures are taken in: one conversation column, the width the app
 /// gives it, so the box is docked on the reading measure it is drawn on.
@@ -109,6 +114,86 @@ fn many_models() -> Vec<ModelRow> {
         .collect()
 }
 
+/// The commands the registry lists, as `GET /catalog` would: evo's own command
+/// table, its own words, in its own order — what a `/word` completes against.
+fn commands() -> Vec<Candidate> {
+    [
+        ("compact", "compact the context now"),
+        ("eval", "evaluate one sexpr in the live image"),
+        ("export", "export the transcript as markdown"),
+        ("fork", "fork this session at the current leaf"),
+        ("global-lore", "show lore, or add user-scope guidance"),
+        (
+            "global-memory",
+            "show global user memory or ask the agent to refine it",
+        ),
+        ("goal", "show, create, refine, pause, or resume the goal"),
+        ("lang", "language of the system prompt and replies"),
+        ("lore", "show lore, or add project guidance"),
+        (
+            "memory",
+            "show project memory or ask the agent to refine it",
+        ),
+        ("model", "pick the model from a list, or set it directly"),
+        ("new", "start a new session in this folder"),
+        (
+            "reload",
+            "re-evaluate init files, extensions and post-init files",
+        ),
+        ("thinking", "set the effort level of the next turn"),
+    ]
+    .iter()
+    .map(|(name, description)| Candidate {
+        name: name.to_string(),
+        description: description.to_string(),
+    })
+    .collect()
+}
+
+/// What `evo.eval:completions-for` answers for `evo.eval:` — the package's own
+/// exported names, which is what the image offers a qualified token, each with what
+/// it is.
+fn eval_package_symbols() -> Vec<Candidate> {
+    [
+        ("*eval-package-name*", "variable"),
+        ("completions-for", "function"),
+        ("eval-form", "function"),
+        ("eval-package", "function"),
+        ("single-form", "function"),
+        ("symbol-kind", "function"),
+        ("token-start", "function"),
+    ]
+    .iter()
+    .map(|(name, description)| Candidate {
+        name: format!("evo.eval:{name}"),
+        description: description.to_string(),
+    })
+    .collect()
+}
+
+/// Put the caret in the box and type, as a reader does: the popup is raised by the
+/// word being typed, not by a state being set.
+fn type_into(
+    cx: &mut HeadlessAppContext,
+    window: AnyWindowHandle,
+    page: &Entity<Page>,
+    text: &str,
+) {
+    let composer = composer_of(cx, page);
+    cx.update_window(window, |_, window, cx| {
+        composer.update(cx, |composer, cx| composer.focus_input(window, cx));
+        window.render_frame(cx);
+        window.input(text, cx);
+    })
+    .unwrap();
+}
+
+/// Move the caret within the box by pressing a key, as a reader does.
+fn press(cx: &mut HeadlessAppContext, window: AnyWindowHandle, key: &str) {
+    cx.update_window(window, |_, window, cx| window.press(key, cx))
+        .unwrap();
+}
+
 /// The column the box is docked at the foot of: what the app renders above it.
 struct Page {
     composer: Entity<Composer>,
@@ -120,7 +205,7 @@ impl Page {
         composer.update(cx, |composer, cx| {
             composer.set_pane_height(px(WINDOW_SIZE.1 - 200.), cx);
             composer.set_agent(&state(false, "stub-a"), "Coordinator", true, cx);
-            composer.set_catalog(levels(), models(), cx);
+            composer.set_catalog(levels(), models(), commands(), cx);
         });
         Self { composer }
     }
@@ -208,8 +293,11 @@ fn main() {
     // out, then the todo list, then the model drawer — the catalog's own three
     // models, and a catalog long enough that the models scroll — then the one
     // button's other face, then a lane's own box, which changes nothing, and says so.
+    // Then the completion popup, one picture per thing it does: the commands over
+    // the word at the message's start, the same list walked down its own rows, a word
+    // mid-prose, and the image's own symbols inside `/eval`.
     type Setup = fn(&mut HeadlessAppContext, AnyWindowHandle, &Entity<Page>);
-    let states: [(&str, Setup); 6] = [
+    let states: [(&str, Setup); 11] = [
         ("goal-open", |cx, window, _| {
             click(cx, window, "goal-strip-row")
         }),
@@ -226,7 +314,7 @@ fn main() {
                     // The last registration, so the drawer opens on the row that
                     // only the region's own scroll can show.
                     composer.set_agent(&state(false, "stub-j"), "Coordinator", true, cx);
-                    composer.set_catalog(levels(), many_models(), cx);
+                    composer.set_catalog(levels(), many_models(), commands(), cx);
                 })
             });
             click(cx, window, "composer-chip-model");
@@ -243,6 +331,55 @@ fn main() {
                 })
             });
             click(cx, window, "composer-chip-model");
+        }),
+        // The registry's fourteen commands over the word being started at the
+        // message's own start: the first row highlighted, the list's own counter
+        // saying how many there are, and every description whole — the list is as
+        // wide as its widest row, and these are the rows evo's own registry sends.
+        ("completion-command", |cx, window, page| {
+            type_into(cx, window, page, "/");
+        }),
+        // The same list walked: three rows down, so the highlight — and the list
+        // under it — is somewhere other than the first row.
+        ("completion-walked", |cx, window, page| {
+            type_into(cx, window, page, "/");
+            for _ in 0..3 {
+                press(cx, window, "down");
+            }
+        }),
+        // A word mid-prose: the caret is at the end of `/mo`, and the popup's every
+        // label starts where that word does — the popup is placed by the word's own
+        // beginning, not by the caret. `mo` is what three commands begin or contain,
+        // so the list is a list and not a single row, and the letters it matched
+        // (`mo` of `/model`, the `m` and `o` of `/memory`) are drawn heavier.
+        ("completion-mid-prose", |cx, window, page| {
+            type_into(cx, window, page, "please run /mo now");
+            // Four lefts put the caret at the end of `/mo`.
+            for _ in 0..4 {
+                press(cx, window, "left");
+            }
+        }),
+        // A word started near the right-hand edge of the box: the list is pulled back
+        // inside the window instead of hanging off it — its labels are no longer on the
+        // word, which is the price of staying whole.
+        ("completion-right-edge", |cx, window, page| {
+            type_into(
+                cx,
+                window,
+                page,
+                "please check the docs and the run outcomes before you answer, then /re",
+            );
+        }),
+        // `/eval` content completes against the live image: here the package's own
+        // exported names, as `evo.eval:completions-for` answers for `evo.eval:`.
+        ("completion-symbols", |cx, window, page| {
+            type_into(cx, window, page, "/eval (evo.eval:");
+            let composer = composer_of(cx, page);
+            cx.update(|cx| {
+                composer.update(cx, |composer, cx| {
+                    composer.set_symbols("evo.eval:", eval_package_symbols(), cx)
+                })
+            });
         }),
     ];
 

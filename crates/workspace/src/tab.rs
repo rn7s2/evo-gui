@@ -26,7 +26,7 @@ use gpui_kit::{
 };
 
 use async_channel::Receiver;
-use composer::{Composer, ComposerEvent, ModelRow};
+use composer::{Candidate, Composer, ComposerEvent, ModelRow};
 use session::{
     AgentKey, Changes, ItemChange, LaunchPlan, Op, Queue, Status, StreamStatus, TabModel,
 };
@@ -348,15 +348,22 @@ struct AgentsSnapshot {
 /// What one outstanding op was, so its reply is read for what it is: only a *send*'s
 /// `ok` clears the draft — a stop is answered `ok` too, and the text the person was
 /// typing is none of its business (§7.3).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum Pending {
     /// `input.send` — the reply is the one that clears the draft.
     Send,
-    /// A `run.interrupt`, from the button, from a lane's Stop, or from `Esc`.
+    /// `run.interrupt`, from the button, from a lane's Stop, or from `Esc`.
     Interrupt,
     /// `model.set` or `thinking.set`, from a drawer. The composer's button has nothing
     /// to do with these: the reply only releases the composer's own in-flight flag.
     Settings,
+    /// `command.run` — the slash command a whole message was. Its own output is the
+    /// session's `notice` items, which the transcript draws; this reply says only
+    /// whether the command was taken at all.
+    Command,
+    /// The `eval` op behind one half-typed symbol, carried with the token it asked
+    /// about: the answer is only an answer for that token.
+    Symbols(String),
 }
 
 /// One tab's live swarm: the engine, the model its updates land in, and the pump
@@ -1517,8 +1524,18 @@ impl TabContent {
                 detail: model.detail,
             })
             .collect();
-        self.composer
-            .update(cx, |composer, cx| composer.set_catalog(levels, models, cx));
+        // The commands the registry lists are the popup's candidates: evo's own table,
+        // extension commands and skills included, never a list this client keeps.
+        let commands = session::command_options(catalog)
+            .into_iter()
+            .map(|command| Candidate {
+                name: command.name,
+                description: command.description,
+            })
+            .collect();
+        self.composer.update(cx, |composer, cx| {
+            composer.set_catalog(levels, models, commands, cx)
+        });
     }
 
     /// Feed the agent list from the model: the rows, the coordinator's status and step
@@ -1667,6 +1684,7 @@ impl TabContent {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let mut unanswered: Option<String> = None;
         let sent = match self.live.as_mut() {
             Some(live) => {
                 let (request, pending) = match event {
@@ -1690,6 +1708,18 @@ impl TabContent {
                     ComposerEvent::ThinkingSet(level) => {
                         (session::OpRequest::thinking_set(&level), Pending::Settings)
                     }
+                    // A message that is one slash command is the command layer's: the
+                    // server dispatches it exactly as the TUI does, extension commands
+                    // and all, and says `not_found` for a word it does not know.
+                    ComposerEvent::Command { name, args } => (
+                        session::OpRequest::command_run(&name, &args),
+                        Pending::Command,
+                    ),
+                    // The popup's question about a symbol being typed inside `/eval`:
+                    // the one op that can ask the image about its own symbols.
+                    ComposerEvent::Symbols { token } => {
+                        (session::symbol_request(&token), Pending::Symbols(token))
+                    }
                 };
                 // The engine mints the request's id, and the reply comes back tagged
                 // with it: that is what says which op was answered (§5.5).
@@ -1698,7 +1728,15 @@ impl TabContent {
                         live.pending.insert(rid, pending);
                         true
                     }
-                    None => false,
+                    // The engine is gone — the tab is stopping. A question about a
+                    // symbol would leave the popup waiting for an answer that cannot
+                    // come, so it is answered with nothing.
+                    None => {
+                        if let Pending::Symbols(token) = pending {
+                            unanswered = Some(token);
+                        }
+                        false
+                    }
                 }
             }
             // No swarm: there is nothing to send to, and the button must not stay
@@ -1706,9 +1744,18 @@ impl TabContent {
             None => false,
         };
         if !sent {
-            self.composer.update(cx, |composer, cx| {
-                composer.request_finished(false, window, cx)
-            });
+            match unanswered {
+                Some(token) => {
+                    self.composer.update(cx, |composer, cx| {
+                        composer.set_symbols(&token, Vec::new(), cx)
+                    });
+                }
+                None => {
+                    self.composer.update(cx, |composer, cx| {
+                        composer.request_finished(false, window, cx)
+                    });
+                }
+            }
         }
     }
 
@@ -1843,15 +1890,58 @@ impl TabContent {
     ) {
         let asked = self.live.as_mut().and_then(|live| live.pending.remove(rid));
         if let Some(asked) = asked {
-            if asked == Pending::Send {
-                self.composer.update(cx, |composer, cx| {
-                    composer.request_finished(reply.ok, window, cx)
-                });
-            } else {
+            match asked {
+                Pending::Send => {
+                    // A sent message clears the draft when the server took it.
+                    self.composer.update(cx, |composer, cx| {
+                        composer.request_finished(reply.ok, window, cx)
+                    });
+                }
+                Pending::Command => {
+                    // A command that hands text back — `/rewind`, `/tree <id>` on a
+                    // message — puts it in the input for editing, which is the whole of
+                    // what those commands are for; every other command was taken, and
+                    // clears the draft the way a sent message does. A command's output
+                    // is the session's own `notice` items, which the transcript has
+                    // already drawn (§4.1) — the reply is not a second place to say it.
+                    let handed_back = reply
+                        .result
+                        .get("data")
+                        .and_then(|data| data.get("draft"))
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|text| !text.is_empty())
+                        .map(str::to_string);
+                    self.composer.update(cx, |composer, cx| match &handed_back {
+                        Some(text) => composer.set_draft(text, window, cx),
+                        None => composer.request_finished(reply.ok, window, cx),
+                    });
+                }
+                Pending::Symbols(token) => {
+                    // The image's answer, read off the op's own output: one
+                    // `name<TAB>description` line per candidate. A refusal — an image
+                    // with no `--http-eval`, a token that matched nothing — is no rows,
+                    // which is an answer like any other.
+                    let rows: Vec<Candidate> = reply
+                        .result
+                        .get("output")
+                        .and_then(serde_json::Value::as_str)
+                        .map(session::symbol_options)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|symbol| Candidate {
+                            name: symbol.name,
+                            description: symbol.description,
+                        })
+                        .collect();
+                    self.composer
+                        .update(cx, |composer, cx| composer.set_symbols(&token, rows, cx));
+                }
                 // A stop's reply only re-arms the button; the draft is untouched.
-                self.composer.update(cx, |composer, cx| {
-                    composer.request_finished(false, window, cx)
-                });
+                _ => {
+                    self.composer.update(cx, |composer, cx| {
+                        composer.request_finished(false, window, cx)
+                    });
+                }
             }
         }
         if let Some(error) = reply.error() {
@@ -2995,7 +3085,65 @@ mod tests {
                  "ready": false, "reason": "no API key"},
             ],
             "thinking_levels": ["low", "medium", "high", "xhigh", "max"],
+            "commands": [
+                {"name": "lore", "description": "durable guidance", "args_hint": "<text>"},
+                {"name": "loop", "description": "run a prompt again and again",
+                 "args_hint": null},
+            ],
         })
+    }
+
+    /// §7.3, §5.6: the catalog's own `commands` are what a `/word` completes against, in a
+    /// tab that is already running — evo's registry, never a list this client keeps.
+    #[gpui_kit::test]
+    fn the_catalogs_commands_reach_a_running_tabs_popup(cx: &mut TestAppContext) {
+        let (window, tab) = running_tab(cx);
+
+        cx.update_window(window, |_, window, cx| {
+            let data = LauncherData {
+                catalog: Some(catalog_body()),
+                ..LauncherData::default()
+            };
+            tab.update(cx, |tab, cx| tab.set_launcher_data(&data, window, cx));
+            // The caret in the input, then the word a reader would type. Rendering
+            // first is what puts the input in the window's own tree, and
+            // `focus_primary` is what opening this tab does to put the keyboard there.
+            window.render_frame(cx);
+            tab.update(cx, |tab, cx| {
+                tab.focus_primary(window, cx);
+            });
+            window.input("/lo", cx);
+        })
+        .expect("the page");
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("completion-row-0").label(),
+                Some("/lore · durable guidance"),
+                "the registry's first command, in the registry's own words"
+            );
+            assert_eq!(
+                window.find("completion-row-1").label(),
+                Some("/loop · run a prompt again and again"),
+                "and the second: the word is a prefix of one and a subsequence of the other"
+            );
+        })
+        .expect("the page");
+
+        // Enter takes the highlighted row: the word the registry's own list offered is
+        // written out, and the message is not sent.
+        cx.update_window(window, |_, window, cx| window.press("enter", cx))
+            .expect("the page");
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find(("input", 4294967302u64)).value(),
+                Some("/lore "),
+                "the row was taken"
+            );
+        })
+        .expect("the page");
     }
 
     /// §5.6: the catalog the app learned reaches the composer of a tab that is already
