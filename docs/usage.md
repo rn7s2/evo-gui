@@ -113,10 +113,17 @@ a model is a launch that runs it:
 - **Coordinator — Model** is `--model ID@PROVIDER`: what `evo-swarm check --json`
   resolved, else `/catalog.default_model`, else the first registration the
   catalog says is `ready`. The menu lists every registration, `provider · id`,
-  each with a detail line — `200k ctx · vision · reasons` — and a registration
-  evo cannot reach is greyed with evo's own reason.
+  each with a detail line — `200k ctx · vision · effort low, medium, high, xhigh,
+  max` — listing the levels **that** model takes, in the catalog's own order and
+  in full (a provider's ladder need not be a run of levels, so `low, high, max`
+  is three rungs and never a range); a model with no effort parameter simply ends
+  the line at `vision`. A registration evo cannot reach is greyed with evo's own
+  reason.
 - **Coordinator — Effort** is `--thinking`, and **Workers — Effort** is
-  `--lane-thinking`: the rungs `/catalog.thinking_levels` lists. Each opens on
+  `--lane-thinking`: the rungs `/catalog.thinking_levels` lists (the session's
+  ladder; the drawer inside the box offers the chosen **model's** own, from its
+  `effort_levels`, and says `not offered by this model` for one that takes no
+  effort setting at all). Each opens on
   the effort `check` resolved — evo's own chain, journal and settings included,
   so a resumed swarm opens on the level it was running at; click, drag or use the
   arrows, and the level's name is beside the label.
@@ -348,28 +355,31 @@ text a draft like any other. **⌘C** with nothing selected in the input copies 
 window's own selection instead, so a passage picked in the transcript can be
 copied while the caret sits in the input.
 
-**A word completes while it is typed**, as it does in the TUI and in an editor. A
-word that starts with `/` — anywhere in the message, not only at its start —
-raises a list of the commands `GET /catalog` lists, drawn over the word's own
-line, with every row's label beginning where the word does and every description
-whole (the list is as wide as its widest row, and only past 560 px does a
-description give). The characters the word matched are drawn heavier, so it is
-clear why a row is there: `/re` offers `/reload` as a prefix match and `/lore` as
-a subsequence one. `↑`/`↓` walk the rows and wrap, **Tab** or **Enter** takes the
-highlighted one — **Enter takes the row instead of sending the message** — and
-**Esc** puts the list away until the word changes. A word started near the right
-edge of the box pulls the list back inside the window rather than off it. A command is taken with a space after it
+**A word completes while it is typed**, as it does in the TUI and in an editor. What
+the caret is on — whether it is in a `/command` word, or inside `/eval`'s content —
+is evo's own answer (`complete`): the box asks with its text and its caret and the
+server says what a candidate would replace, which is why `/usr/local/bin` offers
+nothing and a `/word` inside a string in `/eval` is a Lisp token and never a
+command. That question is a read, and a round trip away, so the box asks once per
+rest of the caret and holds the answer against the text it was asked about: the
+list is drawn over the word's own line, with every row's label beginning where the
+word does and every description whole (the list is as wide as its widest row, and
+only past 560 px does a description give). The characters the word matched are
+drawn heavier, so it is clear why a row is there: `/re` offers `/reload` as a
+prefix match and `/lore` as a subsequence one. `↑`/`↓` walk the rows and wrap,
+**Tab** or **Enter** takes the highlighted one — **Enter takes the row instead of
+sending the message** — and **Esc** puts the list away until the word changes. A
+word started near the right edge of the box pulls the list back inside the window
+rather than off it. A command is taken with a space after it
 when it is at the message's own start, so its arguments can be typed straight on.
-Typing a second `/` in the word ends it: `/usr/local/bin` is a path, and offers
-nothing. The list is the server's registry, so extension commands and skills
+The list is the server's registry, so extension commands and skills
 (`skill:lark-doc`, say) are in it exactly as evo has them, and a command evo drops
 stops being offered.
 
 Inside `/eval <form>` the word completes against the **live image** instead:
 `/eval (evo.eval:` lists that package's own names, each with what it is
-(`function`, `variable`, `macro`), asked of the image itself when the caret rests
-on the word — the running image is the only thing that knows what its own packages
-hold, and (`docs/api-gaps.md`) the `eval` op is the only way to ask it. Taking a
+(`function`, `variable`, `macro`) — the running image is the only thing that knows
+what its own packages hold, and the same `complete` op is what asks it. Taking a
 row replaces just the token, leaving the rest of the form — closing parens and all
 — where it is. A list is never drawn when there is nothing to choose: one
 candidate that is the word already typed would only show the reader their own
@@ -382,7 +392,9 @@ extension's own command — which is exactly what the TUI does with the same lin
 and the server says `not found` for a word it does not know. A message that merely
 mentions one (`run /help now`) is the reader's words, as is one that begins `//`.
 The command's own output (`/eval`'s `⇒ 3`, a command's notes) arrives as the
-session's `notice` items in the transcript, which is where the TUI prints it too.
+session's `notice` items in the transcript, which is where the TUI prints it too —
+the reply to `command.run` carries the same lines beside them, and the app draws
+the transcript alone rather than saying everything twice.
 A command that hands a message back — `/rewind`, `/tree <id>` on a user message —
 puts that message in the input, as the TUI does: it is the draft again, ready to be
 edited and resubmitted.

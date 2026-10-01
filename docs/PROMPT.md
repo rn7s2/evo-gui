@@ -259,8 +259,17 @@ the agent header are the same height on the same surface, so the rule under them
      empty.
   5. the **completion popup**: a word being typed is completed inline, as an editor does — the
      commands `GET /catalog` lists for a `/word`, and the *running image's* own symbols for a
-     token inside `/eval `, which only the image can enumerate (`docs/api-gaps.md`: the `eval`
-     op is the only thing to ask). It is a drawer's item list floating at the word: the sidebar
+     token inside `/eval `. What the caret is on is evo's own answer (`complete`, §5.6): the box
+     asks with its text and its caret, and the reply is the kind, the range a candidate's name
+     replaces and the candidates — the rules the TUI's Tab popup uses, so the two frontends
+     agree by construction, and a read rather than the evaluation the old `eval`-form path was
+     (`docs/api-gaps.md` is where that workaround used to be written down). `cursor` counts
+     characters, so the client converts the byte offset an input box works in, both ways. One
+     question is out at a time, asked after a keystroke's rest of about a frame; the answer is
+     held against the text it was asked about, so the caret's `/com` plus one typed `p` is that
+     word one character longer while a paste or a delete is a text the answer says nothing
+     about (the word waits for the answer to *this* text, which is a round trip away). It is a
+     drawer's item list floating at the word: the sidebar
      surface, one hairline, a 10 px radius, the box's own shadow, standing over the *word's* own
      line — not the caret's end — a small gap off it, and under it when the window has no room
      above (it is a deferred draw, so neither the box nor the page can clip it). Every row's
@@ -278,16 +287,26 @@ the agent header are the same height on the same surface, so the rule under them
      up: `↑`/`↓` walk the rows and wrap, `Tab`/`Enter` take the highlighted one — **Enter takes
      the row and does not send** — and `Esc` dismisses until the word changes (so it is never
      the coordinator's interrupt). A `/word` completes anywhere in the message, and a second
-     `/` ends the word, so `/usr/local/bin` offers nothing; the detection and the matching are
-     `crates/composer/src/complete.rs`. Accepting a command replaces the whole `/word` and opens
-     its argument with a space when it stands at the message's start; accepting a symbol replaces the token
+     `/` ends the word, so `/usr/local/bin` offers nothing — that is the server's rule, stated
+     to the client as "nothing completable"; what the *client* owns is the ranking
+     (`crates/composer/src/complete.rs`): a command word ranks the catalog's own commands, with
+     the names it begins first and the ones it is a subsequence of, because evo's own answer for
+     a command is the prefix-matched half of that same document (`/rl` finding `/reload` is what
+     the fuzzy half is for), while a symbol's rows can only be the image's own answer. Accepting
+     a command replaces the whole `/word` and opens its argument with a space when it stands at
+     the message's start; accepting a symbol replaces the token
      under the caret alone, leaving the rest of the form where it is. A list whose only
      candidate is the word already typed is never drawn (it would show the reader their own
      input back and capture the `↑`/`↓` the history browses with), and neither is one raised
      by recalled history. A message that **is** one slash command from its start is the
      command layer's — `command.run`, `/eval` and every extension command included — and the
      server's `not_found` is what says a word is not one; a message that merely mentions one
-     is the reader's words.
+     is the reader's words. A command's output arrives **twice**: as the reply's own `notices`
+     and as session `notice` items, the same lines word for word (`evo.command:host-notice`
+     publishes what the reply also carries). The transcript draws the items, so the reply's
+     copy is not drawn — one line, one place — and of the rest of that reply one field is
+     read: `data.draft`, the message `/rewind` and `/tree` hand back for editing, which is the
+     whole point of those commands and cannot be read off the topic.
   6. the **foot row**: the agent's status line as chips, then the one action button.
 - **The chips** are the topic's **`segments`**, one chip per segment and in the order the server
   publishes them — the same core registry (`evo:define-status-segment`) the TUI's status line uses,
@@ -305,8 +324,11 @@ the agent header are the same height on the same surface, so the rule under them
   own summary, which the lanes column already states), and **leave out a segment the server does not
   publish** — a session with no cache activity and no goal shows no cache chip and no goal strip,
   which is the whole of that status line. The `model` chip opens the drawer holding the models `/catalog`
-  lists and the effort ladder it declares (`thinking_levels`, in the server's order, never `off`),
-  and changes the **coordinator's own** model and effort with `model.set` / `thinking.set` (§5.5) —
+  lists and the effort ladder **that model** declares (`models[].effort_levels`, in the server's
+  own order, in full — a provider's ladder need not be a run of levels, so `low, high, max` is
+  stated as three rungs and never as `low–max`; the session's `thinking_levels` stands in only
+  when the catalog names no entry for the chosen model), and changes the **coordinator's own**
+  model and effort with `model.set` / `thinking.set` (§5.5) —
   the session's, not a lane's: for a lane the drawer states what the swarm runs and says so
   read-only.
 - **The button** shares that row, and its face and function follow what is going on — never a
