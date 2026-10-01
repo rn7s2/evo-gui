@@ -187,7 +187,7 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
 fn stop_tabs(cx: &mut HeadlessAppContext, view: &Entity<WorkspaceView>) {
     let engines = cx.update(|cx| view.update(cx, |view, cx| view.take_engines(cx)));
     println!("[capture] stopping {} tab(s)", engines.len());
-    for mut engine in engines {
+    for engine in engines {
         engine.shutdown();
     }
     pump(cx, Duration::from_secs(2));

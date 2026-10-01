@@ -498,7 +498,7 @@ fn run(world: &str, out: &Path, script: &str) -> Result<(), Error> {
     }
 
     let engines = cx.update(|cx| view.update(cx, |view, cx| view.take_engines(cx)));
-    for mut engine in engines {
+    for engine in engines {
         engine.shutdown();
     }
     pump(&mut cx, Duration::from_secs(1));

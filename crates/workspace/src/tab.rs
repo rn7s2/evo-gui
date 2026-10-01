@@ -21,8 +21,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use gpui_kit::component::list::{ListEvent, ListState};
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    App, Context, Entity, EventEmitter, IntoElement, Render, SharedString, Subscription, Task,
-    Window,
+    App, Context, Entity, EventEmitter, FocusHandle, IntoElement, Render, SharedString,
+    Subscription, Task, Window,
 };
 
 use async_channel::Receiver;
@@ -171,9 +171,6 @@ pub enum TabState {
         /// it is shown — the raw log keeps its paths (§9.7).
         tab_dir: Option<PathBuf>,
     },
-    /// The tab is being taken down — its swarm is running §3's ladder somewhere
-    /// that is not the UI thread (§9.8).
-    Stopping { folder: PathBuf },
 }
 
 /// What a tab's content asks the window for.
@@ -260,6 +257,13 @@ pub struct TabContent {
     /// The session the tab's swarm is writing to, once `/state` has said which it
     /// is: the `--resume` argument, and what the app persists (§9.5).
     session: Option<PathBuf>,
+    /// Closed, and waiting for its swarm to exit: the page stays on screen under
+    /// a layer that takes every click and keystroke, until the window removes
+    /// the tab (§7.1).
+    pub(crate) terminating: bool,
+    /// Where the keyboard goes while the tab is terminating, so nothing on the
+    /// frozen page — the composer above all — takes a keystroke.
+    pub(crate) terminating_focus: FocusHandle,
     /// The left column: the agents, drawn by `agent_list`, fed from the model
     /// (§7.3).
     pub(crate) agents: Entity<AgentList>,
@@ -429,6 +433,8 @@ impl TabContent {
             notice: None,
             notice_task: None,
             session: None,
+            terminating: false,
+            terminating_focus: cx.focus_handle(),
             agents,
             _subscriptions: vec![
                 history_subscription,
@@ -457,14 +463,51 @@ impl TabContent {
             TabState::Empty => None,
             TabState::Booting { folder }
             | TabState::Running { folder }
-            | TabState::Failed { folder, .. }
-            | TabState::Stopping { folder } => Some(folder),
+            | TabState::Failed { folder, .. } => Some(folder),
         }
     }
 
     /// The session the tab's swarm is writing to, while `/state` has named it.
     pub fn session_path(&self) -> Option<&Path> {
         self.session.as_deref()
+    }
+
+    /// Whether this tab has `session` open: the one its swarm is writing to, or
+    /// the one it was launched to resume while `/state` has not named it yet. A
+    /// New Swarm page holds none.
+    pub fn holds_session(&self, session: &Path) -> bool {
+        if self.state == TabState::Empty {
+            return false;
+        }
+        let wanted = same_file_key(session);
+        let launched = self.last_launch.as_ref().and_then(Launch::session);
+        [self.session.as_deref(), launched.map(PathBuf::as_path)]
+            .into_iter()
+            .flatten()
+            .any(|held| same_file_key(held) == wanted)
+    }
+
+    /// Whether the tab was closed and its swarm is still on its way out.
+    pub fn is_terminating(&self) -> bool {
+        self.terminating
+    }
+
+    /// Close the tab's swarm and freeze the page until it has exited: the server is
+    /// told to stop now (stdin EOF), and the layer goes over the page and takes the
+    /// keyboard (§7.1). Returns the engine to watch — shared, because the
+    /// transcript's rows keep their own handle to it — or `None` when the tab has
+    /// no swarm and can simply go.
+    pub fn terminate(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Rc<EngineHandle>> {
+        let live = self.live.take()?;
+        live.engine.shutdown();
+        self.terminating = true;
+        self.terminating_focus.focus(window, cx);
+        cx.notify();
+        Some(live.engine)
     }
 
     /// Put the keyboard where this tab's work starts (§7.1), and say whether
@@ -593,9 +636,9 @@ impl TabContent {
     /// The tab's tooltip: the whole path plus what the tab is doing (§7.1, §9.7).
     pub fn tooltip(&self) -> SharedString {
         let what = match &self.state {
+            _ if self.terminating => "terminating the swarm…",
             TabState::Empty => "no folder chosen",
             TabState::Booting { .. } => "starting the swarm…",
-            TabState::Stopping { .. } => "stopping the swarm…",
             TabState::Failed { was_up: true, .. } => "swarm gone: the server exited",
             TabState::Failed { .. } => "failed to start",
             TabState::Running { .. } => match &self.gone {
@@ -737,10 +780,7 @@ impl TabContent {
     /// watching and stops typing to the server.
     pub fn take_engine(&mut self, cx: &mut Context<Self>) -> Option<EngineHandle> {
         let live = self.live.take()?;
-        if let Some(folder) = self.folder().map(Path::to_path_buf) {
-            self.set_state(TabState::Stopping { folder }, cx);
-            cx.notify();
-        }
+        cx.notify();
         // The handle is shared with whatever row asked for a read; when a view still
         // holds one, dropping the last reference is what closes the child's stdin —
         // the server's own signal to stop — so the tab has nothing more to hand over.
@@ -1685,6 +1725,16 @@ impl Render for TabContent {
         self.ensure_step_ticker(window, cx);
         self.render_for_state(window, cx)
     }
+}
+
+/// One spelling per file: a session path as the index writes it and as `/state`
+/// names it can differ by a trailing slash or a symlinked prefix
+/// (`/var` → `/private/var`).
+fn same_file_key(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| {
+        let text = path.to_string_lossy();
+        PathBuf::from(text.trim_end_matches('/'))
+    })
 }
 
 /// Epoch milliseconds, for the step clock.

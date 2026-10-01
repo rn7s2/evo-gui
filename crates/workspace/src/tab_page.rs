@@ -50,7 +50,7 @@ impl TabContent {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        match &self.state {
+        let content = match &self.state {
             TabState::Empty => self.render_empty(cx),
             TabState::Booting { folder } => self.render_booting(folder, cx),
             TabState::Running { folder } => self.render_page(folder, window, cx),
@@ -68,8 +68,47 @@ impl TabContent {
                 tab_dir.as_deref(),
                 cx,
             ),
-            TabState::Stopping { .. } => self.render_stopping(cx),
+        };
+        if !self.terminating {
+            return content;
         }
+        div()
+            .relative()
+            .size_full()
+            .child(content)
+            .child(self.render_terminating(cx))
+            .into_any_element()
+    }
+
+    /// A closed tab whose swarm is still exiting: the page stays where it was, grayed
+    /// out under a layer that takes every click and keystroke, with what is happening
+    /// in the middle. The window removes the tab when the swarm has gone (§7.1).
+    fn render_terminating(&self, cx: &App) -> AnyElement {
+        let theme = cx.theme();
+        div()
+            .id("tab-terminating")
+            .track_focus(&self.terminating_focus)
+            .absolute()
+            .inset_0()
+            .occlude()
+            .bg(theme.background.opacity(0.72))
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_2()
+            .child(Spinner::new().small().color(theme.muted_foreground))
+            .child(
+                div()
+                    .id("tab-terminating-label")
+                    .text_size(px(13.))
+                    .text_color(theme.muted_foreground)
+                    .aria_label("Terminating swarm.")
+                    .child("Terminating swarm.")
+                    .test_support(),
+            )
+            .test_support()
+            .into_any_element()
     }
 
     /// While the swarm starts: what is starting, and where (§3).
@@ -84,17 +123,6 @@ impl TabContent {
                 cx,
             )),
             "the swarm's log tail appears here if it fails to come up",
-            Some(Spinner::new().xsmall().color(cx.theme().muted_foreground)),
-            cx,
-        )
-    }
-
-    /// While §3's ladder runs on the tab's way out (§9.8).
-    fn render_stopping(&self, cx: &App) -> AnyElement {
-        centered_region(
-            "stopping the swarm…",
-            None,
-            "the server is being asked to shut down, then signalled if it does not",
             Some(Spinner::new().xsmall().color(cx.theme().muted_foreground)),
             cx,
         )

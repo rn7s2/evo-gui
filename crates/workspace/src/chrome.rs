@@ -63,6 +63,9 @@ fn panes_from_sizes(sizes: &[Pixels]) -> Option<Panes> {
 /// wherever the keyboard happens to be inside the window.
 const WORKSPACE_CONTEXT: &str = "Workspace";
 
+/// How often a closed tab looks whether its swarm has exited yet.
+const TERMINATE_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+
 gpui_kit::actions!(
     workspace,
     [
@@ -838,6 +841,43 @@ impl WorkspaceView {
     /// thread of its own (§14.5). Closing the last tab leaves a fresh empty one
     /// rather than an empty window (§7.2).
     pub fn close_tab(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self
+            .tabs
+            .iter()
+            .find(|tab| tab.read(cx).id() == id)
+            .cloned()
+        else {
+            return;
+        };
+        if tab.read(cx).is_terminating() {
+            // Already on its way out: a second × has nothing more to do.
+            return;
+        }
+        // The swarm is told to stop now (stdin EOF), and the tab stays on the strip,
+        // frozen under "Terminating swarm.", until it has exited — so the session it
+        // was writing is free before anything can open it again (§7.1, §8).
+        let Some(engine) = tab.update(cx, |tab, cx| tab.terminate(window, cx)) else {
+            // No swarm behind it (a New Swarm page, a boot that never started a
+            // process): nothing to wait for.
+            self.remove_tab(id, window, cx);
+            return;
+        };
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            // The engine thread ends after the server's own ladder has run; its
+            // mailbox closing is the sign. Polled on a timer, so no other thread
+            // ever wakes the UI's executor.
+            while engine.is_running() {
+                cx.background_executor().timer(TERMINATE_POLL).await;
+            }
+            drop(engine);
+            let _ = this.update_in(cx, |view, window, cx| view.remove_tab(id, window, cx));
+        })
+        .detach();
+    }
+
+    /// Take a tab off the strip, with nothing left to stop.
+    fn remove_tab(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>) {
         let Some(index) = self.tabs.iter().position(|tab| tab.read(cx).id() == id) else {
             return;
         };
@@ -849,7 +889,7 @@ impl WorkspaceView {
             self.close_hovered = None;
         }
         if let Some(engine) = tab.update(cx, |tab, cx| tab.take_engine(cx)) {
-            // Nothing waits for it: the tab is already gone from the window.
+            // Only a tab whose swarm started after its close began still has one.
             drop(engine);
         }
         if self.tabs.is_empty() {
@@ -905,6 +945,14 @@ impl WorkspaceView {
                 session_path,
                 folder,
             } => {
+                // A session another tab already has open is shown, not started a
+                // second time: two swarms on one journal would fork it (§7.1).
+                if let Some(index) = self.tabs.iter().position(|other| {
+                    other.read(cx).id() != id && other.read(cx).holds_session(&session_path)
+                }) {
+                    self.select_tab(index, window, cx);
+                    return;
+                }
                 // The New Swarm page the row was picked on becomes the resumed
                 // swarm, as a folder pick does: a resume is that page's answer,
                 // not a second tab beside it. Only a tab that is not an empty

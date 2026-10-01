@@ -468,7 +468,7 @@ fn a_supervisor_restart_is_a_reset_on_the_same_connection() {
 
 #[test]
 fn a_server_that_dies_is_reported_and_the_tab_stops() {
-    let (_dir, mut handle, updates) = tab("dies", &[]);
+    let (_dir, handle, updates) = tab("dies", &[]);
     let mut feed = Feed::new(updates);
     let (_, pid) = serving(&mut feed);
 

@@ -227,7 +227,7 @@ impl EngineHandle {
 
     /// Stop the server and end the engine. Returns at once: the child is told by
     /// its stdin closing, and the ladder runs on the engine's thread.
-    pub fn shutdown(&mut self) {
+    pub fn shutdown(&self) {
         self.cancel.cancel();
         self.stdin.close();
         let _ = self.inbox.send_blocking(Inbound::Shutdown);

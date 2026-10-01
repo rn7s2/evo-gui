@@ -77,7 +77,7 @@ fn tab_id(view: &Entity<WorkspaceView>, index: usize, cx: &App) -> u64 {
 macro_rules! retire_engine {
     ($tab:expr, $cx:expr) => {{
         let engine = $tab.update($cx, |tab, cx| tab.take_engine(cx));
-        if let Some(mut engine) = engine {
+        if let Some(engine) = engine {
             engine.shutdown();
             engine.join();
         }
@@ -1062,6 +1062,164 @@ fn the_add_button_never_sits_on_a_tab(cx: &mut TestAppContext) {
                  and the + is at {add_bounds:?}"
             );
         }
+    })
+    .unwrap();
+}
+
+/// A window whose tabs launch a swarm binary that is not there: a tab gets an engine
+/// (whose boot fails at once) without a real process behind it.
+fn open_unlaunchable(
+    cx: &mut TestAppContext,
+    name: &str,
+) -> (WindowHandle<Root>, Entity<WorkspaceView>, PathBuf) {
+    let home = std::env::temp_dir().join(format!("workspace-ui-{name}-{}", std::process::id()));
+    let folder = home.join("project");
+    std::fs::create_dir_all(&folder).expect("a folder to work in");
+    let root = home.clone();
+    let (handle, view) = open_window_with(cx, move |window, cx| {
+        WorkspaceView::with_config(
+            Arc::new(LaunchEnv {
+                swarm_bin: PathBuf::from("/nonexistent/evo-swarm"),
+                root: store::paths::Root::at(root),
+                ..LaunchEnv::default()
+            }),
+            window,
+            cx,
+        )
+    });
+    (handle, view, folder)
+}
+
+/// Let a closed tab's engine thread end and the window notice it: the window polls
+/// on a timer, so the test moves the clock while the real thread finishes.
+fn settle_terminating(cx: &mut TestAppContext, view: &Entity<WorkspaceView>, tabs: usize) {
+    for _ in 0..100 {
+        if cx.read(|cx| view.read(cx).tabs().len()) == tabs {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(200));
+        cx.run_until_parked();
+    }
+    panic!("the closed tab never left the strip");
+}
+
+/// §7.1: closing a tab whose swarm is running does not drop it out of sight — the tab
+/// stays on the strip, frozen under "Terminating swarm.", and leaves once its swarm
+/// has exited. A second × meanwhile does nothing.
+#[gpui_kit::test]
+fn closing_a_swarm_tab_freezes_it_until_the_swarm_exits(cx: &mut TestAppContext) {
+    let (handle, view, folder) = open_unlaunchable(cx, "terminate");
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let tab = view.read(cx).selected_tab().clone();
+        tab.update(cx, |tab, cx| {
+            tab.launch(
+                Launch::New {
+                    folder: folder.clone(),
+                    plan: LaunchPlan::default(),
+                },
+                window,
+                cx,
+            )
+        });
+        open_another_tab(window, &view, cx);
+        let id = tab.read(cx).id();
+        view.update(cx, |view, cx| view.close_tab(id, window, cx));
+        assert_eq!(
+            view.read(cx).tabs().len(),
+            2,
+            "the tab stays while its swarm stops"
+        );
+        assert!(tab.read(cx).is_terminating());
+        // A second × on a tab already on its way out changes nothing.
+        view.update(cx, |view, cx| view.close_tab(id, window, cx));
+        assert_eq!(view.read(cx).tabs().len(), 2);
+
+        view.update(cx, |view, cx| view.select_tab(0, window, cx));
+        window.render_frame(cx);
+        assert_eq!(
+            window.find("tab-terminating-label").label(),
+            Some("Terminating swarm."),
+            "the frozen page says what is happening"
+        );
+        assert!(window.find("tab-terminating").visible());
+    })
+    .unwrap();
+
+    settle_terminating(cx, &view, 1);
+    cx.update(|cx| {
+        let view = view.read(cx);
+        assert_eq!(view.selected_tab().read(cx).state(), &TabState::Empty);
+    });
+}
+
+/// A tab with no swarm behind it closes at once: there is nothing to wait for.
+#[gpui_kit::test]
+fn closing_an_empty_tab_is_immediate(cx: &mut TestAppContext) {
+    let (handle, view) = open_workspace(cx);
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        open_another_tab(window, &view, cx);
+        view.update(cx, |view, cx| view.close_selected_tab(window, cx));
+        assert_eq!(view.read(cx).tabs().len(), 1);
+    })
+    .unwrap();
+}
+
+/// §7.1: a History row for a session another tab already has open shows that tab;
+/// a second swarm on the same journal would fork it. The path is matched however
+/// it is spelled (here `/var/…` against its `/private/var/…` canonical form).
+#[gpui_kit::test]
+fn resuming_a_session_open_in_another_tab_shows_that_tab(cx: &mut TestAppContext) {
+    let (handle, view, folder) = open_unlaunchable(cx, "dedupe");
+    let session = folder.join("20261001T000000Z_session.sexp");
+    std::fs::write(&session, "(:type :session)\n").expect("a session file");
+    let spelled_otherwise = std::fs::canonicalize(&session).expect("canonical path");
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let running = view.read(cx).selected_tab().clone();
+        running.update(cx, |tab, cx| {
+            tab.launch(
+                Launch::Resume {
+                    folder: folder.clone(),
+                    session: session.clone(),
+                },
+                window,
+                cx,
+            )
+        });
+        open_another_tab(window, &view, cx);
+        let asking = view.read(cx).selected_tab().clone();
+        asking.update(cx, |_, cx| {
+            cx.emit(TabContentEvent::Resume {
+                session_path: spelled_otherwise.clone(),
+                folder: folder.clone(),
+            })
+        });
+    })
+    .unwrap();
+
+    // The window hears the event once the update that emitted it has ended.
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let running = view.read(cx).tabs()[0].clone();
+        let asking = view.read(cx).tabs()[1].clone();
+        assert_eq!(
+            view.read(cx).selected_index(),
+            0,
+            "the tab that has it is shown"
+        );
+        assert_eq!(view.read(cx).tabs().len(), 2, "no tab is added");
+        assert_eq!(
+            asking.read(cx).state(),
+            &TabState::Empty,
+            "the New Swarm page that asked starts nothing"
+        );
+        retire_engine!(running, cx);
     })
     .unwrap();
 }
