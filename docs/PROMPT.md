@@ -210,8 +210,14 @@ the agent header are the same height on the same surface, so the rule under them
   Rows: a `user` item; an `assistant` as markdown; a `tool` as a collapsed one-liner
   (`name — ok/error`, expandable to the whole result, `/items/<id>` when the snapshot truncated it);
   a lane's `lane_report` as a distinct report row; `notice`, `lane_event`, `run_outcome` and
-  `command_note` items as their own lines. Auto-follow the tail while the reader is at the bottom; show a jump
-  affordance when they are not.
+  `command_note` items as their own lines. The list holds the agent's **whole journal** and draws it
+  with a virtual list: only the rows the pane can reach are built and measured, so a record of
+  thousands of items costs a pane of rows a frame. Older items behind the oldest one held are **paged
+  in by the view itself** — one `GET /items?before=<oldest>` in flight at a time, for as long as the
+  topic's `has_more` says there is more — and a quiet `Loading earlier items…` line sits at the head
+  of the list while one is on its way; there is no button to press, and a page that lands is spliced
+  in above the reader without moving what they are reading. Auto-follow the tail while the reader is
+  at the bottom; show a jump affordance when they are not.
 - **The composer, at the foot of the conversation** — the selected agent's, on the transcript's own
   reading measure (an 800 px measure, inset 16). `design/doc28/Composer.tsx`: an `input`-surface box,
   12 px radius, 1 px border; with the caret in it the border mixes 55% of the primary into the
@@ -293,7 +299,9 @@ unknown command is `unknown_op`. None of it is re-validated locally.
    (`session::TabModel`) and applies every op to it: `item.add` inserts by `after`,
    `item.append` grows a field, `item.patch` merge-patches, `item.remove` takes a
    row back (a cancelled queued input). Older items are paged in with
-   `GET /items?before=`; the model's own context is `GET /debug/context`, which is
+   `GET /items?before=<oldest>`, asked for by the transcript itself for as long as the
+   topic says there is more behind the oldest item it holds — one page in flight at a
+   time, no button; the model's own context is `GET /debug/context`, which is
    never rendered.
 2. **Sending, and the one button.** Enter posts `input.send {text, queue}`: idle →
    the run starts, running → the input is queued and arrives as a `user` item whose
