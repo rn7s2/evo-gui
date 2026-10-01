@@ -410,8 +410,10 @@ mod tests {
     fn the_stored_zoom_is_the_one_the_transcripts_open_at(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         let root = temp_root("zoom-install");
-        let mut state = AppState::default();
-        state.zoom = 1.4;
+        let state = AppState {
+            zoom: 1.4,
+            ..AppState::default()
+        };
         state.save(&root).unwrap();
         assert_eq!(AppState::load(&root).zoom, 1.4);
 

@@ -1891,13 +1891,29 @@ impl TabContent {
         let asked = self.live.as_mut().and_then(|live| live.pending.remove(rid));
         if let Some(asked) = asked {
             match asked {
-                Pending::Send | Pending::Command => {
-                    // A command that was taken clears the draft the same way a sent
-                    // message does; its output is the session's own `notice` items,
-                    // which the transcript has already drawn (§4.1) — the reply is not
-                    // a second place to say it.
+                Pending::Send => {
+                    // A sent message clears the draft when the server took it.
                     self.composer.update(cx, |composer, cx| {
                         composer.request_finished(reply.ok, window, cx)
+                    });
+                }
+                Pending::Command => {
+                    // A command that hands text back — `/rewind`, `/tree <id>` on a
+                    // message — puts it in the input for editing, which is the whole of
+                    // what those commands are for; every other command was taken, and
+                    // clears the draft the way a sent message does. A command's output
+                    // is the session's own `notice` items, which the transcript has
+                    // already drawn (§4.1) — the reply is not a second place to say it.
+                    let handed_back = reply
+                        .result
+                        .get("data")
+                        .and_then(|data| data.get("draft"))
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|text| !text.is_empty())
+                        .map(str::to_string);
+                    self.composer.update(cx, |composer, cx| match &handed_back {
+                        Some(text) => composer.set_draft(text, window, cx),
+                        None => composer.request_finished(reply.ok, window, cx),
                     });
                 }
                 Pending::Symbols(token) => {

@@ -364,6 +364,9 @@ and the server says `not found` for a word it does not know. A message that mere
 mentions one (`run /help now`) is the reader's words, as is one that begins `//`.
 The command's own output (`/eval`'s `⇒ 3`, a command's notes) arrives as the
 session's `notice` items in the transcript, which is where the TUI prints it too.
+A command that hands a message back — `/rewind`, `/tree <id>` on a user message —
+puts that message in the input, as the TUI does: it is the draft again, ready to be
+edited and resubmitted.
 
 Sending while the agent is working is normal: the text is queued and lands at the
 running turn's next boundary, exactly as typing into the TUI does — the queued

@@ -112,7 +112,7 @@ fn open(cx: &mut TestAppContext, root: &AppRoot) -> (gpui_kit::AnyWindowHandle, 
             |window, cx| cx.new(|cx| Page::new(window, cx)),
         )
         .expect("the window");
-        (window.into(), page)
+        (window, page)
     })
 }
 

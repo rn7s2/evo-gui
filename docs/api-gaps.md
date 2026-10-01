@@ -125,10 +125,12 @@ vocabulary.
 The GUI therefore shows nothing from that list: a command's output is the
 session's `notice` items (`evo.command:host-notice` publishes one as well, and
 `docs/PROMPT.md` §5 has the client rendering `notice` items already), which the
-transcript draws in the words the command wrote. A command's `data` and `choices`
-are ignored for the same reason — a picker has no surface here (the model drawer
-and the empty tab's choosers cover the one evo offers today), and the choice's own
-title arrives as a notice.
+transcript draws in the words the command wrote. Of the rest of the reply, one
+field is read — `data.draft`, the message `/rewind` and `/tree` hand back for
+editing, which is the whole point of those commands and cannot be read off the
+topic. A command's `choices` has no surface here (the model drawer and the empty
+tab's choosers cover the one evo offers today), and the choice's own title arrives
+as a notice.
 
 To close it: `(destructuring-bind (&key style text) entry …)`, or `notices` as
 objects (`{"severity","text"}`) built where the reply is, and a GUI that can draw

@@ -934,6 +934,24 @@ impl Composer {
         cx.notify();
     }
 
+    /// Put `text` in the input for editing, the caret at its end.
+    ///
+    /// This is what a command that hands a message back does with it — `/rewind`, and
+    /// `/tree` on a user message: it moves the session's leaf above the message and
+    /// gives the text back so it can be edited and resubmitted. Nothing here is a
+    /// send, and nothing is remembered as one.
+    pub fn set_draft(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.in_flight = false;
+        self.walking = None;
+        let caret = end_position(text);
+        self.input.update(cx, |input, cx| {
+            input.set_value(text, window, cx);
+            input.set_cursor_position(caret, window, cx);
+        });
+        self.refresh(cx);
+        cx.notify();
+    }
+
     /// The button's face: `Send` while nothing is going on, and `Stop swarm` while the
     /// swarm is busy or held for its lanes — the one action that means the whole swarm
     /// (CONTRACT §7.5). The per-lane Stop lives in the lane column, where a lane is
@@ -4210,6 +4228,36 @@ mod tests {
             assert!(popup_drawn(window));
             assert_eq!(popup_labels(&f, cx), vec!["/help"]);
         });
+    }
+
+    /// `/rewind` is the command that hands a message back: the text it took out of the
+    /// session lands in the input, ready to be edited and resubmitted — not cleared.
+    #[gpui_kit::test]
+    fn a_command_that_hands_a_message_back_puts_it_in_the_input(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.act(cx, |_window, cx| f.set_catalog(cx));
+        f.act(cx, |window, cx| {
+            f.type_draft("half a thought", window, cx);
+            // What the reply to `/rewind` carries on its own `data.draft`.
+            f.composer.update(cx, |composer, cx| {
+                composer.set_draft("what I asked for", window, cx)
+            });
+        });
+        assert_eq!(
+            f.draft_now(cx),
+            "what I asked for",
+            "the message the command took out of the session is the draft now"
+        );
+        assert_eq!(
+            cx.read(|cx| f.caret(cx)),
+            "what I asked for".len(),
+            "the caret is at the end of it, where the next word is typed"
+        );
+        assert!(
+            f.events().is_empty(),
+            "handing a message back is not sending it: {:?}",
+            f.events()
+        );
     }
 
     #[gpui_kit::test]
