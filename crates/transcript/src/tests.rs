@@ -979,11 +979,150 @@ fn an_image_is_fetched_once_and_then_drawn(cx: &mut TestAppContext) {
     assert_eq!(asked.borrow().len(), 2);
 }
 
+/// A picture that arrives is measured into its row: the row grows by exactly what the
+/// picture added, the row below it moves down by the same amount and is never drawn over,
+/// and the thumbnail is the design's own box at the reader's zoom.
+///
+/// The bytes arrive on a thread of their own, long after the frame that asked for them, so
+/// this is the list's half of "nothing jumps".
+#[gpui_kit::test]
+fn an_arriving_image_re_measures_the_row_it_lands_in(cx: &mut TestAppContext) {
+    let (view, cx) = open_in(
+        cx,
+        1200.,
+        vec![
+            user_with_image("u_1", 1),
+            user("u_2", "the row after the picture"),
+        ],
+    );
+    view.update(cx, |view, cx| view.on_fetch_image(|_, _, _, _| {}, cx));
+    frames(cx, 2);
+
+    let loading = row_box(cx, row_id("transcript-user", "u_1")).size.height;
+    let below = row_box(cx, row_id("transcript-user", "u_2")).origin.y;
+    assert!(
+        row_box(cx, row_id("transcript-image-note-0", "u_1"))
+            .size
+            .height
+            < px(32.),
+        "until the bytes are here the row says so in one line"
+    );
+
+    let picture = crate::decode_image(&transcript_png_sized(1400, 1000)).expect("a decodable PNG");
+    view.update(cx, |view, cx| view.set_image("u_1", 0, picture, cx));
+    frames(cx, 2);
+
+    let grown = row_box(cx, row_id("transcript-user", "u_1"));
+    let after = row_box(cx, row_id("transcript-user", "u_2"));
+    assert!(
+        grown.size.height > loading,
+        "the picture's box is taller than the line it replaced: {loading:?} -> {:?}",
+        grown.size.height
+    );
+    assert_eq!(
+        after.origin.y - below,
+        grown.size.height - loading,
+        "the row below moves down by exactly what the picture added"
+    );
+    assert!(
+        after.origin.y >= grown.origin.y + grown.size.height,
+        "and is never drawn over: {grown:?} then {after:?}"
+    );
+
+    // The thumbnail is the design's own box at the reader's zoom — a screenshot is read,
+    // not framed, so it grows with the rest of the row (§7.2) — and its frame is the
+    // rounded one, the border's 2px around it.
+    let thumbnail = |cx: &mut gpui_kit::VisualTestContext| {
+        row_box(cx, row_id("transcript-image-0", "u_1")).size
+    };
+    assert_eq!(
+        thumbnail(cx),
+        gpui_kit::size(px(522.), px(122.)),
+        "`IMAGE_WIDTH` 520 by `THUMBNAIL` 120, inside the frame's 1px border"
+    );
+    set_zoom(cx, 1.5);
+    assert_eq!(
+        thumbnail(cx),
+        gpui_kit::size(px(782.), px(182.)),
+        "half again as large at 150% — a screenshot is read, not framed (§7.2)"
+    );
+    set_zoom(cx, 0.75);
+    assert_eq!(
+        thumbnail(cx),
+        gpui_kit::size(px(392.), px(92.)),
+        "and smaller at 75%"
+    );
+}
+
+/// The same picture arriving while its row is off screen: the reader is somewhere else in
+/// the record when the bytes land, and the row is not built again until it is scrolled back
+/// to. The pane holds still — the reader's place is the reader's — and the row is measured
+/// when it comes back.
+#[gpui_kit::test]
+fn an_image_that_arrives_off_screen_is_measured_when_it_comes_back(cx: &mut TestAppContext) {
+    // The list follows the tail, so the picture is put one row from the end: on screen
+    // at first, and out of it after one wheel up.
+    let mut items: Vec<Item> = (1..38).map(|n| user(&format!("u_{n}"), "filler")).collect();
+    items.push(user_with_image("u_38", 1));
+    items.push(user("u_39", "the row after the picture"));
+    let (view, cx) = open_in(cx, 1200., items);
+    view.update(cx, |view, cx| view.on_fetch_image(|_, _, _, _| {}, cx));
+    frames(cx, 2);
+
+    wheel(cx, 2000.);
+    assert!(
+        cx.update(|window, _| window.try_find(row_id("transcript-user", "u_38")).is_none()),
+        "the picture's row is off screen now"
+    );
+    let (shown, was) = (1..38)
+        .find_map(|n| {
+            let id = format!("u_{n}");
+            cx.update(|window, _| {
+                window
+                    .try_find(row_id("transcript-user", &id))
+                    .map(|element| (id, element.bounds()))
+            })
+        })
+        .expect("a row the reader is on");
+
+    let picture = crate::decode_image(&transcript_png_sized(1400, 1000)).expect("a decodable PNG");
+    view.update(cx, |view, cx| view.set_image("u_38", 0, picture, cx));
+    frames(cx, 2);
+    assert_eq!(
+        row_box(cx, row_id("transcript-user", &shown)).origin.y,
+        was.origin.y,
+        "the row the reader is on does not move while the picture lands behind them"
+    );
+
+    // Back at the tail, the row is the picture's own height, and the row after it is
+    // where that height puts it — never drawn over it.
+    wheel(cx, -20000.);
+    let grown = row_box(cx, row_id("transcript-user", "u_38"));
+    let after = row_box(cx, row_id("transcript-user", "u_39"));
+    assert_eq!(
+        row_box(cx, row_id("transcript-image-0", "u_38"))
+            .size
+            .height,
+        px(122.),
+        "the picture is measured when the row is built again"
+    );
+    assert!(
+        after.origin.y >= grown.origin.y + grown.size.height,
+        "and the row after it sits under it, never over it: {grown:?} then {after:?}"
+    );
+}
+
 /// A one-pixel PNG, made here rather than embedded: the test is about the path from
 /// bytes to a drawn frame, and this is the smallest thing that goes through it.
 fn transcript_png() -> Vec<u8> {
+    transcript_png_sized(2, 2)
+}
+
+/// The same, at a size a case can choose: an image larger than the row's own box is what
+/// a screenshot is, and the one a cap can be seen on.
+fn transcript_png_sized(width: u32, height: u32) -> Vec<u8> {
     use image::{ImageFormat, Rgba, RgbaImage};
-    let image = RgbaImage::from_pixel(2, 2, Rgba([10, 20, 30, 255]));
+    let image = RgbaImage::from_pixel(width, height, Rgba([10, 20, 30, 255]));
     let mut bytes = std::io::Cursor::new(Vec::new());
     image
         .write_to(&mut bytes, ImageFormat::Png)
