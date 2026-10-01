@@ -86,7 +86,8 @@ Two small marks answer questions a label cannot:
 Every new tab opens on the empty page (`design/doc28/NewSwarm.tsx`): what the
 launch will be, then the folder to run it in, then what can be resumed. Its
 headline says which program the switch has chosen — `New Swarm`, or `New Session`
-with **Use swarm** off — and everything else on the page is true of either.
+with **Use swarm** off, when the first card is titled `Main` rather than
+`Coordinator` — and everything else on the page is true of either.
 
 ```
 New Swarm

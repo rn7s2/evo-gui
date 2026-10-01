@@ -229,6 +229,9 @@ const TITLE: &str = "New Swarm";
 const TITLE_AGENT: &str = "New Session";
 const SUBTITLE: &str = "Choose how it runs, then select a project folder.";
 const COORDINATOR_TITLE: &str = "Coordinator";
+/// The same card when the session is one agent: there is nothing for it to
+/// coordinate, and the running tab names that agent `Main`.
+const MAIN_TITLE: &str = "Main";
 const WORKERS_TITLE: &str = "Workers";
 const MODEL_LABEL: &str = "Model";
 const EFFORT_LABEL: &str = "Effort";
@@ -1227,7 +1230,8 @@ impl EmptyTabState {
         let theme = cx.theme();
         let off = self.card_off(role);
         let (title, id) = match role {
-            Card::Coordinator => (COORDINATOR_TITLE, COORDINATOR_CARD_ID),
+            Card::Coordinator if self.launcher.swarm() => (COORDINATOR_TITLE, COORDINATOR_CARD_ID),
+            Card::Coordinator => (MAIN_TITLE, COORDINATOR_CARD_ID),
             Card::Lanes => (WORKERS_TITLE, WORKERS_CARD_ID),
         };
         v_flex()
@@ -1252,6 +1256,9 @@ impl EmptyTabState {
                     .items_center()
                     .child(
                         div()
+                            .id(ElementId::Name(format!("{id}-title").into()))
+                            .test_support()
+                            .aria_label(title)
                             .flex_1()
                             .min_w_0()
                             .text_size(CARD_TITLE)
@@ -3878,6 +3885,22 @@ mod tests {
                 window.find(HISTORY_HINT_ID).label(),
                 Some("No sessions to resume yet."),
                 "and the history's line is the same either way"
+            );
+            assert_eq!(
+                window.find(format!("{COORDINATOR_CARD_ID}-title")).label(),
+                Some(MAIN_TITLE),
+                "one agent has nothing to coordinate: its card is the one the tab calls Main"
+            );
+        });
+        f.act(cx, |_, cx| {
+            tab.update(cx, |tab, cx| tab.set_use_swarm(true, cx))
+        });
+        f.render(cx);
+        f.act(cx, |window, _| {
+            assert_eq!(
+                window.find(format!("{COORDINATOR_CARD_ID}-title")).label(),
+                Some(COORDINATOR_TITLE),
+                "a swarm's card is its coordinator's again"
             );
         });
     }
