@@ -344,8 +344,7 @@ struct Stub {
 }
 
 impl Stub {
-    /// `EVO_STUB_MESSAGES`, else beside this checkout, else the workspace's own
-    /// evo-agent checkout.
+    /// `EVO_STUB_MESSAGES`, else `EVO_AGENT_REPO`, else beside this checkout.
     fn script() -> PathBuf {
         if let Some(path) = std::env::var_os("EVO_STUB_MESSAGES") {
             return PathBuf::from(path);
@@ -360,16 +359,13 @@ impl Stub {
             candidates.push(PathBuf::from(agent).join("tests/stub-messages.py"));
         }
         candidates.push(repo.join("../evo-agent/tests/stub-messages.py"));
-        candidates.push(PathBuf::from(
-            "/Users/bytedance/coding/evo/evo-agent/tests/stub-messages.py",
-        ));
         candidates
             .into_iter()
             .find(|path| path.is_file())
             .unwrap_or_else(|| {
                 panic!(
-                    "no stub-messages.py: set EVO_STUB_MESSAGES (tried the sibling \
-                     ../evo-agent of this checkout, and this workspace's evo-agent)"
+                    "no stub-messages.py: set EVO_STUB_MESSAGES or EVO_AGENT_REPO \
+                     (tried the sibling ../evo-agent of this checkout)"
                 )
             })
     }

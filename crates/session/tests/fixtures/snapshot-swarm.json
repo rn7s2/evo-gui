@@ -20,7 +20,7 @@
             "step_started_at": 1759200020000,
             "restarts": 0,
             "pid": 4101,
-            "worktree": "/Users/bytedance/coding/evo/wt/gui-model",
+            "worktree": "/Users/you/coding/evo/wt/gui-model",
             "branch": "redesign/gui-model",
             "model": { "id": "stub-b", "provider": "openai" },
             "context": { "tokens": 21000, "window": 200000, "source": "usage" },

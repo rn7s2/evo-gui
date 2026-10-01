@@ -123,7 +123,7 @@ fn settled_items() -> Vec<Item> {
         })),
         item(json!({
             "id": "t_call_2", "ts": epoch_ms(), "kind": "tool", "call_id": "call_2", "name": "read",
-            "args": { "path": "/Users/bytedance/coding/evo/wt/gui-model/crates/session/src/tab.rs" },
+            "args": { "path": "/Users/you/coding/evo/wt/gui-model/crates/session/src/tab.rs" },
             "status": "ok",
             "result": { "text": "//! One topic's mirror…", "chars": 24000, "truncated": true },
             "parent": "e_4"
