@@ -105,12 +105,12 @@ pub(crate) fn notice_tone(error: &OpError) -> NoticeTone {
 /// hover (§4).
 ///
 /// A refusal is the server's own words, always: the reply's `message` is the
-/// swarm talking about the request, and re-stating it is the one thing §8 forbids.
+/// server talking about the request, and re-stating it is the one thing §8 forbids.
 /// The server's messages never quote a user or config value (CONTRACT §5.5), so
 /// there is nothing to scrub here either.
 fn notice_words(error: &OpError) -> (String, Option<String>) {
     let text = if error.message.trim().is_empty() {
-        format!("The swarm refused that ({:?}).", error.code)
+        format!("The session refused that ({:?}).", error.code)
     } else {
         error.message.clone()
     };
@@ -795,31 +795,35 @@ impl TabContent {
         self.model().is_some_and(swarm_is_busy)
     }
 
-    /// The label on the tab: the folder's name, `New Swarm` while empty, or
-    /// `Settings`.
-    pub fn title(&self) -> SharedString {
+    /// The label on the tab: the folder's name, `New Swarm` — or `New Session`, one
+    /// agent's page (§7.2) — while empty, or `Settings`.
+    pub fn title(&self, cx: &App) -> SharedString {
         match &self.state {
             TabState::Settings => SharedString::from("Settings"),
             _ => match self.folder() {
                 Some(folder) => folder_name(folder),
-                None => SharedString::from("New Swarm"),
+                None if self.swarm(cx) => SharedString::from("New Swarm"),
+                None => SharedString::from("New Session"),
             },
         }
     }
 
     /// The tab's tooltip: the whole path plus what the tab is doing (§7.1, §9.7).
+    ///
+    /// The words are the session's, not a swarm's: the tab may hold either program, and
+    /// `session` is what both of them are.
     pub fn tooltip(&self) -> SharedString {
         let what = match &self.state {
-            _ if self.terminating => "terminating the swarm…",
+            _ if self.terminating => "terminating the session…",
             TabState::Settings => "the settings files evo reads",
             TabState::Empty => "no folder chosen",
-            TabState::Booting { .. } => "starting the swarm…",
-            TabState::Failed { was_up: true, .. } => "swarm gone: the server exited",
+            TabState::Booting { .. } => "starting the session…",
+            TabState::Failed { was_up: true, .. } => "session gone: the server exited",
             TabState::Failed { .. } => "failed to start",
             TabState::Running { .. } => match &self.gone {
                 Some(reason) => reason.as_ref(),
-                None if self.is_reconnecting() => "swarm: reconnecting…",
-                None => "swarm: running",
+                None if self.is_reconnecting() => "session: reconnecting…",
+                None => "session: running",
             },
         };
         match self.folder() {
@@ -1385,7 +1389,7 @@ impl TabContent {
             Update::Exited { outcome } => {
                 // The engine stopped. A tab being closed never sees this; one that
                 // is still on screen says so and keeps what it has.
-                self.gone = Some(format!("swarm stopped ({outcome:?})").into());
+                self.gone = Some(format!("session stopped ({outcome:?})").into());
                 cx.notify();
             }
         }
@@ -2100,7 +2104,7 @@ impl TabContent {
         else {
             return;
         };
-        self.gone = Some("swarm: the server exited".into());
+        self.gone = Some("session: the server exited".into());
         // Reading the log is I/O, so it happens on a thread of its own and comes
         // back through the bridge like every other result.
         let (bridge, _worker) =
@@ -2375,6 +2379,35 @@ mod tests {
     /// §7.3: the reveal is offered before any thinking has arrived, to an agent whose
     /// effort is a rung that thinks. The quietest rung and an effort nobody has read
     /// wait for text.
+    /// §7.2: the strip's label for an empty tab is the page's own name — a swarm, or one
+    /// agent's session, which is what the workers switch says — and a tab that has
+    /// started something is its folder, whatever the switch is set to afterwards.
+    #[gpui_kit::test]
+    fn the_empty_tabs_label_follows_the_workers_switch(cx: &mut TestAppContext) {
+        let (_window, tab) = running_tab(cx);
+        tab.update(cx, |tab, _| tab.state = TabState::Empty);
+        let label = |cx: &App| tab.read(cx).title(cx);
+
+        cx.update(|cx| {
+            assert_eq!(label(cx), "New Swarm", "a swarm until told otherwise");
+        });
+        tab.update(cx, |tab, cx| tab.set_use_swarm(false, cx));
+        cx.update(|cx| {
+            assert_eq!(label(cx), "New Session", "one agent's page is a session");
+        });
+
+        // A tab with a folder is that folder: the switch has nothing to say about it.
+        tab.update(cx, |tab, cx| {
+            tab.state = TabState::Running {
+                folder: PathBuf::from("/tmp/proj"),
+            };
+            tab.set_use_swarm(true, cx);
+        });
+        cx.update(|cx| {
+            assert_eq!(label(cx), "proj", "the tab is where it is running");
+        });
+    }
+
     #[gpui_kit::test]
     fn an_effort_above_low_offers_the_reveal_before_any_text(cx: &mut TestAppContext) {
         let (window, tab) = running_tab(cx);

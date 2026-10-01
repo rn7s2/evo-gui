@@ -123,8 +123,11 @@ out of there.
   restored from `app.json`. Custom title bar (`TitleBar::window_options()`), because the title bar is
   the tab strip.
 - Title bar = `TitleBar` containing a `TabBar`:
-  - one `Tab` per session, label = folder name (tooltip: full path + swarm state), `suffix` = a close
-    button, `prefix` on macOS left blank for the traffic lights;
+  - one `Tab` per session, label = folder name — an unlaunched tab says `New Swarm`, or `New Session`
+    while the workers switch is off (§7.2) — with the tooltip carrying the full path plus what the
+    session is doing (`session: running`, `session: reconnecting…`, …; the words are the session's,
+    because a tab may hold either program), `suffix` = a close button, `prefix` on macOS left blank
+    for the traffic lights;
   - `suffix` of the bar = an **Add icon button**, always present, exactly like a browser's `+`; it
     appends a new empty tab and selects it;
   - overflow scrolls (`track_scroll`); tab width capped with `max_width`.

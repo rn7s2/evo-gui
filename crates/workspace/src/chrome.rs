@@ -81,12 +81,13 @@ pub const QUIT_HOLD: Duration = Duration::from_secs(1);
 const HOLD_TOAST_TEXT: &str = "Hold ⌘Q to Quit";
 const HOLD_TOAST_ID: &str = "quit-hold-toast";
 
-/// What the window says while the app's swarms are being stopped (§9.8): one
-/// swarm, or several.
+/// What the window says while the app's sessions are being stopped (§9.8): one
+/// session, or several. A session, not a swarm: a tab may hold either program, and the
+/// screen is about the processes, which are the same thing either way.
 const QUIT_SCREEN_ID: &str = "quit-screen";
 const QUIT_SCREEN_LABEL_ID: &str = "quit-screen-label";
-const QUIT_ONE_TEXT: &str = "Terminating swarm.";
-const QUIT_MANY_TEXT: &str = "Terminating swarms.";
+const QUIT_ONE_TEXT: &str = "Terminating session.";
+const QUIT_MANY_TEXT: &str = "Terminating sessions.";
 
 gpui_kit::actions!(
     workspace,
@@ -1121,7 +1122,7 @@ impl WorkspaceView {
             return;
         }
         // The swarm is told to stop now (stdin EOF), and the tab stays on the strip,
-        // frozen under "Terminating swarm.", until it has exited — so the session it
+        // frozen under "Terminating session.", until it has exited — so the session it
         // was writing is free before anything can open it again (§7.1, §8).
         let Some(engine) = tab.update(cx, |tab, cx| tab.terminate(window, cx)) else {
             // No swarm behind it (a New Swarm page, a boot that never started a
@@ -2160,6 +2161,24 @@ mod tests {
         assert!(
             !cx.update(|_, cx| page.read(cx).swarm(cx)),
             "the page that was open starts one agent now"
+        );
+        // And its words follow: a session, not a swarm — on the page and on the strip
+        // alike, because one program is one page and one name (§7.2).
+        let headline = cx.update(|window, _| {
+            window
+                .find(crate::empty_tab::HEADLINE_ID)
+                .label()
+                .map(str::to_owned)
+        });
+        assert_eq!(
+            headline.as_deref(),
+            Some("New Session"),
+            "the page's own headline says what this page is"
+        );
+        assert_eq!(
+            cx.update(|_, cx| page.read(cx).title(cx).to_string()),
+            "New Session",
+            "and so does the tab"
         );
         // The switch is one value for the window, so a tab opened now opens with it.
         let second =

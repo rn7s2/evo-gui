@@ -243,7 +243,7 @@ fn live_states(
         assert_eq!(view.selected_index(), 1);
         let tab = view.selected_tab().read(cx);
         assert_eq!(tab.state(), &TabState::Empty);
-        assert_eq!(tab.title().as_ref(), "New Swarm");
+        assert_eq!(tab.title(cx).as_ref(), "New Swarm");
         tab.id()
     });
     // The working tab stays selected; the empty tab is hovered so its fill and

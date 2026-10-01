@@ -238,7 +238,7 @@ fn tab(
         let content = tab.read(cx);
         (
             content.id(),
-            content.title(),
+            content.title(cx),
             content.tooltip(),
             content.is_working(),
             index == view.selected_index(),
