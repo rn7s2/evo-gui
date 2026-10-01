@@ -13,6 +13,12 @@
 //! [`SELECTION_DARK`]): the design's editor keeps it in its theme file, as a wash
 //! over the surface it covers rather than a colour of its own.
 //!
+//! Code is the other thing the palette does not carry: a fenced block's *tokens* come
+//! from a highlight palette, and the kit keeps the one it was last given unless a
+//! theme file states another. So each mode states its own ([`code_inks`]) — the kit's
+//! own light and dark syntax palettes — or dark mode draws its blocks with the light
+//! ramp's ink.
+//!
 //! The app follows the system's appearance — the macOS setting, which is also the
 //! one the Dock and every other app follow — unless `app.json`'s `theme` says
 //! otherwise, and it follows it *live*: switching the system appearance switches
@@ -23,6 +29,7 @@
 //! [`ThemeMode::Dark`]; `System` is this app's own third answer, worked out from
 //! the window's appearance.
 
+use gpui_kit::component::highlighter::{HighlightTheme, HighlightThemeStyle};
 use gpui_kit::component::scroll::ScrollbarMode;
 use gpui_kit::component::{Theme as ComponentTheme, ThemeMode, ThemeRegistry};
 use gpui_kit::{App, Subscription, Window, WindowAppearance};
@@ -215,7 +222,30 @@ fn theme(name: &str, mode: &str, palette: &Palette, washes: Washes) -> serde_jso
         "radius.lg": design::RADIUS_LG as u32,
         "shadow": true,
         "colors": colors(palette, washes),
+        "highlight": code_inks(mode),
     })
+}
+
+/// The syntax palette a fenced code block is painted with, in each mode.
+///
+/// This file has to state it. `Theme::apply_config` replaces the highlight theme it
+/// is given only when a theme file carries one, so a theme of ours that said nothing
+/// about code left the kit's highlight theme where it was — its *light* palette, in
+/// either mode. That is the defect this fixes: dark mode drew the light ramp's inks
+/// on the dark block, where a JSON key is `#333333` on `#262626` (1.2:1, a grey
+/// smudge), a string `#036A07` (2.2:1) and a number `#0433FF` (2.1:1).
+///
+/// The design's dark palette *is* the kit's own dark tokens (`store::design::DARK`),
+/// so the kit's dark syntax palette is the one made for the surface it is drawn on —
+/// `#262626`, the design's `--muted`, where its every ink clears 5.5:1. The light
+/// side keeps the palette the light ramp has been read on all along: the design's
+/// light page renders its code in it, comment blue and all.
+fn code_inks(mode: &str) -> HighlightThemeStyle {
+    if mode == "dark" {
+        HighlightTheme::default_dark().style.clone()
+    } else {
+        HighlightTheme::default_light().style.clone()
+    }
 }
 
 /// The tokens the kit has, filled from the design's palette.
@@ -612,6 +642,81 @@ mod tests {
                 "{mode}: {pointed:.2} under the pointer"
             );
         }
+    }
+
+    /// A code block's inks follow the mode.
+    ///
+    /// The kit keeps the highlight theme it was last given — `Theme::apply_config`
+    /// replaces it only when a theme file carries one — so a palette of ours that said
+    /// nothing about code drew its blocks with the kit's *light* ink in dark mode. That
+    /// is the reported defect: dark green strings and grey keys on the dark block.
+    #[gpui_kit::test]
+    fn the_code_inks_follow_the_mode(cx: &mut gpui_kit::TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            install(cx);
+            ComponentTheme::change(ThemeMode::Light, None, cx);
+        });
+        cx.update(|cx| {
+            assert_eq!(
+                cx.theme().highlight_theme.appearance,
+                ThemeMode::Light,
+                "the light theme's code"
+            );
+            ComponentTheme::change(ThemeMode::Dark, None, cx);
+            assert_eq!(
+                cx.theme().highlight_theme.appearance,
+                ThemeMode::Dark,
+                "…and its own ink under the dark one"
+            );
+        });
+    }
+
+    /// Every ink a reader reads code by clears its floor on the block it is drawn on —
+    /// the contrast the defect fails, as a number rather than a taste.
+    ///
+    /// The dark block (`--muted`, `#262626`) is where the light ramp landed at 1.20:1
+    /// for a key and 2.11:1 for a number; the light block (`#E6E0D5`) is read in the
+    /// light ramp the design's live page shows, whose comment blue is its softest ink.
+    #[test]
+    fn every_code_ink_reads_on_the_block_it_is_drawn_on() {
+        let set: serde_json::Value = serde_json::from_str(&theme_set()).expect("JSON");
+        let themes = set["themes"].as_array().expect("themes").clone();
+        let syntax = |mode: &str| {
+            themes
+                .iter()
+                .find(|theme| theme["mode"] == mode)
+                .and_then(|theme| theme["highlight"]["syntax"].as_object().cloned())
+                .unwrap_or_default()
+        };
+        let ink = |syntax: &serde_json::Map<String, serde_json::Value>, token: &str| {
+            let hex = syntax[token]["color"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{token} is not in the palette"));
+            let channel =
+                |at: usize| u8::from_str_radix(&hex[1 + at..3 + at], 16).expect("a hex channel");
+            (channel(0), channel(2), channel(4))
+        };
+        let block = |palette: &Palette| (palette.muted.r, palette.muted.g, palette.muted.b);
+        for (mode, palette, floor) in [("light", &design::LIGHT, 2.5), ("dark", &design::DARK, 4.5)]
+        {
+            let syntax = syntax(mode);
+            for token in [
+                "comment", "string", "number", "boolean", "keyword", "type", "property",
+            ] {
+                let ratio = contrast(ink(&syntax, token), block(palette));
+                assert!(
+                    ratio >= floor,
+                    "{mode}: a {token} reads at {ratio:.2}:1 on the block"
+                );
+            }
+        }
+        // And the pair that must not be painted: the light ramp's own key ink on the
+        // dark block, which is what dark mode drew with before.
+        assert!(
+            contrast(ink(&syntax("light"), "property"), block(&design::DARK)) < 2.0,
+            "the light palette is the one dark mode must not draw its code with"
+        );
     }
 
     /// The scrollbar *behaviour* is the app's own answer rather than the platform's: the kit

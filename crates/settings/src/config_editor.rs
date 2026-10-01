@@ -1423,10 +1423,12 @@ mod tests {
         for (mode, dark) in [(ThemeMode::Dark, true), (ThemeMode::Light, false)] {
             f.act(cx, |window, cx| {
                 ComponentTheme::change(mode, Some(window), cx);
-                // Evo's own theme leaves the kit's highlight theme alone, and the
-                // kit's default for one is light: that is the state the app is
-                // really in, and the one that made the code editor white under the
-                // dark theme. Reproduce it here, not a kinder one.
+                // The kit's *light* highlight theme under the dark one is the harsher
+                // case this test wants: its own background is white, so a surface taken
+                // from it is the defect at its worst. (Evo's themes now carry a palette
+                // per mode — `crates/app/src/theme.rs`'s `code_inks` — so the light one
+                // is no longer the state the app is really in; what is on trial here is
+                // the surface, not the palette.)
                 ComponentTheme::global_mut(cx).highlight_theme = HighlightTheme::default_light();
                 window.render_frame(cx);
             });
