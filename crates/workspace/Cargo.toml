@@ -22,4 +22,7 @@ composer = { path = "../composer" }
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }
 swarm_client = { path = "../swarm_client", features = ["test-harness"] }
+# The transcript counts the rows a frame builds and the frames it renders, which is
+# what the tests over this crate's embedding of it assert.
+transcript = { path = "../transcript", features = ["test-support"] }
 image = "0.25"

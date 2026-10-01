@@ -2635,6 +2635,54 @@ mod tests {
         .expect("the quiet line");
     }
 
+    /// §2.8: the conversation column embeds the transcript as a *cached* view. A
+    /// notification anywhere else in the window — a lane's breathing dot asks for a frame
+    /// every frame, the tab seals a refusal — must not render and lay out a journal of
+    /// hundreds of rows again; the transcript's own news still does.
+    #[gpui_kit::test]
+    fn a_notify_elsewhere_does_not_re_render_the_transcript(cx: &mut TestAppContext) {
+        let (window, tab) = running_tab(cx);
+        let view = cx.update(|cx| cx.new(TranscriptView::new));
+        cx.update(|cx| {
+            tab.update(cx, |tab, _| {
+                tab.transcripts.insert(AgentKey::Coordinator, view.clone());
+            });
+            let items: Vec<Item> = (0..400)
+                .map(|i| assistant(&format!("e_{i:04}"), "an answer", ""))
+                .collect();
+            view.update(cx, |view, cx| view.replace(items, cx));
+        });
+        // `Window::refresh` turns caching off for a frame — it is for a window that has
+        // to be laid out from scratch — so these frames are drawn rather than refreshed.
+        let frames = |cx: &mut TestAppContext| {
+            cx.update_window(window, |_, window, cx| {
+                for _ in 0..3 {
+                    window.draw(cx).clear(cx);
+                }
+            })
+            .expect("the tab window");
+        };
+        frames(cx);
+        let rendered = cx.read(|cx| view.read(cx).renders());
+        assert!(rendered > 0, "the transcript rendered when it was shown");
+
+        cx.update(|cx| tab.update(cx, |_, cx| cx.notify()));
+        frames(cx);
+        assert_eq!(
+            cx.read(|cx| view.read(cx).renders()),
+            rendered,
+            "a notify elsewhere in the window does not render the transcript again"
+        );
+
+        // The transcript's own news is its own: it is rendered again.
+        cx.update(|cx| view.update(cx, |view, cx| view.set_running(true, cx)));
+        frames(cx);
+        assert!(
+            cx.read(|cx| view.read(cx).renders()) > rendered,
+            "a notify on the transcript itself renders it"
+        );
+    }
+
     /// §5.4: a page that answered with nothing new — an overlap with what the topic
     /// holds, or the last page of all — still ends the wait. "Loading earlier items…" is
     /// the scrollback's only in-flight state, and an answer that changed no row used to

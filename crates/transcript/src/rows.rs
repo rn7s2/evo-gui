@@ -1454,23 +1454,26 @@ fn turn_shows_work(items: &[Item]) -> bool {
         })
 }
 
+/// Whether the foot of the record is the pips: the agent is running and no row of its
+/// last turn says so itself.
+pub(crate) fn shows_work(data: &TranscriptData) -> bool {
+    data.running && !turn_shows_work(&data.items)
+}
+
 /// The pips at the foot of the list while the agent is running and nothing in its turn
 /// says so yet: the request is in flight, the model is reasoning without streaming it,
 /// or the next request after a tool is on its way. `None` once a row of the turn shows
 /// the work itself, or while the agent is not running.
 ///
-/// They mark the foot of the *record*, so they are drawn only when the window reaches
-/// it: under a window whose foot is not the list's they would say the list ends while
-/// the output that arrived sits behind it. What the turn has shown is read off the
-/// window's own rows — the rows on screen — so the walk backwards never runs through a
-/// record the list is holding but not drawing.
+/// They mark the foot of the record, and the record is what the list draws: the list's
+/// own foot is the record's, since every item is in it.
 pub(crate) fn pending_row(data: &TranscriptData, cx: &App) -> Option<AnyElement> {
-    let shown = &data.items[data.shown.clone()];
-    if !data.running || data.shown.end < data.items.len() || turn_shows_work(shown) {
+    if !shows_work(data) {
         return None;
     }
     let palette = Palette::from_app(cx);
-    let gap = shown
+    let gap = data
+        .items
         .last()
         .map(|previous| {
             Group::of(&previous.kind)

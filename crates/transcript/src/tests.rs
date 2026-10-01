@@ -1,6 +1,9 @@
 //! `TestAppContext` tests: the items the list is fed, the retained markdown documents, the
 //! rows a reader can act on, and the panel helpers that do not need a window.
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use gpui_kit::base::TextViewState;
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
@@ -143,6 +146,53 @@ impl Render for TranscriptHost {
     }
 }
 
+/// The tab page's own arrangement: the transcript in a cached view, and a neighbour that
+/// notifies on its own — a lane's breathing dot, which asks for a frame every frame.
+struct CachedHost {
+    transcript: Entity<TranscriptView>,
+    neighbour: Entity<Neighbour>,
+}
+
+struct Neighbour;
+
+impl Render for Neighbour {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        cx.notify();
+        div().h(px(24.)).id("neighbour").test_support()
+    }
+}
+
+impl CachedHost {
+    fn new(cx: &mut Context<Self>) -> Self {
+        Self {
+            transcript: cx.new(TranscriptView::new),
+            neighbour: cx.new(|_| Neighbour),
+        }
+    }
+}
+
+impl Render for CachedHost {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .child(
+                div().flex_1().min_h_0().children(Some(
+                    gpui_kit::AnyView::from(self.transcript.clone()).cached(
+                        gpui_kit::StyleRefinement::default()
+                            .flex_1()
+                            .min_h_0()
+                            .min_w_0(),
+                    ),
+                )),
+            )
+            .child(self.neighbour.clone())
+            .id("cached-host")
+            .test_support()
+    }
+}
+
 fn document(view: &Entity<TranscriptView>, cx: &App, id: &str) -> Entity<TextViewState> {
     view.read(cx)
         .data
@@ -205,28 +255,9 @@ fn items_move_by_id_and_keep_the_order_they_arrived_in(cx: &mut TestAppContext) 
             .collect();
         assert_eq!(ids, ["e_0", "e_1", "e_2"]);
     });
-    // The page nobody asked for is held in front of the reader rather than opened
-    // under them: the rows they were reading are the rows they are still reading.
+    // The page is drawn in the record's own order: the older item is spliced in front
+    // of what is held, above the rows the reader was reading.
     cx.update(|window, cx| {
-        window.render_frame(cx);
-        assert!(window
-            .try_find(row_id("transcript-measure", "e_1"))
-            .is_some());
-        assert!(
-            window
-                .try_find(row_id("transcript-measure", "e_0"))
-                .is_none(),
-            "the older item is held, not drawn"
-        );
-        assert!(
-            window.try_find("transcript-load-older").is_some(),
-            "and the header says there is more behind them"
-        );
-    });
-    // The reader asks for it: the header opens what it was holding back, and the rows
-    // are drawn in the record's own order — the insert is at the head, not a rebuild.
-    cx.update(|window, cx| {
-        view.update(cx, |view, cx| view.load_older(window, cx));
         window.render_frame(cx);
         window.render_frame(cx);
         let older = window.find(row_id("transcript-measure", "e_0")).bounds();
@@ -685,53 +716,71 @@ fn a_running_agent_shows_pips_from_the_requests_start(cx: &mut TestAppContext) {
     assert!(!pending(cx), "the run is over");
 }
 
+/// The scrollback walks itself back: the reader presses nothing. For as long as the
+/// topic says there is more behind the oldest item held, the view asks for the next
+/// page — one in flight at a time, each asked from the oldest item it holds — and the
+/// quiet line at the head says a page is on its way.
 #[gpui_kit::test]
-fn the_history_header_asks_for_older_items_only_when_there_are_some(cx: &mut TestAppContext) {
+fn the_scrollback_is_walked_back_without_being_pressed_for(cx: &mut TestAppContext) {
     let (view, cx) = open!(cx, vec![user("e_1", "the tail")]);
-    let asked = std::rc::Rc::new(std::cell::RefCell::new(0));
-    let oldest_seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-    let oldest_handle = oldest_seen.clone();
-    let recorded = asked.clone();
+    let asked = Rc::new(RefCell::new(Vec::new()));
+    let oldest_seen = asked.clone();
     view.update(cx, |view, cx| {
         view.on_load_older(
-            move |oldest, _window, _cx| {
-                oldest_handle.borrow_mut().push(oldest.to_string());
-                *recorded.borrow_mut() += 1;
-            },
+            move |oldest, _window, _cx| oldest_seen.borrow_mut().push(oldest.to_string()),
             cx,
         );
     });
 
-    cx.update(|window, cx| window.render_frame(cx));
-    cx.update(|window, _| {
-        assert!(
-            window.try_find("transcript-load-older").is_none(),
-            "nothing is behind the only item"
-        );
-    });
-
-    view.update(cx, |view, cx| view.set_history(true, false, cx));
-    cx.update(|window, cx| window.render_frame(cx));
-    cx.update(|window, cx| {
-        assert!(window.try_find("transcript-load-older").is_some());
-        window.click("transcript-load-older", cx);
-    });
-    assert_eq!(*asked.borrow(), 1);
-    assert_eq!(
-        oldest_seen.borrow().as_slice(),
-        ["e_1"],
-        "the page is asked for from the oldest item on screen"
+    // Nothing behind the only item held: nothing is asked for, and nothing is said.
+    frames(cx, 2);
+    assert!(asked.borrow().is_empty());
+    assert!(
+        cx.update(|window, _| window.try_find("transcript-loading-older").is_none()),
+        "no line while there is nothing behind the record"
     );
 
-    // While a page is in flight the header says so.
-    view.update(cx, |view, cx| view.set_history(true, true, cx));
-    cx.update(|window, cx| window.render_frame(cx));
-    cx.update(|window, _| {
-        assert_eq!(
-            window.find("transcript-load-older").label(),
-            Some("Loading earlier items…")
-        );
+    // The topic says there is more: the page is asked for at once, from the oldest item
+    // held, and the head says it is on its way.
+    view.update(cx, |view, cx| view.set_history(true, false, cx));
+    frames(cx, 2);
+    assert_eq!(asked.borrow().as_slice(), ["e_1"]);
+    assert!(
+        cx.update(|window, _| window.try_find("transcript-loading-older").is_some()),
+        "and the head says a page is on its way"
+    );
+    // One page at a time: the next frame asks for nothing while that one is in flight.
+    frames(cx, 3);
+    assert_eq!(asked.borrow().len(), 1, "one ask per page");
+
+    // The page lands: it is spliced in front of what is held, and the next one is asked
+    // for from its own oldest item.
+    view.update(cx, |view, cx| {
+        view.prepend(vec![user("e_0", "earlier")], cx);
+        view.set_history(true, false, cx);
     });
+    frames(cx, 2);
+    assert_eq!(asked.borrow().as_slice(), ["e_1", "e_0"]);
+    assert!(
+        cx.update(|window, _| window.try_find(row_id("transcript-row", "e_0")).is_some()),
+        "the page that landed is in the list"
+    );
+
+    // The last page of all: the topic says there is nothing behind it, and the walk ends.
+    view.update(cx, |view, cx| {
+        view.prepend(vec![user("e_-1", "older still")], cx);
+        view.set_history(false, false, cx);
+    });
+    frames(cx, 3);
+    assert_eq!(
+        asked.borrow().len(),
+        2,
+        "nothing is asked for past the record"
+    );
+    assert!(
+        cx.update(|window, _| window.try_find("transcript-loading-older").is_none()),
+        "and the head is quiet again"
+    );
 }
 
 #[gpui_kit::test]
@@ -1663,9 +1712,9 @@ fn a_reports_field_is_rendered_as_markdown(cx: &mut TestAppContext) {
     cx.read(|cx| assert!(view.read(cx).data.read(cx).field_documents.is_empty()));
 }
 
-/// A reader's own wheel takes the list off its tail: the offset moves, the pin lets
-/// go, and the design's "↓ Jump to latest" is drawn — and scrolling back to the tail
-/// puts it away again.
+/// A reader's own wheel takes the list off its tail: the list scrolls, the pin lets go,
+/// and the design's "↓ Jump to latest" is drawn — and scrolling back to the tail puts it
+/// away again.
 ///
 /// The wheel is the one scroll the design counts as the reader's (`USER_WINDOW`),
 /// and the one thing that drives it is the box's own wheel handler — a positive dy
@@ -1679,16 +1728,7 @@ fn a_wheel_takes_the_list_off_its_tail_and_the_pill_appears(cx: &mut TestAppCont
     for _ in 0..4 {
         cx.update(|window, cx| window.render_frame(cx));
     }
-    let tail = cx.read(|cx| view.read(cx).scroll.offset());
-    // The design's own distance from the bottom: `max + offset`, 0 at the tail (the
-    // offset grows negative as the list scrolls down, to `-max`).
-    let gap = |cx: &mut TestAppContext| {
-        cx.read(|cx| {
-            let view = view.read(cx);
-            view.scroll.max_offset().y + view.scroll.offset().y
-        })
-    };
-    assert_eq!(gap(cx), px(0.), "the list opens at its tail");
+    assert_eq!(gap(&view, cx), 0., "the list opens at its tail");
     assert!(
         cx.read(|cx| view.read(cx).pin.is_pinned()),
         "the list opens following its tail"
@@ -1699,20 +1739,11 @@ fn a_wheel_takes_the_list_off_its_tail_and_the_pill_appears(cx: &mut TestAppCont
     );
 
     // A wheel up, over the list.
-    cx.update(|window, cx| {
-        window.scroll(
-            "transcript-scroll",
-            gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(600.))),
-            cx,
-        );
-    });
-    for _ in 0..3 {
-        cx.update(|window, cx| window.render_frame(cx));
-    }
-    assert_eq!(
-        gap(cx),
-        px(600.),
-        "the wheel moved the list 600px off its tail (from {tail:?})"
+    wheel(cx, 600.);
+    let moved = gap(&view, cx);
+    assert!(
+        (moved - 600.).abs() < 1.,
+        "the wheel moved the list 600px off its tail ({moved}px)"
     );
     assert!(
         cx.read(|cx| view.read(cx).pin.is_away()),
@@ -1724,22 +1755,8 @@ fn a_wheel_takes_the_list_off_its_tail_and_the_pill_appears(cx: &mut TestAppCont
     );
 
     // Back down to the tail: following again, nothing to jump to.
-    cx.update(|window, cx| {
-        window.scroll(
-            "transcript-scroll",
-            gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-900.))),
-            cx,
-        );
-    });
-    for _ in 0..3 {
-        cx.update(|window, cx| window.render_frame(cx));
-    }
-    assert_eq!(
-        cx.read(|cx| view.read(cx).scroll.offset()),
-        tail,
-        "the wheel down stops at the tail"
-    );
-    assert_eq!(gap(cx), px(0.));
+    wheel(cx, -900.);
+    assert_eq!(gap(&view, cx), 0., "the wheel down stops at the tail");
     assert!(cx.read(|cx| view.read(cx).pin.is_pinned()));
     assert!(
         !cx.update(|window, _| window.find("transcript-jump").visible()),
@@ -1747,9 +1764,7 @@ fn a_wheel_takes_the_list_off_its_tail_and_the_pill_appears(cx: &mut TestAppCont
     );
 }
 
-/// "↓ Jump to latest" goes to the tail — the latest row on screen — not to the
-/// head. gpui's offset runs *negative* downwards, so an ease aimed at
-/// `+max_offset` clamps to 0 and the reader never leaves the head.
+/// "↓ Jump to latest" goes to the tail — the latest row on screen — not to the head.
 #[gpui_kit::test]
 fn jump_to_latest_lands_on_the_tail(cx: &mut TestAppContext) {
     let items: Vec<Item> = (0..40)
@@ -1761,10 +1776,15 @@ fn jump_to_latest_lands_on_the_tail(cx: &mut TestAppContext) {
     }
     // The reader goes to the very top.
     view.update(cx, |view, _| {
-        view.pin.touched();
-        view.scroll.set_offset(gpui_kit::point(px(0.), px(0.)));
+        view.list.scroll_to(gpui_kit::ListOffset {
+            item_ix: 0,
+            offset_in_item: px(0.),
+        });
+        // The gesture that brought them there is the reader's own, whichever way they
+        // scrolled: a drag of the scrollbar to the head.
+        view.touched();
     });
-    for _ in 0..2 {
+    for _ in 0..3 {
         cx.update(|window, cx| window.render_frame(cx));
     }
     let transcript = cx.update(|window, _| window.find("transcript").bounds());
@@ -1777,6 +1797,7 @@ fn jump_to_latest_lands_on_the_tail(cx: &mut TestAppContext) {
     // The reader's own way back: a press on the pill, not a call.
     view.update(cx, |view, cx| {
         view.pin.on_scroll(3000.);
+        view.pin.touched();
         cx.notify();
     });
     for _ in 0..3 {
@@ -1793,24 +1814,16 @@ fn jump_to_latest_lands_on_the_tail(cx: &mut TestAppContext) {
     for _ in 0..3 {
         cx.update(|window, cx| window.render_frame(cx));
     }
-    // The scroller itself is at the tail: gpui's offset is `-max_offset` down
-    // there, and an ease aimed at `+max_offset` clamps to 0 — the head.
-    let (offset, max_offset) = cx.read(|cx| {
-        let view = view.read(cx);
-        (
-            f32::from(view.scroll.offset().y),
-            f32::from(view.scroll.max_offset().y),
-        )
-    });
-    assert_eq!(
-        offset, -max_offset,
-        "the scroller sits at `-max_offset`, the tail, not at the head"
-    );
     let last = cx.update(|window, _| window.find(row_id("transcript-row", "u_39")).bounds());
     assert!(
         last.bottom() <= transcript.bottom() + px(1.)
             && last.bottom() > transcript.bottom() - px(60.),
         "the latest row is at the pane's foot after the jump: {last:?} vs {transcript:?}"
+    );
+    assert_eq!(
+        gap(&view, cx),
+        0.,
+        "the list lands on its tail, not its head"
     );
     assert!(cx.read(|cx| view.read(cx).is_following_tail(cx)));
     assert!(
@@ -1879,19 +1892,54 @@ fn the_text_style_draws_rules_in_the_designs_ink_in_both_themes(cx: &mut TestApp
         }
     }
 }
-// --- the window: how much of a long record the list builds ----------------------------
+// --- the list: the whole record, and only a pane of rows built ----------------------
 
-/// The range of the record the list is drawing, at this moment.
-fn drawn(
-    view: &Entity<TranscriptView>,
-    cx: &gpui_kit::VisualTestContext,
-) -> std::ops::Range<usize> {
-    cx.read(|cx| view.read(cx).data.read(cx).shown.clone())
+/// How many rows the list holds: every item of the record, and nothing else.
+fn held(view: &Entity<TranscriptView>, cx: &gpui_kit::VisualTestContext) -> usize {
+    cx.read(|cx| view.read(cx).slots.rows)
 }
 
-/// Whether the row of `id` is on screen, by its own element.
+/// How far the reader is from the bottom of the list, in pixels.
+fn gap(view: &Entity<TranscriptView>, cx: &gpui_kit::VisualTestContext) -> f32 {
+    cx.read(|cx| view.read(cx).gap())
+}
+
+/// Whether the row of `id` is *built*: the list builds the rows the pane can reach, so
+/// a row that is not on screen is not built either.
 fn drawn_row(window: &mut gpui_kit::VisualTestContext, id: &str) -> bool {
     window.update(|window, _| window.try_find(row_id("transcript-row", id)).is_some())
+}
+
+/// Where a row is, in window coordinates.
+fn row_bounds(
+    cx: &mut gpui_kit::VisualTestContext,
+    id: &str,
+) -> gpui_kit::Bounds<gpui_kit::Pixels> {
+    cx.update(|window, _| window.find(row_id("transcript-row", id)).bounds())
+}
+
+/// The pane the reader can see: the transcript's own box.
+fn pane(cx: &mut gpui_kit::VisualTestContext) -> gpui_kit::Bounds<gpui_kit::Pixels> {
+    cx.update(|window, _| window.find("transcript-scroll").bounds())
+}
+
+/// The row at the top of the pane, of `ids`: what the reader's eye lands on first.
+fn top_row_in_pane(cx: &mut gpui_kit::VisualTestContext, ids: &[String]) -> Option<String> {
+    let pane = pane(cx);
+    ids.iter()
+        .find(|id| {
+            drawn_row(cx, id)
+                && row_bounds(cx, id).top() >= pane.top()
+                && row_bounds(cx, id).top() < pane.bottom()
+        })
+        .cloned()
+}
+
+/// Render `count` frames.
+fn frames(cx: &mut gpui_kit::VisualTestContext, count: usize) {
+    for _ in 0..count {
+        cx.update(|window, cx| window.render_frame(cx));
+    }
 }
 
 /// One wheel over the list: a positive `dy` is a wheel up, away from the tail, and it
@@ -1909,134 +1957,178 @@ fn wheel(cx: &mut gpui_kit::VisualTestContext, dy: f32) {
     }
 }
 
-/// A record longer than a page is drawn a page at a time: the newest page is what the
-/// list builds, and "Earlier items" opens the block in front of it — at its own head,
-/// so the reader reads forward through what they asked for.
+/// The whole record is in the list — every item of the topic — and only the rows the
+/// pane can reach are built: a journal of hundreds of items costs a pane of rows a
+/// frame, not a parse and a layout per item.
 #[gpui_kit::test]
-fn a_long_record_is_drawn_a_page_at_a_time(cx: &mut TestAppContext) {
+fn the_whole_record_is_held_and_only_the_rows_on_screen_are_built(cx: &mut TestAppContext) {
     let items: Vec<Item> = (0..700)
-        .map(|i| user(&format!("u_{i:04}"), "a turn of its own"))
+        .map(|i| {
+            user(
+                &format!("u_{i:04}"),
+                "a turn of its own, long enough that its row is a few lines tall and the \
+                 whole record is far taller than the pane it is read in",
+            )
+        })
         .collect();
     let (view, cx) = open!(cx, items);
-    cx.update(|window, cx| window.render_frame(cx));
+    frames(cx, 2);
 
     assert_eq!(
-        cx.read(|cx| view.read(cx).items(cx).len()),
+        held(&view, cx),
         700,
-        "the whole record is held"
+        "every item of the record is in the list"
     );
-    assert_eq!(drawn(&view, cx), 444..700, "and the newest page is drawn");
-    assert!(drawn_row(cx, "u_0444"), "the page starts at its own head");
-    assert!(!drawn_row(cx, "u_0443"), "and stops there");
+    assert_eq!(cx.read(|cx| view.read(cx).items(cx).len()), 700);
+
+    // The list opens at its latest row, and builds a pane of rows: the head of the
+    // record is in the list and is not a row yet.
     assert!(drawn_row(cx, "u_0699"), "the latest row is on screen");
-
-    // A press on the header opens the block in front of the reader, at its start.
-    cx.update(|window, cx| {
-        view.update(cx, |view, cx| view.load_older(window, cx));
-        window.render_frame(cx);
-        window.render_frame(cx);
-    });
-    assert_eq!(drawn(&view, cx), 188..700);
-    assert!(drawn_row(cx, "u_0188"), "the block's own first row");
-    assert!(!drawn_row(cx, "u_0187"), "and not the one behind it");
-    assert_eq!(
-        cx.read(|cx| view.read(cx).scroll.offset().y),
-        px(0.),
-        "the block is at the head of the list"
-    );
     assert!(
-        cx.read(|cx| view.read(cx).is_away_from_latest(cx)),
-        "and the reader is not at the latest any more"
-    );
-    assert!(
-        cx.update(|window, _| window.find("transcript-jump").visible()),
-        "the pill offers the way back"
+        !drawn_row(cx, "u_0000"),
+        "the head of the record is not built"
     );
 
-    // The rest of the record: another page, and then there is nothing behind it.
-    cx.update(|window, cx| {
-        view.update(cx, |view, cx| view.load_older(window, cx));
-        window.render_frame(cx);
-        window.render_frame(cx);
+    // How many rows a frame builds, for a record of 700.
+    let built = {
+        crate::counted::reset();
+        cx.update(|window, cx| window.render_frame(cx));
+        crate::counted::rows()
+    };
+    assert!(built > 0, "a frame builds the rows on screen");
+    assert!(
+        built < 64,
+        "and only those: {built} rows built of a 700-row record"
+    );
+
+    // A second frame builds the same handful: the record behind the pane is not walked.
+    crate::counted::reset();
+    cx.update(|window, cx| window.render_frame(cx));
+    assert!(crate::counted::rows() < 64);
+
+    // The built rows are the pane's, and they follow the reader: taken to the head of
+    // the record — a drag of the scrollbar to the top, which is the reader's own scroll
+    // — the head is a row and the tail no longer is.
+    view.update(cx, |view, _| {
+        view.list.scroll_to(gpui_kit::ListOffset {
+            item_ix: 0,
+            offset_in_item: px(0.),
+        });
+        // The gesture that brought them there is the reader's own, whichever way they
+        // scrolled: a drag of the scrollbar to the head.
+        view.touched();
     });
-    assert_eq!(drawn(&view, cx), 0..700, "the last page holds what is left");
-    cx.update(|window, cx| {
-        window.render_frame(cx);
-        assert!(
-            window.try_find("transcript-load-older").is_none(),
-            "with every held row on screen there is nothing to ask for"
-        );
-    });
+    frames(cx, 3);
+    assert!(
+        drawn_row(cx, "u_0000"),
+        "the head of the record is on screen"
+    );
+    assert!(!drawn_row(cx, "u_0699"), "and the tail is not");
 }
 
-/// Following the tail, the window slides as rows arrive — the newest page, always. A
-/// reader who has scrolled away keeps the rows they are reading: output that arrives
-/// while they are there is held behind them, and offered by the pill.
+/// The transcript is embedded as a *cached* view (the tab page's own arrangement): a
+/// notification somewhere else in the window — a lane's breathing dot asks for a frame
+/// every frame — must not render the list again, while the transcript's own news does.
 #[gpui_kit::test]
-fn the_window_slides_while_following_and_holds_still_while_reading(cx: &mut TestAppContext) {
+fn a_notify_elsewhere_does_not_re_render_the_cached_transcript(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (host, cx) = cx.add_window_view(|_window, cx| CachedHost::new(cx));
+    let (view, neighbour) = cx.read(|cx| {
+        let host = host.read(cx);
+        (host.transcript.clone(), host.neighbour.clone())
+    });
+    let items: Vec<Item> = (0..300)
+        .map(|i| user(&format!("u_{i:04}"), "a turn of its own"))
+        .collect();
+    view.update(cx, |view, cx| view.replace(items, cx));
+    frames(cx, 3);
+    let rendered = cx.read(|cx| view.read(cx).renders());
+    assert!(rendered > 0, "the transcript rendered when it was shown");
+
+    // The neighbour notifies on its own, frame after frame: the transcript is reused.
+    // (`Window::refresh` turns caching off for a frame — it is for a window that has to
+    // be laid out from scratch — so these frames are drawn rather than refreshed.)
+    for _ in 0..3 {
+        neighbour.update(cx, |_, cx| cx.notify());
+        for _ in 0..2 {
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+    }
+    assert_eq!(
+        cx.read(|cx| view.read(cx).renders()),
+        rendered,
+        "a notify elsewhere in the window does not render the transcript again"
+    );
+
+    // The transcript's own news is its own: it renders again.
+    view.update(cx, |_, cx| cx.notify());
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        cx.read(|cx| view.read(cx).renders()) > rendered,
+        "a notify on the transcript itself renders it"
+    );
+}
+
+/// Following the tail, the list is at the newest row however many arrive. A reader who
+/// has scrolled away is not moved: what arrives is appended below them, and offered by
+/// the pill.
+#[gpui_kit::test]
+fn output_that_arrives_moves_a_follower_and_leaves_a_reader_alone(cx: &mut TestAppContext) {
     let items: Vec<Item> = (0..300)
         .map(|i| user(&format!("u_{i:04}"), "a turn of its own"))
         .collect();
     let (view, cx) = open!(cx, items);
-    for _ in 0..3 {
-        cx.update(|window, cx| window.render_frame(cx));
-    }
-    assert_eq!(drawn(&view, cx), 44..300);
+    frames(cx, 3);
     assert!(cx.read(|cx| view.read(cx).is_following_tail(cx)));
+    assert!(drawn_row(cx, "u_0299"), "the list opens at its latest row");
 
-    // An item arrives while the reader is following: the window slides by one.
+    // An item arrives while the reader is following: the tail follows it.
     view.update(cx, |view, cx| {
         view.upsert(user("u_0300", "the newest"), cx);
     });
-    assert_eq!(drawn(&view, cx), 45..301);
-    cx.update(|window, cx| window.render_frame(cx));
-    assert!(drawn_row(cx, "u_0300"), "the newest row is drawn");
+    frames(cx, 2);
+    assert!(drawn_row(cx, "u_0300"), "the newest row is on screen");
+    assert_eq!(gap(&view, cx), 0., "and the list is still on its tail");
 
-    // The reader wheels up, off the tail but not far enough for the pill.
-    wheel(cx, 100.);
+    // The reader wheels up, well past the pill's threshold.
+    wheel(cx, 900.);
     assert!(!cx.read(|cx| view.read(cx).is_following_tail(cx)));
-    let reading = drawn(&view, cx);
+    let ids: Vec<String> = (0..301).map(|i| format!("u_{i:04}")).collect();
+    let reading = top_row_in_pane(cx, &ids).expect("a row at the top of the pane");
+    let before = row_bounds(cx, &reading);
 
-    // Output arrives while they are reading: nothing on screen moves, and the new row
-    // is not drawn — but the way back to it is offered all the same, because it is
-    // behind the window and there is no other way to reach it.
-    let before = cx.read(|cx| view.read(cx).scroll.offset());
+    // Output arrives while they are reading: nothing on screen moves, and the pill
+    // offers the way back to it.
     view.update(cx, |view, cx| {
         view.upsert(user("u_0301", "arrived while reading"), cx);
     });
-    for _ in 0..2 {
-        cx.update(|window, cx| window.render_frame(cx));
-    }
-    assert_eq!(drawn(&view, cx), reading, "the window has not moved");
-    assert!(!drawn_row(cx, "u_0301"));
+    frames(cx, 3);
     assert_eq!(
-        cx.read(|cx| view.read(cx).scroll.offset()),
+        row_bounds(cx, &reading),
         before,
-        "and the reader's place has not moved either"
+        "the row they were reading has not moved"
     );
     assert!(
         cx.update(|window, _| window.find("transcript-jump").visible()),
-        "the new output is offered by the pill"
+        "and the new output is offered by the pill"
     );
 
-    // Back to the bottom: the window is the newest page again, and the newer rows are
-    // the ones on screen.
+    // Back to the bottom: the list is at the newest row, which is the one that arrived.
     wheel(cx, -100_000.);
-    assert_eq!(drawn(&view, cx), 46..302);
     assert!(drawn_row(cx, "u_0301"));
     assert!(cx.read(|cx| view.read(cx).is_following_tail(cx)));
     assert!(!cx.read(|cx| view.read(cx).is_away_from_latest(cx)));
 }
 
-/// A page that lands after the reader has gone back to the latest is held in front of
-/// them: it does not open under them, and it does not undo their place at the tail.
+/// A page of scrollback that lands while the reader is at the latest is spliced in
+/// above them: the rows they are looking at do not move, and the list stays on its foot.
 #[gpui_kit::test]
-fn a_page_that_lands_after_a_return_to_the_latest_is_only_held(cx: &mut TestAppContext) {
+fn a_page_that_lands_leaves_a_reader_at_the_latest_where_they_were(cx: &mut TestAppContext) {
     let items: Vec<Item> = (0..256)
         .map(|i| user(&format!("u_{i:03}"), "a turn of its own"))
         .collect();
     let (view, cx) = open!(cx, items);
-    let asked = std::rc::Rc::new(std::cell::RefCell::new(0));
+    let asked = Rc::new(RefCell::new(0));
     let recorded = asked.clone();
     view.update(cx, |view, cx| {
         view.on_load_older(
@@ -2047,24 +2139,12 @@ fn a_page_that_lands_after_a_return_to_the_latest_is_only_held(cx: &mut TestAppC
         );
     });
     view.update(cx, |view, cx| view.set_history(true, false, cx));
-    for _ in 0..3 {
-        cx.update(|window, cx| window.render_frame(cx));
-    }
-    assert_eq!(drawn(&view, cx), 0..256, "the window holds the lot");
+    frames(cx, 3);
+    assert_eq!(held(&view, cx), 256, "the list holds the whole record");
+    assert_eq!(*asked.borrow(), 1, "and the page behind it was asked for");
 
-    // The reader asks for the topic's own scrollback.
-    cx.update(|window, cx| {
-        view.update(cx, |view, cx| view.load_older(window, cx));
-    });
-    assert_eq!(*asked.borrow(), 1);
-    // The header is not asked again while that page is in flight.
-    cx.update(|window, cx| {
-        view.update(cx, |view, cx| view.load_older(window, cx));
-    });
-    assert_eq!(*asked.borrow(), 1, "one ask per page");
-
-    // They go back to the latest before it lands.
-    view.update(cx, |view, cx| view.scroll_to_latest(cx));
+    // The page lands while the reader is at the latest.
+    let before = row_bounds(cx, "u_255");
     let page: Vec<Item> = (0..256)
         .map(|i| user(&format!("p_{i:03}"), "an older turn"))
         .collect();
@@ -2072,38 +2152,27 @@ fn a_page_that_lands_after_a_return_to_the_latest_is_only_held(cx: &mut TestAppC
         view.prepend(page, cx);
         view.set_history(false, false, cx);
     });
-    for _ in 0..3 {
-        cx.update(|window, cx| window.render_frame(cx));
-    }
-    assert_eq!(
-        drawn(&view, cx),
-        256..512,
-        "the page is held in front of the window, which did not change"
-    );
-    assert!(
-        drawn_row(cx, "u_000"),
-        "the rows the reader had are the rows on screen"
-    );
-    assert!(
-        !drawn_row(cx, "p_000"),
-        "and the page is not opened under them"
-    );
+    frames(cx, 3);
+    assert_eq!(held(&view, cx), 512, "the page is in the list, all of it");
     assert!(
         cx.read(|cx| view.read(cx).is_following_tail(cx)),
         "the reader is still at the latest"
     );
+    assert_eq!(gap(&view, cx), 0., "and at the very bottom of it");
     assert_eq!(
-        cx.read(|cx| {
-            let view = view.read(cx);
-            view.scroll.max_offset().y + view.scroll.offset().y
-        }),
-        px(0.),
-        "and at the very bottom of it"
+        row_bounds(cx, "u_255"),
+        before,
+        "the row they were at has not moved"
+    );
+    assert!(
+        !drawn_row(cx, "p_000"),
+        "and the page above them is not built under their pane"
     );
 }
 
-/// A page that lands after the reader has read on is held in front of their place
-/// without moving it: the row they were looking at stays where it was.
+/// A page that lands after the reader has read on is spliced in above their place
+/// without moving it: the row they were looking at stays where it was, and so does their
+/// distance from the bottom.
 #[gpui_kit::test]
 fn a_page_that_lands_after_the_reader_read_on_leaves_their_place_alone(cx: &mut TestAppContext) {
     let items: Vec<Item> = (0..256)
@@ -2114,16 +2183,15 @@ fn a_page_that_lands_after_the_reader_read_on_leaves_their_place_alone(cx: &mut 
         view.on_load_older(|_, _, _| {}, cx);
     });
     view.update(cx, |view, cx| view.set_history(true, false, cx));
-    for _ in 0..3 {
-        cx.update(|window, cx| window.render_frame(cx));
-    }
+    frames(cx, 3);
 
-    // The reader asks for the page, then reads on while it is in flight.
-    cx.update(|window, cx| {
-        view.update(cx, |view, cx| view.load_older(window, cx));
-    });
+    // The reader reads on while the page is in flight.
     wheel(cx, 600.);
-    let anchor = cx.update(|window, _| window.find(row_id("transcript-row", "u_255")).bounds());
+    assert!(!cx.read(|cx| view.read(cx).is_following_tail(cx)));
+    let ids: Vec<String> = (0..256).map(|i| format!("u_{i:03}")).collect();
+    let reading = top_row_in_pane(cx, &ids).expect("a row at the top of the pane");
+    let anchor = row_bounds(cx, &reading);
+    let away = gap(&view, cx);
 
     let page: Vec<Item> = (0..256)
         .map(|i| user(&format!("p_{i:03}"), "an older turn"))
@@ -2132,34 +2200,27 @@ fn a_page_that_lands_after_the_reader_read_on_leaves_their_place_alone(cx: &mut 
         view.prepend(page, cx);
         view.set_history(false, false, cx);
     });
-    for _ in 0..3 {
-        cx.update(|window, cx| window.render_frame(cx));
-    }
+    frames(cx, 3);
+    assert_eq!(held(&view, cx), 512, "the page is in the list");
+    assert!(!drawn_row(cx, "p_000"), "and not opened under their pane");
     assert_eq!(
-        drawn(&view, cx),
-        256..512,
-        "the page is held in front of the window, which did not change"
-    );
-    assert!(!drawn_row(cx, "p_000"), "and not opened under them");
-    assert_eq!(
-        cx.update(|window, _| window.find(row_id("transcript-row", "u_255")).bounds()),
+        row_bounds(cx, &reading),
         anchor,
         "the row they were reading has not moved"
     );
-    assert_eq!(
-        cx.read(|cx| {
-            let view = view.read(cx);
-            view.scroll.max_offset().y + view.scroll.offset().y
-        }),
-        px(600.),
-        "nor has their distance from the bottom"
+    let drifted = (gap(&view, cx) - away).abs();
+    assert!(
+        drifted < 1.,
+        "nor has their distance from the bottom ({away}px -> {}px)",
+        gap(&view, cx)
     );
 }
 
-/// The turn rule counts the record's turns, not the window's: a rule in the middle of
-/// a long transcript keeps the number it would have had if every row were drawn.
+/// The turn rule counts the record's turns, not the rows the list happens to have built:
+/// the rule at the tail of a long record carries the number it would have had if every
+/// row were drawn.
 #[gpui_kit::test]
-fn the_turn_rule_counts_the_records_turns_not_the_windows(cx: &mut TestAppContext) {
+fn the_turn_rule_counts_the_records_turns_not_the_rows_on_screen(cx: &mut TestAppContext) {
     let items: Vec<Item> = (0..600)
         .map(|i| {
             if i % 2 == 0 {
@@ -2170,101 +2231,145 @@ fn the_turn_rule_counts_the_records_turns_not_the_windows(cx: &mut TestAppContex
         })
         .collect();
     let (view, cx) = open!(cx, items);
-    cx.update(|window, cx| window.render_frame(cx));
+    frames(cx, 2);
 
-    assert_eq!(drawn(&view, cx), 344..600, "the newest page is drawn");
+    // 300 turns in the record, and the list is at its tail: the rule above the last
+    // turn is numbered 300 — counted from the head of the record, through every row the
+    // list has not built.
+    assert!(drawn_row(cx, "a_599"), "the newest row is on screen");
     cx.update(|window, _| {
-        // Row 344 is the 173rd turn evo has taken, and the rule above it says so.
         assert!(
-            window.try_find(("transcript-turn", 173usize)).is_some(),
+            window.try_find(("transcript-turn", 300usize)).is_some(),
             "the rule is numbered from the head of the record"
         );
         assert!(
-            window.try_find(("transcript-turn", 172usize)).is_none(),
-            "and not from the head of the window"
+            window.try_find(("transcript-turn", 1usize)).is_none(),
+            "and the first turn's rule is far above the pane, not renamed"
         );
-        assert!(window.try_find(("transcript-turn", 1usize)).is_none());
+    });
+
+    // The head of the record numbers from the same count: its own first rule is 1.
+    view.update(cx, |view, _| {
+        view.list.scroll_to(gpui_kit::ListOffset {
+            item_ix: 0,
+            offset_in_item: px(0.),
+        });
+        // The gesture that brought them there is the reader's own, whichever way they
+        // scrolled: a drag of the scrollbar to the head.
+        view.touched();
+    });
+    frames(cx, 3);
+    cx.update(|window, _| {
+        assert!(
+            window.try_find(("transcript-turn", 2usize)).is_some(),
+            "the record opens with its own first rule"
+        );
     });
 }
 
-/// Only the rows the window draws keep a parsed document: the record behind it is held,
-/// and its markdown is parsed when the reader asks to see it — not before.
+/// Only the rows the list builds keep a parsed document — markdown is parsed for the
+/// rows a reader is looking at, not for the whole record.
 #[gpui_kit::test]
-fn only_the_rows_the_window_draws_keep_a_document(cx: &mut TestAppContext) {
+fn only_the_rows_the_list_builds_keep_a_document(cx: &mut TestAppContext) {
     let items: Vec<Item> = (0..600)
         .map(|i| assistant(&format!("a_{i:04}"), "# Head", "final"))
         .collect();
     let (view, cx) = open!(cx, items);
-    cx.update(|window, cx| window.render_frame(cx));
+    frames(cx, 2);
 
     let documents = |cx: &gpui_kit::VisualTestContext| {
         cx.read(|cx| view.read(cx).data.read(cx).documents.len())
     };
-    assert_eq!(documents(cx), 256, "one per drawn row, and no more");
-    assert!(cx.read(|cx| view.read(cx).data.read(cx).documents.contains_key("a_0344")));
-    assert!(!cx.read(|cx| view.read(cx).data.read(cx).documents.contains_key("a_0343")));
+    let built = documents(cx);
+    assert!(
+        built > 0 && built < 64,
+        "one per built row, and no more: {built} of 600"
+    );
+    assert!(drawn_row(cx, "a_0599"), "the newest row is on screen");
+    assert!(cx.read(|cx| view.read(cx).data.read(cx).documents.contains_key("a_0599")));
+    assert!(
+        !cx.read(|cx| view.read(cx).data.read(cx).documents.contains_key("a_0000")),
+        "the head of the record has no document until it is read"
+    );
 
-    // A page opened by the reader brings its own rows' documents with it.
-    cx.update(|window, cx| {
-        view.update(cx, |view, cx| view.load_older(window, cx));
-        window.render_frame(cx);
+    // Taken to the head, its rows are built and parsed.
+    view.update(cx, |view, _| {
+        view.list.scroll_to(gpui_kit::ListOffset {
+            item_ix: 0,
+            offset_in_item: px(0.),
+        });
+        // The gesture that brought them there is the reader's own, whichever way they
+        // scrolled: a drag of the scrollbar to the head.
+        view.touched();
     });
-    assert_eq!(documents(cx), 512);
+    frames(cx, 3);
+    assert!(
+        cx.read(|cx| view.read(cx).data.read(cx).documents.contains_key("a_0000")),
+        "the head is parsed once the reader is looking at it"
+    );
 
-    // And a record that is replaced outright leaves the last one's documents behind.
+    // A record that is replaced outright leaves the last one's documents behind.
     view.update(cx, |view, cx| {
         view.replace(vec![assistant("a_9999", "# Fresh", "final")], cx)
     });
-    cx.update(|window, cx| window.render_frame(cx));
+    frames(cx, 2);
     assert_eq!(documents(cx), 1);
 }
 
-/// An ask that settles without an answer — an empty page, or one that failed — is
-/// forgotten with the page it belonged to: the next page to turn up is not the answer
-/// to it, and is held in front of the reader rather than opened under them.
+/// A page that settles without bringing a row back — an empty page, the last page, or
+/// one that failed — ends the walk: the same question is not asked again, frame after
+/// frame, and the next page that turns up later is not taken for an answer to it.
 #[gpui_kit::test]
-fn an_ask_that_settles_without_a_page_does_not_claim_the_next_one(cx: &mut TestAppContext) {
+fn a_page_that_settles_with_nothing_ends_the_walk(cx: &mut TestAppContext) {
     let items: Vec<Item> = (0..256)
         .map(|i| user(&format!("u_{i:03}"), "a turn of its own"))
         .collect();
     let (view, cx) = open!(cx, items);
+    let asked = Rc::new(RefCell::new(0));
+    let counted = asked.clone();
     view.update(cx, |view, cx| {
-        view.on_load_older(|_, _, _| {}, cx);
+        view.on_load_older(move |_, _, _| *counted.borrow_mut() += 1, cx);
     });
     view.update(cx, |view, cx| view.set_history(true, false, cx));
-    for _ in 0..3 {
-        cx.update(|window, cx| window.render_frame(cx));
-    }
-
-    // The reader asks, and what comes back is an empty page.
-    cx.update(|window, cx| {
-        view.update(cx, |view, cx| view.load_older(window, cx));
-    });
-    view.update(cx, |view, cx| view.set_history(false, false, cx));
-    for _ in 0..2 {
-        cx.update(|window, cx| window.render_frame(cx));
-    }
-
-    // A page turns up later, unasked for: it is held where the reader is not looking.
-    let page: Vec<Item> = (0..256)
-        .map(|i| user(&format!("p_{i:03}"), "an older turn"))
-        .collect();
-    view.update(cx, |view, cx| view.prepend(page, cx));
-    for _ in 0..3 {
-        cx.update(|window, cx| window.render_frame(cx));
-    }
-    assert_eq!(drawn(&view, cx), 256..512, "the window did not grow");
-    assert!(!drawn_row(cx, "p_000"), "and nothing was opened");
-    assert!(cx.read(|cx| view.read(cx).is_following_tail(cx)));
-    assert!(
-        drawn_row(cx, "u_255"),
-        "the reader is where they were, at the tail"
+    frames(cx, 3);
+    assert_eq!(
+        *asked.borrow(),
+        1,
+        "the page behind the record is asked for"
     );
+
+    // It settles — a page that overlaps what is held, or the last page of all — and the
+    // record did not grow.
+    view.update(cx, |view, cx| view.set_history(true, false, cx));
+    frames(cx, 4);
+    assert_eq!(
+        *asked.borrow(),
+        1,
+        "a page that brought nothing back is not asked for again"
+    );
+
+    // A snapshot that says there is scrollback where there was none starts the walk
+    // over.
+    view.update(cx, |view, cx| view.set_history(false, false, cx));
+    frames(cx, 2);
+    assert_eq!(*asked.borrow(), 1);
+    view.update(cx, |view, cx| view.set_history(true, false, cx));
+    frames(cx, 2);
+    assert_eq!(
+        *asked.borrow(),
+        2,
+        "a topic with scrollback again is walked again"
+    );
+
+    // And nothing is opened under the reader by a page that lands: they stay at the
+    // tail they were at.
+    assert!(cx.read(|cx| view.read(cx).is_following_tail(cx)));
+    assert!(drawn_row(cx, "u_255"), "the reader is where they were");
 }
 
 /// A row leaving the record while the reader is reading is the *list's* own layout
-/// shrinking under them: it must not be taken for coming back to the latest, or the
-/// answers that arrived behind their window would be opened under them.
+/// shrinking under them: it must not be taken for coming back to the latest, and what
+/// arrived while they read must stay below the pane.
 #[gpui_kit::test]
 fn a_row_leaving_in_front_of_the_reader_does_not_put_them_back_on_the_tail(
     cx: &mut TestAppContext,
@@ -2278,13 +2383,12 @@ fn a_row_leaving_in_front_of_the_reader_does_not_put_them_back_on_the_tail(
         })
         .collect();
     let (view, cx) = open!(cx, items);
-    for _ in 0..3 {
-        cx.update(|window, cx| window.render_frame(cx));
-    }
-    assert_eq!(drawn(&view, cx), 44..300);
+    frames(cx, 3);
+    assert!(cx.read(|cx| view.read(cx).is_following_tail(cx)));
 
-    // The reader goes up, off the tail, and the agent answers while they read.
-    wheel(cx, 10_000.);
+    // The reader goes up, off the tail, and the agent answers while they read: the
+    // answers are appended below the pane they are looking at.
+    wheel(cx, 400.);
     for i in 300..320 {
         view.update(cx, |view, cx| {
             assert!(
@@ -2293,51 +2397,48 @@ fn a_row_leaving_in_front_of_the_reader_does_not_put_them_back_on_the_tail(
             );
         });
     }
-    for _ in 0..2 {
-        cx.update(|window, cx| window.render_frame(cx));
-    }
+    frames(cx, 3);
     assert!(
         !drawn_row(cx, "u_0319"),
-        "the answers are behind the window"
+        "the answers arrived below the pane the reader is looking at"
     );
 
-    // A row's height — and the reader stands most of one above the foot of what they
-    // can see, so that a row leaving is a real movement under them.
-    let pitch = cx.update(|window, _| {
-        let last = window.find(row_id("transcript-measure", "u_0299")).bounds();
-        let before = window.find(row_id("transcript-measure", "u_0298")).bounds();
-        f32::from(last.origin.y) - f32::from(before.origin.y)
-    });
+    // What the reader is reading: the row at the foot of the pane, and the height of a
+    // row above it, so that one leaving is a real movement under them.
+    let ids: Vec<String> = (0..320).map(|i| format!("u_{i:04}")).collect();
+    let reading = ids
+        .iter()
+        .rev()
+        .find(|id| {
+            drawn_row(cx, id)
+                && row_bounds(cx, id).bottom() <= pane(cx).bottom()
+                && row_bounds(cx, id).bottom() > pane(cx).bottom() - px(120.)
+        })
+        .cloned()
+        .expect("a row near the foot of the pane");
+    let before = row_bounds(cx, &reading);
+    let pitch = {
+        let before_it: Vec<String> = ids.clone();
+        let above = before_it
+            .iter()
+            .take_while(|id| **id != reading)
+            .last()
+            .cloned()
+            .expect("a row above");
+        f32::from(before.top()) - f32::from(row_bounds(cx, &above).top())
+    };
     assert!(pitch > 8., "a row is tall enough for one leaving to matter");
-    let gap = cx.update(|window, _| {
-        let last = window.find(row_id("transcript-measure", "u_0299")).bounds();
-        let pane = window.find("transcript-scroll").bounds();
-        f32::from(last.bottom()) - f32::from(pane.bottom())
-    });
-    wheel(cx, -(gap - pitch * 0.8));
-    assert!(
-        !cx.read(|cx| view.read(cx).is_following_tail(cx)),
-        "the reader is near the foot of their window, and not on the tail"
-    );
 
-    // A row in front of them goes away.
-    let reading =
-        cx.update(|window, _| window.find(row_id("transcript-measure", "u_0299")).bounds());
+    // A row in front of them — the one at the top of the pane, where the list has
+    // measured it — goes away.
     view.update(cx, |view, cx| {
         assert!(view.remove("u_0150", cx), "the row leaves the record");
     });
-    for _ in 0..3 {
-        cx.update(|window, cx| window.render_frame(cx));
-    }
+    frames(cx, 3);
 
-    assert_eq!(
-        drawn(&view, cx),
-        44..299,
-        "the window kept its place around the hole"
-    );
     assert!(
         !drawn_row(cx, "u_0319"),
-        "the answers that arrived are still behind their window"
+        "the answers that arrived are still below the pane"
     );
     assert!(
         !cx.read(|cx| view.read(cx).is_following_tail(cx)),
@@ -2347,59 +2448,50 @@ fn a_row_leaving_in_front_of_the_reader_does_not_put_them_back_on_the_tail(
         cx.read(|cx| view.read(cx).is_away_from_latest(cx)),
         "and the way back to those answers is still offered"
     );
-    // They are still where they were, looking at the row they were reading: the content
-    // gave up one row's height in front of them, so what they see shifts by no more than
-    // the row that left — and never a page's worth of answers.
-    let after = cx.update(|window, _| window.find(row_id("transcript-measure", "u_0299")).bounds());
-    let drift = f32::from(after.origin.y) - f32::from(reading.origin.y);
+    // They are still where they were, looking at the row they were reading: the list
+    // splices the hole out rather than rebuilding around it.
+    let after = row_bounds(cx, &reading);
+    let drift = f32::from(after.top()) - f32::from(before.top());
     assert!(
         drift.abs() <= pitch + 1.,
         "the reader's place did not run away: {drift}px, of a {pitch}px row"
     );
-    let pane = cx.update(|window, _| window.find("transcript-scroll").bounds());
     assert!(
-        after.top() < pane.bottom(),
-        "and the row they were reading is still on screen: {after:?} vs {pane:?}"
+        after.bottom() <= pane(cx).bottom(),
+        "and the row they were reading is still on screen: {after:?}"
     );
 }
 
-/// A row that goes away in front of everything the window draws is one the reader
-/// cannot see: its height comes off the content above them, and their place is put back
-/// where it was.
+/// A row that goes away far above the pane is one the reader cannot see: the rows they
+/// are looking at do not move a pixel.
 #[gpui_kit::test]
-fn a_row_leaving_behind_the_window_does_not_move_the_reader(cx: &mut TestAppContext) {
+fn a_row_leaving_above_the_pane_does_not_move_the_reader(cx: &mut TestAppContext) {
     let items: Vec<Item> = (0..300)
         .map(|i| user(&format!("u_{i:04}"), "a turn of its own, a few lines tall"))
         .collect();
     let (view, cx) = open!(cx, items);
-    for _ in 0..3 {
-        cx.update(|window, cx| window.render_frame(cx));
-    }
+    frames(cx, 3);
     wheel(cx, 600.);
 
-    let before =
-        cx.update(|window, _| window.find(row_id("transcript-measure", "u_0299")).bounds());
+    let ids: Vec<String> = (0..300).map(|i| format!("u_{i:04}")).collect();
+    let reading = top_row_in_pane(cx, &ids).expect("a row at the top of the pane");
+    let before = row_bounds(cx, &reading);
     view.update(cx, |view, cx| {
-        assert!(
-            view.remove("u_0010", cx),
-            "a row in front of the window leaves"
-        );
+        assert!(view.remove("u_0010", cx), "a row far above leaves");
     });
-    for _ in 0..3 {
-        cx.update(|window, cx| window.render_frame(cx));
-    }
+    frames(cx, 3);
 
-    assert_eq!(drawn(&view, cx), 43..299, "the window keeps its place");
-    let after = cx.update(|window, _| window.find(row_id("transcript-measure", "u_0299")).bounds());
+    assert_eq!(held(&view, cx), 299, "the record is one row shorter");
     assert_eq!(
-        after.origin.y, before.origin.y,
+        row_bounds(cx, &reading),
+        before,
         "and the row the reader is looking at has not moved"
     );
 }
 
 /// The thinking a reader can reveal is counted as the record changes, so the control in
-/// the header costs no walk of the record — and a row behind the window still counts,
-/// since what the control reveals is the transcript, not the window.
+/// the header costs no walk of the record — and a row far above the pane still counts,
+/// since what the control reveals is the transcript, not the rows on screen.
 #[gpui_kit::test]
 fn thinking_behind_the_window_still_counts(cx: &mut TestAppContext) {
     let items: Vec<Item> = (0..600)
@@ -2412,12 +2504,11 @@ fn thinking_behind_the_window_still_counts(cx: &mut TestAppContext) {
         })
         .collect();
     let (view, cx) = open!(cx, items);
-    cx.update(|window, cx| window.render_frame(cx));
+    frames(cx, 2);
 
-    assert_eq!(drawn(&view, cx), 344..600, "the newest page is drawn");
     assert!(
         !drawn_row(cx, "u_0100"),
-        "and the thinking is well behind it"
+        "the thinking is far above the pane the list has built"
     );
     assert!(
         cx.read(|cx| view.read(cx).has_thinking(cx)),
