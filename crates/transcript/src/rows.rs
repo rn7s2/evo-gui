@@ -167,6 +167,101 @@ pub(crate) fn row_id(name: impl Into<SharedString>, id: &str) -> ElementId {
     (ElementId::from(name.into()), id.to_string()).into()
 }
 
+/// The name each piece of a row's own text is kept under. They are the element names of
+/// the rows themselves, so a document is found where the row that draws it looks.
+pub(crate) const USER_TEXT: &str = "transcript-user-text";
+
+/// The text a row draws in its own words, and the name each piece is kept under: a
+/// user's message, a notice's line, and the body of a quiet row the reader has opened.
+///
+/// These are the words a person or an agent wrote, and the addresses and paths in them
+/// are the reader's to press. A tool call's arguments and its result are *data*: they
+/// are drawn exactly as they were said, and are not here.
+pub(crate) fn plain_texts(item: &Item, expanded: bool) -> Vec<(&'static str, String)> {
+    let mut texts = Vec::new();
+    match &item.kind {
+        ItemKind::User(user) => texts.push((USER_TEXT, user.text.clone())),
+        ItemKind::Notice(notice) => texts.push(("transcript-notice", notice.text.clone())),
+        ItemKind::LaneEvent(event) => {
+            texts.push(("transcript-lane-event", lane_event_line(event)))
+        }
+        ItemKind::RunOutcome(outcome) => {
+            texts.push(("transcript-run-outcome", outcome.text()))
+        }
+        ItemKind::ProviderRetry(retry) => {
+            texts.push(("transcript-retry", retry_line(retry)));
+        }
+        ItemKind::Unknown { kind, text } => {
+            texts.push(("transcript-unknown", unknown_line(kind, text)));
+        }
+        ItemKind::HumanAction(action) if expanded => {
+            texts.push(("transcript-action-text", action.action.clone()))
+        }
+        ItemKind::Recovery(recovery) if expanded => {
+            texts.push(("transcript-recovery-text", recovery.status.clone()))
+        }
+        ItemKind::Context(context) if expanded => {
+            texts.push(("transcript-context-text", context.text.clone()))
+        }
+        ItemKind::Goal(goal) if expanded => texts.push(("transcript-goal-text", goal_text(goal))),
+        ItemKind::CommandNote(note) if expanded => {
+            texts.push(("transcript-command-text", note.text.clone()))
+        }
+        _ => {}
+    }
+    texts
+}
+
+/// What a provider retry says, without the row: the row draws it, and so does the text
+/// the row reads for the links in it.
+fn retry_line(retry: &session::ProviderRetry) -> String {
+    match retry.reason.as_deref() {
+        Some(reason) => format!(
+            "Retrying provider ({}/{}) in {} ms — {reason}",
+            retry.attempt, retry.max, retry.delay_ms
+        ),
+        None => format!(
+            "Retrying provider ({}/{}) in {} ms",
+            retry.attempt, retry.max, retry.delay_ms
+        ),
+    }
+}
+
+/// What an item of a kind this app has never seen says.
+fn unknown_line(kind: &str, text: &str) -> String {
+    format!("{kind} · {text}")
+}
+
+/// One run of a row's own words, with the addresses and paths in it pressable.
+///
+/// The words are read as Markdown that draws exactly the characters they hold (see
+/// `linkify::literal`), so pressing a link is the only thing that changes: the row says
+/// what was said. A row built without its document — nothing reads it outside the list's
+/// own frame — draws the words as plain text rather than not at all.
+fn linked_text(
+    id: &ItemId,
+    name: &'static str,
+    text: &str,
+    data: &TranscriptData,
+    ink: gpui_kit::Hsla,
+    cx: &App,
+) -> AnyElement {
+    match data.plain_document(id, name) {
+        Some(document) => div()
+            .id(row_id(name, id))
+            .w_full()
+            .min_w_0()
+            .test_support()
+            .child(
+                TextView::new(&document)
+                    .style(text_style(cx).with_foreground(ink))
+                    .on_link_click(link::on_click(data.open_link())),
+            )
+            .into_any_element(),
+        None => SelectableText::new(row_id(name, id), text.to_string()).into_any_element(),
+    }
+}
+
 /// The row a copy button's icon and word sit in.
 fn copy_face() -> Div {
     div().flex().items_center().gap(px(4.))
@@ -383,6 +478,11 @@ pub(crate) fn render_row(
             data.sync_field_document(index, label, cx);
         }
     }
+    // The row's own plain text — a user's words, a notice, the body of a quiet row —
+    // is read as Markdown that draws the same characters, so that an address or a path
+    // in it can be pressed. It is made here, at the frame that shows the row, because a
+    // document is state and the row below already borrows the record.
+    data.sync_plain_documents(index, cx);
 
     let item = &data.items[index];
     let palette = Palette::from_app(cx);
@@ -399,7 +499,7 @@ pub(crate) fn render_row(
     }
 
     stack = stack.child(match &item.kind {
-        ItemKind::User(user) => user_row(item.id.clone(), user, data, view, &palette),
+        ItemKind::User(user) => user_row(item.id.clone(), user, data, view, &palette, cx),
         ItemKind::Context(context) => context_row(
             item.id.clone(),
             &context.key,
@@ -407,17 +507,21 @@ pub(crate) fn render_row(
             data.expanded.contains(&item.id),
             view,
             &palette,
+            data,
+            cx,
         ),
         ItemKind::Assistant(assistant) => assistant_row(item, assistant, data, cx, &palette),
         ItemKind::Tool(tool) => tool_row(item, tool, data, view, &palette),
         ItemKind::LaneReport(report) => report_row(item.id.clone(), report, data, cx, &palette),
-        ItemKind::LaneEvent(event) => lane_event_row(item.id.clone(), event, &palette),
+        ItemKind::LaneEvent(event) => lane_event_row(item.id.clone(), event, data, &palette, cx),
         ItemKind::Goal(goal) => goal_row(
             item.id.clone(),
             goal,
             data.expanded.contains(&item.id),
             view,
             &palette,
+            data,
+            cx,
         ),
         ItemKind::CommandNote(note) => command_note_row(
             item.id.clone(),
@@ -426,6 +530,8 @@ pub(crate) fn render_row(
             data.expanded.contains(&item.id),
             view,
             &palette,
+            data,
+            cx,
         ),
         ItemKind::HumanAction(action) => quiet_row(
             QuietRow {
@@ -442,9 +548,13 @@ pub(crate) fn render_row(
             data.expanded.contains(&item.id),
             view,
             &palette,
+            data,
+            cx,
         ),
-        ItemKind::Notice(notice) => notice_row(item.id.clone(), notice, &palette),
-        ItemKind::RunOutcome(outcome) => run_outcome_row(item.id.clone(), outcome, &palette),
+        ItemKind::Notice(notice) => notice_row(item.id.clone(), notice, data, &palette, cx),
+        ItemKind::RunOutcome(outcome) => {
+            run_outcome_row(item.id.clone(), outcome, data, &palette, cx)
+        }
         ItemKind::Compaction(compaction) => compaction_row(item.id.clone(), compaction, &palette),
         ItemKind::Recovery(recovery) => quiet_row(
             QuietRow {
@@ -461,32 +571,26 @@ pub(crate) fn render_row(
             data.expanded.contains(&item.id),
             view,
             &palette,
+            data,
+            cx,
         ),
-        ItemKind::ProviderRetry(retry) => {
-            let text = match retry.reason.as_deref() {
-                Some(reason) => format!(
-                    "Retrying provider ({}/{}) in {} ms — {reason}",
-                    retry.attempt, retry.max, retry.delay_ms
-                ),
-                None => format!(
-                    "Retrying provider ({}/{}) in {} ms",
-                    retry.attempt, retry.max, retry.delay_ms
-                ),
-            };
-            quiet_line(
-                item.id.clone(),
-                "transcript-retry",
-                &text,
-                palette.info,
-                &palette,
-            )
-        }
+        ItemKind::ProviderRetry(retry) => quiet_line(
+            item.id.clone(),
+            "transcript-retry",
+            &retry_line(retry),
+            palette.info,
+            &palette,
+            data,
+            cx,
+        ),
         ItemKind::Unknown { kind, text } => quiet_line(
             item.id.clone(),
             "transcript-unknown",
-            &format!("{kind} · {text}"),
+            &unknown_line(kind, text),
             palette.muted_foreground,
             &palette,
+            data,
+            cx,
         ),
     });
 
@@ -606,6 +710,7 @@ fn user_row(
     data: &TranscriptData,
     view: &WeakEntity<TranscriptView>,
     palette: &Palette,
+    cx: &App,
 ) -> AnyElement {
     let queued = user.status == UserStatus::Queued;
     let cancelled = user.status == UserStatus::Cancelled;
@@ -640,9 +745,13 @@ fn user_row(
         // `.user-row{font-size:14px}` under the page's `line-height: 1.5`.
         .line_height(palette.scaled(USER_LINE))
         .text_color(text_color)
-        .child(SelectableText::new(
-            row_id("transcript-user-text", &id),
-            user.text.clone(),
+        .child(linked_text(
+            &id,
+            "transcript-user-text",
+            &user.text,
+            data,
+            text_color,
+            cx,
         ));
 
     if !user.images.is_empty() {
@@ -823,6 +932,8 @@ fn quiet_row(
     expanded: bool,
     view: &WeakEntity<TranscriptView>,
     palette: &Palette,
+    data: &TranscriptData,
+    cx: &App,
 ) -> AnyElement {
     let QuietRow {
         id,
@@ -879,7 +990,7 @@ fn quiet_row(
 
     let mut row = div().w_full().min_w_0().flex().flex_col().child(header);
     if expanded {
-        row = row.child(quiet_block(block, id, text, palette));
+        row = row.child(quiet_block(block, id, text, palette, data, cx));
     }
     row.into_any_element()
 }
@@ -893,6 +1004,8 @@ fn context_row(
     expanded: bool,
     view: &WeakEntity<TranscriptView>,
     palette: &Palette,
+    data: &TranscriptData,
+    cx: &App,
 ) -> AnyElement {
     quiet_row(
         QuietRow {
@@ -906,6 +1019,8 @@ fn context_row(
         expanded,
         view,
         palette,
+        data,
+        cx,
     )
 }
 
@@ -917,6 +1032,8 @@ fn command_note_row(
     expanded: bool,
     view: &WeakEntity<TranscriptView>,
     palette: &Palette,
+    data: &TranscriptData,
+    cx: &App,
 ) -> AnyElement {
     quiet_row(
         QuietRow {
@@ -930,6 +1047,8 @@ fn command_note_row(
         expanded,
         view,
         palette,
+        data,
+        cx,
     )
 }
 
@@ -954,6 +1073,8 @@ fn goal_row(
     expanded: bool,
     view: &WeakEntity<TranscriptView>,
     palette: &Palette,
+    data: &TranscriptData,
+    cx: &App,
 ) -> AnyElement {
     let head = match goal.event {
         GoalEventKind::Created | GoalEventKind::ObjectiveUpdated => {
@@ -986,6 +1107,8 @@ fn goal_row(
         expanded,
         view,
         palette,
+        data,
+        cx,
     )
 }
 
@@ -999,9 +1122,9 @@ pub(crate) fn goal_text(goal: &session::GoalItem) -> String {
     }
 }
 
-/// A lane's transition, as the swarm published it: one line — `Lane 2 · crashed — …` —
-/// in the colour its own `severity` asks for.
-fn lane_event_row(id: ItemId, event: &LaneEvent, palette: &Palette) -> AnyElement {
+/// What a lane's transition says, without the lane it is about: the row draws it, and
+/// so does the text the row reads for the links in it.
+fn lane_event_line(event: &LaneEvent) -> String {
     let mut text = event.event.label().to_string();
     if let Some(outcome) = event.outcome.as_deref().filter(|o| *o != "stop") {
         text.push_str(&format!(" ({outcome})"));
@@ -1012,20 +1135,40 @@ fn lane_event_row(id: ItemId, event: &LaneEvent, palette: &Palette) -> AnyElemen
     if let Some(detail) = event.detail.as_deref() {
         text.push_str(&format!(" — {detail}"));
     }
+    text
+}
+
+/// A lane's transition, as the swarm published it: one line — `Lane 2 · crashed — …` —
+/// in the colour its own `severity` asks for.
+fn lane_event_row(
+    id: ItemId,
+    event: &LaneEvent,
+    data: &TranscriptData,
+    palette: &Palette,
+    cx: &App,
+) -> AnyElement {
     quiet_source_line(
         id,
         "transcript-lane-event",
         Some(&format!("Lane {}", event.lane)),
         palette.muted_foreground,
-        &text,
+        &lane_event_line(event),
         severity_color(event.severity, palette),
         palette,
+        data,
+        cx,
     )
 }
 
 /// A notice, as the server said it: severity decides how loud the line is, and the source
 /// says who is talking.
-fn notice_row(id: ItemId, notice: &Notice, palette: &Palette) -> AnyElement {
+fn notice_row(
+    id: ItemId,
+    notice: &Notice,
+    data: &TranscriptData,
+    palette: &Palette,
+    cx: &App,
+) -> AnyElement {
     quiet_source_line(
         id,
         "transcript-notice",
@@ -1034,11 +1177,19 @@ fn notice_row(id: ItemId, notice: &Notice, palette: &Palette) -> AnyElement {
         &notice.text,
         severity_color(notice.severity, palette),
         palette,
+        data,
+        cx,
     )
 }
 
 /// A run that ended as something other than `stop`, said in the run's own vocabulary.
-fn run_outcome_row(id: ItemId, outcome: &RunOutcome, palette: &Palette) -> AnyElement {
+fn run_outcome_row(
+    id: ItemId,
+    outcome: &RunOutcome,
+    data: &TranscriptData,
+    palette: &Palette,
+    cx: &App,
+) -> AnyElement {
     let color = match outcome.outcome.as_str() {
         "error" => palette.destructive,
         _ => palette.info,
@@ -1049,6 +1200,8 @@ fn run_outcome_row(id: ItemId, outcome: &RunOutcome, palette: &Palette) -> AnyEl
         &outcome.text(),
         color,
         palette,
+        data,
+        cx,
     )
 }
 
@@ -1129,9 +1282,15 @@ pub(crate) fn severity_color(severity: NoticeSeverity, palette: &Palette) -> gpu
 
 /// The text of an opened quiet row: the payload face, selectable, capped at
 /// [`CONTEXT_BLOCK_LINES`] with a scroll of its own.
-fn quiet_block(name: &'static str, id: ItemId, text: &str, palette: &Palette) -> AnyElement {
+fn quiet_block(
+    name: &'static str,
+    id: ItemId,
+    text: &str,
+    palette: &Palette,
+    data: &TranscriptData,
+    cx: &App,
+) -> AnyElement {
     let content: ElementId = row_id(format!("{name}-content"), &id);
-    let run: ElementId = row_id(format!("{name}-run"), &id);
     div()
         .id(row_id(name, &id))
         .w_full()
@@ -1154,7 +1313,7 @@ fn quiet_block(name: &'static str, id: ItemId, text: &str, palette: &Palette) ->
                 .w_full()
                 .min_w_0()
                 .test_support()
-                .child(SelectableText::new(run, text.to_string())),
+                .child(linked_text(&id, name, text, data, palette.foreground, cx)),
         )
         .test_support()
         .into_any_element()
@@ -1249,7 +1408,7 @@ fn assistant_row(
                             TextView::new(document)
                                 .style(text_style(cx))
                                 .motion(stream_motion())
-                                .on_link_click(link::on_click())
+                                .on_link_click(link::on_click(data.open_link()))
                                 .markdown_extensions(markdown::extensions())
                                 .code_block_actions(move |code_block, _, _| {
                                     let block = code_block.span.map(|span| span.start).unwrap_or(0);
@@ -2033,8 +2192,10 @@ fn quiet_line(
     text: &str,
     color: gpui_kit::Hsla,
     palette: &Palette,
+    data: &TranscriptData,
+    cx: &App,
 ) -> AnyElement {
-    quiet_source_line(id, name, None, color, text, color, palette)
+    quiet_source_line(id, name, None, color, text, color, palette, data, cx)
 }
 
 /// The same, with who said it in front: the source is chrome and stays in the
@@ -2046,6 +2207,7 @@ fn quiet_line(
 const QUIET_SIZE: f32 = 13.;
 const QUIET_LINE: f32 = 18.;
 
+#[allow(clippy::too_many_arguments)]
 fn quiet_source_line(
     id: ItemId,
     name: &'static str,
@@ -2054,6 +2216,8 @@ fn quiet_source_line(
     text: &str,
     color: gpui_kit::Hsla,
     palette: &Palette,
+    data: &TranscriptData,
+    cx: &App,
 ) -> AnyElement {
     let full: SharedString = match source {
         Some(source) => format!("{source} · {text}").into(),
@@ -2069,6 +2233,7 @@ fn quiet_source_line(
         .line_height(palette.scaled(QUIET_LINE))
         .text_color(color)
         .aria_label(full.clone());
+    let words = linked_text(&id, name, text, data, color, cx);
     if let Some(source) = source {
         line = line
             .flex()
@@ -2080,9 +2245,9 @@ fn quiet_source_line(
                     .text_color(source_ink)
                     .child(format!("{source} ·")),
             )
-            .child(div().min_w_0().truncate().child(text.to_string()));
+            .child(div().min_w_0().truncate().child(words));
     } else {
-        line = line.child(full.clone());
+        line = line.child(words);
     }
     line.tooltip(move |window, cx| {
         widgets::tooltip::text(
