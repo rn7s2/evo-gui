@@ -301,19 +301,24 @@ When you scroll away from the bottom the view stops following and offers a
 ### The composer, at the foot
 
 The composer sits under the transcript, on the same reading measure, and it is
-the selected agent's: a box with the todo strip across its top (`Todos 1/3`, and
-a click on the row folds the list out under it — `☑` done, `◐` in progress, `☐`
-pending — hidden when that agent has no todos), then the drawers a chip folds
-out, then the input, then one row of chips and the button.
+the selected agent's: a box with the goal strip across its top (a click on the
+row folds the goal's objective out under it — never the goal's own id, which is
+evo's handle on it — and the strip is hidden when that agent has no goal), the
+todo strip under it (`Todos 1/3`, and a click on the row folds the list out under
+it — `☑` done, `◐` in progress, `☐` pending — hidden when that agent has no
+todos), then the drawer a chip folds out, then the input, then one row of chips
+and the button.
 
 The chips are the server's own status line for that agent, one chip per segment
-and in its order — the model with its effort beside it, the context, how much of
-the input was read from cache, and the goal with its status; a segment the
-server does not publish has no chip. The model chip folds out the model and
-effort drawer, and the goal chip the goal drawer, both inside the box; a click
-outside the box, or selecting another agent, folds them back. The model and
-effort are the coordinator's own to change — a lane's chip states what the swarm
-runs, and the drawer says so.
+and in its order — the model with its effort beside it, the context, and how much
+of the input was read from cache; a segment the server does not publish has no
+chip. The server's `goal` segment is the one segment the box does not chip: the
+goal's own strip states it, and the id that segment spells out is not drawn
+anywhere. The model chip folds out the model and effort drawer inside the box; a
+click outside the box, or selecting another agent, folds it back — while the goal
+and todo strips stay where their own rows put them. The model and effort are the
+coordinator's own to change — a lane's chip states what the swarm runs, and the
+drawer says so.
 
 The input grows from two rows to half the pane, and scrolls after that.
 **Enter** sends, **Shift+Enter** is a newline, **Esc** interrupts the
@@ -344,8 +349,9 @@ publishes for it, in its order, so the same session reads the same here and in t
 TUI. A core registry builds them — model, thinking, context, goal — and an
 extension's own segment (a project's `cache-stats`, say) arrives the same way, as
 a chip of its own. A segment the server does not publish has no chip, so a session
-with no cache activity and no goal shows neither, which is the whole of that
-agent's status line and not a row with holes in it.
+with no cache activity shows no cache chip, which is the whole of that agent's
+status line and not a row with holes in it. The `goal` segment is the exception:
+the goal has the strip of its own, so its segment is not chipped.
 
 ## Settings, About, and light or dark
 

@@ -892,7 +892,11 @@ pub(crate) fn context_label(key: &str) -> String {
 }
 
 /// A goal transition: one quiet line naming what happened to the goal, which opens onto
-/// the whole of it.
+/// the objective itself.
+///
+/// The goal's **id** is evo's own handle on it (`g-b7ba`), not something a reader reads:
+/// the line names the event and the objective, and neither the header nor the block
+/// spells the id out.
 fn goal_row(
     id: ItemId,
     goal: &session::GoalItem,
@@ -918,12 +922,7 @@ fn goal_row(
         (None, Some(tokens)) => Some(format!("· {}", session::k_tokens(tokens))),
         _ => None,
     };
-    let text = match (&goal.objective, &goal.goal_id) {
-        (Some(objective), Some(id)) => format!("{objective}\n\ngoal {id}"),
-        (Some(objective), None) => objective.clone(),
-        (None, Some(id)) => format!("goal {id}"),
-        (None, None) => goal.event.label().to_string(),
-    };
+    let text = goal_text(goal);
     quiet_row(
         QuietRow {
             id,
@@ -937,6 +936,16 @@ fn goal_row(
         view,
         palette,
     )
+}
+
+/// What a goal transition's block holds: the objective itself, or — with none on the
+/// item — the event's own words. The goal's id is not part of it: it is evo's handle on
+/// the goal (`b1`), not something a reader reads.
+pub(crate) fn goal_text(goal: &session::GoalItem) -> String {
+    match &goal.objective {
+        Some(objective) => objective.clone(),
+        None => goal.event.label().to_string(),
+    }
 }
 
 /// A lane's transition, as the swarm published it: one line — `Lane 2 · crashed — …` —

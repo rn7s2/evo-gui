@@ -1,9 +1,9 @@
 //! composer_states — the box's own open states, as pictures.
 //!
 //! The screens in `docs/screens.md` are the app's states: a tab, a lane at work,
-//! a report arriving. They never open the box's fold-outs, which is where the
-//! design puts the todo list and the two drawers — so this takes those pictures,
-//! from the composer the app builds, in both themes.
+//! a report arriving. They never fold out what the box holds of its own, which is
+//! where the design puts the goal's objective, the todo list and the model drawer
+//! — so this takes those pictures, from the composer the app builds, in both themes.
 //!
 //! ```sh
 //! cargo run -p composer --example composer_states -- --capture /tmp/composer
@@ -190,19 +190,19 @@ fn main() {
         .into();
     std::fs::create_dir_all(&dir).expect("the capture directory");
 
-    // The states, in the order the design reads them: the todo list folded out,
-    // then each drawer, then the one button's other face, then a lane's own box —
-    // which changes nothing, and says so.
+    // The states, in the order the design reads them: the goal's objective folded
+    // out, then the todo list, then the model drawer, then the one button's other
+    // face, then a lane's own box — which changes nothing, and says so.
     type Setup = fn(&mut HeadlessAppContext, AnyWindowHandle, &Entity<Page>);
     let states: [(&str, Setup); 5] = [
+        ("goal-open", |cx, window, _| {
+            click(cx, window, "goal-strip-row")
+        }),
         ("todos-open", |cx, window, _| {
             click(cx, window, "todo-strip-row")
         }),
         ("model-drawer", |cx, window, _| {
             click(cx, window, "composer-chip-model")
-        }),
-        ("goal-drawer", |cx, window, _| {
-            click(cx, window, "composer-chip-goal")
         }),
         ("busy", |cx, _window, page| {
             let composer = composer_of(cx, page);

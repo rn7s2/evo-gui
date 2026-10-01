@@ -217,21 +217,29 @@ the agent header are the same height on the same surface, so the rule under them
   12 px radius, 1 px border; with the caret in it the border mixes 55% of the primary into the
   border and a 3 px ring of the primary at 12% sits outside it. Inside the box, in the order the
   design draws them:
-  1. the **todo strip** of the selected agent across the top — a 32 px row reading `Todos d/n` with
+  1. the **goal strip** of the selected agent across the top, in the todo strip's own style — a
+     32 px row reading `Goal`, its status in the dim half and its budget beside it while evo
+     tracks one, with a chevron that turns over 120 ms — and, folded out under it, the objective
+     itself as prose, scrolling past 156 px. No goal, no strip. The goal's **id** evo's status
+     line spells out (`goal g-b7ba (active) 12k/50k`) is its own handle on the goal, never a
+     reader's fact: the `goal` segment is not drawn as a chip, and neither the row nor the
+     objective writes the id. Unlike a drawer the strip is not dismissed by a press outside the
+     box — only its own row folds its objective, and each composer keeps that.
+  2. the **todo strip** of the selected agent — a 32 px row reading `Todos d/n` with
      a chevron that turns over 120 ms — and, folded out under it, the items (`☑` done, `◐` in
      progress, `☐` pending), scrolling past 156 px. No todos, no strip: `Todos 0/0` over nothing is
      chrome that says only that there is nothing to say. The todos come from the selected agent's
      topic state — `state.todos` of `session`, or of that lane — seeded by the snapshot and kept
      current by `state.patch`.
-  2. the **drawers** a chip folds out, inside the box, in the todo strip's own style: a 32 px title
+  3. the **model drawer** a chip folds out, inside the box, in the strips' own style: a 32 px title
      row that folds it back, and the body under it. A click outside the box, or selecting another
      agent, folds it back too.
-  3. the **input** (plain multiline text editor for now — `Textarea` + `TextareaState`, 14 px on a
+  4. the **input** (plain multiline text editor for now — `Textarea` + `TextareaState`, 14 px on a
      20 px line): two rows at rest, growing with what is typed to **half the conversation pane**,
      and scrolling inside itself past that. Enter sends, Shift+Enter is a newline, `Esc` interrupts
      the coordinator's turn, and `↑`/`↓` walk the prompts this tab has sent while the input is
      empty.
-  4. the **foot row**: the agent's status line as chips, then the one action button.
+  5. the **foot row**: the agent's status line as chips, then the one action button.
 - **The chips** are the topic's **`segments`**, one chip per segment and in the order the server
   publishes them — the same core registry (`evo:define-status-segment`) the TUI's status line uses,
   so the two cannot drift apart, and an extension's own segment (cache-stats, say) arrives the same
@@ -242,12 +250,12 @@ the agent header are the same height on the same surface, so the rule under them
   | model | the id, or `id (provider)` when that id is registered under more than one provider, with the effort in the chip's dim half | `state.model`, `state.thinking` |
   | thinking | the effort level, when there is no model chip to ride on | `state.thinking` |
   | context | `ctx 48k/936k (5%)` — the server's own numbers and units | `state.context` |
-  | goal | `goal <id> (<status>) <tokens>[/<budget>]` — its status in the chip's dim half — opening the goal drawer; with a goal in `state.goal` and no segment for it, the design's own `goal` chip (`goal` + the dim status) stands in | `state.goal` |
+  | goal | **not a chip** — the goal has its own strip above the todo strip (the box's item 1): the row states `Goal` and the status, folds out the objective, and never writes the id evo's segment spells out | `state.goal` |
 
   Render a segment's `text` as it is, `order` left to right (right-hand segments are the swarm's
   own summary, which the lanes column already states), and **leave out a segment the server does not
-  publish** — a session with no cache activity and no goal shows no cache and no goal chip, which is
-  the whole of that status line. The `model` chip opens the drawer holding the models `/catalog`
+  publish** — a session with no cache activity and no goal shows no cache chip and no goal strip,
+  which is the whole of that status line. The `model` chip opens the drawer holding the models `/catalog`
   lists and the effort ladder it declares (`thinking_levels`, in the server's order, never `off`),
   and changes the **coordinator's own** model and effort with `model.set` / `thinking.set` (§5.5) —
   the session's, not a lane's: for a lane the drawer states what the swarm runs and says so

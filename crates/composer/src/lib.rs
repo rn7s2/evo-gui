@@ -1,13 +1,15 @@
 //! composer — the box under the transcript (`Workspace.css`'s `.composer-box`): the
-//! coordinator's input, the todo strip and the drawers that fold out of it, the chips
-//! that state what the selected agent is working with, and the one Send/Stop button.
+//! coordinator's input, the goal and todo strips that stand over it, the model drawer
+//! that folds out of it, the chips that state what the selected agent is working with,
+//! and the one Send/Stop button.
 //!
 //! The box sits on the transcript's reading measure, at the foot of the conversation
 //! column, so what is written lines up with what is read. Everything inside it is the
 //! *selected agent's own* state (CONTRACT §4.2): the chips are the topic's status
-//! segments in the server's words and order, the todos are the topic's todos, and the
-//! model drawer ticks the model the topic reports. Nothing is composed here, and
-//! nothing survives a selection — another agent is another set of facts.
+//! segments in the server's words and order, the goal strip is the topic's goal and the
+//! todo strip its todos, and the model drawer ticks the model the topic reports.
+//! Nothing is composed here, and nothing survives a selection — another agent is
+//! another set of facts.
 //!
 //! The effort ladder is the server's too (`catalog`'s `thinking_levels`, §5.6): a
 //! client never writes the rungs down.
@@ -32,16 +34,16 @@ use gpui_kit::component::{
     h_flex,
     input::{InputEvent, Textarea, TextareaState},
     scroll::ScrollableElement,
-    v_flex, ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, Size, StyledExt as _,
+    v_flex, ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, Size,
 };
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    div, px, radians, Animation, AnimationExt as _, AnyElement, App, Bounds, BoxShadow,
+    div, px, radians, Animation, AnimationExt as _, AnyElement, App, Bounds, BoxShadow, ClickEvent,
     ClipboardItem, Context, ElementId, Entity, EventEmitter, FocusHandle, Global, IntoElement,
     KeyBinding, Keystroke, KeystrokeEvent, Pixels, Point, Render, ScrollHandle, SharedString,
     Subscription, TestSupportExt as _, WeakEntity, Window,
 };
-use session::{ordered_segments, Segment, Todo, TodoStatus, TopicState};
+use session::{ordered_segments, GoalInfo, Segment, Todo, TodoStatus, TopicState};
 use store::design::{self, Palette, INSET, MEASURE, RADIUS};
 use widgets::effort::{cubic_bezier, Motion};
 use widgets::{paint, Chip, EffortSlider};
@@ -99,7 +101,7 @@ const ACTION_RADIUS: Pixels = px(RADIUS);
 const FOOT_GAP: Pixels = px(12.);
 const FOOT_PAD: (f32, f32, f32, f32) = (6., 8., 8., 14.);
 
-/// The todo strip's rows: a 32px title row, and a list that scrolls past 156px
+/// The strips' rows: a 32px title row, and a body that scrolls past 156px
 /// (`.todo-strip-row`, `.todo-strip-list{max-height:156px}`).
 const STRIP_ROW: Pixels = px(32.);
 const STRIP_LIST_MAX: Pixels = px(156.);
@@ -108,8 +110,7 @@ const TODO_ROW: Pixels = px(18.);
 const TODO_BOX: Pixels = px(14.);
 const TODO_BOX_RADIUS: Pixels = px(3.);
 const TODO_BOX_INSET: Pixels = px(6.);
-/// The chevron's turn when the todo strip is folded: `.chev{transition:transform
-/// .12s ease}`.
+/// The chevron's turn when a strip is folded: `.chev{transition:transform .12s ease}`.
 const CHEVRON_TURN: std::time::Duration = std::time::Duration::from_millis(120);
 
 /// The drawer's rows and its model items.
@@ -170,15 +171,8 @@ struct ChipFact {
     text: SharedString,
     /// The dim second half: the effort level beside a model.
     dim: Option<SharedString>,
-    /// The drawer this chip opens, when it opens one.
-    opens: Option<Drawer>,
-}
-
-/// The fold-out a chip opens, inside the box (`.drawer`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Drawer {
-    Model,
-    Goal,
+    /// Whether the chip opens the model drawer.
+    opens: bool,
 }
 
 /// The facts one agent's topic reports, as this box draws them.
@@ -190,8 +184,9 @@ struct Agent {
     model: Option<(String, String)>,
     /// The effort level the topic reports, as it is (`state.thinking`).
     thinking: Option<String>,
-    /// The goal, for the drawer's body: its status and the objective in full.
-    goal: Option<(String, String)>,
+    /// The goal, for its strip: the status the title row states, the objective it folds
+    /// out, and the budget evo tracks while it tracks one.
+    goal: Option<GoalInfo>,
 }
 
 /// What the composer asks its owner to do. Each is one op the owner sends
@@ -282,12 +277,16 @@ impl Global for KeysBound {}
 ///
 /// The server's registry built them, so this walks them and folds the two that belong
 /// together: `thinking` is the dim half of the `model` chip — `stub-a medium`, the way
-/// the design draws it. A `goal` segment opens the goal drawer, when the topic
-/// carries the goal itself; everything else is a chip of its own, in the server's
-/// order. Right-hand segments are the swarm's own summary (`2 lanes`), which the lane
-/// column already states, so they are not repeated here.
-fn chips_of(segments: &[Segment], goal: Option<&(String, String)>) -> Vec<ChipFact> {
-    let has_goal = goal.is_some();
+/// the design draws it. The `model` chip opens the model drawer; everything else is a
+/// chip of its own, in the server's order. Right-hand segments are the swarm's own
+/// summary (`2 lanes`), which the lane column already states, so they are not repeated
+/// here.
+///
+/// A `goal` segment is not a chip: the goal has a strip of its own above the foot
+/// (`Composer::goal_strip`), and the segment's words name the goal's id — evo's handle
+/// on the goal, not a reader's fact. The strip states the status and the objective
+/// instead, from `state.goal`.
+fn chips_of(segments: &[Segment]) -> Vec<ChipFact> {
     let (left, _right) = ordered_segments(segments);
     let effort = left
         .iter()
@@ -297,33 +296,19 @@ fn chips_of(segments: &[Segment], goal: Option<&(String, String)>) -> Vec<ChipFa
     let mut chips = Vec::new();
     for segment in left {
         let name = segment.name.as_str();
+        if name == "goal" {
+            continue;
+        }
         // The effort rides on the model chip; with no model to ride on it is a fact
         // of its own rather than a dropped one.
         if name == "thinking" && has_model {
             continue;
         }
-        let opens = match name {
-            "model" => Some(Drawer::Model),
-            "goal" if has_goal => Some(Drawer::Goal),
-            _ => None,
-        };
         chips.push(ChipFact {
             name: segment.name.clone(),
             text: SharedString::from(segment.text.clone()),
             dim: (name == "model").then(|| effort.clone()).flatten(),
-            opens,
-        });
-    }
-    // A goal the topic's state carries is a goal even when the status line has no
-    // segment for it — a state without a goal is the only thing that means there is
-    // no goal (§4.2). The chip is the design's own: `goal`, its status beside it in
-    // the dim half, opening the drawer that holds the objective.
-    if let Some((status, _)) = goal.filter(|_| !chips.iter().any(|chip| chip.name == "goal")) {
-        chips.push(ChipFact {
-            name: "goal".to_string(),
-            text: SharedString::from("goal"),
-            dim: Some(SharedString::from(format!("({status})"))),
-            opens: Some(Drawer::Goal),
+            opens: name == "model",
         });
     }
     chips
@@ -344,13 +329,17 @@ pub struct Composer {
     levels: Vec<SharedString>,
     /// The models the catalog lists, for the drawer (§5.6).
     models: Vec<ModelRow>,
-    /// The fold-out that is open, if any.
-    drawer: Option<Drawer>,
+    /// Whether the model drawer is folded out, as the model chip folds it.
+    model_open: bool,
+    /// Whether the goal strip's objective is unfolded.
+    goal_open: bool,
     /// Whether the todo list is unfolded.
     todos_open: bool,
-    /// Whether the chevron was drawn pointing up the last time it was drawn, and
-    /// how many times it has turned: `.chev{transition:transform .12s ease}` needs
+    /// Whether each strip's chevron was drawn pointing up the last time it was drawn,
+    /// and how many times it has turned: `.chev{transition:transform .12s ease}` needs
     /// to know what it is turning from, and a new id to turn under.
+    goal_chevron_up: bool,
+    goal_chevron_turns: u64,
     chevron_up: bool,
     chevron_turns: u64,
     /// The swarm's own busy flag: what the action button's face follows.
@@ -373,6 +362,9 @@ pub struct Composer {
     /// The todo list's own scroll position, kept across frames (and per composer,
     /// so two tabs' lists do not share one).
     todos_scroll: ScrollHandle,
+    /// The goal's objective scrolls under the strip's own cap, and its handle is the
+    /// composer's for the same reason the todo list's is.
+    goal_scroll: ScrollHandle,
     /// The effort slider's own motion: the level's move along the rail, the press,
     /// the hover and the focus fades. One per composer, handed back every render.
     effort_motion: Rc<Motion>,
@@ -451,8 +443,11 @@ impl Composer {
             settable: true,
             levels: Vec::new(),
             models: Vec::new(),
-            drawer: None,
+            model_open: false,
+            goal_open: false,
             todos_open: false,
+            goal_chevron_up: false,
+            goal_chevron_turns: 0,
             chevron_up: false,
             chevron_turns: 0,
             busy: false,
@@ -463,6 +458,7 @@ impl Composer {
             pending_send: None,
             room: px(320.),
             todos_scroll: ScrollHandle::new(),
+            goal_scroll: ScrollHandle::new(),
             effort_motion: Rc::new(Motion::new()),
             box_bounds: Rc::new(Cell::new(Bounds::default())),
             effort_focus: cx.focus_handle(),
@@ -499,19 +495,15 @@ impl Composer {
         settable: bool,
         cx: &mut Context<Self>,
     ) {
-        let goal = state
-            .goal
-            .as_ref()
-            .map(|goal| (goal.status.clone(), goal.objective.clone()));
         let agent = Agent {
-            chips: chips_of(&state.segments, goal.as_ref()),
+            chips: chips_of(&state.segments),
             todos: state.todos.clone(),
             model: state
                 .model
                 .as_ref()
                 .map(|model| (model.id.clone(), model.provider.clone())),
             thinking: state.thinking.clone(),
-            goal,
+            goal: state.goal.clone(),
         };
         let name: SharedString = name.into();
         let mut changed = false;
@@ -545,6 +537,19 @@ impl Composer {
         }
     }
 
+    /// Unfold or fold the goal's objective, which is also the chevron's turn: the angle
+    /// it is coming from is the one it was last drawn at, and the turn is re-keyed so
+    /// the animation runs once per press (`.chev{transition:transform .12s ease}`).
+    ///
+    /// Folding its own objective is the *only* thing a press outside the box does to
+    /// the goal: the strip is where the goal is read, not a drawer that comes and goes.
+    fn toggle_goal(&mut self, cx: &mut Context<Self>) {
+        self.goal_chevron_up = self.goal_open;
+        self.goal_chevron_turns = self.goal_chevron_turns.wrapping_add(1);
+        self.goal_open = !self.goal_open;
+        cx.notify();
+    }
+
     /// Unfold or fold the todo list, which is also the chevron's turn: the angle it
     /// is coming from is the one it was last drawn at, and the turn is re-keyed so
     /// the animation runs once per press (`.chev{transition:transform .12s ease}`).
@@ -555,31 +560,34 @@ impl Composer {
         cx.notify();
     }
 
-    /// The strip's chevron: the design's one glyph — an up chevron — drawn at 12px
-    /// and turned over the design's 120ms when the strip is folded (`up` is 0°, the
-    /// folded state the 180° the CSS rotates it to).
-    fn chevron(&self, open: bool) -> AnyElement {
+    /// A strip's chevron: the design's one glyph — an up chevron — drawn at 12px and
+    /// turned over the design's 120ms when the strip is folded (`open` is 0°, the
+    /// folded state the 180° the CSS rotates it to). `key` and `drawn` are the strip's
+    /// own: which one it is, what angle it was last drawn at, and how many turns it has
+    /// taken, so the animation runs once per press.
+    fn chevron(&self, open: bool, key: &'static str, drawn: bool, turns: u64) -> AnyElement {
         // Up is the open strip: 0°. Folded is the 180° the CSS turns it to.
         let angle = |up: bool| if up { 0. } else { std::f32::consts::PI };
         let icon = Icon::new(IconName::ChevronUp).size(px(12.));
-        if self.chevron_up == open {
+        if drawn == open {
             return icon.rotate(radians(angle(open))).into_any_element();
         }
-        let (from, to) = (angle(self.chevron_up), angle(open));
+        let (from, to) = (angle(drawn), angle(open));
         let turn = Animation::new(CHEVRON_TURN).with_easing(cubic_bezier(0.25, 0.1, 0.25, 1.));
-        icon.with_animation(
-            ("todo-chevron", self.chevron_turns),
-            turn,
-            move |icon, t: f32| icon.rotate(radians(from + (to - from) * t)),
-        )
+        icon.with_animation((key, turns), turn, move |icon, t: f32| {
+            icon.rotate(radians(from + (to - from) * t))
+        })
         .into_any_element()
     }
 
-    /// Fold the open drawer back if `at` is a press outside the box, which is what
+    /// Fold the model drawer back if `at` is a press outside the box, which is what
     /// the design's `pointerdown` listener on the document does. The page asks this
     /// on every press it sees, so a press on the transcript, the lanes or the band
-    /// folds it, and one in the box — on the input, a chip, the strip, the drawer
+    /// folds it, and one in the box — on the input, a chip, a strip, the drawer
     /// itself — leaves it.
+    ///
+    /// The strips are not the drawer's: where their own rows put them is where they
+    /// stay, whoever presses where.
     pub fn close_drawer_at(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
         if self.box_bounds.get().contains(&at) {
             return;
@@ -587,9 +595,10 @@ impl Composer {
         self.close_drawer(cx);
     }
 
-    /// Fold the open drawer back, as selecting another agent does.
+    /// Fold the model drawer back, as selecting another agent does.
     pub fn close_drawer(&mut self, cx: &mut Context<Self>) {
-        if self.drawer.take().is_some() {
+        if self.model_open {
+            self.model_open = false;
             cx.notify();
         }
     }
@@ -806,11 +815,171 @@ impl Composer {
         self.interrupt(cx);
     }
 
+    /// The title row both strips wear (`.todo-strip-row`): 32px, the design's paddings
+    /// and 10px gap, the muted ink the row's own words turn into the foreground under
+    /// the pointer, and the chevron it is handed at its right-hand end.
+    ///
+    /// `leading` is what the strip says at its left, in its own order; the chevron comes
+    /// last, pushed to the row's end (`margin-left:auto`). A strip builds its own
+    /// ([`Composer::chevron`]), because the angle it turns from and the turn it is on are
+    /// the strip's own.
+    fn strip_row(
+        &self,
+        id: &'static str,
+        aria: SharedString,
+        leading: Vec<AnyElement>,
+        chevron: AnyElement,
+        palette: &'static Palette,
+        on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> AnyElement {
+        h_flex()
+            .id(id)
+            .test_support()
+            .aria_label(aria)
+            .h(STRIP_ROW)
+            .w_full()
+            .items_center()
+            .gap(px(10.))
+            .pl(px(14.))
+            .pr(px(10.))
+            // The design keeps the arrow over every control of its own — a macOS app's
+            // chrome does not turn the pointer into a hand
+            // (`.todo-strip-row{cursor:default}`) — and only the effort slider, a
+            // control the pointer does track, asks for one.
+            .cursor_default()
+            .text_size(STRIP_FONT)
+            // `.todo-strip-row:hover{color:var(--fg)}`: the row's own words take the
+            // ink; whatever it sets in the ink is already the ink.
+            .text_color(paint::color(palette.muted_fg))
+            .hover(move |row| row.text_color(paint::color(palette.fg)))
+            .on_click(on_click)
+            .children(leading)
+            .child(
+                div()
+                    .ml_auto()
+                    .flex_none()
+                    .text_color(paint::color(palette.muted_fg))
+                    .child(chevron),
+            )
+            .into_any_element()
+    }
+
+    /// The goal strip: the title row, always, and the objective under it while it is
+    /// open.
+    ///
+    /// The strip is where the goal is read, so it is not a drawer: a press outside the
+    /// box does not fold it (`Composer::close_drawer_at`) and the model drawer opening
+    /// does not either. Its own row is the one thing that folds its objective, and the
+    /// composer keeps that, per tab.
+    ///
+    /// An agent with no goal has no strip: a state with no goal is the only thing that
+    /// means there is no goal (§4.2). An agent with one has the status on the row, the
+    /// objective folded out under it, and its budget beside the status while evo tracks
+    /// one. The goal's **id** (`g-b7ba`) is evo's own handle on it, not a reader's fact:
+    /// the status line's `goal` segment spells it out and is not drawn as a chip
+    /// (`chips_of`), and nothing here writes it either.
+    fn goal_strip(
+        &self,
+        palette: &'static Palette,
+        cx: &Context<Self>,
+        top: bool,
+    ) -> Option<AnyElement> {
+        let goal = self.agent.goal.as_ref()?;
+        let open = self.goal_open;
+        // The design's own title: `Goal` at the 500 weight in the ink, and the status in
+        // the dim half beside it, where the drawer put it (`drawer-dim`).
+        let mut leading: Vec<AnyElement> = vec![
+            div()
+                .flex_none()
+                .font_weight(widgets::text::MEDIUM)
+                .text_color(paint::color(palette.fg))
+                .child(SharedString::from("Goal"))
+                .into_any_element(),
+            div()
+                .flex_none()
+                .child(SharedString::from(format!("({})", goal.status)))
+                .into_any_element(),
+        ];
+        // The budget, beside the status, when evo is tracking one: the count a goal is
+        // run against is a fact of its own, and a goal with no budget has no count to
+        // draw rather than a zero standing for one.
+        let mut aria = format!("Goal ({})", goal.status);
+        if goal.budget.is_some() {
+            let tokens = SharedString::from(goal.tokens_label());
+            aria.push_str(&format!(" · {tokens}"));
+            leading.push(div().flex_none().child(tokens).into_any_element());
+        }
+        let mut strip = v_flex()
+            .id("goal-strip")
+            .test_support()
+            .w_full()
+            .flex_none()
+            .bg(paint::color(palette.sidebar))
+            // It is the box's first child, so its corners are the box's top corners: the
+            // same curve as the border's inner edge, never a square that leaves the box's
+            // own fill showing in the wedge.
+            .when(top, |this| this.rounded_t(BOX_INNER_RADIUS))
+            .border_b_1()
+            .border_color(paint::color(palette.border))
+            .child(self.strip_row(
+                "goal-strip-row",
+                SharedString::from(aria),
+                leading,
+                self.chevron(
+                    open,
+                    "goal-chevron",
+                    self.goal_chevron_up,
+                    self.goal_chevron_turns,
+                ),
+                palette,
+                cx.listener(|this, _, _, cx| this.toggle_goal(cx)),
+            ));
+        if open {
+            // The objective is read as prose, and reads the way the input's own lines
+            // do (`.goal-text{font-size:13px;line-height:20px}`). A long one scrolls
+            // under the strip's own cap, in the host-and-bar shape the todo list uses —
+            // the host holds the height, the bar is its sibling, and the handle lives on
+            // the composer so two tabs' strips do not share a scroll position.
+            strip = strip.child(
+                div()
+                    .id(("goal-text-host", cx.entity_id()))
+                    .relative()
+                    .w_full()
+                    .flex_none()
+                    .child(
+                        div()
+                            .id("goal-text")
+                            .test_support()
+                            // The block's own words, as a reader that cannot see them
+                            // hears them.
+                            .aria_label(SharedString::from(goal.objective.clone()))
+                            .w_full()
+                            .max_h(STRIP_LIST_MAX)
+                            .overflow_y_scroll()
+                            .track_scroll(&self.goal_scroll)
+                            .px(px(14.))
+                            .pb(px(4.))
+                            .text_size(ITEM_FONT)
+                            .line_height(INPUT_LINE)
+                            .text_color(paint::color(palette.fg))
+                            .child(SharedString::from(goal.objective.clone())),
+                    )
+                    .vertical_scrollbar(&self.goal_scroll),
+            );
+        }
+        Some(strip.into_any_element())
+    }
+
     /// The todo strip: the title row, always, and the list under it while it is open.
     ///
     /// An agent with no todos has no strip — `Todos 0/0` over nothing is a row of
     /// chrome that says only that there is nothing to say.
-    fn todo_strip(&self, palette: &'static Palette, cx: &Context<Self>) -> Option<AnyElement> {
+    fn todo_strip(
+        &self,
+        palette: &'static Palette,
+        cx: &Context<Self>,
+        top: bool,
+    ) -> Option<AnyElement> {
         if self.agent.todos.is_empty() {
             return None;
         }
@@ -821,66 +990,33 @@ impl Composer {
             .filter(|todo| todo.status == TodoStatus::Done)
             .count();
         let open = self.todos_open;
-        let stripe = paint::color(palette.sidebar);
-        let ink = paint::color(palette.muted_fg);
-        // It is the box's first child whenever it is drawn, so its corners are the
-        // box's top corners: the same curve as the border's inner edge, never a
-        // square that leaves the box's own fill showing in the wedge.
+        let count = SharedString::from(format!("Todos {done}/{}", self.agent.todos.len()));
+        // With no goal strip above it this is the box's first child, and its corners are
+        // the box's top corners.
         let mut strip = v_flex()
             .id("todo-strip")
             .test_support()
             .w_full()
             .flex_none()
-            .bg(stripe)
-            .rounded_t(BOX_INNER_RADIUS)
+            .bg(paint::color(palette.sidebar))
+            .when(top, |this| this.rounded_t(BOX_INNER_RADIUS))
             .border_b_1()
             .border_color(paint::color(palette.border))
-            .child(
-                h_flex()
-                    .id("todo-strip-row")
-                    .test_support()
-                    .aria_label(SharedString::from(format!(
-                        "Todos {done}/{}",
-                        self.agent.todos.len()
-                    )))
-                    .h(STRIP_ROW)
-                    .w_full()
-                    .items_center()
-                    .gap(px(10.))
-                    .pl(px(14.))
-                    .pr(px(10.))
-                    // The design keeps the arrow over every control of its own — a
-                    // macOS app's chrome does not turn the pointer into a hand
-                    // (`.todo-strip-row{cursor:default}`) — and only the effort
-                    // slider, a control the pointer does track, asks for one.
-                    .cursor_default()
-                    .text_size(STRIP_FONT)
-                    // `.todo-strip-row:hover{color:var(--fg)}`: the row's own words
-                    // take the ink; the count is already the ink.
-                    .text_color(ink)
-                    .hover(move |row| row.text_color(paint::color(palette.fg)))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.toggle_todos(cx);
-                    }))
-                    .child(
-                        div()
-                            .flex_none()
-                            // `.todo-strip-count{font-weight:500}`.
-                            .font_weight(widgets::text::MEDIUM)
-                            .text_color(paint::color(palette.fg))
-                            .child(SharedString::from(format!(
-                                "Todos {done}/{}",
-                                self.agent.todos.len()
-                            ))),
-                    )
-                    .child(
-                        div()
-                            .ml_auto()
-                            .flex_none()
-                            .text_color(paint::color(palette.muted_fg))
-                            .child(self.chevron(open)),
-                    ),
-            );
+            .child(self.strip_row(
+                "todo-strip-row",
+                count.clone(),
+                // The count is the design's own `.todo-strip-count`: the ink, at the 500
+                // weight, over the row's muted words.
+                vec![div()
+                    .flex_none()
+                    .font_weight(widgets::text::MEDIUM)
+                    .text_color(paint::color(palette.fg))
+                    .child(count)
+                    .into_any_element()],
+                self.chevron(open, "todo-chevron", self.chevron_up, self.chevron_turns),
+                palette,
+                cx.listener(|this, _, _, cx| this.toggle_todos(cx)),
+            ));
         if open {
             // The rows scroll inside the list, and the bar is the kit's, on a host
             // that does not scroll (its own absolute overlay) — the same shape
@@ -920,7 +1056,7 @@ impl Composer {
         Some(strip.into_any_element())
     }
 
-    /// The drawer a chip opened, folded out inside the box under the todo row.
+    /// The drawer the model chip opened, folded out inside the box under the strips.
     fn drawer_panel(
         &self,
         palette: &'static Palette,
@@ -928,37 +1064,14 @@ impl Composer {
         cx: &Context<Self>,
         top: bool,
     ) -> Option<AnyElement> {
-        let drawer = self.drawer?;
-        let title: AnyElement = match drawer {
-            Drawer::Model => h_flex()
-                .gap(px(6.))
-                .child(SharedString::from(format!("{} model", self.name)))
-                .into_any_element(),
-            Drawer::Goal => {
-                let status = self
-                    .agent
-                    .goal
-                    .as_ref()
-                    .map(|(status, _)| status.clone())
-                    .unwrap_or_default();
-                h_flex()
-                    .gap(px(6.))
-                    .child("Goal")
-                    .child(
-                        div()
-                            // `.drawer-dim{color:var(--muted-fg);font-weight:400}`: the
-                            // status is set back from the 500-weight title.
-                            .font_normal()
-                            .text_color(paint::color(palette.muted_fg))
-                            .child(SharedString::from(format!("({status})"))),
-                    )
-                    .into_any_element()
-            }
-        };
-        let body: AnyElement = match drawer {
-            Drawer::Model => self.model_body(palette, window, cx),
-            Drawer::Goal => self.goal_body(palette).into_any_element(),
-        };
+        if !self.model_open {
+            return None;
+        }
+        let title: AnyElement = h_flex()
+            .gap(px(6.))
+            .child(SharedString::from(format!("{} model", self.name)))
+            .into_any_element();
+        let body: AnyElement = self.model_body(palette, window, cx);
         Some(
             v_flex()
                 .id("composer-drawer")
@@ -966,13 +1079,13 @@ impl Composer {
                 .w_full()
                 .flex_none()
                 .bg(paint::color(palette.sidebar))
-                // `top` when no todo strip is drawn above it: then the drawer's own
-                // corners are the box's, and they take the box's curve.
+                // `top` when no strip is drawn above it: then the drawer's own corners
+                // are the box's, and they take the box's curve.
                 .when(top, |this| this.rounded_t(BOX_INNER_RADIUS))
                 .border_b_1()
                 .border_color(paint::color(palette.border))
                 .child(
-                    // The title row folds the drawer back, the way the todo row does.
+                    // The title row folds the drawer back, the way a strip's row does.
                     h_flex()
                         .id("drawer-row")
                         .test_support()
@@ -999,8 +1112,8 @@ impl Composer {
                             div()
                                 .ml_auto()
                                 .flex_none()
-                                // The design's own toggle: the up chevron the todo
-                                // strip turns to when it is open — a way back, not a
+                                // The design's own toggle: the up chevron a strip
+                                // turns to when it is open — a way back, not a
                                 // way further out.
                                 .child(Icon::new(IconName::ChevronUp).size(px(12.))),
                         ),
@@ -1205,27 +1318,6 @@ impl Composer {
         .into_any_element()
     }
 
-    /// The goal drawer: the objective in full, under its status.
-    fn goal_body(&self, palette: &'static Palette) -> impl IntoElement {
-        let objective = self
-            .agent
-            .goal
-            .as_ref()
-            .map(|(_, objective)| objective.clone())
-            .unwrap_or_default();
-        div()
-            .id("drawer-goal-text")
-            .test_support()
-            .px(px(8.))
-            .pb(px(4.))
-            .text_size(ITEM_FONT)
-            // `.goal-text{font-size:13px;line-height:20px}`: the objective is read as
-            // prose, so its lines are the input's own leading.
-            .line_height(INPUT_LINE)
-            .text_color(paint::color(palette.fg))
-            .child(SharedString::from(objective))
-    }
-
     /// Send `model.set` for a model the drawer picked.
     fn choose_model(&mut self, id: &str, provider: &str, cx: &mut Context<Self>) {
         if !self.settable || self.in_flight {
@@ -1273,7 +1365,7 @@ impl Composer {
             .pr(px(FOOT_PAD.1))
             .pb(px(FOOT_PAD.2))
             .pl(px(FOOT_PAD.3));
-        let open = self.drawer;
+        let open = self.model_open;
         let weak = cx.entity().downgrade();
         for chip in &self.agent.chips {
             // The slot is the composer's: it carries the chip's own words as its
@@ -1292,17 +1384,17 @@ impl Composer {
             if let Some(dim) = chip.dim.clone() {
                 pill = pill.dim(dim);
             }
-            if let Some(drawer) = chip.opens {
+            if chip.opens {
                 let weak = weak.clone();
-                pill = pill.open(open == Some(drawer)).interactive(move |_, cx| {
-                    // A chip is a button: clicking the open one folds the drawer
-                    // back, clicking the other one switches to it.
+                pill = pill.open(open).interactive(move |_, cx| {
+                    // A chip is a button: clicking it while the drawer it opens is
+                    // folded out folds the drawer back, and otherwise opens it.
                     if let Some(composer) = weak.upgrade() {
                         composer.update(cx, |this, cx| {
-                            if this.drawer == Some(drawer) {
+                            if this.model_open {
                                 this.close_drawer(cx);
                             } else {
-                                this.drawer = Some(drawer);
+                                this.model_open = true;
                                 cx.notify();
                             }
                         });
@@ -1470,12 +1562,17 @@ impl Render for Composer {
             );
         }
 
-        let strip = self.todo_strip(palette, cx);
-        let drawer = self.drawer_panel(palette, window, cx, strip.is_none());
+        // The strips stand over the input in the box's own order: the goal first, then
+        // the plan, then the drawer a chip folded out. The first of them is the box's
+        // first child and takes the box's top corners.
+        let goal = self.goal_strip(palette, cx, true);
+        let strip = self.todo_strip(palette, cx, goal.is_none());
+        let drawer = self.drawer_panel(palette, window, cx, goal.is_none() && strip.is_none());
         let foot = self.foot(palette, cx);
-        // With neither fold-out open the input's wrapper is the box's first child:
-        // its own top corners are the box's, and it is the only child painting there.
-        let body_at_top = strip.is_none() && drawer.is_none();
+        // With neither strip nor drawer open the input's wrapper is the box's first
+        // child: its own top corners are the box's, and it is the only child painting
+        // there.
+        let body_at_top = goal.is_none() && strip.is_none() && drawer.is_none();
 
         // Where the box was painted: the page asks this against the press it sees, so
         // that a press in the box and a press outside it are told apart by where they
@@ -1519,6 +1616,7 @@ impl Render for Composer {
                     // own interrupt (the TUI's).
                     .key_context(KEY_CONTEXT)
                     .on_action(cx.listener(Self::interrupt_action))
+                    .children(goal)
                     .children(strip)
                     .children(drawer)
                     .child(
@@ -2239,8 +2337,11 @@ mod tests {
     }
 
     /// The foot row is the topic's own chips (CONTRACT §4.2): the model with its
-    /// effort beside it, then the context, the cache and the goal, in the order the
-    /// server published them — and the goal chip opens the goal drawer.
+    /// effort beside it, then the context and the cache, in the order the server
+    /// published them.
+    ///
+    /// The goal is not one of them: it has the strip of its own above the foot, and the
+    /// server's `goal` segment — the one place its id is spelled out — is not drawn.
     #[gpui_kit::test]
     fn the_foot_row_is_the_topics_own_chips(cx: &mut TestAppContext) {
         let f = open(cx);
@@ -2252,8 +2353,7 @@ mod tests {
             let model = window.find(chip_id("model"));
             let ctx = window.find(chip_id("context"));
             let cache = window.find(chip_id("cache_stats"));
-            let goal = window.find(chip_id("goal"));
-            assert!(model.visible() && ctx.visible() && cache.visible() && goal.visible());
+            assert!(model.visible() && ctx.visible() && cache.visible());
             assert_eq!(
                 model.label(),
                 Some("stub-a high"),
@@ -2261,13 +2361,15 @@ mod tests {
             );
             assert_eq!(ctx.label(), Some("ctx 48k/936k (5%)"));
             assert_eq!(cache.label(), Some("97% cached"));
-            assert_eq!(goal.label(), Some("goal a1b2c3d4 (active) 12k/50k"));
+            assert!(
+                window.try_find(chip_id("goal")).is_none(),
+                "the goal is the strip's, not a chip's"
+            );
 
             // One row, left to right, in the server's order.
             let x = |id: &str| window.find(chip_id(id)).bounds().left();
             assert!(x("model") < x("context") && x("context") < x("cache_stats"));
-            assert!(x("cache_stats") < x("goal"));
-            for id in ["model", "context", "cache_stats", "goal"] {
+            for id in ["model", "context", "cache_stats"] {
                 assert_eq!(
                     window.find(chip_id(id)).bounds().size.height,
                     px(widgets::chip::HEIGHT)
@@ -2318,43 +2420,167 @@ mod tests {
             assert!(cache.visible(), "the cache is a chip of its own");
             assert_eq!(cache.label(), Some("0% cached"), "in the server's words");
             assert_eq!(cache.bounds().size.height, px(widgets::chip::HEIGHT));
-            // The server's own order: after the context, before the goal.
+            // The server's own order: after the context. The `goal` segment beside it is
+            // the one segment the box does not draw (the goal strip is), and the id its
+            // words carry is nowhere on this row.
             let x = |id: &str| window.find(chip_id(id)).bounds().left();
             assert!(x("context") < x("cache_stats"), "after `context`");
-            assert!(x("cache_stats") < x("goal"), "before `goal`");
+            assert!(
+                window.try_find(chip_id("goal")).is_none(),
+                "the goal's own segment is not a chip"
+            );
         });
     }
 
-    /// A goal the topic's state carries is a goal even when the status line has no
-    /// segment for it: the chip appears last — the design's own `goal`, its status in
-    /// the dim half — and opens the drawer holding the objective (§4.2).
+    /// Evo's own `goal` segment is the one place the goal's id is written down
+    /// (`goal g-b7ba (active) 12k/50k`), and the box does not draw it: the goal is a
+    /// strip, and a chip is a status segment.
+    #[test]
+    fn the_goal_segment_is_not_a_chip() {
+        let state = state_with(&["model", "thinking", "context", "goal"]);
+        assert!(
+            state
+                .segments
+                .iter()
+                .any(|segment| segment.name == "goal" && segment.text.contains("a1b2c3d4")),
+            "the fixture's status line spells the goal's id out"
+        );
+
+        let chips = chips_of(&state.segments);
+        assert!(
+            chips.iter().all(|chip| chip.name != "goal"),
+            "the goal's segment is not a chip: {:?}",
+            chips.iter().map(|chip| &chip.name).collect::<Vec<_>>()
+        );
+        assert!(
+            chips
+                .iter()
+                .all(|chip| !chip.text.contains("a1b2c3d4") && !chip.text.contains("goal")),
+            "and no chip carries the id the segment spelled out"
+        );
+    }
+
+    /// The goal's strip: the title row states the goal — `Goal`, its status in the dim
+    /// half, its budget beside it — and the objective folds out under it.
+    ///
+    /// The goal's id is evo's own handle on it (`g-b7ba`), never a reader's fact: not
+    /// the chip's words (there is no goal chip), not the row's, and not the objective's.
     #[gpui_kit::test]
-    fn a_goal_the_state_carries_is_a_chip_without_a_segment(cx: &mut TestAppContext) {
+    fn the_goal_strip_states_the_goal_and_folds_out_its_objective(cx: &mut TestAppContext) {
         let f = open(cx);
         f.act(cx, |window, cx| {
-            let state = state_with(&["model", "thinking"]);
+            let state = state_with(&["model", "thinking", "goal"]);
             assert!(
                 state.goal.is_some(),
-                "the topic's state carries the goal, and its status line does not"
+                "the topic's state carries the goal; its status line spells out the id"
             );
             f.set_agent(&state, cx);
             window.render_frame(cx);
 
-            let goal = window.find(chip_id("goal"));
-            assert!(goal.visible(), "the state's goal has a chip of its own");
-            assert_eq!(goal.label(), Some("goal (active)"));
             assert!(
-                goal.bounds().left() > window.find(chip_id("model")).bounds().right(),
-                "last in the row, where the design draws it"
+                window.try_find(chip_id("goal")).is_none(),
+                "the state's goal is a strip, not a chip"
+            );
+            let row = window.find("goal-strip-row");
+            assert!(row.visible(), "the goal has a strip of its own");
+            assert_eq!(row.label(), Some("Goal (active) · 12k/50k"));
+            assert!(
+                !row.label().unwrap_or_default().contains("a1b2c3d4"),
+                "the row never names the goal's id"
+            );
+            assert!(
+                window.try_find("goal-text").is_none(),
+                "the objective is folded away to begin with, as the todo list is"
             );
 
-            window.click(chip_id("goal"), cx);
+            window.click("goal-strip-row", cx);
+            window.render_frame(cx);
+            let text = window.find("goal-text");
+            assert!(text.visible(), "and folds out under its own row");
+            assert_eq!(
+                text.label(),
+                Some("ship the redesign"),
+                "the block is the objective, whole and nothing else"
+            );
+            let row_ = window.find("goal-strip-row").bounds();
+            assert!(
+                text.bounds().top() >= row_.bottom(),
+                "the objective is under the title row: {:?} vs {row_:?}",
+                text.bounds()
+            );
+
+            // The strips stack: the goal over the plan, both over the input.
+            let todos = window.find("todo-strip-row").bounds();
+            let input = window.find(f.input_frame(cx)).bounds();
+            assert!(
+                row_.bottom() <= todos.top() && todos.bottom() <= input.top(),
+                "the goal strip stands over the todo strip: {row_:?}, {todos:?}, {input:?}"
+            );
+
+            // The row folds the objective back, and only the row does.
+            window.click("goal-strip-row", cx);
+            window.render_frame(cx);
+            assert!(window.try_find("goal-text").is_none());
+        });
+    }
+
+    /// The strip is not a drawer: the press outside the box that folds the model drawer
+    /// back leaves the goal where its own row put it, and so does the drawer opening.
+    #[gpui_kit::test]
+    fn the_goal_strip_is_not_folded_by_a_press_outside_the_box(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.act(cx, |window, cx| {
+            f.set_catalog(cx);
+            let state = state_with(&["model", "thinking", "goal"]);
+            f.set_agent(&state, cx);
+            window.render_frame(cx);
+
+            // The goal's objective, and the model's drawer beside it.
+            window.click("goal-strip-row", cx);
+            window.render_frame(cx);
+            window.click(chip_id("model"), cx);
+            window.render_frame(cx);
+            assert!(window.find("goal-text").visible());
+            assert!(window.find("composer-drawer").visible());
+
+            // A press on the transcript — anywhere outside the box — folds the drawer
+            // and nothing else.
+            f.composer.update(cx, |composer, cx| {
+                composer.close_drawer_at(point(px(0.), px(0.)), cx)
+            });
             window.render_frame(cx);
             assert!(
-                window.find("composer-drawer").visible(),
-                "and opens the drawer the design puts the objective in"
+                window.try_find("composer-drawer").is_none(),
+                "the model drawer folds back"
             );
-            assert!(window.find("drawer-goal-text").visible());
+            assert!(
+                window.find("goal-text").visible(),
+                "the goal's strip stays where it is"
+            );
+
+            // And folding the drawer out again leaves it there too.
+            window.click(chip_id("model"), cx);
+            window.render_frame(cx);
+            assert!(window.find("composer-drawer").visible());
+            assert!(window.find("goal-text").visible());
+        });
+    }
+
+    /// An agent with no goal has no goal strip, as §4.2 means it: the box says nothing
+    /// about a goal the topic does not carry.
+    #[gpui_kit::test]
+    fn an_agent_with_no_goal_has_no_goal_strip(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.act(cx, |window, cx| {
+            let mut state = state_with(&["model", "thinking"]);
+            state.goal = None;
+            f.set_agent(&state, cx);
+            window.render_frame(cx);
+            assert!(window.try_find("goal-strip-row").is_none());
+            assert!(
+                window.find("composer-box").visible(),
+                "the box is still there"
+            );
         });
     }
 

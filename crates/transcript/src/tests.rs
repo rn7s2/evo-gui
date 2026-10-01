@@ -775,6 +775,34 @@ fn structured_lines_read_as_one_line_each(cx: &mut TestAppContext) {
     });
 }
 
+/// A goal row's block is the objective, never the goal's id: the id is evo's own handle
+/// on the goal (`b1` in the fixture's status line), and a reader reads what the goal is,
+/// not what evo calls it. A transition with no objective on it says what happened.
+#[test]
+fn a_goal_row_reads_the_objective_and_never_the_goal_id() {
+    let ItemKind::Goal(created) = goal("e_1", "created", "ship the redesign").kind else {
+        panic!("the fixture is a goal transition");
+    };
+    let text = crate::rows::goal_text(&created);
+    assert_eq!(text, "ship the redesign");
+    assert!(
+        !text.contains("b1"),
+        "the goal's id is nowhere in what the row opens onto: {text:?}"
+    );
+
+    let paused = item(json!({
+        "id": "e_2", "ts": 1, "kind": "goal", "event": "paused", "goal_id": "b1"
+    }));
+    let ItemKind::Goal(paused) = paused.kind else {
+        panic!("the fixture is a goal transition");
+    };
+    assert_eq!(
+        crate::rows::goal_text(&paused),
+        "paused",
+        "a transition with no objective says what happened to the goal"
+    );
+}
+
 #[gpui_kit::test]
 fn a_quiet_line_opens_onto_the_whole_of_it(cx: &mut TestAppContext) {
     let text = "a memory snapshot the reader never typed";
