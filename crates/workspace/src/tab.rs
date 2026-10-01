@@ -2665,6 +2665,19 @@ mod tests {
         frames(cx);
         let rendered = cx.read(|cx| view.read(cx).renders());
         assert!(rendered > 0, "the transcript rendered when it was shown");
+        // The cached embedding still gives the transcript the whole box under the
+        // header: a cached view is not measured from its rows, so a style that does not
+        // size it outright leaves it 0px tall.
+        cx.update_window(window, |_, window, _cx| {
+            use gpui_kit::test::TestWindowExt as _;
+            let transcript = window.find("transcript").bounds();
+            let column = window.find("conversation-column").bounds();
+            assert!(
+                transcript.size.height > column.size.height / 2.,
+                "the transcript fills the conversation column: {transcript:?} in {column:?}"
+            );
+        })
+        .expect("the tab window");
 
         cx.update(|cx| tab.update(cx, |_, cx| cx.notify()));
         frames(cx);

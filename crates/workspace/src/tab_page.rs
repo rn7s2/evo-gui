@@ -749,12 +749,11 @@ impl TabContent {
             // rendered only when it or the data it reads is itself notified, or when the
             // box it lives in changes shape.
             .child(div().flex_1().min_h_0().children(view.map(|view| {
-                gpui_kit::AnyView::from(view).cached(
-                    gpui_kit::StyleRefinement::default()
-                        .flex_1()
-                        .min_h_0()
-                        .min_w_0(),
-                )
+                // A cached view is laid out from this style alone, never measured
+                // from its rows, so it must fill the box outright: `flex_1` would
+                // mean nothing in this block box and leave the transcript 0px tall.
+                gpui_kit::AnyView::from(view)
+                    .cached(gpui_kit::StyleRefinement::default().size_full())
             })))
             .child(self.composer.clone())
             .into_any_element()
