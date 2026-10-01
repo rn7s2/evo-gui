@@ -33,6 +33,30 @@ use serde_json::{json, Value};
 use session::{Completion, CompletionKind};
 use store::launch::Program;
 
+/// One `notice` item of a session topic, as the transcript reads it.
+#[derive(Debug)]
+struct Shown {
+    text: String,
+    tone: Option<String>,
+    source: Option<String>,
+}
+
+/// Every `notice` item of a session snapshot, in order — the lines the transcript
+/// draws for a command's own output.
+fn notice_items(session: &Value) -> Vec<Shown> {
+    session["topics"]["session"]["items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .filter(|item| item["kind"] == json!("notice"))
+        .map(|item| Shown {
+            text: item["text"].as_str().unwrap_or_default().to_owned(),
+            tone: item["tone"].as_str().map(str::to_owned),
+            source: item["source"].as_str().map(str::to_owned),
+        })
+        .collect()
+}
+
 /// Ask the running server what the caret is on in `text` at `cursor` — a **byte**
 /// offset, the way the box holds it — and read the answer back the way the popup does.
 fn ask(client: &swarm_client::Client, text: &str, cursor: usize) -> (Completion, Value) {
@@ -268,18 +292,46 @@ fn t11_completion_and_levels() {
     );
 
     let session = snapshot(&client, &["session"], 50);
-    let notices: Vec<String> = session["topics"]["session"]["items"]
-        .as_array()
-        .expect("items")
-        .iter()
-        .filter(|item| item["kind"] == json!("notice"))
-        .filter_map(|item| item["text"].as_str().map(str::to_owned))
-        .collect();
+    let notices = notice_items(&session);
     for line in &lines {
         assert!(
-            notices.iter().any(|notice| notice == line),
+            notices.iter().any(|notice| notice.text == *line),
             "the same line is a session notice too — which is why the reply's copy is \
              not drawn: {line:?} in {notices:?}"
+        );
+    }
+
+    // A command that *fails* is the same shape, and that is the half worth checking:
+    // an argument the image refuses has its reason in the reply's notices *and* in the
+    // items, so drawing the transcript alone loses none of it.
+    let failed = op(
+        &client,
+        "command.run",
+        json!({"name": "eval", "args": "(error \"boom\")"}),
+    );
+    println!("{NOTE} command.run /eval (error …) answered {failed}");
+    let failed_lines: Vec<String> = failed["notices"]
+        .as_array()
+        .expect("notices")
+        .iter()
+        .filter_map(|notice| notice["text"].as_str().map(str::to_owned))
+        .collect();
+    assert!(
+        !failed_lines.is_empty(),
+        "a command that fails says why in this reply too: {failed}"
+    );
+    let session = snapshot(&client, &["session"], 50);
+    let after = notice_items(&session);
+    for line in &failed_lines {
+        assert!(
+            after.iter().any(|notice| &notice.text == line),
+            "including the failure's own line: {line:?} in {after:?}"
+        );
+    }
+    for notice in after.iter().filter(|n| failed_lines.contains(&n.text)) {
+        println!(
+            "{NOTE} the failure's item: tone={:?} source={:?} {:?}",
+            notice.tone, notice.source, notice.text
         );
     }
 

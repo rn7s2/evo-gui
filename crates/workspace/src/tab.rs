@@ -357,9 +357,12 @@ enum Pending {
     /// `model.set` or `thinking.set`, from a drawer. The composer's button has nothing
     /// to do with these: the reply only releases the composer's own in-flight flag.
     Settings,
-    /// `command.run` — the slash command a whole message was. Its own output is the
-    /// session's `notice` items, which the transcript draws; this reply says only
-    /// whether the command was taken at all.
+    /// `command.run` — the slash command a whole message was. Its own output reaches
+    /// this client twice: as `notices` on this reply, and as the session's `notice`
+    /// items, the same lines word for word (the server publishes what it also
+    /// answers). The transcript draws the items, so the reply's copy is not drawn —
+    /// one line, one place — and what is read off the reply is `data.draft`, the text
+    /// `/rewind` and `/tree` hand back for editing.
     Command,
     /// The `complete` op behind one half-typed word, carried with the question it
     /// asked about: what the server says is only ever an answer about *that* text, at
