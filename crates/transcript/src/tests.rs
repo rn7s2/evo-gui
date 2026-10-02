@@ -1788,9 +1788,9 @@ fn a_turn_rule_puts_its_label_on_the_line(cx: &mut TestAppContext) {
     });
 }
 
-/// An ephemeral system line is not part of the conversation: `session ready` is
-/// said at every boot and dropped; a durable notice — the kind the journal keeps —
-/// is the record and stays.
+/// The serve's own ephemeral system line is not part of the conversation: `session
+/// ready` is said at every boot and dropped; a durable notice — the kind the journal
+/// keeps — is the record and stays.
 #[gpui_kit::test]
 fn a_notice_the_server_does_not_keep_is_not_in_the_transcript(cx: &mut TestAppContext) {
     let mut ephemeral = notice("e_1", "info", "session ready");
@@ -1825,12 +1825,106 @@ fn a_notice_the_server_does_not_keep_is_not_in_the_transcript(cx: &mut TestAppCo
         let mut item = notice("e_3", "info", "session ready");
         if let ItemKind::Notice(notice) = &mut item.kind {
             notice.durable = false;
+            notice.source = session::NoticeSource::Serve;
         }
         item
     };
     view.update(cx, |view, cx| {
         assert!(!view.upsert(later, cx), "an ephemeral line changes nothing");
         assert_eq!(view.items(cx).len(), 1, "only the durable one is held");
+    });
+}
+
+/// A command's own output is a `notice` item the serve does **not** journal (`durable:
+/// false`) whose source is `command`: `/lore` with no lore to show, `/model`'s list,
+/// `/eval`'s answer, a command's refusal. It is what the reader asked to see, so it is
+/// the record — a row, drawn and kept, and not counted as declined.
+#[gpui_kit::test]
+fn a_commands_output_is_drawn_even_though_the_server_does_not_keep_it(
+    cx: &mut TestAppContext,
+) {
+    let saying = item(json!({
+        "id": "n_cmd", "ts": 2, "kind": "notice", "severity": "info",
+        "text": "no lore — /lore <text> adds durable guidance",
+        "source": "command", "durable": false
+    }));
+    let refusing = item(json!({
+        "id": "n_warn", "ts": 3, "kind": "notice", "severity": "warn",
+        "text": "✗ /eval: boom", "source": "command", "durable": false
+    }));
+    // The serve's own boot line rides in the same snapshot, and is still dropped.
+    let (view, cx) = open!(
+        cx,
+        vec![
+            user("e_1", "hi"),
+            ephemeral_notice("n_ready"),
+            saying,
+            refusing
+        ]
+    );
+    cx.update(|window, cx| window.render_frame(cx));
+    cx.update(|window, _| {
+        assert_eq!(
+            window.find(row_id("transcript-notice", "n_cmd")).label(),
+            Some("command · no lore — /lore <text> adds durable guidance"),
+            "the command's line is drawn, under the source that said it"
+        );
+        assert_eq!(
+            window.find(row_id("transcript-notice", "n_warn")).label(),
+            Some("command · ✗ /eval: boom"),
+            "a refused command's line is drawn the same way"
+        );
+        assert!(
+            window
+                .try_find(row_id("transcript-notice", "n_ready"))
+                .is_none(),
+            "the serve's boot line is still not drawn"
+        );
+    });
+    // Held, and not declined: the record plus the declined is the topic's own list.
+    cx.read(|cx| {
+        assert_eq!(view.read(cx).items(cx).len(), 3, "turn + two command lines");
+        assert_eq!(view.read(cx).declined(cx), 1, "only the serve's line");
+    });
+
+    // The stream's own shape: the `item.add` for such a notice, arriving after the
+    // snapshot, is a row the moment it lands — the ephemeral is not what is dropped.
+    let streamed = item(json!({
+        "id": "n_cmd2", "ts": 4, "kind": "notice", "severity": "error",
+        "text": "✗ /lore: boom", "source": "command", "durable": false
+    }));
+    view.update(cx, |view, cx| {
+        assert!(view.upsert(streamed, cx), "the stream's line is the record");
+    });
+    cx.update(|window, cx| window.render_frame(cx));
+    cx.update(|window, _| {
+        assert_eq!(
+            window.find(row_id("transcript-notice", "n_cmd2")).label(),
+            Some("command · ✗ /lore: boom")
+        );
+    });
+    cx.read(|cx| {
+        assert_eq!(view.read(cx).declined(cx), 1, "and is not declined");
+    });
+}
+
+/// A command's output that ends on a line break (`/model`'s list) is drawn without it:
+/// the text view would draw a trailing break as a literal hard-break `\` after the last
+/// line.
+#[gpui_kit::test]
+fn a_notice_is_drawn_without_its_trailing_line_break(cx: &mut TestAppContext) {
+    let list = item(json!({
+        "id": "n_list", "ts": 2, "kind": "notice", "severity": "info",
+        "text": "model:\n  stub  stub-a  200k ctx · current\n  stub  stub-b  100k ctx\n",
+        "source": "command", "durable": false
+    }));
+    let (_view, cx) = open!(cx, vec![list]);
+    cx.update(|window, cx| window.render_frame(cx));
+    cx.update(|window, _| {
+        assert_eq!(
+            window.find(row_id("transcript-notice", "n_list")).label(),
+            Some("command · model:\n  stub  stub-a  200k ctx · current\n  stub  stub-b  100k ctx"),
+        );
     });
 }
 
@@ -4045,12 +4139,14 @@ fn the_list_is_the_record_under_a_storm_of_live_ops(cx: &mut TestAppContext) {
 
 // --- what the view declined, and why it is counted ------------------------------------
 
-/// A notice the server itself does not keep (`durable: false`): a line about the
-/// machine, said again at every boot, and not part of the conversation.
+/// An ephemeral notice the *serve* itself says (`durable: false`, `source: serve`): a
+/// line about the machine, said again at every boot, and not part of the conversation.
+/// A command's own ephemeral notice is not this — see
+/// `a_commands_output_is_drawn_even_though_the_server_does_not_keep_it`.
 fn ephemeral_notice(id: &str) -> Item {
     item(json!({
         "id": id, "ts": 1, "kind": "notice", "severity": "info",
-        "text": "session ready", "source": "swarm", "durable": false
+        "text": "session ready", "source": "serve", "durable": false
     }))
 }
 

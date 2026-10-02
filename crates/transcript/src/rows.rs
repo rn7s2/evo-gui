@@ -211,7 +211,7 @@ pub(crate) fn plain_texts(item: &Item, expanded: bool) -> Vec<(&'static str, Str
                 }
             }
         }
-        ItemKind::Notice(notice) => texts.push((NOTICE_TEXT, notice.text.clone())),
+        ItemKind::Notice(notice) => texts.push((NOTICE_TEXT, notice_text(notice).to_string())),
         ItemKind::LaneEvent(event) => texts.push((LANE_EVENT_TEXT, lane_event_line(event))),
         ItemKind::RunOutcome(outcome) => texts.push((RUN_OUTCOME_TEXT, outcome.text())),
         ItemKind::ProviderRetry(retry) => texts.push((RETRY_TEXT, retry_line(retry))),
@@ -1317,12 +1317,19 @@ fn notice_row(
         NOTICE_TEXT,
         notice.source.label(),
         palette.muted_foreground,
-        &notice.text,
+        notice_text(notice),
         severity_color(notice.severity, palette),
         palette,
         data,
         cx,
     )
+}
+
+/// A notice's words as a row draws them: without the line breaks a command's output
+/// ends on (`/model`'s list ends in `\n`), which the text view would otherwise draw as a
+/// literal hard-break `\` after the last line.
+fn notice_text(notice: &Notice) -> &str {
+    notice.text.trim_end()
 }
 
 /// A run that ended as something other than `stop`, said in the run's own vocabulary.
@@ -2408,9 +2415,11 @@ fn quiet_source_line(
         .aria_label(full.clone());
     let words = linked_text(&id, format!("{name}-text"), name, text, data, color, cx);
     if let Some(source) = source {
+        // The label sits on the first line of the words: a command's output can be
+        // several lines (`/model`'s list), and a centred label floats beside the middle.
         line = line
             .flex()
-            .items_center()
+            .items_start()
             .gap_2()
             .child(
                 div()
