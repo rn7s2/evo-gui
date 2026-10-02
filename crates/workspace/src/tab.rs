@@ -1968,6 +1968,9 @@ impl TabContent {
             }),
             _ => None,
         };
+        // A send is ended by `send_finished` and by nothing else: when nobody can take
+        // one, that is what releases the box, or it says `Sending…` for good.
+        let is_send = matches!(event, ComposerEvent::Send(_));
         let mut unanswered: Option<Completing> = None;
         let sent = match self.live.as_mut() {
             Some(live) => {
@@ -2064,7 +2067,11 @@ impl TabContent {
                 }
                 None => {
                     self.composer.update(cx, |composer, cx| {
-                        composer.request_finished(false, window, cx)
+                        if is_send {
+                            composer.send_finished(false, window, cx)
+                        } else {
+                            composer.request_finished(false, window, cx)
+                        }
                     });
                 }
             }

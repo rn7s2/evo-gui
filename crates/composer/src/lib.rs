@@ -1636,7 +1636,6 @@ impl Composer {
         if self.waiting() || (draft.trim().is_empty() && self.attachments.is_empty()) {
             return;
         }
-        self.sending = true;
         // A prompt is remembered the moment it is sent, not when the server takes
         // it: the reader's ↑ should bring back what they just sent even if the
         // request is still on its way. A message with no words is not a prompt —
@@ -1657,14 +1656,25 @@ impl Composer {
             .then(|| complete::command_message(&draft))
             .flatten()
         {
-            Some((name, args)) => ComposerEvent::Command {
-                name: name.to_string(),
-                args: args.to_string(),
-            },
-            None => ComposerEvent::Send(Outgoing {
-                text: draft,
-                attachments: self.attachments.clone(),
-            }),
+            // A command is a request of the box's own, like a stop or a setting:
+            // its answer comes back through `request_finished` (or `set_draft`),
+            // never `send_finished`, so it must not raise the sending state — a
+            // command that did was a box stuck on `Sending…` for good, swallowing
+            // every message after it.
+            Some((name, args)) => {
+                self.in_flight = true;
+                ComposerEvent::Command {
+                    name: name.to_string(),
+                    args: args.to_string(),
+                }
+            }
+            None => {
+                self.sending = true;
+                ComposerEvent::Send(Outgoing {
+                    text: draft,
+                    attachments: self.attachments.clone(),
+                })
+            }
         };
         cx.emit(event);
         cx.notify();
@@ -5860,6 +5870,57 @@ mod tests {
             "a bare command is the command's: {:?}",
             f.events()
         );
+    }
+
+    /// A command is answered through `request_finished` (or `set_draft`, when it hands
+    /// text back), never `send_finished`: it must not leave the box saying `Sending…`
+    /// and swallowing every message after it. Regression: `/lore` locked the box.
+    #[gpui_kit::test]
+    fn a_command_answered_leaves_the_box_ready_for_the_next_message(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            f.type_draft("/lore", window, cx);
+            window.press("enter", cx);
+        });
+        assert_eq!(
+            f.events().last(),
+            Some(&ComposerEvent::Command {
+                name: "lore".to_string(),
+                args: String::new(),
+            }),
+            "{:?}",
+            f.events()
+        );
+        assert_ne!(
+            f.composer.read_with(cx, |composer, _| composer.face()),
+            ActionFace::Sending,
+            "a command is not a message on its way"
+        );
+
+        // The server took it: the box is free again, and the next message goes.
+        f.act(cx, |window, cx| {
+            f.composer
+                .update(cx, |composer, cx| composer.request_finished(true, window, cx));
+            window.render_frame(cx);
+            f.type_draft("hello", window, cx);
+            window.press("enter", cx);
+        });
+        assert_eq!(f.events().last(), Some(&ComposerEvent::Send("hello".into())));
+
+        // A command that hands text back frees the box the same way.
+        f.act(cx, |window, cx| {
+            f.composer
+                .update(cx, |composer, cx| composer.send_finished(true, window, cx));
+            window.render_frame(cx);
+            f.type_draft("/rewind", window, cx);
+            window.press("enter", cx);
+            f.composer
+                .update(cx, |composer, cx| composer.set_draft("edit me", window, cx));
+            window.render_frame(cx);
+            window.press("enter", cx);
+        });
+        assert_eq!(f.events().last(), Some(&ComposerEvent::Send("edit me".into())));
     }
 
     /// The input grows with what is typed and stops at half the pane
