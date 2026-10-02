@@ -404,6 +404,25 @@ struct Completing {
     cursor: usize,
 }
 
+/// The questions an op map is still waiting on, taken out of it: the answers are not
+/// coming any more, and the question a box asked is what its next one waits for
+/// ([`composer::Composer::set_completion`]).
+///
+/// The rids go with them — nothing will be replied to under them, and a late reply
+/// would be about a session that is over — and every other op is left where it is: a
+/// stop or a send is released by its own reply, or by the tab going away with it.
+fn waiting_completions(pending: &mut BTreeMap<String, Pending>) -> Vec<Completing> {
+    let waiting: Vec<Completing> = pending
+        .values()
+        .filter_map(|pending| match pending {
+            Pending::Complete(question) => Some(question.clone()),
+            _ => None,
+        })
+        .collect();
+    pending.retain(|_, pending| !matches!(pending, Pending::Complete(_)));
+    waiting
+}
+
 /// One tab's live swarm: the engine, the model its updates land in, and the pump
 /// that carries them across.
 struct Live {
@@ -1393,6 +1412,7 @@ impl TabContent {
             Update::Exited { outcome } => {
                 // The engine stopped. A tab being closed never sees this; one that
                 // is still on screen says so and keeps what it has.
+                self.answer_pending_completions(cx);
                 self.gone = Some(format!("session stopped ({outcome:?})").into());
                 cx.notify();
             }
@@ -1402,6 +1422,28 @@ impl TabContent {
         // strip decides (§7.1).
         if was_running && !self.is_running() {
             cx.emit(TabContentEvent::RunFinished);
+        }
+    }
+
+    /// Every question still waiting for an answer, answered with nothing: the engine or
+    /// the server behind it is gone, so the answer is not coming, and a box left waiting
+    /// on one would never ask about another word (§7.3).
+    ///
+    /// The entries go with them — the ids they were filed under will never be answered,
+    /// and a reply that arrived for one anyway would be about a tab that is over.
+    fn answer_pending_completions(&mut self, cx: &mut Context<Self>) {
+        let Some(live) = self.live.as_mut() else {
+            return;
+        };
+        for question in waiting_completions(&mut live.pending) {
+            self.composer.update(cx, |composer, cx| {
+                composer.set_completion(
+                    &question.text,
+                    question.cursor,
+                    composer::Answer::none(),
+                    cx,
+                )
+            });
         }
     }
 
@@ -1782,6 +1824,18 @@ impl TabContent {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The question this event asks, kept for the half below where nobody can take
+        // it: the box holds its next question until the one it asked is released
+        // ([`composer::Composer::set_completion`]), so a question nobody answers is the
+        // popup never coming back — the first one a tab asks (about its empty box, the
+        // moment the catalog reaches it) included.
+        let asked_about = match &event {
+            ComposerEvent::Complete { text, cursor } => Some(Completing {
+                text: text.clone(),
+                cursor: *cursor,
+            }),
+            _ => None,
+        };
         let mut unanswered: Option<Completing> = None;
         let sent = match self.live.as_mut() {
             Some(live) => {
@@ -1860,7 +1914,12 @@ impl TabContent {
             None => false,
         };
         if !sent {
-            match unanswered {
+            // Nobody could take the question: there is no server under this tab at all
+            // — it has not launched yet, or its session is gone — or the engine that
+            // would carry it is. A question is answered with nothing either way:
+            // "nothing" is a true answer about a caret no server is reading, and it is
+            // what releases the box to ask about the word typed once there is one.
+            match unanswered.or(asked_about) {
                 Some(question) => {
                     self.composer.update(cx, |composer, cx| {
                         composer.set_completion(
@@ -2101,6 +2160,7 @@ impl TabContent {
     /// The swarm's server exited on its own (§3, §9.7): the tab shows why, from
     /// the log the server was writing to.
     fn server_gone(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.answer_pending_completions(cx);
         let Some(log) = self
             .live
             .as_ref()
@@ -3436,6 +3496,97 @@ mod tests {
             );
         })
         .expect("the page");
+    }
+
+    /// §7.3: a question left waiting when the engine or the server goes is released, and
+    /// with it the rid it was filed under — no reply is coming for either, and a box
+    /// waiting on one would never ask about another word. Every other op stays pending,
+    /// because its own reply (or the tab's own end) is what releases it.
+    #[test]
+    fn a_lost_session_releases_the_questions_it_was_holding() {
+        let asked = |text: &str| Completing {
+            text: text.to_string(),
+            cursor: 3,
+        };
+        let mut pending: BTreeMap<String, Pending> = BTreeMap::new();
+        pending.insert("1".into(), Pending::Send);
+        pending.insert("2".into(), Pending::Complete(asked("/lo")));
+        pending.insert("3".into(), Pending::Interrupt);
+        pending.insert("4".into(), Pending::Complete(asked("/ev")));
+
+        assert_eq!(
+            waiting_completions(&mut pending),
+            vec![asked("/lo"), asked("/ev")],
+            "every question comes out, in the order they were filed; the other ops do not"
+        );
+        assert_eq!(
+            pending.keys().collect::<Vec<_>>(),
+            vec!["1", "3"],
+            "and the rids nothing will answer go with them"
+        );
+        assert!(waiting_completions(&mut pending).is_empty());
+    }
+
+    /// §7.3: the box asks about the word under the caret, and a question **nothing could
+    /// take** — a tab with no server under it yet, which is every tab between its first
+    /// catalog and its launch — is still a question to answer. It is answered with
+    /// nothing, and the word typed once there *is* a server is asked about like any
+    /// other; a question left hanging is the box asked once and never again.
+    #[gpui_kit::test]
+    fn a_question_no_server_took_is_answered_and_the_next_one_is_asked(cx: &mut TestAppContext) {
+        let (window, tab) = running_tab(cx);
+        let composer = cx.update(|cx| tab.read(cx).composer.clone());
+        let asked: Rc<RefCell<Vec<ComposerEvent>>> = Rc::new(RefCell::new(Vec::new()));
+        let recorded = asked.clone();
+        let _subscription = cx.update(|cx| {
+            cx.subscribe(&composer, move |_, event: &ComposerEvent, _| {
+                recorded.borrow_mut().push(event.clone())
+            })
+        });
+
+        // The catalog the app read before this tab had a server: the box takes it, and
+        // asks about the caret in its own box.
+        cx.update_window(window, |_, window, cx| {
+            let data = LauncherData {
+                catalog: Some(catalog_body()),
+                ..LauncherData::default()
+            };
+            tab.update(cx, |tab, cx| tab.set_launcher_data(&data, window, cx));
+        })
+        .expect("the page");
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(50));
+        cx.run_until_parked();
+        assert!(
+            !asked.borrow().is_empty(),
+            "the box asks about the caret its catalog arrived on"
+        );
+
+        // Nobody took that question — this tab is running no server — and the word
+        // typed now is still asked about, which is the popup's whole existence.
+        let before = asked.borrow().len();
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            tab.update(cx, |tab, cx| tab.focus_primary(window, cx));
+            window.input("/lo", cx);
+        })
+        .expect("the page");
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(50));
+        cx.run_until_parked();
+        assert!(
+            asked.borrow().len() > before,
+            "a question nobody answered still lets the next one out: {:?}",
+            asked.borrow()
+        );
+        assert_eq!(
+            asked.borrow().last(),
+            Some(&ComposerEvent::Complete {
+                text: "/lo".to_string(),
+                cursor: 3,
+            }),
+            "and it is about the word the caret is on"
+        );
     }
 
     /// §5.6: the catalog the app learned reaches the composer of a tab that is already
