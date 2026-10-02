@@ -91,7 +91,7 @@ fn the_lane_list_comes_from_the_swarm_topic() {
 
     // The header's tooltip is the swarm's line, plus what the new topic adds.
     let tooltip = lanes[0].tooltip(1759200035000);
-    assert!(tooltip.contains("lane 1  working"), "{tooltip}");
+    assert!(tooltip.contains("Lane 1  working"), "{tooltip}");
     assert!(tooltip.contains("2 reports"), "{tooltip}");
     assert!(tooltip.contains("ctx 21k/200k"), "{tooltip}");
 }
@@ -364,4 +364,20 @@ fn a_stream_badge_is_per_topic() {
     );
     assert!(tab.stream_status("session").is_reconnecting());
     assert!(!tab.stream_status("swarm").is_reconnecting());
+}
+
+/// An agent's name is a name, and the UI reads it from one place: a swarm's
+/// `Coordinator`, a single-agent session's one agent `Main`, and a lane `Lane N`.
+///
+/// The lanes column's rows, the band over the conversation and the composer's drawer
+/// each used to write it themselves, which is how the column came to say `coordinator`
+/// while the card that starts the session said `Coordinator`.
+#[test]
+fn an_agents_name_is_the_uis_in_both_kinds_of_session() {
+    assert_eq!(AgentKey::Coordinator.name(true), "Coordinator");
+    assert_eq!(AgentKey::Coordinator.name(false), "Main");
+    for n in [1, 2, 6, 12] {
+        assert_eq!(AgentKey::Lane(n).name(true), format!("Lane {n}"));
+        assert_eq!(AgentKey::Lane(n).name(false), format!("Lane {n}"));
+    }
 }

@@ -1570,12 +1570,9 @@ impl TabContent {
         let state = live.model.state(selected).unwrap_or(&empty).clone();
         let busy = swarm_is_busy(&live.model);
         // What the drawer calls the agent it is showing: a swarm is coordinated, one
-        // agent is not (§7.2).
-        let name = match selected {
-            AgentKey::Coordinator if live.swarm => "Coordinator".to_string(),
-            AgentKey::Coordinator => "Main".to_string(),
-            AgentKey::Lane(n) => format!("lane {n}"),
-        };
+        // agent is not (§7.2). `AgentKey::name` writes that name once, for the drawer,
+        // the band above the transcript and the lane column's own rows.
+        let name = selected.name(live.swarm);
         let settable = selected == AgentKey::Coordinator;
         // The same reading the header takes for its reveal: the level this agent is
         // set to, kept where the page can reach it (the drawer's own copy is the

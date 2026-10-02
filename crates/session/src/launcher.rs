@@ -1055,8 +1055,8 @@ fn tooltip_line(entry: &HistoryEntry, offset_seconds: i32) -> String {
         parts.push("open at last quit".to_string());
     }
     for (label, model) in [
-        ("coordinator", entry.coordinator_model.as_deref()),
-        ("lanes", entry.lanes_model.as_deref()),
+        ("Coordinator", entry.coordinator_model.as_deref()),
+        ("Lanes", entry.lanes_model.as_deref()),
     ] {
         if let Some(model) = model.filter(|model| !model.is_empty()) {
             parts.push(format!("{label}: {model}"));

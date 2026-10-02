@@ -344,14 +344,19 @@ pub struct HumanAction {
 }
 
 impl HumanAction {
-    /// The lanes the action named, as `lane 2`, `lanes 2, 3`, or nothing for the whole
+    /// The lanes the action named, as `Lane 2`, `Lanes 2, 3`, or nothing for the whole
     /// swarm.
+    ///
+    /// Capitalised because it is a name — the one the column's rows, the band and a
+    /// report card all use (`Lane 2`) — and both of its readers put it in a sentence the
+    /// reader already knows: the transcript's `Stopped Lane 2`, and the one-line summary
+    /// `interrupt Lane 2`.
     pub fn lanes_label(&self) -> Option<String> {
         match self.lanes.as_slice() {
             [] => None,
-            [one] => Some(format!("lane {one}")),
+            [one] => Some(format!("Lane {one}")),
             many => Some(format!(
-                "lanes {}",
+                "Lanes {}",
                 many.iter()
                     .map(u32::to_string)
                     .collect::<Vec<_>>()

@@ -723,7 +723,7 @@ fn history_rows_name_a_session_by_its_folder() {
     assert_eq!(
         rows[0].tooltip,
         "/Users/you/coding/foo · 1.sexp · 2026-09-29 09:29:56 +00:00 · \
-         coordinator: claude-opus-5@anthropic · 6 lanes"
+         Coordinator: claude-opus-5@anthropic · 6 lanes"
     );
     // No time, no lanes: the folder names the row and the time says nothing rather than
     // guessing.
