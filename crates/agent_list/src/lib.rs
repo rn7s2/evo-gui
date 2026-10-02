@@ -195,7 +195,7 @@ impl AgentList {
 
     /// Which program this column is showing (§7.2): a swarm's coordinator, or the one
     /// agent a single-agent session has. It is the difference between the first row's
-    /// name — `coordinator` against `Main` — and whether the lane count is drawn at all.
+    /// name — `Coordinator` against `Main` — and whether the lane count is drawn at all.
     pub fn set_swarm(&mut self, swarm: bool, cx: &mut Context<Self>) {
         if self.swarm != swarm {
             self.swarm = swarm;
@@ -206,7 +206,7 @@ impl AgentList {
     /// What this column calls its first row: a swarm is coordinated, one agent is not.
     fn main_name(&self) -> &'static str {
         if self.swarm {
-            "coordinator"
+            "Coordinator"
         } else {
             "Main"
         }
@@ -473,7 +473,7 @@ impl AgentList {
             paint::color(palette.muted_fg)
         };
         let aria = format!(
-            "lane {}, {word}{}{}",
+            "Lane {}, {word}{}{}",
             row.n,
             match &task {
                 Some(task) => format!(", {task}"),
@@ -486,7 +486,7 @@ impl AgentList {
         );
         RowView {
             key,
-            name: format!("lane {}", row.n).into(),
+            name: format!("Lane {}", row.n).into(),
             busy: row.is_busy(),
             task: task.map(SharedString::from),
             task_color,
