@@ -93,6 +93,17 @@ fn run(cx: &mut App, swarms: Vec<Rc<EngineHandle>>) {
     let log = cx.global::<Shell>().log.clone();
     log.info("quitting: stopping every tab");
 
+    // The app's other children (§9.8): the offline reads — a `catalog`, `check` or
+    // `sessions` probe the page started before anything was running. Their own
+    // bound would end them in a few seconds, but the quit is not a place to leave
+    // a process behind, and a read that is already hung is exactly what this is
+    // for. Bounded by the same ladder as a timeout, so it costs the quit half a
+    // second at the very most.
+    let reads = store::cli::stop_live_children();
+    if reads > 0 {
+        log.info(format!("stopping {reads} offline read(s)"));
+    }
+
     // The bounds and the recents are what the next launch needs, and they do not
     // depend on the servers stopping, so they are written first.
     let stopping = swarms.len();
