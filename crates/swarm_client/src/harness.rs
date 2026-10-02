@@ -374,6 +374,13 @@ impl Control {
         Ok(())
     }
 
+    /// Fail the next `times` snapshots, the way a server that is not ready yet
+    /// does: the one ask a client has to repeat rather than read as "no answer".
+    pub fn fail_snapshots(&self, times: u32) -> Result<()> {
+        self.control("/_fail_snapshot", json!({"times": times}))?;
+        Ok(())
+    }
+
     /// Close every open stream, to see the client reconnect.
     pub fn drop_streams(&self) -> Result<()> {
         self.control("/_drop", json!({}))?;

@@ -15,7 +15,10 @@
 //!    parsed into a [`session::Op`] and handed over; a `topic.reset` makes the
 //!    engine re-snapshot that topic, and a `stream.reset` makes it re-snapshot
 //!    everything and resume the stream from the snapshot's cursor, so the re-read
-//!    is gapless.
+//!    is gapless. A snapshot that failed is asked for again — half a second,
+//!    doubling to ten — because the resumed stream is the only thing that can wake
+//!    a parked one; while that lasts the tab says it is catching up
+//!    ([`crate::types::StreamStatus::Reconnecting`]).
 //! 4. **ops** — `POST /ops` with an engine-made rid, on a thread of its own so a
 //!    slow answer never holds up the stream.
 //!
@@ -24,7 +27,10 @@
 //! stream that cannot reconnect (checked against the process, once).
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use async_channel::{Receiver, Sender};
 use serde_json::{json, Value};
@@ -38,6 +44,17 @@ use swarm_client::{
 /// How many items of the session topic a lost send is checked against: the newest
 /// page, which is where a turn that has just been taken is.
 const SESSION_PAGE: u32 = 50;
+
+/// How long the first re-snapshot after a reset waits, and the longest it grows to.
+///
+/// A reset parks the stream until the snapshot that resumes it lands
+/// ([`EventStream::resume_from`]), and nothing else in this process can wake it.
+/// What failed is the *moment* — a session thread taken by a long turn, a process
+/// still coming back after a restart — so the snapshot is asked for again, at half a
+/// second and doubling: long enough to stop hammering a session that is busy, short
+/// enough that a tab which came back is live again before a reader misses it.
+const RESET_RETRY_FIRST: Duration = Duration::from_millis(500);
+const RESET_RETRY_LONGEST: Duration = Duration::from_secs(10);
 
 use crate::types::Update;
 
@@ -58,6 +75,15 @@ enum Inbound {
     Fetch(Fetch),
     /// Stop the server the ladder's way and end the engine.
     Shutdown,
+    /// Ask again for a snapshot that failed, once the retry timer says the wait is
+    /// over. Sent by the timer thread, never by the UI.
+    Retry {
+        /// The one topic a `topic.reset` made stale; `None` for a `stream.reset`,
+        /// which makes every topic stale and parks the stream until it is answered.
+        topic: Option<String>,
+        /// What was waited before this attempt: what the next one doubles from.
+        waited: Duration,
+    },
     Stream(StreamMsg),
 }
 
@@ -297,7 +323,7 @@ fn run(
     cancel: BootCancel,
 ) {
     let mut engine = Engine {
-        updates,
+        updates: Updates::new(updates),
         topics: tab_topics(),
     };
     engine.send(Update::Booting);
@@ -334,7 +360,7 @@ fn run(
     };
     engine.topics_of(&snapshot);
 
-    let outcome = engine_loop(&mut engine, &mut server, &mut live, &mailbox);
+    let outcome = engine_loop(&mut engine, &mut server, &mut live, &mailbox, &commands);
     live.stop();
     let outcome = match outcome {
         Some(outcome) => outcome,
@@ -431,6 +457,7 @@ fn engine_loop(
     server: &mut Server,
     live: &mut Live,
     mailbox: &Receiver<Inbound>,
+    commands: &Sender<Inbound>,
 ) -> Option<ShutdownOutcome> {
     loop {
         let message = match mailbox.recv_blocking() {
@@ -470,8 +497,12 @@ fn engine_loop(
                 if frame.topic_reset().is_some() {
                     let topic = frame.topic().unwrap_or_default().to_owned();
                     engine.frame(frame);
-                    // That one topic is stale; everything else stands.
-                    engine.snapshot(&live.client, Some(topic));
+                    // That one topic is stale; everything else stands. Asking again
+                    // does not hold this loop up — the stream is not parked — so a
+                    // snapshot that failed is retried on its own clock.
+                    if engine.snapshot(&live.client, Some(topic.clone())).is_none() {
+                        ask_again(engine, commands, Some(topic), RESET_RETRY_FIRST);
+                    }
                 } else {
                     engine.frame(frame);
                 }
@@ -487,8 +518,38 @@ fn engine_loop(
                         reason: reason.as_str().to_owned(),
                     },
                 });
-                if let Some(snapshot) = engine.snapshot(&live.client, None) {
-                    live.stream.resume_from(snapshot.cursor());
+                match engine.snapshot(&live.client, None) {
+                    Some(snapshot) => live.stream.resume_from(snapshot.cursor()),
+                    None => ask_again(engine, commands, None, RESET_RETRY_FIRST),
+                }
+            }
+            Inbound::Retry { topic, waited } => {
+                // The wait is over: the snapshot that failed is asked for again.
+                // Only success ends this — a tab catching up is worth telling the
+                // reader about (`Reconnecting`), and a process that is gone is the
+                // one way out.
+                match engine.snapshot(&live.client, topic.clone()) {
+                    Some(snapshot) => {
+                        if topic.is_none() {
+                            // Every topic is re-read and the parked stream resumes
+                            // from the position that read was atomic at.
+                            live.stream.resume_from(snapshot.cursor());
+                        }
+                        // The tab is live again, and stops saying otherwise.
+                        engine.send(Update::Stream {
+                            status: crate::types::StreamStatus::Connected,
+                        });
+                    }
+                    None if server.is_running() => {
+                        let next = waited
+                            .saturating_mul(2)
+                            .clamp(RESET_RETRY_FIRST, RESET_RETRY_LONGEST);
+                        ask_again(engine, commands, topic, next);
+                    }
+                    None => {
+                        engine.send(Update::ServerGone);
+                        return None;
+                    }
                 }
             }
             Inbound::Stream(StreamMsg::Stopped) => {
@@ -499,6 +560,33 @@ fn engine_loop(
             }
         }
     }
+}
+
+/// Ask again for a snapshot that failed, once `next` has gone by — and say the tab
+/// is catching up until it lands.
+///
+/// The retry is a timer, not a wait here: the engine thread still takes ops and
+/// frames while a tab is behind, which is the only reason a reset can be retried
+/// without freezing the very tab it is trying to bring back.
+fn ask_again(
+    engine: &mut Engine,
+    commands: &Sender<Inbound>,
+    topic: Option<String>,
+    next: Duration,
+) {
+    engine.send(Update::Stream {
+        status: crate::types::StreamStatus::Reconnecting { retry_in: next },
+    });
+    let commands = commands.clone();
+    let _ = thread::Builder::new()
+        .name("evo-tab-reset".into())
+        .spawn(move || {
+            thread::sleep(next);
+            let _ = commands.send_blocking(Inbound::Retry {
+                topic,
+                waited: next,
+            });
+        });
 }
 
 /// One read, on a thread of its own: a page of items, an item, or an image can be
@@ -520,7 +608,7 @@ fn fetch_off_loop(engine: &Engine, client: &Client, fetch: Fetch) {
                     page,
                 },
             };
-            let _ = updates.send_blocking(message);
+            updates.send(message);
         });
 }
 
@@ -541,7 +629,7 @@ fn post(engine: &Engine, client: &Client, rid: String, request: OpRequest) {
                 Ok(reply) => reply,
                 Err(error) => lost_reply(&client, &rid, &op, &args, sent_at_ms, error),
             };
-            let _ = updates.send_blocking(Update::OpReply {
+            updates.send(Update::OpReply {
                 rid,
                 op,
                 reply: Box::new(reply),
@@ -663,15 +751,76 @@ fn now_millis() -> u64 {
         .unwrap_or_default()
 }
 
+/// The engine's end of the update channel, and the one thing to say when nobody is
+/// taking what it sends.
+///
+/// Every send here is fire-and-forget on purpose — a tab that fell behind must not
+/// hold the stream up — so an update nobody takes vanishes without a trace, and that
+/// is how a dead reader hides: the engine writes into a closed channel for the rest
+/// of the tab's life and nothing anywhere says so. The first one is said once, with
+/// what it was. It is a bug in this client, not something a reader can act on.
+#[derive(Clone)]
+struct Updates {
+    updates: Sender<Update>,
+    /// How many have been dropped, and whether that has been said.
+    dropped: Arc<AtomicUsize>,
+    said: Arc<AtomicBool>,
+}
+
+impl Updates {
+    fn new(updates: Sender<Update>) -> Updates {
+        Updates {
+            updates,
+            dropped: Arc::new(AtomicUsize::new(0)),
+            said: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Hand one over. `false` when there was nobody left to take it.
+    fn send(&self, update: Update) -> bool {
+        let update = match self.updates.send_blocking(update) {
+            Ok(()) => return true,
+            Err(error) => error.into_inner(),
+        };
+        let dropped = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
+        if !self.said.swap(true, Ordering::Relaxed) {
+            eprintln!(
+                "evo-desktop: the tab stopped taking updates — {dropped} dropped, the first was a {}",
+                what(&update)
+            );
+        }
+        false
+    }
+}
+
+/// One update, named for the one line said when it could not be handed over.
+fn what(update: &Update) -> &'static str {
+    match update {
+        Update::Booting => "boot",
+        Update::Ready { .. } => "ready",
+        Update::BootFailed { .. } => "boot failure",
+        Update::Snapshot { .. } => "snapshot",
+        Update::Op { .. } => "frame",
+        Update::Stream { .. } => "stream status",
+        Update::OpReply { .. } => "reply",
+        Update::ItemsBefore { .. } => "page of older items",
+        Update::Item { .. } => "item",
+        Update::Media { .. } => "image",
+        Update::FetchFailed { .. } => "failed read",
+        Update::ServerGone => "server gone",
+        Update::Exited { .. } => "exit",
+    }
+}
+
 /// The engine's own state: where updates go, and what to read.
 struct Engine {
-    updates: Sender<Update>,
+    updates: Updates,
     topics: Vec<String>,
 }
 
 impl Engine {
     fn send(&mut self, update: Update) -> bool {
-        self.updates.send_blocking(update).is_ok()
+        self.updates.send(update)
     }
 
     /// Hand a snapshot's topics over, one update each: the UI applies them topic by
@@ -841,5 +990,39 @@ mod tests {
             json!({"outcome": "unknown"}),
             "and marks the outcome as unknown, which is what the UI reads"
         );
+    }
+
+    /// A tab whose UI stopped taking updates is the one failure with no other
+    /// witness: every send is fire-and-forget, so the count and the one line are
+    /// all there is to see from the outside.
+    #[test]
+    fn updates_nobody_takes_are_counted_and_the_first_is_named() {
+        let (sender, receiver) = async_channel::bounded(1);
+        let updates = Updates::new(sender);
+        // The tab is gone: its receiver went with it.
+        drop(receiver);
+        assert!(!updates.send(Update::Booting));
+        assert!(!updates.send(Update::Snapshot {
+            topic: "session".into(),
+            body: json!({}),
+        }));
+        assert_eq!(updates.dropped.load(Ordering::Relaxed), 2);
+        assert!(
+            updates.said.load(Ordering::Relaxed),
+            "said once, and only once"
+        );
+
+        // The name is one line's worth, and it is the update's own.
+        assert_eq!(what(&Update::Booting), "boot");
+        assert_eq!(
+            what(&Update::Op {
+                topic: "session".into(),
+                op: Op::StreamReset {
+                    reason: "restarted".into()
+                },
+            }),
+            "frame"
+        );
+        assert_eq!(what(&Update::ServerGone), "server gone");
     }
 }

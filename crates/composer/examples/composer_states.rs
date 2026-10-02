@@ -508,7 +508,7 @@ fn main() {
     // list walked down its own rows, a word mid-prose, and the image's own symbols
     // inside `/eval`.
     type Setup = fn(&mut HeadlessAppContext, AnyWindowHandle, &Entity<Page>);
-    let states: [(&str, Setup); 18] = [
+    let states: [(&str, Setup); 19] = [
         ("goal-open", |cx, window, _| {
             click(cx, window, "goal-strip-row")
         }),
@@ -563,6 +563,21 @@ fn main() {
         ("busy", |cx, _window, page| {
             let composer = composer_of(cx, page);
             cx.update(|cx| composer.update(cx, |composer, cx| composer.set_swarm_busy(true, cx)));
+        }),
+        // A message on its way: the words took `Enter`, and the server has not answered
+        // yet — which is the whole of the state, so it is reached by typing and pressing
+        // it rather than by setting anything. What a turn carrying a screenshot looks
+        // like from the box's side for the half-minute its bytes are leaving: the button
+        // says what is happening, and the draft it is sending is the reader's to read,
+        // not to edit.
+        ("sending", |cx, window, page| {
+            type_into(
+                cx,
+                window,
+                page,
+                "look at this screenshot and say what changed",
+            );
+            press(cx, window, "enter");
         }),
         ("lane-drawer", |cx, window, page| {
             let composer = composer_of(cx, page);

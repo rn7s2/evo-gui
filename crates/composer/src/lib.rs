@@ -360,6 +360,9 @@ pub enum ComposerEvent {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ActionFace {
     Send,
+    /// A message is on its way and nothing is running yet: the button says so and
+    /// does nothing, which is all there is to do until the server answers it.
+    Sending,
     /// The swarm is busy or held while its lanes work: the one action that stops it all.
     StopSwarm,
     /// The same button in a single-agent session (§7.2), where there is no swarm to
@@ -374,6 +377,7 @@ impl ActionFace {
     pub fn label(self) -> &'static str {
         match self {
             Self::Send => "\u{2191} Send",
+            Self::Sending => "Sending\u{2026}",
             Self::StopSwarm => "\u{25a0} Stop swarm",
             Self::Stop => "\u{25a0} Stop",
         }
@@ -384,6 +388,7 @@ impl ActionFace {
     pub fn name(self) -> &'static str {
         match self {
             Self::Send => "Send",
+            Self::Sending => "Sending",
             Self::StopSwarm => "Stop swarm",
             Self::Stop => "Stop",
         }
@@ -705,9 +710,16 @@ pub struct Composer {
     /// Whether this box is a swarm's (§7.2): what the button says while it is busy, and
     /// therefore what a click on it stops.
     swarm: bool,
-    /// True while this composer's own request is in flight — the only reason the
-    /// button is disabled.
+    /// True while a request of this composer's own is in flight that is not a send —
+    /// a stop, a setting, a command. `in_flight` is what the button greys for.
     in_flight: bool,
+    /// True from the moment a message was emitted until the server answered it, which
+    /// is the whole of what `Sending\u{2026}` is about: the send is on its way and the
+    /// turn has not started. It is not `in_flight` — a stop, Escape included, is
+    /// allowed while a send is in flight, and a message that takes half a minute to
+    /// leave (a screenshot's bytes, on a slow connection) is exactly when a reader
+    /// wants to call the run off.
+    sending: bool,
     /// The prompts this tab has sent, oldest first: what ↑/↓ walks.
     history: Vec<String>,
     /// Where in `history` the input is, while it is showing a recalled prompt.
@@ -886,6 +898,7 @@ impl Composer {
             attachments_chevron_up: false,
             attachments_chevron_turns: 0,
             busy: false,
+            sending: false,
             in_flight: false,
             history: Vec::new(),
             walking: None,
@@ -1527,13 +1540,31 @@ impl Composer {
     pub fn request_finished(&mut self, ok: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.in_flight = false;
         if ok {
-            self.input
-                .update(cx, |input, cx| input.set_value("", window, cx));
-            // The attachments went with the message, so the next one starts empty.
-            self.attachments.clear();
-            self.thumbs.clear();
+            self.clear_draft(window, cx);
         }
         cx.notify();
+    }
+
+    /// Report the outcome of a *send*: the one thing that ends the box's sending
+    /// state.
+    ///
+    /// A stop, a setting or a command answered while a send is in flight says nothing
+    /// about that send, and must not re-arm an input whose words are still on their
+    /// way — which is why this is not [`Composer::request_finished`].
+    pub fn send_finished(&mut self, ok: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.sending = false;
+        if ok {
+            self.clear_draft(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// The message went: the input is emptied and its attachments go with it.
+    fn clear_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.input
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.attachments.clear();
+        self.thumbs.clear();
     }
 
     /// Put `text` in the input for editing, the caret at its end.
@@ -1560,6 +1591,10 @@ impl Composer {
     /// named.
     pub fn face(&self) -> ActionFace {
         match (self.busy, self.swarm) {
+            // The message is still on its way and the turn has not started: the
+            // button says where the reader's words are, rather than offering to send
+            // them a second time.
+            (false, _) if self.sending => ActionFace::Sending,
             (false, _) => ActionFace::Send,
             (true, true) => ActionFace::StopSwarm,
             (true, false) => ActionFace::Stop,
@@ -1574,7 +1609,17 @@ impl Composer {
     /// not a disabled button (`.composer-send` is drawn in the primary face at rest);
     /// it is a button with nothing to send, and the click and `Enter` do nothing.
     fn is_action_disabled(&self) -> bool {
-        self.in_flight
+        // A send in flight greys the Send face — there is nothing to send twice — and
+        // never the Stop face: a run to call off is the one thing a reader may still
+        // do while their message is on its way.
+        self.in_flight || matches!(self.face(), ActionFace::Sending)
+    }
+
+    /// Whether a request of this composer's own is on its way: a send, a stop, a
+    /// setting, a command. What the box waits for before it sends or changes
+    /// anything else.
+    fn waiting(&self) -> bool {
+        self.in_flight || self.sending
     }
 
     /// Put the caret in the input, as opening a tab does.
@@ -1588,10 +1633,10 @@ impl Composer {
     /// A draft with attachments and no text is a message: the files are what it says
     /// (§5.5), and a blank box with a picture attached is not a blank box.
     fn send(&mut self, draft: String, cx: &mut Context<Self>) {
-        if self.in_flight || (draft.trim().is_empty() && self.attachments.is_empty()) {
+        if self.waiting() || (draft.trim().is_empty() && self.attachments.is_empty()) {
             return;
         }
-        self.in_flight = true;
+        self.sending = true;
         // A prompt is remembered the moment it is sent, not when the server takes
         // it: the reader's ↑ should bring back what they just sent even if the
         // request is still on its way. A message with no words is not a prompt —
@@ -1777,7 +1822,11 @@ impl Composer {
         true
     }
 
-    /// Emit `Interrupt`, unless a request is already in flight.
+    /// Emit `Interrupt`, unless one is already on its way.
+    ///
+    /// A send in flight is not one of those ([`Composer::send_finished`]): the reader
+    /// who wants the run called off is not asking for their message back, and `in_flight`
+    /// is only ever a stop, a setting or a command.
     fn interrupt(&mut self, cx: &mut Context<Self>) {
         if self.in_flight {
             return;
@@ -2852,7 +2901,7 @@ impl Composer {
 
     /// Send `model.set` for a model the drawer picked.
     fn choose_model(&mut self, id: &str, provider: &str, cx: &mut Context<Self>) {
-        if !self.settable || self.in_flight {
+        if !self.settable || self.waiting() {
             return;
         }
         if self
@@ -2873,7 +2922,7 @@ impl Composer {
 
     /// Send `thinking.set` for a rung the slider picked.
     fn choose_effort(&mut self, level: &str, cx: &mut Context<Self>) {
-        if !self.settable || self.in_flight {
+        if !self.settable || self.waiting() {
             return;
         }
         if self.agent.thinking.as_deref() == Some(level) {
@@ -2981,6 +3030,12 @@ impl Composer {
 
     fn action_button(&self, cx: &Context<Self>) -> impl IntoElement {
         let face = self.face();
+        // A message on its way is the one state with nothing to click: the kit's own
+        // in-progress face says so — the spinner in place of the icon it has none of,
+        // the label saying what is happening — and it stops the pointer reacting, which
+        // is what "nothing to click" looks like. Nothing else about the button changes:
+        // the primary face is still the design's.
+        let sending = matches!(face, ActionFace::Sending);
         Button::new(BUTTON_ID)
             .h(ACTION_HEIGHT)
             .px(px(12.))
@@ -2991,6 +3046,9 @@ impl Composer {
             // reader hears is still the word: the glyph is decoration.
             .label(face.label())
             .accessibility_label(face.name())
+            .when(sending, |button| {
+                button.loading(true).icon(IconName::Loader)
+            })
             // A request of this composer's own in flight is the only thing that greys
             // it. An empty draft is not a disabled button: the design draws
             // `.composer-send` in the primary face at rest, and a blank draft simply
@@ -3001,6 +3059,9 @@ impl Composer {
                     let draft = this.input.read(cx).value().to_string();
                     this.send(draft, cx);
                 }
+                // Nothing to do until the server answers the message that is already
+                // on its way: a second send would be the same turn twice.
+                ActionFace::Sending => {}
                 ActionFace::StopSwarm => {
                     this.in_flight = true;
                     cx.emit(ComposerEvent::StopSwarm);
@@ -3317,6 +3378,11 @@ impl Render for Composer {
                                             .with_size(Size::XSmall)
                                             .appearance(false)
                                             .bordered(false)
+                                            // While the message is on its way the words
+                                            // stay where the reader left them — visible,
+                                            // selected, copyable — and an edit cannot
+                                            // change what is already being sent.
+                                            .readonly(self.sending)
                                             .text_size(INPUT_FONT)
                                             .line_height(INPUT_LINE)
                                             .w_full()
@@ -3612,9 +3678,8 @@ mod tests {
             self.act(cx, |window, cx| self.type_draft(prompt, window, cx));
             self.act(cx, |window, cx| window.press("enter", cx));
             self.act(cx, |window, cx| {
-                self.composer.update(cx, |composer, cx| {
-                    composer.request_finished(true, window, cx)
-                });
+                self.composer
+                    .update(cx, |composer, cx| composer.send_finished(true, window, cx));
             });
         }
 
@@ -3723,9 +3788,7 @@ mod tests {
         cx.update_window(window, |_, window, cx| window.press("enter", cx))
             .expect("the composer's window");
         cx.update_window(window, |_, window, cx| {
-            composer.update(cx, |composer, cx| {
-                composer.request_finished(true, window, cx)
-            })
+            composer.update(cx, |composer, cx| composer.send_finished(true, window, cx))
         })
         .expect("the composer's window");
         assert_eq!(
@@ -3889,9 +3952,8 @@ mod tests {
 
         // A failed request keeps the draft, so the prompt is not lost.
         f.act(cx, |window, cx| {
-            f.composer.update(cx, |composer, cx| {
-                composer.request_finished(false, window, cx)
-            })
+            f.composer
+                .update(cx, |composer, cx| composer.send_finished(false, window, cx))
         });
         assert_eq!(f.draft_now(cx), "hello");
 
@@ -3900,9 +3962,8 @@ mod tests {
         assert_eq!(f.events().len(), 2, "the retry sends the kept draft again");
 
         f.act(cx, |window, cx| {
-            f.composer.update(cx, |composer, cx| {
-                composer.request_finished(true, window, cx)
-            })
+            f.composer
+                .update(cx, |composer, cx| composer.send_finished(true, window, cx))
         });
         assert_eq!(
             f.draft_now(cx),
@@ -4130,9 +4191,8 @@ mod tests {
 
         // The request is over, so the button works again.
         f.act(cx, |window, cx| {
-            f.composer.update(cx, |composer, cx| {
-                composer.request_finished(true, window, cx)
-            });
+            f.composer
+                .update(cx, |composer, cx| composer.send_finished(true, window, cx));
             f.set_draft("two", window, cx);
             window.render_frame(cx);
             window.click(BUTTON_ID, cx);
@@ -4145,6 +4205,103 @@ mod tests {
                 ComposerEvent::Send("two".into())
             ]
         );
+    }
+
+    /// A send in flight is a state the reader can *see*: the box says the message is on
+    /// its way, the draft stays where they left it and cannot be edited under it, and
+    /// the run is still theirs to call off.
+    ///
+    /// That last part is the point of the other two. A turn whose bytes take half a
+    /// minute to leave (a screenshot, a slow connection) is exactly when a reader wants
+    /// to stop the agent, and a box that shows "on its way" while refusing to be
+    /// stopped has taken away the one thing left in it.
+    #[gpui_kit::test]
+    fn a_send_in_flight_says_so_and_leaves_the_run_the_readers_to_stop(cx: &mut TestAppContext) {
+        const DRAFT: &str = "a message with a screenshot on it";
+        let f = open(cx);
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            f.type_draft(DRAFT, window, cx);
+            window.press("enter", cx);
+        });
+        assert!(
+            matches!(f.events().last(), Some(ComposerEvent::Send(_))),
+            "the message went: {:?}",
+            f.events()
+        );
+
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            // The button says where the message is, rather than offering to send the
+            // same draft a second time.
+            assert_eq!(
+                window.find(BUTTON_ID).label(),
+                Some(ActionFace::Sending.name())
+            );
+            assert!(f.composer.read(cx).is_action_disabled());
+
+            // The draft stays — readable, selectable, copyable — and typing cannot
+            // change what is already on its way.
+            assert_eq!(f.draft(cx), DRAFT);
+            window.click(f.input_frame(cx), cx);
+            window.input(" and another thing", cx);
+            assert_eq!(
+                f.draft(cx),
+                DRAFT,
+                "the draft is read-only while it is on its way"
+            );
+
+            // And the click is inert: one message, not the same one twice.
+            window.click(BUTTON_ID, cx);
+        });
+        assert_eq!(f.events().len(), 1, "one send, and not two");
+
+        // The run is still the reader's to stop, and `Esc` is how they do it: a send in
+        // flight is not a reason to refuse them the only thing left to do.
+        f.act(cx, |window, cx| {
+            f.busy(true, cx);
+            window.render_frame(cx);
+            assert_eq!(window.find(BUTTON_ID).label(), Some("Stop swarm"));
+            assert!(
+                !f.composer.read(cx).is_action_disabled(),
+                "the stop is not greyed by the send that is still on its way"
+            );
+            window.press("escape", cx);
+        });
+        assert_eq!(f.events().last(), Some(&ComposerEvent::Interrupt));
+
+        // The stop is answered and the run is over — and the box is still the send's: an
+        // answer to *another* request says nothing about the message on its way, and must
+        // not hand the draft back for sending again.
+        f.act(cx, |window, cx| {
+            f.busy(false, cx);
+            f.composer.update(cx, |composer, cx| {
+                composer.request_finished(false, window, cx)
+            });
+            window.render_frame(cx);
+            assert_eq!(
+                window.find(BUTTON_ID).label(),
+                Some(ActionFace::Sending.name()),
+                "the stop was answered; the message is still on its way"
+            );
+            assert!(f.composer.read(cx).is_action_disabled());
+        });
+
+        // The server takes it, and the box is the reader's again: the draft went with
+        // the message, and the next one may be typed and sent.
+        f.act(cx, |window, cx| {
+            f.composer
+                .update(cx, |composer, cx| composer.send_finished(true, window, cx));
+            window.render_frame(cx);
+            assert_eq!(window.find(BUTTON_ID).label(), Some("Send"));
+            assert_eq!(f.draft(cx), "", "the message took the draft with it");
+            f.type_draft("the next one", window, cx);
+            assert_eq!(
+                f.draft(cx),
+                "the next one",
+                "and the box takes typing again"
+            );
+        });
     }
 
     /// While the swarm is busy the button stops it — the whole swarm, which is the one
@@ -5593,8 +5750,8 @@ mod tests {
                 .find(BUTTON_ID)
                 .label()
                 .map(str::to_string)),
-            Some(ActionFace::Send.name().to_string()),
-            "and the one button is still Send"
+            Some(ActionFace::Sending.name().to_string()),
+            "and the one button is not offering to stop anything: the message is on its way"
         );
     }
 
@@ -5633,9 +5790,8 @@ mod tests {
 
         // The refusal: nothing is taken off the draft — neither the words nor the files.
         f.act(cx, |window, cx| {
-            f.composer.update(cx, |composer, cx| {
-                composer.request_finished(false, window, cx)
-            });
+            f.composer
+                .update(cx, |composer, cx| composer.send_finished(false, window, cx));
             window.render_frame(cx);
         });
         assert_eq!(f.attached(cx).len(), 2, "a refusal keeps the attachments");
@@ -5652,9 +5808,8 @@ mod tests {
         // Sent again, and taken: the input is cleared, and so is what it carried.
         f.act(cx, |window, cx| window.press("enter", cx));
         f.act(cx, |window, cx| {
-            f.composer.update(cx, |composer, cx| {
-                composer.request_finished(true, window, cx)
-            });
+            f.composer
+                .update(cx, |composer, cx| composer.send_finished(true, window, cx));
             window.render_frame(cx);
         });
         assert!(f.attached(cx).is_empty(), "an accepted send takes them off");
@@ -5689,9 +5844,8 @@ mod tests {
 
         // And with nothing attached it is the command it reads as.
         f.act(cx, |window, cx| {
-            f.composer.update(cx, |composer, cx| {
-                composer.request_finished(true, window, cx)
-            });
+            f.composer
+                .update(cx, |composer, cx| composer.send_finished(true, window, cx));
             window.render_frame(cx);
             window.click(f.input_frame(cx), cx);
             window.input("/compact", cx);
@@ -5807,9 +5961,8 @@ mod tests {
         f.act(cx, |window, cx| f.set_draft(TWO_LINES, window, cx));
         f.act(cx, |window, cx| window.press("enter", cx));
         f.act(cx, |window, cx| {
-            f.composer.update(cx, |composer, cx| {
-                composer.request_finished(true, window, cx)
-            })
+            f.composer
+                .update(cx, |composer, cx| composer.send_finished(true, window, cx))
         });
         assert_eq!(f.history(cx).last().map(String::as_str), Some(TWO_LINES));
         f.act(cx, |window, cx| {
@@ -5850,15 +6003,13 @@ mod tests {
         // A refused send leaves the draft; the retry is the same prompt.
         f.act(cx, |window, cx| window.press("enter", cx));
         f.act(cx, |window, cx| {
-            f.composer.update(cx, |composer, cx| {
-                composer.request_finished(false, window, cx)
-            })
+            f.composer
+                .update(cx, |composer, cx| composer.send_finished(false, window, cx))
         });
         f.act(cx, |window, cx| window.press("enter", cx));
         f.act(cx, |window, cx| {
-            f.composer.update(cx, |composer, cx| {
-                composer.request_finished(true, window, cx)
-            })
+            f.composer
+                .update(cx, |composer, cx| composer.send_finished(true, window, cx))
         });
 
         assert_eq!(f.history(cx), ["try this"], "a retry is not a new prompt");
@@ -5877,9 +6028,8 @@ mod tests {
         });
         f.act(cx, |window, cx| window.press("enter", cx));
         f.act(cx, |window, cx| {
-            f.composer.update(cx, |composer, cx| {
-                composer.request_finished(false, window, cx)
-            });
+            f.composer
+                .update(cx, |composer, cx| composer.send_finished(false, window, cx));
             window.render_frame(cx);
 
             assert_eq!(f.draft(cx), DRAFT, "a refused send keeps the draft");
@@ -6869,6 +7019,12 @@ mod tests {
             "the same text is sent as the reader's words: {:?}",
             f.events()
         );
+        // The server takes it, so the box is the reader's again — which is what the
+        // recall below is about.
+        f.act(cx, |window, cx| {
+            f.composer
+                .update(cx, |composer, cx| composer.send_finished(true, window, cx))
+        });
 
         // Recalled, it asks for nothing: a suggestion list is what new input asks
         // for, and ↑ would have no way back out of a popup that captured it.

@@ -15,6 +15,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -50,6 +51,27 @@ const STEP_TICK: Duration = Duration::from_secs(1);
 /// How long a notice above the composer stays: long enough to read a refusal,
 /// short enough that it is gone before it becomes furniture (§4).
 const NOTICE_LIFETIME: Duration = Duration::from_secs(4);
+
+/// How often a pump whose tab has no window asks for one again.
+///
+/// Every update it is holding is waiting on a frame that draws the tab — a page
+/// rebuilt in another window, a window that has not been opened yet — and the wait
+/// only ends when one arrives (§9.1). Short, because a tab that comes back is live
+/// again by the next frame; it costs nothing while a tab has a window, which is
+/// every tab a reader is looking at.
+const PUMP_RETRY: Duration = Duration::from_millis(100);
+
+/// Say, once, that a batch of updates never reached a window.
+///
+/// The one way this tab can lose an update: its entity was released while a batch
+/// was in hand (a tab closed, its engine still writing). There is nothing else to
+/// see from the outside — the tab is gone — so one line, and no more.
+fn say_dropped(said: &AtomicBool, dropped: usize) {
+    if said.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    eprintln!("evo-desktop: a closed tab dropped {dropped} update(s) it had no window for");
+}
 
 /// A transient line above the composer (§4, §9.2).
 ///
@@ -1299,27 +1321,54 @@ impl TabContent {
     ///
     /// Everything already queued is applied in one turn of the loop, so a burst
     /// of `text-delta`s costs one task poll and one render instead of one each.
+    ///
+    /// Only the engine ends this. An update is taken out of the channel and held
+    /// until a window applies it, so a tab whose window went away — a page rebuilt
+    /// in another window, the window closed — is driven again the moment a frame
+    /// draws the tab. The engine cannot tell a tab that fell behind from a tab that
+    /// is dead, and a pump that ends on the first failure leaves a running swarm
+    /// writing into a channel nobody reads: the tab draws its last frame for the
+    /// rest of its life.
     fn spawn_pump(
         &self,
         updates: Receiver<Update>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Task<()> {
-        cx.spawn_in(window, async move |this, cx| {
-            while let Ok(update) = updates.recv().await {
-                let mut batch = vec![update];
-                while let Ok(queued) = updates.try_recv() {
-                    batch.push(queued);
-                }
+        // Said once per tab, not once per update: what is dropped here is dropped
+        // because there is no window left to draw it in, and a reader who is still
+        // looking deserves one line rather than a stream of them.
+        let said = Arc::new(AtomicBool::new(false));
+        cx.spawn_in(window, async move |this, cx| loop {
+            let Ok(update) = updates.recv().await else {
+                // The engine is gone, or its handle was dropped: the tab has
+                // nothing left to be told. This is the only end there is.
+                return;
+            };
+            let mut batch = vec![update];
+            while let Ok(queued) = updates.try_recv() {
+                batch.push(queued);
+            }
+            // The batch is drained by the closure that applies it, so a tab with no
+            // window right now — `update_in` fails before that closure is reached —
+            // still holds every update in it, and is asked again until a frame
+            // draws the tab somewhere.
+            loop {
                 let applied = this.update_in(cx, |tab, window, cx| {
-                    for update in batch {
+                    for update in batch.drain(..) {
                         tab.apply(update, window, cx);
                     }
                 });
-                if applied.is_err() {
-                    // The tab is gone; there is nothing left to apply to.
+                if applied.is_ok() {
                     break;
                 }
+                if this.upgrade().is_none() {
+                    // The tab itself is gone: this batch has no reader, now or
+                    // later. Nothing else in this tab can lose an update.
+                    say_dropped(&said, batch.len());
+                    return;
+                }
+                cx.background_executor().timer(PUMP_RETRY).await;
             }
         })
     }
@@ -2162,7 +2211,7 @@ impl TabContent {
                     // same message again. The line above the composer is the server's
                     // own reason for it ([`notice_words`]).
                     self.composer.update(cx, |composer, cx| {
-                        composer.request_finished(reply.ok, window, cx)
+                        composer.send_finished(reply.ok, window, cx)
                     });
                     // A message the server took answers the refusal above it: the
                     // reader fixed what was wrong and sent again, and a red line that
@@ -2445,7 +2494,7 @@ mod tests {
     use super::*;
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{
-        point, px, size, AnyWindowHandle, Bounds, Entity, TestAppContext, WindowBounds,
+        div, point, px, size, AnyWindowHandle, Bounds, Entity, TestAppContext, WindowBounds,
         WindowOptions,
     };
     use session::Item;
@@ -3332,6 +3381,107 @@ mod tests {
         assert!(following && !away, "the transcript is at its latest");
         cx.update_window(window, |_, window, cx| window.render_frame(cx))
             .expect("the tab window");
+    }
+
+    /// A window whose whole view is one tab: what drawing a tab again in another
+    /// window is, with no chrome around it.
+    struct Drawn(Entity<TabContent>);
+
+    impl Render for Drawn {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(self.0.clone())
+        }
+    }
+
+    /// §9.1: the pump is the tab's only reader, and only the engine ends it.
+    ///
+    /// A tab's window can go away while the tab and its swarm live on — a page
+    /// rebuilt in another window, a window closed — and every update after that has
+    /// no window to be applied in. The pump must hold it, not end: ending it leaves a
+    /// running swarm writing into a channel nobody reads, and the tab drawing the
+    /// last frame it had for the rest of its life.
+    #[gpui_kit::test]
+    fn a_tab_whose_window_went_away_is_driven_again_in_the_next_one(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (window, tab, dir) = live_tab(cx);
+        pump_until(cx, "the tab's server", |_| {
+            dir.path().join("ready.json").exists()
+        });
+        let control = swarm_client::harness::Control::attach(dir.path()).expect("the fake server");
+        pump_until(cx, "the tab's own stream", |_| {
+            !control.requests_on("/stream").is_empty()
+        });
+
+        control
+            .emit(turn("e_1", "before the window went"))
+            .expect("emit");
+        pump_until(cx, "the first turn", |cx| {
+            held_ids(&tab, cx) == vec!["e_1".to_string()]
+        });
+
+        // The window the tab is drawn in goes away under it: this call marks it
+        // removed, and the app drops it — and the entities it drew — on the way out.
+        let _ = cx.update_window(window, |_, window, _| window.remove_window());
+        cx.run_until_parked();
+
+        // An op published now has no window to be applied in, and the pump has had
+        // every chance to try: this is where a pump that ends on the first failure
+        // gives up, taking the update with it.
+        control
+            .emit(turn("e_2", "with no window to be drawn in"))
+            .expect("emit");
+        // The pump asks again on a timer, and a test's clock is the test's to move:
+        // three waits, which is three attempts.
+        for _ in 0..3 {
+            cx.executor().advance_clock(PUMP_RETRY);
+            cx.run_until_parked();
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(
+            held_ids(&tab, cx),
+            vec!["e_1".to_string()],
+            "the turn has nowhere to be drawn yet"
+        );
+
+        // The tab is drawn again, in another window: the update that had no window
+        // is applied to the one that has it, and the view catches up.
+        let other = cx.update(|cx| {
+            gpui_kit::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds {
+                        origin: point(px(0.), px(0.)),
+                        size: size(px(1000.), px(700.)),
+                    })),
+                    ..Default::default()
+                },
+                cx,
+                |_window, cx| cx.new(|_cx| Drawn(tab.clone())),
+            )
+            .expect("a second window")
+        });
+        pump_until(cx, "the turn that had no window", |cx| {
+            // The new window's own frame is what gives the tab a window again; the
+            // pump's next wait is what applies the update it has been holding.
+            cx.executor().advance_clock(PUMP_RETRY);
+            held_ids(&tab, cx) == vec!["e_1".to_string(), "e_2".to_string()]
+        });
+
+        // And the tab is live in it, not merely caught up: an op published now
+        // arrives because it was published, not because a window was drawn again.
+        control
+            .emit(turn("e_3", "after the second window"))
+            .expect("emit");
+        pump_until(cx, "the turn after it", |cx| {
+            held_ids(&tab, cx) == vec!["e_1".to_string(), "e_2".to_string(), "e_3".to_string()]
+        });
+
+        // The first window really is gone: otherwise none of this was about a tab
+        // whose window went away.
+        assert!(
+            cx.update_window(window, |_, _window, _| ()).is_err(),
+            "the first window is gone"
+        );
+        drop(other);
     }
 
     /// §4: a refused op is a line above the composer, in the reply's own words, and

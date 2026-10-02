@@ -516,8 +516,14 @@ Stop swarm** while anything is — the coordinator running its own turn, held wh
 its lanes work, or a lane still working (`run.interrupt`, scope `swarm`: it stops
 everyone, and the coordinator is told). Send is drawn in the design's primary face
 whatever the draft, so an empty input is a button that looks ready and has nothing
-to send: clicking it (or pressing **Enter**) does nothing, and only a request of its
-own in flight greys it. There is never a Send and a Stop side by side; `Esc` is the
+to send: clicking it (or pressing **Enter**) does nothing. A message that is still
+on its way — `input.send` posted, the server not yet answered, which for a turn
+carrying a screenshot is half a minute — reads **Sending…** with the kit's spinner
+on that same button, and the draft stays in the box where the reader left it:
+visible, selectable, copyable, and read-only, so what is already being sent cannot
+be edited under it. That state never takes the run away from the reader: `Esc`, and
+the Stop face, still stop the agent while the message is in flight. There is never a
+Send and a Stop side by side; `Esc` is the
 same interrupt with the keyboard, and **Enter** still sends while the swarm is busy
 (that is what the queue is for). A lane can be stopped from its own row in the left column.
 
