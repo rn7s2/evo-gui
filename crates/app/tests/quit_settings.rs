@@ -87,6 +87,7 @@ fn open(cx: &mut TestAppContext, root: &AppRoot) -> (AnyWindowHandle, Entity<Wor
                 root,
                 env: Vec::new(),
                 env_remove: Vec::new(),
+                ..LaunchEnv::default()
             });
             gpui_kit::open_window(
                 WindowOptions {

@@ -51,6 +51,14 @@ pub use imgcheck::decode_image;
 /// The reader's font zoom for every transcript (§7.2): what the View menu sets.
 pub use style::TranscriptZoom;
 
+/// What this client tells a session about how it renders: the note a launch
+/// passes as `evo-agent serve --prompt-note <path>`, so the agent writes math
+/// this renderer draws rather than math it has to explain (the maths module is
+/// where what can be drawn is decided). Markdown, and short — it rides in every
+/// system prompt of the session. It lives beside the renderer that decides what
+/// it can say.
+pub const RATEX_NOTE: &str = include_str!("ratex_note.md");
+
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;

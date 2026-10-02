@@ -28,6 +28,14 @@ pub const LOG_FILE: &str = "swarm.log";
 pub const TAB_FILE: &str = "tab.json";
 /// Name of the activation socket a secondary instance knocks on (§2 rule 1).
 pub const ACTIVATE_SOCK: &str = "activate.sock";
+/// Directory under the root holding the notes this client hands its sessions: one
+/// markdown file per client, named on the launch's own command line
+/// (`--prompt-note`, §1).
+pub const PROMPT_NOTES_DIR: &str = "prompt-notes";
+/// This client's own note, inside [`PROMPT_NOTES_DIR`]. The name is the one the
+/// session registers it under — evo names a note for its file — so it says which
+/// client wrote it and what it is about.
+pub const PROMPT_NOTE_FILE: &str = "gui-math.md";
 
 /// Permissions for every file this crate creates: owner-only.
 pub const FILE_MODE: u32 = 0o600;
@@ -167,6 +175,14 @@ impl Root {
 
     pub fn model_cache(&self) -> PathBuf {
         self.path.join("model-cache.json")
+    }
+
+    /// Where this client's own note lives — what every launch it starts passes as
+    /// `--prompt-note` (§1): a stable path under the app's root, not a temporary
+    /// one, because a supervisor restart re-reads it (the flag survives a restart;
+    /// the file has to be there when it does).
+    pub fn prompt_note(&self) -> PathBuf {
+        self.path.join(PROMPT_NOTES_DIR).join(PROMPT_NOTE_FILE)
     }
 
     pub fn activate_sock(&self) -> PathBuf {
@@ -483,6 +499,12 @@ mod tests {
         );
         assert_eq!(root.tab_ready(&id), root.tab_dir(&id).join("ready.json"));
         assert_eq!(root.tab_log(&id), root.tab_dir(&id).join("swarm.log"));
+        // The client's own note: under the root, and not inside a tab's directory —
+        // every launch of every tab passes this one path (`--prompt-note`).
+        assert_eq!(
+            root.prompt_note(),
+            PathBuf::from("/tmp/whatever/prompt-notes/gui-math.md")
+        );
     }
 
     #[test]

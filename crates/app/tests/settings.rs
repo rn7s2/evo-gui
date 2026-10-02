@@ -66,6 +66,7 @@ fn open(
                 root,
                 env: Vec::new(),
                 env_remove: Vec::new(),
+                ..LaunchEnv::default()
             });
             gpui_kit::open_window(
                 WindowOptions {
