@@ -19,9 +19,10 @@
 //! the app that started it quit (`ppid 1`), and it ignored the `SIGTERM` sent to
 //! it by hand — the command has no timeout of its own and reads nothing. So:
 //!
-//! * each run is given a bound ([`PROBE_TIMEOUT`], [`SESSIONS_TIMEOUT`]) and is
-//!   spawned as the leader of **its own process group**, so the claim the app
-//!   makes on it — and on anything *it* spawned — can be given up as a group;
+//! * each run is given a bound ([`PROBE_TIMEOUT`], [`SESSIONS_TIMEOUT`],
+//!   [`VERSION_TIMEOUT`]) and is spawned as the leader of **its own process
+//!   group**, so the claim the app makes on it — and on anything *it* spawned —
+//!   can be given up as a group;
 //! * the bound running out is [`CliError::TimedOut`]: the group is sent `SIGTERM`,
 //!   given a short grace, and then killed, and the caller gets one line saying
 //!   which binary never answered;
@@ -94,6 +95,14 @@ pub const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 /// index rather than the registries — and because the empty tab shows something
 /// either way while it is missing (§9.5).
 pub const SESSIONS_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long `<bin> --version` may take before the app gives up on it (§13).
+///
+/// The shortest bound here, because the least is asked of it: both binaries introduce
+/// themselves before they do anything else, and five seconds is already far longer
+/// than that takes. It is a bound against a binary that does not answer *at all* —
+/// the failure the longer bounds are for too — and the same ladder ends it.
+pub const VERSION_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How long a child is given to go after `SIGTERM`, before its group is killed.
 const TERM_GRACE: Duration = Duration::from_millis(500);
@@ -225,11 +234,28 @@ pub fn run_json_reporting_within(
     }
 }
 
-/// One bounded run's exit and output.
-struct Run {
-    status: ExitStatus,
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
+/// `<bin> --version` within `limit` (§13): what a binary says about itself, asked
+/// the way both Settings rows and the About dialog ask.
+///
+/// The one bounded read with no document in it: the caller gets the exit status and
+/// both streams, in bytes, and decides what they mean — "it introduced itself",
+/// "not an evo binary", "nothing to read". A binary that never answers is
+/// [`CliError::TimedOut`], like everywhere else in this module, and its group is
+/// stopped the same way. [`VERSION_TIMEOUT`] is the bound the app gives it; a caller
+/// that wants another one says so.
+pub fn version_within(bin: &Path, limit: Duration) -> Result<Output, CliError> {
+    run_bounded(bin, &args(&["--version"]), limit)
+}
+
+/// What a bounded run said: its exit, and its two streams, exactly as they came.
+pub struct Output {
+    /// How it ended — a signal is not a status, so a killed read has no code.
+    pub status: ExitStatus,
+    /// Everything it printed.
+    pub stdout: Vec<u8>,
+    /// Everything it complained about, uncapped: [`tail`] is what a *message* does
+    /// with this, and a caller that wants the first line wants all of it.
+    pub stderr: Vec<u8>,
 }
 
 /// Run `bin args…` in its own process group, and give it `limit` to exit.
@@ -245,7 +271,7 @@ struct Run {
 /// child is then waited for, so nothing of it is left as a zombie, and the
 /// readers are let go rather than joined: the group is gone, and joining a reader
 /// whose pipe a surviving grandchild held would be a second way to hang.
-fn run_bounded(bin: &Path, args: &[String], limit: Duration) -> Result<Run, CliError> {
+fn run_bounded(bin: &Path, args: &[String], limit: Duration) -> Result<Output, CliError> {
     let mut command = Command::new(bin);
     command
         .args(args)
@@ -290,7 +316,7 @@ fn run_bounded(bin: &Path, args: &[String], limit: Duration) -> Result<Run, CliE
     let stdout = out_reader.join().unwrap_or_default();
     let stderr = err_reader.join().unwrap_or_default();
     drop(live);
-    Ok(Run {
+    Ok(Output {
         status,
         stdout,
         stderr,
