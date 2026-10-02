@@ -389,7 +389,9 @@ once it is taken, the card becomes the turn it is.
 
 When you scroll away from the bottom the view stops following and offers a
 **Jump to latest** button. An agent with nothing to show says so in its own words:
-`Ask the coordinator to get started` for the coordinator, and
+`Ask the coordinator to get started` — it plans the work and hands tasks to its
+lanes — for a swarm's coordinator, `Ask the agent to get started` for the one
+agent of a single-agent session, which does the work itself, and
 `Lane 1 hasn't been given work yet.` for a lane.
 
 ### The composer, at the foot
