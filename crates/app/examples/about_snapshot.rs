@@ -13,7 +13,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use evo_desktop::{AppLog, Shell};
+use evo_desktop::{AppLog, Shell, Version};
 use gpui_kit::component::theme::ThemeMode;
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
@@ -118,15 +118,17 @@ fn capture(dir: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Wait until both binaries have answered, or give up — the dialog shows what it
-/// has either way, and the picture is still the picture.
+/// Wait until both binaries have introduced themselves, or give up — a binary that
+/// hung has its own row and the dialog shows what it has either way, so the picture
+/// is still the picture.
 fn wait_for_versions(cx: &mut HeadlessAppContext, window: AnyWindowHandle) {
     let deadline = Instant::now() + VERSIONS_WAIT;
     loop {
         let ready = cx
             .update_window(window, |_, _, cx| {
                 let versions = &cx.global::<Shell>().versions;
-                versions.swarm.is_some() && versions.agent.is_some()
+                let answered = |version: &Version| matches!(version, Version::Line(_));
+                answered(&versions.swarm) && answered(&versions.agent)
             })
             .unwrap_or(false);
         if ready || Instant::now() >= deadline {

@@ -30,7 +30,7 @@ mod settings_guard;
 mod startup;
 mod theme;
 
-pub use about::{start as start_version_probe, Versions};
+pub use about::{start as start_version_probe, Version, Versions};
 pub use bounds::{window_bounds, window_options, Tracker};
 pub use housekeeping::{prune_tab_dirs, Pruned, TAB_DIR_TTL};
 pub use launcher::{history_entries, push_launcher_data, tab_count, Launcher};
