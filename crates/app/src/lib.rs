@@ -54,6 +54,7 @@ use gpui_kit::prelude::*;
 use gpui_kit::{App, Entity, Global, QuitMode, Subscription, WeakEntity};
 
 use store::app_state::{AppState, Binaries, Recent, Theme};
+use store::cli::{self, PROMPT_NOTE_FLAG};
 use store::model_cache::ModelCache;
 use store::paths::Root;
 use store::single::{Activation, SingleInstance};
@@ -143,6 +144,59 @@ pub fn launch_env(cx: &App) -> workspace::LaunchEnv {
             .map(|(key, value)| (key.to_string(), value.to_string()))
             .collect(),
         env_remove: Vec::new(),
+        prompt_note: prompt_note(shell),
+    }
+}
+
+/// What this app tells every session it starts about itself (§7.2): the note the
+/// transcript ships, at the path under this app's own root, written here so that a
+/// launch only has to name it.
+///
+/// Whether a session can be told at all is a question about the **binaries**, not
+/// about this app: `app.json` can point at a build from before the flag existed,
+/// and evo refuses to start over a flag it does not know. So each is asked what it
+/// takes (`store::cli`, a cached read of its own usage text, warmed off the UI
+/// thread at startup) — and the answer decides, not a version number. A swarm is a
+/// pair: its lanes are the agent's binary, so both have to take the flag or a lane
+/// dies on it. What was decided goes to the log, because the first question a
+/// formula left as source asks is whether its session was ever told.
+fn prompt_note(shell: &Shell) -> workspace::PromptNote {
+    let agent = cli::supports_prompt_note(&shell.binaries.evo_agent);
+    let swarm = cli::supports_prompt_note(&shell.binaries.evo_swarm);
+    let note = workspace::PromptNote::for_binaries(&shell.root, agent, swarm);
+    if note.is_empty() {
+        // The agent's own binary is the one every session runs — a swarm's lanes
+        // included — so this is every launch.
+        shell.log.warn(format!(
+            "prompt note: {} does not take {PROMPT_NOTE_FLAG}; sessions will not be told \
+             how this client renders",
+            shell.binaries.evo_agent.display()
+        ));
+        return note;
+    }
+    if note.swarm.is_none() {
+        shell.log.warn(format!(
+            "prompt note: {} does not take {PROMPT_NOTE_FLAG}; only single-agent sessions \
+             will be told",
+            shell.binaries.evo_swarm.display()
+        ));
+    }
+    match workspace::prompt_note::write(&shell.root) {
+        Ok(path) => {
+            shell.log.info(format!("prompt note: {}", path.display()));
+            note
+        }
+        // No file, no flag: evo reads the path at parse time, and a path it cannot
+        // read is a session that refuses to start. A session without the note still
+        // runs — a formula is then read as its source — which is what the log line
+        // is for.
+        Err(error) => {
+            shell.log.warn(format!(
+                "prompt note: could not write {}: {error}; sessions will not be told",
+                shell.root.prompt_note().display()
+            ));
+            workspace::PromptNote::default()
+        }
     }
 }
 
@@ -348,5 +402,105 @@ mod host_env_tests {
     #[test]
     fn the_app_silences_baby_evo_in_the_swarms_it_starts() {
         assert!(super::HOST_ENV.contains(&("EVO_BABY_EVO", "0")));
+    }
+}
+
+/// The chain the window runs before a launch: ask the binaries what they take,
+/// write the note where the flag will name it, and hand the launch the path (§7.2).
+#[cfg(test)]
+mod prompt_note_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
+    use store::launch::Program;
+
+    /// A binary that answers `--help` the way the real ones do — with the flag in
+    /// its usage text, or without it (a build from before the flag existed).
+    fn stub(dir: &std::path::Path, name: &str, takes: bool) -> PathBuf {
+        let usage = if takes {
+            "usage: evo-agent serve [--ready-file PATH] [--prompt-note PATH]"
+        } else {
+            "usage: evo-agent serve [--ready-file PATH]"
+        };
+        let path = dir.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\necho '{usage}'\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    fn home(name: &str) -> Root {
+        let path =
+            std::env::temp_dir().join(format!("evo-desktop-note-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        Root::at(path)
+    }
+
+    fn shell(root: &Root, agent: PathBuf, swarm: PathBuf) -> Shell {
+        let state = AppState {
+            binaries: Binaries {
+                evo_swarm: swarm,
+                evo_agent: agent,
+            },
+            ..AppState::default()
+        };
+        Shell::new(
+            root.clone(),
+            AppLog::open(root),
+            state,
+            ModelCache::default(),
+        )
+    }
+
+    fn with_binaries(name: &str, agent_takes: bool, swarm_takes: bool) -> (Root, Shell) {
+        let root = home(name);
+        let dir = root.path().join("bin");
+        std::fs::create_dir_all(&dir).unwrap();
+        let shell = shell(
+            &root,
+            stub(&dir, "evo-agent", agent_takes),
+            stub(&dir, "evo-swarm", swarm_takes),
+        );
+        (root, shell)
+    }
+
+    /// Both binaries take the flag: every session this window starts is told, and
+    /// the file the launch names holds the note the renderer ships.
+    #[test]
+    fn a_binary_that_takes_the_flag_is_told_and_the_note_is_written() {
+        let (root, shell) = with_binaries("takes", true, true);
+        let note = prompt_note(&shell);
+        let path = root.prompt_note();
+        assert_eq!(note.for_program(Program::Agent), Some(path.clone()));
+        assert_eq!(note.for_program(Program::Swarm), Some(path.clone()));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), workspace::NOTE);
+        let _ = std::fs::remove_dir_all(root.path());
+    }
+
+    /// A build from before the flag existed: nothing is written and no launch is
+    /// told — the window opens and the tab starts, which is what matters here.
+    #[test]
+    fn an_old_binary_is_launched_without_the_note() {
+        let (root, shell) = with_binaries("old", false, false);
+        let note = prompt_note(&shell);
+        assert!(note.is_empty());
+        assert_eq!(note.for_program(Program::Agent), None);
+        assert_eq!(note.for_program(Program::Swarm), None);
+        assert!(
+            !root.prompt_note().exists(),
+            "a note nobody can be told is not written"
+        );
+        let _ = std::fs::remove_dir_all(root.path());
+    }
+
+    /// One new binary and one old one: a single agent can be told, a swarm cannot —
+    /// its lanes are the very binary the coordinator would pass the flag to.
+    #[test]
+    fn a_swarm_learns_nothing_from_a_binary_its_lanes_would_refuse() {
+        let (root, shell) = with_binaries("mixed", true, false);
+        let note = prompt_note(&shell);
+        assert_eq!(note.for_program(Program::Agent), Some(root.prompt_note()));
+        assert_eq!(note.for_program(Program::Swarm), None);
+        assert!(root.prompt_note().is_file());
+        let _ = std::fs::remove_dir_all(root.path());
     }
 }

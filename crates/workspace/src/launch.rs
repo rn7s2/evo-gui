@@ -26,6 +26,8 @@ use store::launch::{LaunchSpec, Program};
 use store::paths::Root;
 use tab_engine::{EngineHandle, Update};
 
+use crate::prompt_note::PromptNote;
+
 /// What every tab this window opens needs in order to start a swarm: the two
 /// binaries, the app's own data root, and the environment a hermetic run needs.
 ///
@@ -44,6 +46,11 @@ pub struct LaunchEnv {
     pub env: Vec<(String, String)>,
     /// Variables to drop from the child's environment.
     pub env_remove: Vec<String>,
+    /// What this client tells the sessions it starts about itself (§1): the path of
+    /// the note file, per program, or nothing for a binary that does not take the
+    /// flag. The file itself is written by the app, which is also where the flag is
+    /// asked for (`store::cli`) — a launch only passes what it is handed.
+    pub prompt_note: PromptNote,
 }
 
 impl Default for LaunchEnv {
@@ -54,6 +61,7 @@ impl Default for LaunchEnv {
             root: Root::default(),
             env: Vec::new(),
             env_remove: Vec::new(),
+            prompt_note: PromptNote::default(),
         }
     }
 }
@@ -129,6 +137,11 @@ pub fn launch_spec(env: &LaunchEnv, launch: &Launch, id: &store::paths::TabId) -
     // (§1): nothing has bound one yet, and the supervisor keeps the port it got.
     spec.port = Some(0);
     spec.resume = launch.session().cloned();
+    // What this client is, in the session's own words (§1): the same note for a new
+    // session and a resumed one — a resumed journal is read by the same renderer —
+    // and one per program, because whether it can be passed at all is a question
+    // about the binaries.
+    spec.prompt_note = env.prompt_note.for_program(program);
     if swarm {
         // The lanes run this app's own `evo-agent`; `evo-swarm` takes it as `--evo`.
         // `LaunchSpec::argv` passes no lane flag of any kind for one agent, so the
@@ -206,7 +219,18 @@ pub struct Started {
 pub fn start(env: &LaunchEnv, launch: &Launch) -> std::io::Result<Started> {
     let store_id = store::paths::TabId::new();
     let tab_dir = env.root.ensure_tab_dir(&store_id)?;
-    let spec = launch_spec(env, launch, &store_id);
+    let mut spec = launch_spec(env, launch, &store_id);
+
+    // What the spec names has to be there when the child reads it: evo reads the
+    // path at parse time, and a path it cannot read is a session that refuses to
+    // start (exit 64). So the note is written here, on every launch and every
+    // resume — a no-op when the app already wrote it, which is the usual case — and
+    // the flag is taken back out of the argv if it could not be written: a session
+    // that reads a formula as its source still runs, one that never comes ready
+    // does not. The root is the one the tab's own directory was just made under.
+    if spec.prompt_note.is_some() && crate::prompt_note::write(&env.root).is_err() {
+        spec.prompt_note = None;
+    }
 
     // The spawn is `swarm_client`'s, and `tab_engine` is what drives it: the config
     // says which binary, which flags, where to run, where the ready file and the log
@@ -350,6 +374,69 @@ mod tests {
         assert_eq!(config.argv[at + 1], config.ready_file.display().to_string());
         assert!(config.argv.iter().any(|flag| flag == "--watch-stdin"));
         let _ = std::fs::remove_dir_all(env.root.path());
+    }
+
+    /// §1, §7.2: what this client is goes on the command line of **both** programs,
+    /// for a new session and for a resumed one — the note is about the renderer,
+    /// which does not change because a journal was written earlier.
+    #[test]
+    fn the_clients_note_rides_on_every_launch_and_resume() {
+        let note = PathBuf::from("/tmp/evo-desktop/prompt-notes/gui-math.md");
+        let env = LaunchEnv {
+            root: Root::at("/tmp/evo-desktop"),
+            prompt_note: PromptNote {
+                agent: Some(note.clone()),
+                swarm: Some(note.clone()),
+            },
+            ..LaunchEnv::default()
+        };
+        let id = store::paths::TabId::parse("t5").unwrap();
+        let launches = [
+            Launch::New {
+                folder: PathBuf::from("/Users/you/coding/foo"),
+                plan: plan(None, None, None),
+            },
+            Launch::New {
+                folder: PathBuf::from("/Users/you/coding/foo"),
+                plan: LaunchPlan {
+                    swarm: false,
+                    ..plan(None, None, None)
+                },
+            },
+            Launch::Resume {
+                folder: PathBuf::from("/Users/you/coding/foo"),
+                session: PathBuf::from("/Users/you/.evo/sessions/a/1.sexp"),
+                swarm: true,
+            },
+            Launch::Resume {
+                folder: PathBuf::from("/Users/you/coding/foo"),
+                session: PathBuf::from("/Users/you/.evo/sessions/a/1.sexp"),
+                swarm: false,
+            },
+        ];
+        for launch in &launches {
+            let argv = launch_spec(&env, launch, &id).argv();
+            let at = argv
+                .iter()
+                .position(|flag| flag == "--prompt-note")
+                .unwrap_or_else(|| panic!("{launch:?} is told about this client: {argv:?}"));
+            assert_eq!(argv[at + 1], note.display().to_string(), "{launch:?}");
+        }
+
+        // An environment whose binaries take no note passes none — the same four
+        // launches, each without the flag and without an empty value.
+        let without = LaunchEnv {
+            root: Root::at("/tmp/evo-desktop"),
+            ..LaunchEnv::default()
+        };
+        for launch in &launches {
+            let argv = launch_spec(&without, launch, &id).argv();
+            assert!(
+                !argv.iter().any(|flag| flag == "--prompt-note"),
+                "{launch:?}"
+            );
+            assert!(!argv.iter().any(String::is_empty), "{launch:?}");
+        }
     }
 
     #[test]

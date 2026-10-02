@@ -11,6 +11,7 @@ mod empty_tab;
 mod history;
 mod launch;
 mod panes;
+pub mod prompt_note;
 mod tab;
 mod tab_page;
 mod tab_strip;
@@ -24,6 +25,7 @@ pub use chrome::{
 pub use empty_tab::OpenSettings;
 pub use history::{placeholder_history, HistoryRow};
 pub use launch::{check, check_spec, launch_spec, Launch, LaunchEnv};
+pub use prompt_note::{PromptNote, NOTE};
 pub use tab::{TabContent, TabContentEvent, TabId, TabState};
 
 /// A test's own evo home, for the tests that open the app's Settings pages.

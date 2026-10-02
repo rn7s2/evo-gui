@@ -12,6 +12,10 @@
 //! knows the path — `app.json`'s Settings value — hands it in, and the
 //! environment is not consulted at all.
 //!
+//! One read here is not a document at all: `<bin> --help`, whose usage text is how
+//! a window learns whether the binary it is about to run takes a flag the window
+//! wants to pass it ([`supports_prompt_note`]).
+//!
 //! # Every read is bounded, and nothing is left behind (§9.4, §9.5, §9.8)
 //!
 //! A run that would never exit has happened: an `evo-swarm check --json` the app
@@ -55,6 +59,10 @@ pub const AGENT_BIN_ENV: &str = "EVO_AGENT_BIN";
 /// The environment variable that overrides the swarm binary.
 pub const SWARM_BIN_ENV: &str = "EVO_SWARM_BIN";
 
+/// The flag a client's own note is passed with, by both binaries
+/// (`serve --prompt-note <path>`), and the string the probe below looks for.
+pub const PROMPT_NOTE_FLAG: &str = "--prompt-note";
+
 /// The `evo-agent` this process should run: `$EVO_AGENT_BIN`, else the
 /// installed path.
 pub fn agent_bin() -> PathBuf {
@@ -94,6 +102,15 @@ pub const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 /// index rather than the registries — and because the empty tab shows something
 /// either way while it is missing (§9.5).
 pub const SESSIONS_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long `<bin> --help` may take before the app gives up on it.
+///
+/// Cheaper than [`PROBE_TIMEOUT`] on purpose: usage text is printed by the
+/// argument parser, before the binary boots the session the other reads need, so
+/// a healthy one answers in the time it takes to start the image — and this is a
+/// question asked while a window is being built. The bound is there all the same:
+/// a binary that hangs on `--help` must not hang a window.
+pub const USAGE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How long a child is given to go after `SIGTERM`, before its group is killed.
 const TERM_GRACE: Duration = Duration::from_millis(500);
@@ -223,6 +240,93 @@ pub fn run_json_reporting_within(
             message: error.to_string(),
         }),
     }
+}
+
+/// Whether `bin` takes [`PROMPT_NOTE_FLAG`] — asked of the binary, once.
+///
+/// The binary a window runs is not necessarily the one the app was built against:
+/// `app.json` can name a build from before the flag existed, and to a binary that
+/// does not know it the flag is a refusal to start (exit 64 — a launch that never
+/// comes ready). So the usage text is what is read, not a version number: a flag
+/// that exists is a line in it, `--help` prints it before anything boots, and the
+/// read is the same bounded one every other offline ask uses — its own process
+/// group, stopped on the way out ([`stop_live_children`]).
+///
+/// The answer is cached by path, size and modification time: the app asks once per
+/// binary per run, and a binary that is replaced is a different question. Every way
+/// the ask can fail — not there, not runnable, nothing printed, no answer inside
+/// [`USAGE_TIMEOUT`] — is `false`. A session started without the note reads its
+/// formulas as source, which is a great deal better than a session that will not
+/// start; a client that does not need the answer asks nothing.
+pub fn supports_prompt_note(bin: &Path) -> bool {
+    let stamp = Stamp::of(bin);
+    // The lock is let go around the ask: a probe is a process, and another thread
+    // asking about another binary must not wait on this one. Two threads asking
+    // about the same one probe twice and agree.
+    let known = asked()
+        .iter()
+        .find(|(asked, _)| *asked == stamp)
+        .map(|(_, known)| *known);
+    if let Some(known) = known {
+        return known;
+    }
+    let answer = usage_names_the_flag(bin, USAGE_TIMEOUT);
+    let mut asked = asked();
+    match asked.iter_mut().find(|(asked, _)| *asked == stamp) {
+        Some(entry) => entry.1 = answer,
+        None => asked.push((stamp, answer)),
+    }
+    answer
+}
+
+/// `<bin> --help` within `limit`, and whether the flag is in what it printed.
+///
+/// Either stream, and whatever the exit code: usage belongs to the argument parser,
+/// and where a binary writes it and with what status is not this question. What is
+/// asked is only whether the flag is written down.
+fn usage_names_the_flag(bin: &Path, limit: Duration) -> bool {
+    let Ok(run) = run_bounded(bin, &args(&["--help"]), limit) else {
+        return false;
+    };
+    let printed = |stream: &[u8]| String::from_utf8_lossy(stream).into_owned();
+    format!("{}{}", printed(&run.stdout), printed(&run.stderr)).contains(PROMPT_NOTE_FLAG)
+}
+
+/// One binary, as the file it was when it was asked about.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Stamp {
+    path: PathBuf,
+    len: u64,
+    /// Modified, in nanoseconds since the epoch; `0` when the file cannot be read,
+    /// which is its own answer and is cached like any other.
+    modified: i64,
+}
+
+impl Stamp {
+    fn of(bin: &Path) -> Stamp {
+        let meta = std::fs::metadata(bin).ok();
+        Stamp {
+            path: bin.to_path_buf(),
+            len: meta.as_ref().map_or(0, std::fs::Metadata::len),
+            modified: meta
+                .and_then(|meta| meta.modified().ok())
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |since| {
+                    i64::try_from(since.as_nanos()).unwrap_or(i64::MAX)
+                }),
+        }
+    }
+}
+
+/// What each binary has already answered. A probe thread that panicked while
+/// holding it must not turn every later ask into a panic: a stamp whose answer is
+/// lost is one more `--help`, and nothing is signalled here.
+static ASKED: Mutex<Vec<(Stamp, bool)>> = Mutex::new(Vec::new());
+
+fn asked() -> MutexGuard<'static, Vec<(Stamp, bool)>> {
+    ASKED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// One bounded run's exit and output.
@@ -567,5 +671,77 @@ mod tests {
         // test's — could say.
         assert_eq!(seconds(&Duration::from_millis(300)), 1);
         assert_eq!(seconds(&SESSIONS_TIMEOUT), 10);
+    }
+
+    /// The flag is taken where the binary's own usage writes it down — and a build
+    /// from before the flag existed is a "no", never a guess in its favour.
+    #[test]
+    fn the_usage_text_says_whether_the_flag_is_taken() {
+        let with = temp_script(
+            "note-flag",
+            "#!/bin/sh\necho 'usage: evo-agent serve [--ready-file PATH] [--prompt-note PATH]'\n",
+        );
+        assert!(supports_prompt_note(&with), "{with:?} names the flag");
+        // The same question of a binary that does not know it: this is the old
+        // build, and the launch it is about goes out without the note.
+        let without = temp_script(
+            "note-flag-old",
+            "#!/bin/sh\necho 'usage: evo-agent serve [--ready-file PATH]'\n",
+        );
+        assert!(!supports_prompt_note(&without));
+        std::fs::remove_file(&with).unwrap();
+        std::fs::remove_file(&without).unwrap();
+    }
+
+    /// Usage on stderr and a non-zero exit are still an answer: what is asked is
+    /// whether the flag is written down, not where or with what status.
+    #[test]
+    fn usage_written_to_stderr_is_read_too() {
+        let bin = temp_script(
+            "note-flag-stderr",
+            "#!/bin/sh\necho 'usage: evo-swarm serve [--prompt-note PATH]' >&2\nexit 1\n",
+        );
+        assert!(supports_prompt_note(&bin));
+        std::fs::remove_file(&bin).unwrap();
+    }
+
+    /// A binary that cannot be asked is a binary that gets no note: never an
+    /// error, and never a hang — the read is bounded like every other one.
+    #[test]
+    fn a_binary_that_cannot_be_asked_takes_no_note() {
+        assert!(!supports_prompt_note(Path::new(
+            "/nonexistent/evo-agent-evo-gui-test"
+        )));
+        let stubborn = temp_script("note-flag-hang", "#!/bin/sh\nsleep 60\n");
+        let started = Instant::now();
+        assert!(
+            !usage_names_the_flag(&stubborn, Duration::from_millis(200)),
+            "nothing printed, no flag"
+        );
+        assert!(
+            started.elapsed() < USAGE_TIMEOUT,
+            "the read ends at its bound, not at the binary's"
+        );
+        std::fs::remove_file(&stubborn).unwrap();
+    }
+
+    /// A rebuild that learned the flag is a different binary, and is asked again:
+    /// the answer is cached for the file it was given, not for the path.
+    #[test]
+    fn a_binary_that_is_replaced_is_asked_again() {
+        let bin = temp_script(
+            "note-flag-rebuilt",
+            "#!/bin/sh\necho 'usage: evo-agent serve'\n",
+        );
+        assert!(!supports_prompt_note(&bin));
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\necho 'usage: evo-agent serve [--prompt-note PATH]'\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(supports_prompt_note(&bin), "the new file is its own answer");
+        std::fs::remove_file(&bin).unwrap();
     }
 }

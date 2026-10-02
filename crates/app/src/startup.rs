@@ -13,6 +13,13 @@
 //!    and it replaces the two throwaway servers this used to need. What it found
 //!    is written back through `store` and handed over when it lands.
 //!
+//! Two more run beside them: the tab directories nobody has touched are pruned
+//! (§6), and the two binaries are asked what they take (`<bin> --help`) so that the
+//! question a window asks while it is being built — whether this client's own note
+//! can be passed to them ([`crate::prompt_note`], via
+//! [`store::cli::supports_prompt_note`]) — is a cache read rather than a process on
+//! the UI thread.
+//!
 //! Each arrival goes through [`crate::launcher`], which both pushes it into the
 //! tabs that exist and remembers it for the ones created later.
 
@@ -67,7 +74,45 @@ pub fn start(cx: &mut App) {
     prune_tab_dirs(root.clone(), log.clone());
 
     // 4. The catalog, refreshed the same way.
-    load_catalog(cx, root, binaries.evo_swarm);
+    load_catalog(cx, root, binaries.evo_swarm.clone());
+
+    // What the binaries take, asked off the UI thread: the usage read behind
+    // `--prompt-note` (see the module docs). The window asks the same question of
+    // the same two binaries while it is being built (§7.2), and this is what makes
+    // that a cache read.
+    probe_prompt_notes(binaries, log);
+}
+
+/// Ask both binaries what they take (`--prompt-note`), on a thread of its own.
+///
+/// Nothing is pushed to a tab and nothing here can fail a launch: the answer is
+/// kept in `store::cli`'s own cache, and whoever asks next — the window, building
+/// a [`LaunchEnv`](workspace::LaunchEnv) — gets it without a process. The line in
+/// the log is what says the ask happened, for the sessions that are then told
+/// nothing.
+fn probe_prompt_notes(binaries: Binaries, log: AppLog) {
+    let thread_log = log.clone();
+    let spawned = std::thread::Builder::new()
+        .name("evo-desktop-prompt-note".to_owned())
+        .spawn(move || {
+            let takes = |bin: &std::path::Path| {
+                if cli::supports_prompt_note(bin) {
+                    "takes"
+                } else {
+                    "does not take"
+                }
+            };
+            thread_log.info(format!(
+                "prompt note: {} {} --prompt-note, {} {} it",
+                binaries.evo_agent.display(),
+                takes(&binaries.evo_agent),
+                binaries.evo_swarm.display(),
+                takes(&binaries.evo_swarm)
+            ));
+        });
+    if let Err(error) = spawned {
+        log.error(format!("could not start the prompt-note probe: {error}"));
+    }
 }
 
 /// Read the model catalog again, in the background, and hand it over when it

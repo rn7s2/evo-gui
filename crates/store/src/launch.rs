@@ -8,7 +8,7 @@
 //! ```text
 //! evo-swarm serve --ready-file PATH --watch-stdin --port 0
 //!                [--resume PATH] [--model ID@PROVIDER] [--thinking L]
-//!                [--evo PATH] [--workers N]
+//!                [--prompt-note PATH] [--evo PATH] [--workers N]
 //!                [--lane-model ID@PROVIDER] [--lane-thinking L]
 //! ```
 //!
@@ -74,6 +74,14 @@ pub struct LaunchSpec {
     pub model: Option<ModelRef>,
     /// `--thinking LEVEL`.
     pub thinking: Option<String>,
+    /// `--prompt-note PATH`: a markdown file this session adds to every system
+    /// prompt it builds — what the client that renders it says about itself, so
+    /// the agent writes math that client can draw (§1). Both programs take it, and
+    /// a swarm passes it on to every lane it starts. The file is the client's, at a
+    /// stable path under the app's own root ([`Root::prompt_note`]), written by the
+    /// caller before the spawn: evo reads it at parse time, so a path that is not
+    /// there is a launch that refuses to start.
+    pub prompt_note: Option<PathBuf>,
     /// `--lane-model ID@PROVIDER`, the model every lane registers.
     pub lane_model: Option<ModelRef>,
     /// `--lane-thinking LEVEL`.
@@ -132,6 +140,12 @@ impl LaunchSpec {
         if let Some(level) = level(&self.thinking) {
             argv.push("--thinking".to_owned());
             argv.push(level);
+        }
+        // The client's own note, before the lane flags: a swarm takes it as the
+        // coordinator's — and passes the same one on to every lane it starts.
+        if let Some(note) = &self.prompt_note {
+            argv.push("--prompt-note".to_owned());
+            argv.push(note.display().to_string());
         }
         if self.program == Some(Program::Swarm) {
             if let Some(agent) = &self.agent_bin {
@@ -230,6 +244,7 @@ mod tests {
             resume: None,
             model: None,
             thinking: None,
+            prompt_note: None,
             lane_model: None,
             lane_thinking: None,
             workers: None,
@@ -394,6 +409,36 @@ mod tests {
         let argv = launch.argv();
         assert!(!argv.iter().any(|a| a == "--thinking"));
         assert!(!argv.iter().any(|a| a == "--lane-thinking"));
+    }
+
+    /// The client's own note is one flag both programs take, and the path is the
+    /// client's own file — absolute, because the child's cwd is the folder it runs
+    /// in, not the app's root. A launch with no note (an older binary) passes
+    /// nothing, never an empty value.
+    #[test]
+    fn a_clients_note_is_one_flag_with_an_absolute_path() {
+        for program in [Program::Agent, Program::Swarm] {
+            let mut launch = spec(program);
+            launch.prompt_note = Some(PathBuf::from(
+                "/Users/x/.evo/desktop/prompt-notes/gui-math.md",
+            ));
+            let argv = launch.argv();
+            let at = argv
+                .iter()
+                .position(|a| a == "--prompt-note")
+                .unwrap_or_else(|| panic!("{program:?} takes the note: {argv:?}"));
+            assert_eq!(
+                argv[at + 1],
+                "/Users/x/.evo/desktop/prompt-notes/gui-math.md"
+            );
+            launch.prompt_note = None;
+            let argv = launch.argv();
+            assert!(!argv.iter().any(|a| a == "--prompt-note"), "{argv:?}");
+            assert!(
+                !argv.iter().any(|a| a.is_empty()),
+                "no empty value: {argv:?}"
+            );
+        }
     }
 
     #[test]
