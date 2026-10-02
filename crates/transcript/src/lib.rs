@@ -76,7 +76,7 @@ use gpui_kit::{
     ParentElement as _, Pixels, Render, StatefulInteractiveElement as _, Styled as _, Task,
     TestSupportExt as _, Window,
 };
-use session::{AgentKey, Item, ItemId, ItemKind};
+use session::{AgentKey, Item, ItemId, ItemKind, NoticeSource};
 use std::time::Duration;
 use widgets::effort::cubic_bezier;
 use widgets::paint;
@@ -173,8 +173,8 @@ pub(crate) struct TranscriptData {
     pub(crate) field_documents: HashMap<(ItemId, &'static str), Entity<TextViewState>>,
     /// Items the reader has opened.
     pub(crate) expanded: HashSet<ItemId>,
-    /// The ids of items the topic holds and this view is not the place for — a notice
-    /// the server itself does not keep (`is_part_of_the_record`). Counted rather than
+    /// The ids of items the topic holds and this view is not the place for — the
+    /// serve's own ephemeral status line (`is_part_of_the_record`). Counted rather than
     /// forgotten so that the two lists can be held to each other: with them, the
     /// record is the topic's own list, and a view that missed a row is a view that
     /// says so ([`TranscriptView::declined`]).
@@ -572,9 +572,9 @@ impl TranscriptView {
         &self.data.read(cx).items
     }
 
-    /// How many items this view has been offered and is not the place for: notices
-    /// the server itself does not keep. The record plus these is the topic's own
-    /// list, which is the invariant the tab holds the two to.
+    /// How many items this view has been offered and is not the place for: the serve's
+    /// own ephemeral status lines. The record plus these is the topic's own list, which
+    /// is the invariant the tab holds the two to.
     pub fn declined(&self, cx: &App) -> usize {
         self.data.read(cx).declined.len()
     }
@@ -835,10 +835,10 @@ impl TranscriptView {
 
     /// Add or replace one item, by its id. Returns whether the view changed.
     ///
-    /// A notice the server does not keep in the journal is not part of the
-    /// conversation: it is a status line about the machine — `session ready`, at
-    /// the top of every session — and it is dropped here rather than drawn at the
-    /// head of every transcript.
+    /// The serve's own ephemeral status line — `session ready`, at the top of every
+    /// session — is not part of the conversation: it is dropped here rather than drawn
+    /// at the head of every transcript. A command's output is a `notice` item too, and
+    /// stays: see [`is_part_of_the_record`].
     pub fn upsert(&mut self, item: Item, cx: &mut Context<Self>) -> bool {
         if !is_part_of_the_record(&item) {
             // Not a row, but still one of the items the topic holds: counted so the
@@ -1244,12 +1244,19 @@ impl TranscriptView {
 
 /// Whether an item belongs in the conversation.
 ///
-/// Only one kind is ever dropped: a notice the server itself does not keep
-/// (`durable: false`, §4.1) — a line about the machine saying it is ready, said
-/// again at every boot. Everything else, including a durable notice, is the
-/// record.
+/// Only one kind is ever dropped: the **serve's** own ephemeral status line — `session
+/// ready` at the top of every session, said again at every boot (`durable: false`,
+/// `source: serve`, §4.1). Being outside the journal is not what makes a notice noise:
+/// a command's output (`/lore`, `/model`, `/eval`, an extension's own) is published as
+/// a live `notice` item with `source: command` and `durable: false` too, and it is
+/// exactly what the reader asked to see. Every other notice, and everything else,
+/// including a durable notice, is the record.
 fn is_part_of_the_record(item: &Item) -> bool {
-    !matches!(&item.kind, ItemKind::Notice(notice) if !notice.durable)
+    !matches!(
+        &item.kind,
+        ItemKind::Notice(notice)
+            if !notice.durable && notice.source == NoticeSource::Serve
+    )
 }
 
 /// Whether an item carries thinking text a reader could reveal. The view counts these
