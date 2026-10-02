@@ -152,9 +152,11 @@ out of there.
   Each defaults to **Default** — the coordinator model is passed only when chosen, the lanes model
   only when chosen (§9.6), and the workers only when chosen (else evo's own `:swarm-workers`, else 6).
   A tab's models are fixed when it is created — the tab page has no model selector (§7.3, §14.7).
-- The workers card's own **Use swarm** switch (§7.2, §9.6): on by default, and remembered in
-  `app.json` as an optional field, so a file written before it existed opens on a swarm. It is the
-  window's, like the column widths: one value for every tab, read again at launch. Off, the lanes'
+- The workers card's own **Use swarm** switch (§7.2, §9.6): on by default, on every page and every
+  launch. It is the **page's own**, one empty tab's, for the one launch it makes — never the window's,
+  never another tab's, never `app.json`'s: flipping it changes that page and nothing else, and a tab
+  that comes back to the empty page (a launch that failed, a session that ended) is a tab on the page
+  every tab opens on, so it opens on a swarm again. Off, the lanes'
   model, its effort and the count grey **in place** and take nothing — the same boxes in the same
   places, no click, no keystroke, no tab stop, so nothing moves under the pointer that flipped it —
   and the page's fields resolve from one agent's own `evo-agent catalog --json` (§9.4) instead of

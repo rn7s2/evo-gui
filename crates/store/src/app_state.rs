@@ -281,10 +281,6 @@ pub struct AppState {
     /// leave behind. Absent in a file written before the View menu existed, which
     /// reads as the design's own size.
     pub zoom: f32,
-    /// Whether a new session is a swarm or one agent: the New Swarm page's own
-    /// switch (§7.2), remembered the way the splits and the zoom are. Absent in a
-    /// file written before the switch existed, which reads as a swarm.
-    pub use_swarm: bool,
 }
 
 impl Default for AppState {
@@ -299,7 +295,6 @@ impl Default for AppState {
             theme: Theme::System,
             panes: Panes::default(),
             zoom: ZOOM_DEFAULT,
-            use_swarm: true,
         }
     }
 }
@@ -523,22 +518,35 @@ mod tests {
         fs::remove_dir_all(root.path()).unwrap();
     }
 
-    /// §7.2: the New Swarm page's own switch, remembered. A file written before
-    /// there was one opens on a swarm — the app's own default — and the switch
-    /// only ever names one of the two programs.
+    /// §7.2: the New Swarm page's own switch is **not** this file's — it is one
+    /// page's, for one launch — and a file that still carries one from when it was
+    /// written here opens fine: the field is not read, and the file's own facts are.
     #[test]
-    fn the_swarm_switch_is_remembered() {
+    fn a_file_that_still_carries_the_swarm_switch_opens() {
         let root = temp_root("use-swarm");
-        let mut state = sample();
-        state.use_swarm = false;
-        state.save(&root).unwrap();
-        assert!(!AppState::load(&root).use_swarm);
-
-        // A file from before the switch existed: a swarm.
         root.ensure().unwrap();
-        fs::write(root.app_json(), r#"{"version":1,"theme":"dark"}"#).unwrap();
-        assert!(AppState::load(&root).use_swarm);
-        assert!(AppState::default().use_swarm);
+        fs::write(
+            root.app_json(),
+            r#"{"version":1,"theme":"dark","use_swarm":false,"zoom":1.25}"#,
+        )
+        .unwrap();
+        let state = AppState::load(&root);
+        assert_eq!(state.theme, Theme::Dark, "the file's own facts are read");
+        assert_eq!(state.zoom, 1.25);
+        let before = fs::read_to_string(root.app_json()).unwrap();
+        assert!(
+            before.contains("use_swarm"),
+            "the field is still in the file the test wrote"
+        );
+
+        // And saving over it drops it: what the app writes is what the app reads.
+        state.save(&root).unwrap();
+        let after = fs::read_to_string(root.app_json()).unwrap();
+        assert!(
+            !after.contains("use_swarm"),
+            "a switch that is nobody's is not written down again: {after}"
+        );
+        assert_eq!(AppState::load(&root), state);
         fs::remove_dir_all(root.path()).unwrap();
     }
 
