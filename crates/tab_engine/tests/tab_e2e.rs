@@ -195,6 +195,133 @@ fn a_stream_reset_re_snapshots_everything_and_resumes_the_stream() {
     drop(handle);
 }
 
+/// A reset is answered by a snapshot, and one that fails is asked for again: the
+/// parked stream is the only reader this tab has, and nothing else can wake it.
+#[test]
+fn a_stream_reset_whose_snapshot_fails_is_asked_for_again() {
+    let (dir, handle, updates) = tab("reset-retry", &[]);
+    let mut feed = Feed::new(updates);
+    serving(&mut feed);
+    let control = Control::attach(dir.path()).unwrap();
+    feed.expect("the first snapshot", snapshot_of("session"));
+    control.requests(); // forget the boot's requests
+
+    // The server cannot continue from the cursor, and the read that would let it —
+    // twice over: a session thread taken by a long turn, a process still coming
+    // back. The stream parks waiting for that read, and stays parked until one
+    // lands.
+    control.fail_snapshots(2).unwrap();
+    control.stream_reset("restarted").unwrap();
+
+    let update = feed.expect("the stream reset", |update| {
+        matches!(
+            update,
+            Update::Op {
+                op: Op::StreamReset { .. },
+                ..
+            }
+        )
+    });
+    let Update::Op { op, .. } = update else {
+        unreachable!()
+    };
+    assert_eq!(
+        op,
+        Op::StreamReset {
+            reason: "restarted".into()
+        }
+    );
+    // While it is trying, the tab says so rather than showing a stale view as live.
+    feed.expect(
+        "the tab says it is catching up",
+        |update| matches!(update, Update::Stream { status } if status.is_reconnecting()),
+    );
+    // The read that lands is a whole window, and it is the one that resumes the
+    // stream (§5.2).
+    let update = feed.expect("the re-read session", snapshot_of("session"));
+    let Update::Snapshot { body, .. } = update else {
+        unreachable!()
+    };
+    assert_eq!(body["state"]["status"], "idle");
+    let asked = control.requests_on("/snapshot");
+    assert!(
+        asked.len() >= 3,
+        "two that failed and one that landed: {asked:?}"
+    );
+    for request in &asked {
+        let path = request["path"].as_str().unwrap();
+        assert!(path.contains("items=256"), "{path}");
+    }
+
+    // And the stream is reading again: a frame published now reaches the tab.
+    control
+        .emit(json!({
+            "op": "item.add", "topic": "session", "after": null,
+            "item": {"id": "e_2", "kind": "user", "ts": 2, "text": "still here"}
+        }))
+        .unwrap();
+    let update = feed.expect("the op after the resume", |update| {
+        matches!(
+            update,
+            Update::Op {
+                op: Op::ItemAdd { .. },
+                ..
+            }
+        )
+    });
+    let Update::Op { op, .. } = update else {
+        unreachable!()
+    };
+    let Op::ItemAdd { item, .. } = op else {
+        unreachable!()
+    };
+    assert_eq!(item.id, "e_2");
+    drop(handle);
+}
+
+/// The same for the one topic a `topic.reset` makes stale: the stream keeps
+/// running, so the re-read is not what wakes it — but a view that never catches up
+/// is a view a reader is shown as current.
+#[test]
+fn a_topic_reset_whose_snapshot_fails_is_asked_for_again() {
+    let (dir, handle, updates) = tab("topic-reset-retry", &[]);
+    let mut feed = Feed::new(updates);
+    serving(&mut feed);
+    let control = Control::attach(dir.path()).unwrap();
+    feed.expect("the first snapshot", snapshot_of("session"));
+
+    control
+        .snapshot_body(json!({
+            "session": {"state": {"status": "running"}, "items": [{"id": "e_9", "kind": "user", "ts": 9}]}
+        }))
+        .unwrap();
+    control.fail_snapshots(1).unwrap();
+    control
+        .emit(json!({"op": "topic.reset", "topic": "session", "reason": "leaf_moved"}))
+        .unwrap();
+
+    feed.expect("the topic.reset frame", |update| {
+        matches!(
+            update,
+            Update::Op {
+                op: Op::TopicReset { .. },
+                ..
+            }
+        )
+    });
+    feed.expect(
+        "the tab says it is catching up",
+        |update| matches!(update, Update::Stream { status } if status.is_reconnecting()),
+    );
+    let update = feed.expect("the re-read topic", snapshot_of("session"));
+    let Update::Snapshot { body, .. } = update else {
+        unreachable!()
+    };
+    assert_eq!(body["items"][0]["id"], "e_9");
+    assert_eq!(body["state"]["status"], "running");
+    drop(handle);
+}
+
 #[test]
 fn a_refetch_asks_for_every_topic_again() {
     let (dir, handle, updates) = tab("refetch", &[]);

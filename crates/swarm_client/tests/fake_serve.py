@@ -16,6 +16,10 @@ server):
     POST /_snapshot  {"topics": {name: {"state": …, "items": [...], "has_more": b}}}
     POST /_emit      {"op": {…}}          assign a seq and publish to every stream
     POST /_reply     {"op": "input.send", "reply": {…}}   script an op's reply
+    POST /_drop_op   {"op": "input.send", "times": 1}  answer the next `times`
+                                          requests for this op with nothing at all
+    POST /_fail_snapshot {"times": 2}     fail the next `times` /snapshot requests
+                                          (a server that is not ready yet)
     POST /_requests  {}                   the requests seen so far (and forget them)
     POST /_drop      {}                   close every open stream (a reconnect test)
     POST /_reset     {"reason": "restarted"}   publish a stream.reset to every stream
@@ -60,6 +64,10 @@ class State:
         # Op name -> how many of its requests are answered with nothing at all
         # (the connection dies with the request written): a lost reply.
         self.drop_ops = {}
+        # How many of the next `/snapshot` requests answer with a failure: a
+        # server that is not ready yet, which a client has to ask again rather
+        # than give up on.
+        self.fail_snapshots = 0
 
     def next_seq(self):
         self.seq += 1
@@ -187,6 +195,7 @@ class Handler(BaseHTTPRequestHandler):
             "/_requests": self.control_requests,
             "/_drop": self.control_drop,
             "/_drop_op": self.control_drop_op,
+            "/_fail_snapshot": self.control_fail_snapshot,
             "/_reset": self.control_reset,
             "/_epoch": self.control_epoch,
             "/_forget": self.control_forget,
@@ -231,6 +240,9 @@ class Handler(BaseHTTPRequestHandler):
     def snapshot(self, query, _body):
         state = self.server.state
         with state.lock:
+            failing = state.fail_snapshots > 0
+            if failing:
+                state.fail_snapshots -= 1
             wanted = self.expand(query.get("topics", ["session"])[0].split(",") or [])
             limit = int((query.get("items") or ["200"])[0])
             topics = {}
@@ -244,6 +256,8 @@ class Handler(BaseHTTPRequestHandler):
                     "has_more": more,
                 }
             body = {"epoch": state.epoch, "seq": state.seq, "topics": topics}
+        if failing:
+            return self.reply(503, {"ok": False, "error": "not ready"})
         self.reply(200, body)
 
     def stream(self, query, _body):
@@ -425,6 +439,12 @@ class Handler(BaseHTTPRequestHandler):
         """Answer the next `times` requests for this op with nothing at all."""
         with self.server.state.lock:
             self.server.state.drop_ops[body.get("op")] = int(body.get("times", 1))
+        self.reply(200, {"ok": True})
+
+    def control_fail_snapshot(self, _query, body):
+        """Fail the next `times` snapshot requests: a server not ready yet."""
+        with self.server.state.lock:
+            self.server.state.fail_snapshots = int(body.get("times", 1))
         self.reply(200, {"ok": True})
 
     def control_drop(self, _query, _body):
