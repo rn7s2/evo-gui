@@ -209,6 +209,10 @@ const HISTORY_ROW_ID: &str = "history-row";
 /// row wears without reading the SVG. A row wears one of them, never both.
 const HISTORY_KIND_AGENT_ID: &str = "history-kind-agent";
 const HISTORY_KIND_SWARM_ID: &str = "history-kind-swarm";
+/// A row's two lines — the title over the path and the clock — as one column: named so
+/// that the glyph's place can be measured against the block it leads, not only against
+/// the row's box.
+const HISTORY_TEXT_ID: &str = "history-text";
 const HISTORY_HINT_ID: &str = "history-hint";
 /// The page's headline, named so that a probe — and the tests — can read the words the
 /// workers switch puts there.
@@ -313,6 +317,12 @@ fn kind_icon_id(swarm: bool, row: usize) -> ElementId {
         HISTORY_KIND_AGENT_ID
     };
     ElementId::NamedInteger(name.into(), row as u64)
+}
+
+/// The element a row's two text lines wear as one column, per row: what the glyph's own
+/// centre is measured against — the block it leads.
+fn text_column_id(row: usize) -> ElementId {
+    ElementId::NamedInteger(HISTORY_TEXT_ID.into(), row as u64)
 }
 
 /// One row's tooltip lines: what kind of session this is, then the facts the session model
@@ -2024,22 +2034,23 @@ impl EmptyTabState {
                 // the title beside it is not.
                 //
                 // The glyph is the *kind* the row is — one agent's session or a swarm's
-                // (§2) — and it sits on the title's line rather than in the middle of
-                // the two the row holds: it is the title's own mark, and the path and
-                // the clock under it have none.
+                // (§2) — and it is centred on the row, which is where the design puts it
+                // (`.history-icon` against the two-line row) and where the title and the
+                // path beside it read as one block the glyph leads. It has no line of its
+                // own to sit on: the box is the glyph's own 16px, and the row's flex
+                // centres it (no `self_start`, no line-sized box) — the row is 58px tall
+                // against 39px of type, so a box pinned to the head landed 10px high.
                 div()
                     .id(kind_icon_id(row.swarm, ix))
                     .test_support()
                     .flex_none()
-                    .self_start()
-                    .h(BODY_LINE)
-                    .flex()
-                    .items_center()
                     .text_color(muted)
                     .child(Icon::new(kind_glyph(row.swarm)).with_size(ROW_ICON)),
             )
             .child(
                 v_flex()
+                    .id(text_column_id(ix))
+                    .test_support()
                     .flex_1()
                     .min_w_0()
                     .items_start()
@@ -3876,19 +3887,32 @@ mod tests {
             );
             assert!(window.try_find(kind_icon_id(true, 1)).is_none());
 
-            // The glyph sits on the row's first line: its own box is that line's, so
-            // its middle is the title's middle, not the middle of the two lines.
-            let glyph = window.find(kind_icon_id(true, 0)).bounds();
-            let row = window.find(history_row_id(0)).bounds();
-            assert_eq!(
-                glyph.size.height, BODY_LINE,
-                "the glyph's box is the title's own line"
-            );
-            assert_eq!(
-                glyph.top() - row.top(),
-                ROW_PAD_Y,
-                "at the row's head, where the title is — not in the middle of the two lines"
-            );
+            // The glyph is centred on the row, and so on the two lines of type beside it
+            // (the row is 58px against 39px of type, and the column is centred in the
+            // rest): its own box is the 16px glyph with no line of its own, and where
+            // its middle lands is the row's middle to the pixel.
+            for (row_ix, swarm) in [(0, true), (1, false)] {
+                let glyph = window.find(kind_icon_id(swarm, row_ix)).bounds();
+                let text = window.find(text_column_id(row_ix)).bounds();
+                let row = window.find(history_row_id(row_ix)).bounds();
+                assert_eq!(
+                    glyph.size.height, ROW_ICON,
+                    "row {row_ix}: the glyph's box is the glyph, not a line box"
+                );
+                assert!(
+                    (glyph.center().y - row.center().y).as_f32().abs() <= 0.5,
+                    "row {row_ix}: the glyph's centre is off the row's: {glyph:?} in {row:?}"
+                );
+                assert!(
+                    (glyph.center().y - text.center().y).as_f32().abs() <= 0.5,
+                    "row {row_ix}: the glyph's centre is off the text column's: {glyph:?} in {text:?}"
+                );
+                // Inside the row it belongs to, top and bottom — not on its padding edge.
+                assert!(
+                    glyph.top() > row.top() && glyph.bottom() < row.bottom(),
+                    "row {row_ix}: inside its row: {glyph:?} in {row:?}"
+                );
+            }
 
             // And each row names itself with the kind in it.
             let swarm = window.find(history_row_id(0)).label().unwrap().to_string();
