@@ -365,6 +365,15 @@ impl Control {
         Ok(())
     }
 
+    /// Answer the next `times` requests for this op with nothing at all — the
+    /// connection dies with the request written. That is a *lost* reply, not a
+    /// refusal, and it is what a slow server does to a `input.send` carrying a
+    /// picture.
+    pub fn drop_ops(&self, op: &str, times: u32) -> Result<()> {
+        self.control("/_drop_op", json!({"op": op, "times": times}))?;
+        Ok(())
+    }
+
     /// Close every open stream, to see the client reconnect.
     pub fn drop_streams(&self) -> Result<()> {
         self.control("/_drop", json!({}))?;

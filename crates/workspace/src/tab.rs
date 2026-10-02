@@ -94,7 +94,21 @@ impl NoticeTone {
 /// The decision is the server's, not ours: `busy` and `not_quiescent` are the
 /// server saying it cannot take this now — dim, not a mistake — and every other
 /// code is a failure carrying the reply's own words.
+///
+/// One failure is not the server's at all, and not a refusal: a request the server
+/// never answered. `tab_engine` marks that one in the reply's own `detail` (it is
+/// the only thing that knows the answer was lost rather than refused), and it reads
+/// dim for the same reason `busy` does — nothing was refused, so nothing is shown
+/// as having failed to be taken. See `tab_engine::engine::lost_reply`.
 pub(crate) fn notice_tone(error: &OpError) -> NoticeTone {
+    if error
+        .detail
+        .get("outcome")
+        .and_then(serde_json::Value::as_str)
+        == Some("unknown")
+    {
+        return NoticeTone::Dim;
+    }
     match error.code {
         ErrorCode::Busy | ErrorCode::NotQuiescent => NoticeTone::Dim,
         _ => NoticeTone::Error,
@@ -2944,6 +2958,20 @@ mod tests {
             notice_tone(&error(ErrorCode::Unknown, "who knows")),
             NoticeTone::Error
         );
+
+        // A lost reply is not a refusal: the tab's engine marks it in the reply's
+        // own detail, and it reads as a quiet line rather than as a failure.
+        let mut lost = error(
+            ErrorCode::Unknown,
+            "the server did not answer this send (io: Broken pipe)",
+        );
+        lost.detail = serde_json::json!({ "outcome": "unknown" });
+        assert_eq!(notice_tone(&lost), NoticeTone::Dim);
+        // While the same code from the server itself, with its own detail, is still
+        // a failure: only the marker reads quiet.
+        let mut server_said = error(ErrorCode::Unknown, "who knows");
+        server_said.detail = serde_json::json!({ "field": "objective" });
+        assert_eq!(notice_tone(&server_said), NoticeTone::Error);
     }
 
     /// A refusal is the server's own words, always (§8): nothing is re-stated, and

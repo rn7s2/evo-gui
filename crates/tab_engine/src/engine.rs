@@ -27,13 +27,17 @@ use std::path::{Path, PathBuf};
 use std::thread::{self, JoinHandle};
 
 use async_channel::{Receiver, Sender};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use session::{Op, OpRequest, OpSink};
 use swarm_client::{
     BootCancel, Client, ErrorCode, EventStream, OpError, OpReply, Server, ServerConfig,
     ShutdownOutcome, Snapshot, StdinClose, StreamConfig, StreamFrame, StreamMsg,
 };
+
+/// How many items of the session topic a lost send is checked against: the newest
+/// page, which is where a turn that has just been taken is.
+const SESSION_PAGE: u32 = 50;
 
 use crate::types::Update;
 
@@ -526,30 +530,137 @@ fn post(engine: &Engine, client: &Client, rid: String, request: OpRequest) {
     let client = client.clone();
     let updates = engine.updates.clone();
     let op = request.op.clone();
+    let args = request.args.clone();
+    let sent_at_ms = now_millis();
     let _ = thread::Builder::new()
         .name("evo-tab-op".into())
         .spawn(move || {
             // Sent under the rid the handle minted, so the reply the UI gets is
             // the one its request is waiting for.
-            let reply = client
-                .op_with_rid(&rid, &request.op, request.args)
-                .unwrap_or_else(|error| OpReply {
-                    rid: rid.clone(),
-                    ok: false,
-                    seq: 0,
-                    result: Value::Null,
-                    error: Some(OpError {
-                        code: ErrorCode::OpFailed,
-                        message: error.to_string(),
-                        detail: Value::Null,
-                    }),
-                });
+            let reply = match client.op_with_rid(&rid, &op, args.clone()) {
+                Ok(reply) => reply,
+                Err(error) => lost_reply(&client, &rid, &op, &args, sent_at_ms, error),
+            };
             let _ = updates.send_blocking(Update::OpReply {
                 rid,
                 op,
                 reply: Box::new(reply),
             });
         });
+}
+
+/// What to answer when the server never answered.
+///
+/// A request that was written and not answered is *not* a refusal: the server may
+/// have taken it and lost the reply (a connection reset, a read timeout), and a
+/// client that reads that as "the session refused this" is how a reader ends up
+/// sending the same turn again — measured 2026-10-02: a turn carrying a 640 KB
+/// screenshot is 854 KB of base64, which this server reads and journals in 35.7 s,
+/// and the 30 s patience in force then reported it as refused while the session
+/// held it.
+///
+/// An `input.send` is the one op whose whole truth a client can look up: the turn
+/// it asked for *is* the session topic's newest user item, with the same words and
+/// the same number of pictures, made when the send went out. Finding it answers the
+/// send the way the server would have — `ok` with the item's own id — so the
+/// composer clears its draft and the turn is not sent twice. Not finding it says so
+/// in the reply's own words: the outcome of this send is unknown, and the reader is
+/// told that rather than told the session refused it.
+fn lost_reply(
+    client: &Client,
+    rid: &str,
+    op: &str,
+    args: &Value,
+    sent_at_ms: u64,
+    error: swarm_client::Error,
+) -> OpReply {
+    if op == "input.send" {
+        if let Some(item_id) = the_turn_in_the_session(client, args, sent_at_ms) {
+            return OpReply {
+                rid: rid.to_owned(),
+                ok: true,
+                seq: 0,
+                result: json!({ "item_id": item_id, "queued": false, "blocked": Value::Null }),
+                error: None,
+            };
+        }
+    }
+    OpReply {
+        rid: rid.to_owned(),
+        ok: false,
+        seq: 0,
+        result: Value::Null,
+        error: Some(OpError {
+            code: ErrorCode::Unknown,
+            message: if op == "input.send" {
+                format!(
+                    "the server did not answer this send ({error}); the session does not \
+                     hold it yet — it may still arrive"
+                )
+            } else {
+                format!("the server did not answer this {op} ({error})")
+            },
+            // A marker the UI reads, not a code: an absent answer is not the
+            // session refusing anything, and it may not be shown as a refusal.
+            detail: json!({ "outcome": "unknown" }),
+        }),
+    }
+}
+
+/// The item the session holds for the turn `args` asked for, if it is there: same
+/// words, same number of pictures, made no earlier than the send went out.
+///
+/// A read, and a cheap one: the newest page of the session topic. It cannot make a
+/// duplicate — it asks the session, it does not ask it again.
+fn the_turn_in_the_session(client: &Client, args: &Value, sent_at_ms: u64) -> Option<String> {
+    let snapshot = client
+        .snapshot(&["session".to_string()], Some(SESSION_PAGE))
+        .ok()?;
+    the_turn_in(snapshot.topic("session")?, args, sent_at_ms)
+}
+
+/// The same question of one snapshot body, so the rule is testable without a
+/// server (`tests` below).
+fn the_turn_in(topic: &Value, args: &Value, sent_at_ms: u64) -> Option<String> {
+    let text = args.get("text").and_then(Value::as_str)?;
+    let images = args
+        .get("images")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let items = topic.get("items")?.as_array()?;
+    for item in items.iter().rev() {
+        if item.get("kind").and_then(Value::as_str) != Some("user") {
+            continue;
+        }
+        if item.get("text").and_then(Value::as_str) != Some(text) {
+            continue;
+        }
+        if item
+            .get("images")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len)
+            != images
+        {
+            continue;
+        }
+        // The reader's own history is not evidence about this send: a turn of the
+        // same words from before it went out is a different turn. Two seconds of
+        // slack for the server's own clock against ours.
+        let ts = item.get("ts").and_then(Value::as_u64).unwrap_or(0);
+        if ts + 2_000 < sent_at_ms {
+            continue;
+        }
+        return item.get("id").and_then(Value::as_str).map(str::to_owned);
+    }
+    None
+}
+
+/// Epoch milliseconds, for matching a turn's own `ts` against when the send went out.
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_millis() as u64)
+        .unwrap_or_default()
 }
 
 /// The engine's own state: where updates go, and what to read.
@@ -631,5 +742,104 @@ mod tests {
             Op::from_json(&frame.op, &frame.data),
             Some(Op::ItemAppend { .. })
         ));
+    }
+
+    /// §5.5: a send whose reply was lost is looked up in the session before it is
+    /// called a failure. The turn is the one with its words and its pictures, made
+    /// when the send went out — the reader's own history is not evidence about
+    /// this send.
+    #[test]
+    fn a_lost_send_is_found_by_its_own_words_pictures_and_time() {
+        let sent = 1_790_000_000_000u64;
+        let turn = |id: &str, text: &str, images: usize, ts: u64| {
+            json!({
+                "id": id, "kind": "user", "ts": ts, "text": text, "status": "queued",
+                "images": (0..images).map(|n| json!({"name": format!("{n}.png")})).collect::<Vec<_>>(),
+            })
+        };
+        let args = |text: &str, images: usize| {
+            json!({
+                "text": text, "queue": "now", "topic": "session",
+                "images": (0..images).map(|_| json!({"data": "…"})).collect::<Vec<_>>(),
+            })
+        };
+        let topic = |items: Vec<serde_json::Value>| json!({ "state": {}, "items": items });
+
+        // There it is: the reader's turn with the picture, made as the send went out.
+        let body = topic(vec![
+            turn("e_1", "an older turn", 0, sent - 60_000),
+            turn("e_2", "look at this", 1, sent + 120),
+        ]);
+        assert_eq!(
+            the_turn_in(&body, &args("look at this", 1), sent).as_deref(),
+            Some("e_2")
+        );
+
+        // A turn of the same words from before the send is not this send — and a
+        // turn with the words but not the picture is not this send either.
+        let older = topic(vec![turn("e_1", "look at this", 1, sent - 60_000)]);
+        assert_eq!(the_turn_in(&older, &args("look at this", 1), sent), None);
+        let text_only = topic(vec![turn("e_1", "look at this", 0, sent + 120)]);
+        assert_eq!(
+            the_turn_in(&text_only, &args("look at this", 1), sent),
+            None
+        );
+
+        // And a session that does not hold it says so, rather than answering with
+        // somebody else's turn.
+        let other = topic(vec![turn("e_9", "something else", 1, sent + 120)]);
+        assert_eq!(the_turn_in(&other, &args("look at this", 1), sent), None);
+        assert_eq!(
+            the_turn_in(&json!({ "state": {} }), &args("", 0), sent),
+            None
+        );
+    }
+
+    /// The same, end to end of the failure path: what the UI is told when the reply
+    /// was lost. `ok` when the session holds the turn (so the composer clears its
+    /// draft and nothing is sent twice), and an *unknown* outcome — never a refusal
+    /// the reader would read as "that did not happen" — when it does not.
+    #[test]
+    fn a_lost_send_is_not_reported_as_a_refusal() {
+        let args = json!({"text": "look at this", "images": [{"data": "…"}], "queue": "now"});
+        let error = || swarm_client::Error::Protocol("io: Broken pipe (os error 32)".into());
+        let held = json!({"state": {}, "items": [
+            {"id": "e_7", "kind": "user", "ts": now_millis(), "text": "look at this",
+             "images": [{"name": "pasted image.png"}]}
+        ]});
+
+        // The session holds it: the reply is the one the server would have sent.
+        let found = {
+            let turn = the_turn_in(&held, &args, now_millis() - 60_000).expect("the turn");
+            OpReply {
+                rid: "r1".into(),
+                ok: true,
+                seq: 0,
+                result: json!({"item_id": turn}),
+                error: None,
+            }
+        };
+        assert!(found.ok);
+        assert_eq!(found.result["item_id"], json!("e_7"));
+
+        // And the words for the two ends of the failure path: a lost send is not
+        // the session refusing anything.
+        let nowhere = Client::loopback(1, "t").expect("a client with no server behind it");
+        let lost = lost_reply(&nowhere, "r1", "input.send", &args, now_millis(), error());
+        assert!(!lost.ok);
+        assert_eq!(
+            lost.error.as_ref().map(|error| error.code),
+            Some(ErrorCode::Unknown)
+        );
+        let lost = lost.error.as_ref().expect("a reason");
+        assert!(
+            lost.message.contains("did not answer this send"),
+            "{lost:?}"
+        );
+        assert_eq!(
+            lost.detail,
+            json!({"outcome": "unknown"}),
+            "and marks the outcome as unknown, which is what the UI reads"
+        );
     }
 }

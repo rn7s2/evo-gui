@@ -596,3 +596,108 @@ fn a_fake_swarm_can_still_be_driven_directly() {
     assert!(swarm.control().requests_on("/_emit").is_empty());
     assert_eq!(swarm.server().port(), swarm.client().port());
 }
+
+/// §5.5: a send whose reply is *lost* is looked up in the session before it is
+/// called a refusal.
+///
+/// A turn carrying a screenshot is 854 KB of base64, which this server reads and
+/// journals in ~36 s — slower than the patience a client had, measured 2026-10-02 —
+/// so a lost reply to an `input.send` is the ordinary case for a pasted picture,
+/// not an exotic one. Reported as a refusal, it makes the reader send the same turn
+/// again (the journal of the session that reported this held it three times).
+/// Reported as what it is — the session has the turn — it clears the composer and
+/// sends nothing twice.
+#[test]
+fn a_lost_send_that_the_session_holds_is_not_a_refusal() {
+    let (dir, handle, updates) = tab("lost-send", &[]);
+    let mut feed = Feed::new(updates);
+    serving(&mut feed);
+    let control = Control::attach(dir.path()).unwrap();
+    control.requests();
+
+    // The session holds the turn the send asked for: its own words, its own one
+    // picture, made as the send went out.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("a clock")
+        .as_millis() as u64;
+    control
+        .snapshot_body(json!({
+            "session": {"state": {"status": "running"}, "items": [{
+                "id": "e_pasted", "kind": "user", "ts": now, "text": "look at this",
+                "status": "sent",
+                "images": [{"name": "pasted image.png", "media_type": "image/png",
+                            "bytes": 640663, "href": "/media/e_pasted/0"}]
+            }]}
+        }))
+        .unwrap();
+
+    // The reply is lost, twice: the client's own retry of the same rid is lost too.
+    control.drop_ops("input.send", 2).unwrap();
+
+    let model = TabModel::new();
+    let rid = handle
+        .request(model.send_input_with(
+            "look at this",
+            vec![json!({"name": "pasted image.png", "media_type": "image/png", "data": "…"})],
+            session::Queue::Now,
+        ))
+        .expect("the engine took the request");
+    let update = feed.expect("the reply", |update| {
+        matches!(update, Update::OpReply { .. })
+    });
+    let Update::OpReply {
+        rid: answered,
+        op,
+        reply,
+    } = update
+    else {
+        unreachable!()
+    };
+    assert_eq!(answered, rid);
+    assert_eq!(op, "input.send");
+    assert!(
+        reply.ok,
+        "the session holds the turn, so this send did not fail: {reply:?}"
+    );
+    assert_eq!(
+        reply.result["item_id"],
+        json!("e_pasted"),
+        "and the reply names the turn it found: {reply:?}"
+    );
+    drop(handle);
+}
+
+/// The other end of the same rule: a lost send the session does *not* hold is not a
+/// refusal either — the words say the outcome is unknown, which is the truth, and
+/// never "the session refused this", which would read as "it never happened".
+#[test]
+fn a_lost_send_the_session_does_not_hold_is_an_unknown_outcome() {
+    let (dir, handle, updates) = tab("lost-unknown", &[]);
+    let mut feed = Feed::new(updates);
+    serving(&mut feed);
+    let control = Control::attach(dir.path()).unwrap();
+    control.requests();
+    control.drop_ops("input.send", 2).unwrap();
+
+    let model = TabModel::new();
+    let rid = handle
+        .request(model.send_input("hello there", session::Queue::Now))
+        .expect("the engine took the request");
+    let update = feed.expect("the reply", |update| {
+        matches!(update, Update::OpReply { .. })
+    });
+    let Update::OpReply { reply, .. } = update else {
+        unreachable!()
+    };
+    assert_eq!(reply.rid, rid);
+    assert!(!reply.ok);
+    let error = reply.error.as_ref().expect("a reason");
+    assert_eq!(error.code, swarm_client::ErrorCode::Unknown, "{error:?}");
+    assert!(
+        error.message.contains("did not answer this send")
+            && error.message.contains("does not hold it yet"),
+        "{error:?}"
+    );
+    drop(handle);
+}

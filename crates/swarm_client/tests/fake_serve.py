@@ -26,6 +26,7 @@ server):
 """
 
 import json
+import socket
 import os
 import re
 import sys
@@ -56,6 +57,9 @@ class State:
         self.streams = []          # Stream, one per open SSE connection
         self.forget_next = False   # the next `since` is too old
         self.lanes = 0
+        # Op name -> how many of its requests are answered with nothing at all
+        # (the connection dies with the request written): a lost reply.
+        self.drop_ops = {}
 
     def next_seq(self):
         self.seq += 1
@@ -182,6 +186,7 @@ class Handler(BaseHTTPRequestHandler):
             "/_reply": self.control_reply,
             "/_requests": self.control_requests,
             "/_drop": self.control_drop,
+            "/_drop_op": self.control_drop_op,
             "/_reset": self.control_reset,
             "/_epoch": self.control_epoch,
             "/_forget": self.control_forget,
@@ -285,6 +290,20 @@ class Handler(BaseHTTPRequestHandler):
         state = self.server.state
         rid = body.get("rid")
         op = body.get("op")
+        with state.lock:
+            remaining = state.drop_ops.get(op, 0)
+            if remaining:
+                state.drop_ops[op] = remaining - 1
+        if remaining:
+            # A lost reply: the request was written and nothing is answered. The
+            # client sees a transport failure, which is not a refusal — this is how
+            # `input.send` really behaves when the server is slow to read a body.
+            self.close_connection = True
+            try:
+                self.connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            return
         with state.lock:
             # A retried rid must not act twice (§5.5): answer from the store.
             if rid in state.replies_by_rid:
@@ -401,6 +420,12 @@ class Handler(BaseHTTPRequestHandler):
             seen = self.server.state.requests
             self.server.state.requests = []
         self.reply(200, {"requests": seen})
+
+    def control_drop_op(self, _query, body):
+        """Answer the next `times` requests for this op with nothing at all."""
+        with self.server.state.lock:
+            self.server.state.drop_ops[body.get("op")] = int(body.get("times", 1))
+        self.reply(200, {"ok": True})
 
     def control_drop(self, _query, _body):
         self.server.state.close_streams()
