@@ -207,15 +207,17 @@ pub fn window_options(cx: &App) -> WindowOptions {
 /// centered in it.
 const TRAFFIC_BUTTON: f32 = 14.;
 
-/// Where the traffic lights sit: vertically centered in the tab strip.
+/// Where the traffic lights sit: vertically centered in the tab strip, and
+/// inset from the window's left edge by the same room they have above, so the
+/// cluster sits evenly in the corner.
 ///
 /// `TitleBar`'s own `(9, 9)` centers them in its 34px bar, which leaves them
-/// 4px high in the 42px strip. The x stays at AppKit's 9.
+/// 4px high in the 42px strip, and AppKit's x of 9 crowds the left edge next
+/// to a 14px top inset. The cluster then ends at 74pt, the same 14pt short of
+/// the first tab.
 pub fn traffic_light_position() -> gpui_kit::Point<Pixels> {
-    point(
-        px(9.),
-        px((store::design::STRIP_HEIGHT - TRAFFIC_BUTTON) / 2.),
-    )
+    let inset = (store::design::STRIP_HEIGHT - TRAFFIC_BUTTON) / 2.;
+    point(px(inset), px(inset))
 }
 
 /// What the window is closed with (§9.8).
@@ -1555,13 +1557,21 @@ mod tests {
     };
 
     /// The traffic lights' 14pt buttons sit with equal room above and below
-    /// inside the strip.
+    /// inside the strip, the same room to their left, and clear of the tabs.
     #[test]
     fn traffic_lights_are_centered_in_the_strip() {
-        let top = f32::from(traffic_light_position().y);
+        let position = traffic_light_position();
+        let top = f32::from(position.y);
         let bottom = store::design::STRIP_HEIGHT - top - TRAFFIC_BUTTON;
         assert_eq!(top, bottom);
         assert_eq!(top, 14.);
+        assert_eq!(f32::from(position.x), top);
+        // AppKit puts minimize and zoom 23pt after the previous button (what
+        // `examples/traffic_lights.rs` reads off the real window). The first
+        // tab keeps at least the corner's room from the zoom button.
+        let cluster_end = f32::from(position.x) + 2. * 23. + TRAFFIC_BUTTON;
+        let first_tab = store::design::TRAFFIC_WIDTH + store::design::TAB_ROW_PAD.0;
+        assert!(first_tab - cluster_end >= top);
     }
 
     /// A window of a given size, built by `build` — the production entry point,
