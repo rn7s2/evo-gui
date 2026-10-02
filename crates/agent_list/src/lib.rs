@@ -195,7 +195,7 @@ impl AgentList {
 
     /// Which program this column is showing (§7.2): a swarm's coordinator, or the one
     /// agent a single-agent session has. It is the difference between the first row's
-    /// name — `coordinator` against `Main` — and whether the lane count is drawn at all.
+    /// name — `Coordinator` against `Main` — and whether the lane count is drawn at all.
     pub fn set_swarm(&mut self, swarm: bool, cx: &mut Context<Self>) {
         if self.swarm != swarm {
             self.swarm = swarm;
@@ -203,13 +203,10 @@ impl AgentList {
         }
     }
 
-    /// What this column calls its first row: a swarm is coordinated, one agent is not.
-    fn main_name(&self) -> &'static str {
-        if self.swarm {
-            "coordinator"
-        } else {
-            "Main"
-        }
+    /// What this column calls its first row: a swarm is coordinated, one agent is not
+    /// ([`AgentKey::name`], the one place those names are written).
+    fn main_name(&self) -> String {
+        AgentKey::Coordinator.name(self.swarm)
     }
 
     /// The moment lane clocks are counted to, stamped by the owner with its own
@@ -426,7 +423,7 @@ impl AgentList {
         let state: SharedString = clock.unwrap_or_else(|| word.to_string()).into();
         RowView {
             key: AgentKey::Coordinator,
-            name: name.into(),
+            name: name.clone().into(),
             busy: status.is_busy(),
             task: None,
             task_color: paint::color(palette.muted_fg),
@@ -473,8 +470,8 @@ impl AgentList {
             paint::color(palette.muted_fg)
         };
         let aria = format!(
-            "lane {}, {word}{}{}",
-            row.n,
+            "{}, {word}{}{}",
+            key.name(self.swarm),
             match &task {
                 Some(task) => format!(", {task}"),
                 None => String::new(),
@@ -486,7 +483,7 @@ impl AgentList {
         );
         RowView {
             key,
-            name: format!("lane {}", row.n).into(),
+            name: key.name(self.swarm).into(),
             busy: row.is_busy(),
             task: task.map(SharedString::from),
             task_color,
@@ -538,7 +535,7 @@ impl AgentList {
             .cursor_default()
             .group_hover("lane", |stop| stop.visible())
             .hover(move |stop| stop.text_color(paint::color(palette.destructive)))
-            .aria_label(format!("Stop lane {lane}"))
+            .aria_label(format!("Stop Lane {lane}"))
             .on_click(cx.listener(move |_, _, _, cx| {
                 // A click on the button is not a click on the row: the row must not also
                 // select the lane the reader is stopping.
@@ -1109,7 +1106,7 @@ mod tests {
                     .unwrap_or_default()
                     .to_string();
                 assert!(
-                    aria.contains(&format!("lane {n}")),
+                    aria.contains(&format!("Lane {n}")),
                     "lane {n} should name itself: {aria}"
                 );
                 assert!(
@@ -1483,7 +1480,7 @@ mod tests {
                 .label()
                 .unwrap_or_default()
                 .to_string();
-            assert!(row.starts_with("lane 2, idle"), "{row}");
+            assert!(row.starts_with("Lane 2, idle"), "{row}");
         });
     }
 
@@ -1798,7 +1795,7 @@ mod tests {
             window.render_frame(cx);
             assert_eq!(
                 window.find(row_id(AgentKey::Coordinator)).label(),
-                Some("coordinator, idle"),
+                Some("Coordinator, idle"),
                 "a swarm's first row is its coordinator"
             );
             assert!(
@@ -1900,7 +1897,7 @@ mod tests {
                 .label()
                 .unwrap_or_default()
                 .to_string();
-            assert_eq!(main, "coordinator, idle");
+            assert_eq!(main, "Coordinator, idle");
             assert!(
                 window.try_find(badge_id(AgentKey::Coordinator)).is_none(),
                 "no badge while the stream is up"
@@ -1915,7 +1912,7 @@ mod tests {
                 .label()
                 .unwrap_or_default()
                 .to_string();
-            assert_eq!(main, "coordinator, running");
+            assert_eq!(main, "Coordinator, running");
             assert!(window.find(badge_id(AgentKey::Coordinator)).visible());
             // The state keeps its cell: the badge is added after it, not instead.
             assert!(window.find(state_id(AgentKey::Coordinator)).visible());
@@ -1969,7 +1966,7 @@ mod tests {
                 .label()
                 .unwrap_or_default()
                 .to_string();
-            assert_eq!(main, "coordinator, running, step 41s");
+            assert_eq!(main, "Coordinator, running, step 41s");
 
             // A compaction is work too.
             f.list.update(cx, |list, cx| {
@@ -2004,7 +2001,7 @@ mod tests {
                 .label()
                 .unwrap_or_default()
                 .to_string();
-            assert_eq!(main, "coordinator, running, step 0s");
+            assert_eq!(main, "Coordinator, running, step 0s");
         });
     }
 
@@ -2043,7 +2040,7 @@ mod tests {
         let tooltip = lane_tooltip(&row, None, NOW);
         // Folded for the tooltip's width, so the checks ignore where the line breaks land.
         let flat = tooltip.replace('\n', " ");
-        assert!(flat.starts_with("lane 2  working · step 1m"), "{tooltip}");
+        assert!(flat.starts_with("Lane 2  working · step 1m"), "{tooltip}");
         assert!(
             flat.contains("task: build the readout segments"),
             "{tooltip}"

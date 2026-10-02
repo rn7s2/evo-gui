@@ -795,6 +795,10 @@ fn structured_lines_read_as_one_line_each(cx: &mut TestAppContext) {
             goal("e_3", "created", "ship the redesign"),
             run_outcome("e_4", "aborted"),
             report("e_5", 3),
+            item(json!({
+                "id": "e_6", "ts": 1, "kind": "human_action",
+                "action": "stop", "lanes": [2]
+            })),
         ]
     );
     cx.update(|window, cx| window.render_frame(cx));
@@ -820,6 +824,11 @@ fn structured_lines_read_as_one_line_each(cx: &mut TestAppContext) {
                 .find(row_id("transcript-report-heading", "e_5"))
                 .label(),
             Some("Lane 3 report")
+        );
+        // A person stopping a lane names it as a name: `Stopped Lane 2`.
+        assert_eq!(
+            window.find(row_id("transcript-action", "e_6")).label(),
+            Some("Stopped Lane 2")
         );
         // A structured line is not a turn and opens none.
         assert!(window.try_find(("transcript-turn", 1u64)).is_none());
@@ -1467,7 +1476,7 @@ fn a_tool_calls_sentence_comes_from_its_arguments() {
         "lane": 5,
         "task": "Lower-case the collapsible captions"
     }));
-    assert_eq!(target, "lane 5");
+    assert_eq!(target, "Lane 5");
     assert_eq!(summary, "Lower-case the collapsible captions");
 
     // A command: the command is what it was aimed at, and there is nothing else

@@ -4657,7 +4657,7 @@ mod tests {
             f.set_catalog(cx);
             let state = state_with(&["model", "thinking"]);
             f.composer.update(cx, |composer, cx| {
-                composer.set_agent(&state, "lane 3", false, cx)
+                composer.set_agent(&state, "Lane 3", false, cx)
             });
             window.render_frame(cx);
             window.click(chip_id("model"), cx);
@@ -4697,7 +4697,7 @@ mod tests {
         f.act(cx, |window, cx| {
             let state = state_with(&["model", "thinking", "context", "cache_stats"]);
             f.composer.update(cx, |composer, cx| {
-                composer.set_agent(&state, "lane 1", false, cx)
+                composer.set_agent(&state, "Lane 1", false, cx)
             });
             window.render_frame(cx);
             let model = window.find(chip_id("model"));

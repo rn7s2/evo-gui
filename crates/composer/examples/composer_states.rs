@@ -568,7 +568,7 @@ fn main() {
             let composer = composer_of(cx, page);
             cx.update(|cx| {
                 composer.update(cx, |composer, cx| {
-                    composer.set_agent(&state(false, "stub-a"), "lane 1", false, cx)
+                    composer.set_agent(&state(false, "stub-a"), "Lane 1", false, cx)
                 })
             });
             click(cx, window, "composer-chip-model");

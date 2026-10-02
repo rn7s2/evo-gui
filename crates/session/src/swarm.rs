@@ -149,8 +149,11 @@ impl LaneRow {
 
     /// The lane as the swarm's own list writes it (`swarm/tools.lisp`'s
     /// `lane-status-line`), for a tooltip, plus what only the new topic carries.
+    ///
+    /// The name is the one the column's rows and the band call the lane — `Lane 2` — not
+    /// the swarm's own lower-case spelling of it.
     pub fn tooltip(&self, now_millis: u64) -> String {
-        let mut line = format!("lane {}  {}", self.n, self.state.to_lowercase());
+        let mut line = format!("Lane {}  {}", self.n, self.state.to_lowercase());
         if let Some(clock) = self.step_clock(now_millis) {
             line.push_str(&format!(" · step {clock}"));
         }
