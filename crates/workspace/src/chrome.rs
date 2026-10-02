@@ -2188,7 +2188,10 @@ mod tests {
             before,
             "app.json is untouched by a switch"
         );
-        assert!(!before.contains("use_swarm"), "and never carried one: {before}");
+        assert!(
+            !before.contains("use_swarm"),
+            "and never carried one: {before}"
+        );
     }
 
     /// The program a page's own launch would be: the plan its controls add up to, put
