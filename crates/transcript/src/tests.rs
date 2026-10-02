@@ -4042,3 +4042,72 @@ fn the_list_is_the_record_under_a_storm_of_live_ops(cx: &mut TestAppContext) {
         in_step(&view, &record, &when, cx);
     }
 }
+
+// --- what the view declined, and why it is counted ------------------------------------
+
+/// A notice the server itself does not keep (`durable: false`): a line about the
+/// machine, said again at every boot, and not part of the conversation.
+fn ephemeral_notice(id: &str) -> Item {
+    item(json!({
+        "id": id, "ts": 1, "kind": "notice", "severity": "info",
+        "text": "session ready", "source": "swarm", "durable": false
+    }))
+}
+
+/// The record *plus* the items the view declined is the topic's own list — that is the
+/// invariant the tab holds the two lists to (`TabContent::hold_the_record_to_the_topic`),
+/// and it only holds if a declined item is counted rather than forgotten.
+#[gpui_kit::test]
+fn a_notice_the_server_does_not_keep_is_counted_not_just_dropped(cx: &mut TestAppContext) {
+    let (view, cx) = open_in(cx, 1000., vec![user("e_1", "hi")]);
+    let declined = |cx: &gpui_kit::VisualTestContext| cx.read(|cx| view.read(cx).declined(cx));
+    let held = |cx: &gpui_kit::VisualTestContext| cx.read(|cx| view.read(cx).items(cx).len());
+    assert_eq!((held(cx), declined(cx)), (1, 0), "nothing declined yet");
+
+    // A durable notice *is* the record: it is a row, and it is not counted as declined.
+    view.update(cx, |view, cx| {
+        view.upsert(notice("n_1", "info", "the swarm started"), cx);
+    });
+    assert_eq!((held(cx), declined(cx)), (2, 0));
+
+    // An ephemeral one is not a row — and is counted, which is what makes the two
+    // lists comparable at all.
+    view.update(cx, |view, cx| {
+        view.upsert(ephemeral_notice("n_2"), cx);
+    });
+    assert_eq!((held(cx), declined(cx)), (2, 1), "declined, and said so");
+
+    // Offered again — a patch for the same notice, which the stream does send — it is
+    // still the same one item.
+    view.update(cx, |view, cx| {
+        view.upsert(ephemeral_notice("n_2"), cx);
+    });
+    assert_eq!((held(cx), declined(cx)), (2, 1), "counted once");
+
+    // A record replaced outright re-counts from what it was given, and an item a page
+    // brings in front of the reader is counted the same way.
+    view.update(cx, |view, cx| {
+        view.replace(vec![user("e_1", "hi"), ephemeral_notice("n_3")], cx);
+    });
+    assert_eq!(
+        (held(cx), declined(cx)),
+        (1, 1),
+        "re-counted from the topic"
+    );
+    view.update(cx, |view, cx| {
+        view.prepend(vec![ephemeral_notice("n_4")], cx);
+    });
+    assert_eq!((held(cx), declined(cx)), (1, 2), "a page is counted too");
+
+    // And an item the topic no longer holds leaves the count with it.
+    view.update(cx, |view, cx| {
+        view.remove("n_3", cx);
+        view.remove("n_4", cx);
+    });
+    assert_eq!((held(cx), declined(cx)), (1, 0), "gone is gone");
+
+    // A view nobody has told holds nothing and declined nothing: the two lists agree
+    // at the start as well as after every op.
+    view.update(cx, |view, cx| view.clear(cx));
+    assert_eq!((held(cx), declined(cx)), (0, 0));
+}
