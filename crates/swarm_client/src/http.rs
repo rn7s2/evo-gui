@@ -53,6 +53,32 @@ pub fn is_loopback(host: &str) -> bool {
     }
 }
 
+/// How much patience a body of `bytes` bytes buys, on top of the base timeout — a
+/// request is not the only thing on this machine's clock, and the server's own
+/// work is not the client's to hurry.
+///
+/// A turn carrying a pasted picture costs the server far more than its size:
+/// measured 2026-10-02 against `/usr/local/bin/evo-agent`, a turn with a 314 KB
+/// PNG (419 KB of base64) was *answered* 8.7 s after the request and one with a
+/// 640 KB PNG (854 KB of base64, the payload the journal held) after 36 s — while
+/// a body of the same 854 KB made of words was answered in 41 ms. Twice the
+/// picture, four times the wait: the cost is the server's handling of the base64
+/// image, not the transport. The base 30 s patience is therefore shorter than the
+/// request itself for one pasted screenshot, and a client that gives up there
+/// reports a refusal for a turn the session has already taken — which is how a
+/// reader ends up sending the same picture three times.
+///
+/// The model is deliberately crude — the body's size at a rate under any pace
+/// measured here, capped so that a request cannot be held open all day. It is a
+/// deadline, not a delay: a send that is answered in 36 s is shown in 36 s, and
+/// the rest of the patience is only what a wedged server would have used.
+const BODY_RATE_FLOOR: u64 = 8 * 1024;
+
+/// The most extra patience one body may earn, whatever it carries. The largest
+/// picture this server will take is about 1.5 MB of base64 (past ~2 MB it refuses
+/// the body outright), which its own rate of growth puts under four minutes.
+const BODY_PATIENCE_CAP: Duration = Duration::from_secs(240);
+
 /// An HTTP client bound to one server.
 #[derive(Clone, Debug)]
 pub struct HttpClient {
@@ -133,12 +159,24 @@ impl HttpClient {
         Ok(SocketAddr::new(ip, self.port))
     }
 
+    /// How long a request may take, body and reply together: the base patience
+    /// plus what a body of `body` bytes plausibly needs ([`BODY_RATE_FLOOR`],
+    /// capped by [`BODY_PATIENCE_CAP`]).
+    ///
+    /// This is the patience for both ends of one request, not only for its reply:
+    /// a body larger than the socket's buffers is written as the server drains it,
+    /// so a slow server can stall the write as well as the answer.
+    pub fn patience_for_body(&self, body: usize) -> Duration {
+        let extra = Duration::from_secs(body as u64 / BODY_RATE_FLOOR);
+        self.timeout + extra.min(BODY_PATIENCE_CAP)
+    }
+
     fn connect(&self, read_timeout: Duration) -> Result<TcpStream> {
         let addr = self.socket_addr()?;
         let stream = TcpStream::connect_timeout(&addr, self.timeout.min(Duration::from_secs(5)))?;
         stream.set_nodelay(true)?;
         stream.set_read_timeout(Some(read_timeout))?;
-        stream.set_write_timeout(Some(self.timeout))?;
+        stream.set_write_timeout(Some(read_timeout))?;
         Ok(stream)
     }
 
@@ -147,7 +185,7 @@ impl HttpClient {
         stream: &mut TcpStream,
         method: &str,
         path: &str,
-        body: Option<&Value>,
+        payload: Option<&[u8]>,
         accept_sse: bool,
     ) -> Result<()> {
         let host = if self.host.contains(':') && !self.host.starts_with('[') {
@@ -162,21 +200,18 @@ impl HttpClient {
         if accept_sse {
             head.push_str("Accept: text/event-stream\r\n");
         }
-        let payload = match body {
-            Some(value) => {
-                let text = serde_json::to_vec(value)?;
-                head.push_str(&format!(
-                    "Content-Type: application/json\r\nContent-Length: {}\r\n",
-                    text.len()
-                ));
-                text
-            }
-            None => Vec::new(),
-        };
+        if let Some(payload) = payload {
+            head.push_str(&format!(
+                "Content-Type: application/json\r\nContent-Length: {}\r\n",
+                payload.len()
+            ));
+        }
         head.push_str("\r\n");
         stream.write_all(head.as_bytes())?;
-        if !payload.is_empty() {
-            stream.write_all(&payload)?;
+        if let Some(payload) = payload {
+            if !payload.is_empty() {
+                stream.write_all(payload)?;
+            }
         }
         stream.flush()?;
         Ok(())
@@ -184,9 +219,10 @@ impl HttpClient {
 
     /// One request, its whole reply read.
     pub fn request(&self, method: &str, path: &str, body: Option<&Value>) -> Result<HttpResponse> {
-        let timeout = self.timeout;
+        let payload = body.map(serde_json::to_vec).transpose()?;
+        let timeout = self.patience_for_body(payload.as_ref().map_or(0, Vec::len));
         let mut stream = self.connect(timeout)?;
-        self.write_request(&mut stream, method, path, body, false)?;
+        self.write_request(&mut stream, method, path, payload.as_deref(), false)?;
         let mut reader = BufReader::new(stream);
         let (status, headers) = read_head(&mut reader, timeout)?;
         let body = read_body(&mut reader, &headers)?;
@@ -390,5 +426,41 @@ fn read_chunked(reader: &mut impl BufRead) -> Result<Vec<u8>> {
         body.extend_from_slice(&chunk);
         let mut crlf = [0u8; 2];
         let _ = reader.read_exact(&mut crlf);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// §5.5: a POST body is not free. `serve` reads one a few kilobytes a second,
+    /// so the reply to a turn that carries a screenshot's base64 is tens of
+    /// seconds behind its request — measured: 419 KB of base64 answered in
+    /// 8.7 s, 854 KB in 35.7 s — and the base patience alone calls that a
+    /// failure. The patience therefore grows with the body, and stops growing
+    /// where a request would otherwise be held open indefinitely.
+    #[test]
+    fn a_bigger_body_buys_more_patience_with_a_ceiling() {
+        let http = HttpClient::loopback(8421, Token::new("t"));
+        let base = http.patience_for_body(0);
+        assert_eq!(base, Duration::from_secs(30), "nothing to read: the base");
+        assert_eq!(base, http.patience_for_body(1024), "a body of nothing");
+
+        // The payload the journal showed: 640 KB of PNG is 854 KB of base64, which
+        // the server answered 35.7 s in.
+        let pasted = http.patience_for_body(854 * 1024);
+        assert!(
+            pasted >= Duration::from_secs(30 + 90),
+            "a pasted screenshot waits well past the 36 s the server takes: {pasted:?}"
+        );
+
+        // Monotone, and capped: a body past the cap earns no more patience.
+        assert!(http.patience_for_body(100 * 1024) < http.patience_for_body(200 * 1024));
+        let huge = http.patience_for_body(64 * 1024 * 1024);
+        assert_eq!(
+            huge,
+            base + BODY_PATIENCE_CAP,
+            "the cap is the cap: {huge:?}"
+        );
     }
 }

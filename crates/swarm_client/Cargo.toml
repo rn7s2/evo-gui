@@ -17,6 +17,9 @@ async-channel = "2"
 libc = "0.2"
 
 [dev-dependencies]
+# The real-binary test sends a body the size of a pasted screenshot: the base64 an
+# image travels as is the same encoder `session` uses.
+base64 = { workspace = true }
 # Features are unified for the test build, which turns `test-harness` on for
 # `cargo test -p swarm_client` without a plain dependent ever compiling it.
 swarm_client = { path = ".", features = ["test-harness"] }

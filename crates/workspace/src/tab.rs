@@ -94,7 +94,21 @@ impl NoticeTone {
 /// The decision is the server's, not ours: `busy` and `not_quiescent` are the
 /// server saying it cannot take this now — dim, not a mistake — and every other
 /// code is a failure carrying the reply's own words.
+///
+/// One failure is not the server's at all, and not a refusal: a request the server
+/// never answered. `tab_engine` marks that one in the reply's own `detail` (it is
+/// the only thing that knows the answer was lost rather than refused), and it reads
+/// dim for the same reason `busy` does — nothing was refused, so nothing is shown
+/// as having failed to be taken. See `tab_engine::engine::lost_reply`.
 pub(crate) fn notice_tone(error: &OpError) -> NoticeTone {
+    if error
+        .detail
+        .get("outcome")
+        .and_then(serde_json::Value::as_str)
+        == Some("unknown")
+    {
+        return NoticeTone::Dim;
+    }
     match error.code {
         ErrorCode::Busy | ErrorCode::NotQuiescent => NoticeTone::Dim,
         _ => NoticeTone::Error,
@@ -1587,6 +1601,7 @@ impl TabContent {
                     view.upsert(item, cx);
                 }
             });
+            self.hold_the_record_to_the_topic(agent, &view, cx);
         }
 
         // The todos of the selected agent are the composer's: the design puts the
@@ -1596,6 +1611,50 @@ impl TabContent {
         // The lane column takes the same facts, on the same batch (§7.3).
         self.sync_agents(cx);
         cx.notify();
+    }
+
+    /// Hold one agent's transcript to the topic it mirrors.
+    ///
+    /// The list is exactly as tall as the view *was told* it is, so a view that is
+    /// behind its topic — an op the model took and the view never saw, a splice the
+    /// list mislaid, a record built from a stale read — is invisible from the
+    /// outside: the transcript draws what it holds, and it holds what it was told.
+    /// That is a reader looking at a conversation that has ended while the session
+    /// goes on, and the newest rows are the ones missing.
+    ///
+    /// So the two are held to each other on every batch, which costs two numbers:
+    /// the record plus the items the view declined (a notice the server itself does
+    /// not keep) is the topic's own list. A disagreement is said once on stderr —
+    /// it is a bug in this client, and nobody watching the window can do anything
+    /// about it — and settled by re-reading the topic, which is what "the view is
+    /// behind" means. The check cannot loop: a `replace` from the topic is the
+    /// topic's own list, declined and all.
+    fn hold_the_record_to_the_topic(
+        &mut self,
+        agent: AgentKey,
+        view: &Entity<TranscriptView>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(topic_len) = self.live.as_ref().map(|live| live.model.items(agent).len()) else {
+            return;
+        };
+        let (held, declined) = {
+            let view = view.read(cx);
+            (view.items(cx).len(), view.declined(cx))
+        };
+        if held + declined == topic_len {
+            return;
+        }
+        eprintln!(
+            "evo-desktop: {agent:?}'s transcript holds {held} item(s) and declined \
+             {declined}, while its topic has {topic_len}: re-reading the topic"
+        );
+        let items = self
+            .live
+            .as_ref()
+            .map(|live| live.model.items(agent).to_vec())
+            .unwrap_or_default();
+        view.update(cx, |view, cx| view.replace(items, cx));
     }
 
     /// Release one topic's transcript from "Loading earlier items…" (§5.4).
@@ -2944,6 +3003,20 @@ mod tests {
             notice_tone(&error(ErrorCode::Unknown, "who knows")),
             NoticeTone::Error
         );
+
+        // A lost reply is not a refusal: the tab's engine marks it in the reply's
+        // own detail, and it reads as a quiet line rather than as a failure.
+        let mut lost = error(
+            ErrorCode::Unknown,
+            "the server did not answer this send (io: Broken pipe)",
+        );
+        lost.detail = serde_json::json!({ "outcome": "unknown" });
+        assert_eq!(notice_tone(&lost), NoticeTone::Dim);
+        // While the same code from the server itself, with its own detail, is still
+        // a failure: only the marker reads quiet.
+        let mut server_said = error(ErrorCode::Unknown, "who knows");
+        server_said.detail = serde_json::json!({ "field": "objective" });
+        assert_eq!(notice_tone(&server_said), NoticeTone::Error);
     }
 
     /// A refusal is the server's own words, always (§8): nothing is re-stated, and
@@ -2963,6 +3036,302 @@ mod tests {
         // A server that says nothing still gets a line rather than an empty row.
         let (text, _) = notice_words(&error(ErrorCode::OpFailed, ""));
         assert!(text.contains("OpFailed"), "{text}");
+    }
+
+    /// A tab with a live engine behind it: the fake server's ready file, its snapshot
+    /// and its stream, fed into the page's own model. `push` is what this drives, and
+    /// `push` is a tab's — a page with no server has no model to be fed.
+    fn live_tab(
+        cx: &mut TestAppContext,
+    ) -> (
+        AnyWindowHandle,
+        Entity<TabContent>,
+        swarm_client::harness::TempDir,
+    ) {
+        let dir = swarm_client::harness::TempDir::new("live-tab").expect("a temp dir");
+        let config = swarm_client::harness::fake_config(dir.path(), &[]).expect("a config");
+        let (engine, updates) = tab_engine::TabEngine::start(config);
+        let (window, tab) = running_tab(cx);
+        let tab_dir = dir.path().to_path_buf();
+        cx.update_window(window, |_, window, cx| {
+            tab.update(cx, |tab, cx| {
+                tab.attach(
+                    crate::launch::Started {
+                        engine,
+                        updates,
+                        tab_dir,
+                        store_id: store::paths::TabId::new(),
+                    },
+                    window,
+                    cx,
+                );
+            });
+        })
+        .expect("the tab's window");
+        (window, tab, dir)
+    }
+
+    /// Pump the UI thread until `done` holds, which is what a test waits with: the
+    /// engine is a real thread behind a real socket.
+    fn pump_until(
+        cx: &mut TestAppContext,
+        what: &str,
+        mut done: impl FnMut(&mut TestAppContext) -> bool,
+    ) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            cx.run_until_parked();
+            if done(cx) {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for {what}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// The ids one agent's transcript holds, in order.
+    fn held_ids(tab: &Entity<TabContent>, cx: &TestAppContext) -> Vec<String> {
+        cx.read(|cx| {
+            tab.read(cx)
+                .transcripts
+                .get(&AgentKey::Coordinator)
+                .map(|view| {
+                    view.read(cx)
+                        .items(cx)
+                        .iter()
+                        .map(|item| item.id.clone())
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+    }
+
+    /// A user turn, as the stream publishes one.
+    fn turn(id: &str, text: &str) -> serde_json::Value {
+        serde_json::json!({
+            "op": "item.add", "topic": "session", "after": null,
+            "item": {"id": id, "kind": "user", "ts": 1, "text": text, "status": "sent"}
+        })
+    }
+
+    /// §9.1: the transcript holds the topic, and a view that has fallen behind it is
+    /// re-read rather than left drawing a conversation that ended.
+    ///
+    /// A view that is *behind* its topic is invisible from the outside: the virtual
+    /// list is exactly as tall as the view was told it is, so the tab holds the two
+    /// to each other on every batch and re-reads the topic when they disagree. The
+    /// divergence here is staged by taking a row off the view behind the model's
+    /// back — the shape of an op the model took and the view never saw.
+    #[gpui_kit::test]
+    fn a_transcript_that_fell_behind_its_topic_is_re_read(cx: &mut TestAppContext) {
+        // The engine wakes the app's tasks from its own thread, which the
+        // deterministic scheduler has to allow.
+        cx.executor().allow_parking();
+        let (window, tab, dir) = live_tab(cx);
+        // The tab's own server is a process of its own: its ready file is where the
+        // test's control endpoints become reachable.
+        pump_until(cx, "the tab's server", |_| {
+            dir.path().join("ready.json").exists()
+        });
+        let control = swarm_client::harness::Control::attach(dir.path()).expect("the fake server");
+        // A tab's boot is one snapshot and then one stream from the cursor that
+        // snapshot was atomic at: an op published before that cursor is not this
+        // tab's to see. The fake records the stream's own request, which is the
+        // moment the cursor is fixed.
+        pump_until(cx, "the tab's own stream", |_| {
+            !control.requests_on("/stream").is_empty()
+        });
+
+        // Two turns on the stream: the page's model holds them and the transcript
+        // draws them.
+        control.emit(turn("e_1", "the first thing")).expect("emit");
+        control.emit(turn("e_2", "and the second")).expect("emit");
+        pump_until(cx, "the two turns in the transcript", |cx| {
+            held_ids(&tab, cx) == vec!["e_1".to_string(), "e_2".to_string()]
+        });
+
+        // The view loses a row the topic still holds: what a missed op leaves behind.
+        cx.update(|cx| {
+            tab.update(cx, |tab, cx| {
+                let view = tab
+                    .transcripts
+                    .get(&AgentKey::Coordinator)
+                    .cloned()
+                    .unwrap();
+                view.update(cx, |view, cx| {
+                    view.remove("e_1", cx);
+                });
+            });
+        });
+        assert_eq!(
+            held_ids(&tab, cx),
+            vec!["e_2".to_string()],
+            "the view is behind its topic, and the list is as tall as the view says"
+        );
+
+        // The next op from the session is one more push: the two are compared, the
+        // disagreement is said once, and the topic is re-read.
+        control.emit(turn("e_3", "and a third")).expect("emit");
+        pump_until(cx, "the topic re-read into the transcript", |cx| {
+            held_ids(&tab, cx) == vec!["e_1".to_string(), "e_2".to_string(), "e_3".to_string()]
+        });
+
+        // And the invariant holds where it did not: the topic's own list, item for
+        // item, with nothing left over.
+        let topic: Vec<String> = cx.read(|cx| {
+            tab.read(cx)
+                .live
+                .as_ref()
+                .map(|live| {
+                    live.model
+                        .items(AgentKey::Coordinator)
+                        .iter()
+                        .map(|item| item.id.clone())
+                        .collect()
+                })
+                .unwrap_or_default()
+        });
+        assert_eq!(held_ids(&tab, cx), topic);
+        cx.update_window(window, |_, window, cx| window.render_frame(cx))
+            .expect("the tab window");
+    }
+
+    /// The sequence the real journal shows at the moment a reader reported their
+    /// transcript going quiet, item for item: a long `bash` call in flight, the
+    /// reader's words sent into it (a queued row), the call aborted, the goal notice
+    /// the aborted run minted, the queued row taken and answered, and the turns after
+    /// it — every one of which the reader did not see
+    /// (`~/.evo/sessions/-Users-bytedance-coding-evo-gui/20261001T112141Z_…sexp`,
+    /// entries 1932-1943: the tool result with `:is-error t`, a `:source :goal`
+    /// notice, the user's own entry, then four more assistant and tool entries).
+    ///
+    /// Nothing in the region is unusual — no removal, no reset, no id that moves —
+    /// and this is the claim tested: the view takes every item of it, in the order
+    /// the session published them, with the reader's own turn among the newest rows.
+    #[gpui_kit::test]
+    fn the_journals_own_sequence_at_the_reported_freeze_is_ordinary(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (window, tab, dir) = live_tab(cx);
+        pump_until(cx, "the tab's server", |_| {
+            dir.path().join("ready.json").exists()
+        });
+        let control = swarm_client::harness::Control::attach(dir.path()).expect("the fake server");
+        pump_until(cx, "the tab's own stream", |_| {
+            !control.requests_on("/stream").is_empty()
+        });
+
+        // The call in flight when the reader typed — a bash row, running.
+        control
+            .emit(serde_json::json!({
+                "op": "item.add", "topic": "session", "after": null,
+                "item": {"id": "t_call", "kind": "tool", "ts": 1, "call_id": "toolu_01Ny",
+                         "name": "bash", "args": {"command": "cargo test"},
+                         "status": "running", "result": null, "parent": "e_before"}
+            }))
+            .expect("emit");
+        // The reader's words, queued into it: what the view publishes the moment they
+        // are typed, with the id the entry will keep.
+        control
+            .emit(serde_json::json!({
+                "op": "item.add", "topic": "session", "after": "t_call",
+                "item": {"id": "c292ff93", "kind": "user", "ts": 2,
+                         "text": "wait. evo-agent CI failing 7 checks. what are them? why?",
+                         "images": [], "status": "queued", "queue": "now"}
+            }))
+            .expect("emit");
+        // The abort: the same row, now an error, and the goal notice the run left.
+        control
+            .emit(serde_json::json!({
+                "op": "item.patch", "topic": "session", "id": "t_call",
+                "patch": {"status": "error",
+                          "result": {"text": "Tool error: Command aborted by user.",
+                                     "chars": 41, "truncated": false}}
+            }))
+            .expect("emit");
+        control
+            .emit(serde_json::json!({
+                "op": "item.add", "topic": "session", "after": "c292ff93",
+                "item": {"id": "06e743d2", "kind": "notice", "ts": 3, "severity": "info",
+                         "text": "◆ goal g-fb41: complete", "source": "goal", "durable": true}
+            }))
+            .expect("emit");
+        control
+            .emit(serde_json::json!({
+                "op": "item.add", "topic": "session", "after": "06e743d2",
+                "item": {"id": "ro_1", "kind": "run_outcome", "ts": 4, "outcome": "aborted",
+                         "error": null}
+            }))
+            .expect("emit");
+        // Taken, and answered: the row is the same one, sent.
+        control
+            .emit(serde_json::json!({
+                "op": "item.patch", "topic": "session", "id": "c292ff93",
+                "patch": {"status": "sent"}
+            }))
+            .expect("emit");
+        for (id, step) in [("e_answer", 5u64), ("t_after", 6), ("e_answer2", 7)] {
+            control
+                .emit(serde_json::json!({
+                    "op": "item.add", "topic": "session", "after": null,
+                    "item": {"id": id, "kind": "assistant", "ts": step,
+                             "text": "and the answer", "status": "final"}
+                }))
+                .expect("emit");
+        }
+
+        let wanted = vec![
+            "t_call".to_string(),
+            "c292ff93".to_string(),
+            "06e743d2".to_string(),
+            "ro_1".to_string(),
+            "e_answer".to_string(),
+            "t_after".to_string(),
+            "e_answer2".to_string(),
+        ];
+        pump_until(cx, "every item of the sequence in the transcript", |cx| {
+            held_ids(&tab, cx) == wanted
+        });
+
+        // And the reader's own turn is taken, not still queued: the row the sequence
+        // ends on is what the session says it is.
+        let sent = cx.read(|cx| {
+            tab.read(cx)
+                .transcripts
+                .get(&AgentKey::Coordinator)
+                .map(|view| {
+                    view.read(cx)
+                        .items(cx)
+                        .iter()
+                        .find(|item| item.id == "c292ff93")
+                        .map(|item| session::ItemKind::label(&item.kind).to_string())
+                })
+                .unwrap_or_default()
+        });
+        assert_eq!(sent.as_deref(), Some("user"));
+
+        // The reader is at the foot of the list, following it — which is what the
+        // reader who reported this saw (no "Jump to latest"), and what makes a row
+        // that never arrives a row they cannot see. That the newest row is *built* and
+        // above the fold when the view follows its tail is the transcript's own storm
+        // test's; this one is about the sequence that got here.
+        let (following, away) = cx.read(|cx| {
+            let view = tab
+                .read(cx)
+                .transcripts
+                .get(&AgentKey::Coordinator)
+                .cloned()
+                .expect("the coordinator's transcript");
+            (
+                view.read(cx).is_following_tail(cx),
+                view.read(cx).is_away_from_latest(cx),
+            )
+        });
+        assert!(following && !away, "the transcript is at its latest");
+        cx.update_window(window, |_, window, cx| window.render_frame(cx))
+            .expect("the tab window");
     }
 
     /// §4: a refused op is a line above the composer, in the reply's own words, and

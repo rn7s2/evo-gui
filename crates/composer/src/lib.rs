@@ -543,6 +543,28 @@ fn prepare_thumbnail(bytes: &[u8]) -> Option<Arc<RenderImage>> {
     )])))
 }
 
+/// Where a tile's picture comes from: the bytes a clipboard handed over, or a file the
+/// reader picked or dropped. Both are made the same way, on the same thread — a
+/// background one ([`Composer::make_thumbnails`]), never the frame that attached them.
+enum Thumbnail {
+    /// Image bytes with no file behind them — a clipboard paste.
+    Bytes(Vec<u8>),
+    /// An image file on disk, read here rather than in the update that dropped it: a
+    /// screenshot is megabytes, and a drop is a frame.
+    File(PathBuf),
+}
+
+impl Thumbnail {
+    /// The tile's picture, or `None` when it is not a picture this app can draw.
+    fn picture(self) -> Option<Arc<RenderImage>> {
+        let bytes = match self {
+            Thumbnail::Bytes(bytes) => bytes,
+            Thumbnail::File(path) => std::fs::read(path).ok()?,
+        };
+        prepare_thumbnail(&bytes)
+    }
+}
+
 /// Whether the path's own name ends in one of the five image extensions.
 fn has_image_extension(path: &Path) -> bool {
     path.extension()
@@ -1247,19 +1269,19 @@ impl Composer {
         if paths.is_empty() {
             return;
         }
+        let mut wanted = Vec::new();
         for path in paths {
             let name = name_of(&path);
             let kind = kind_of(&path);
-            // The picture's own bytes, read once: the tile is drawn on every keystroke,
-            // and the file is what the message will carry anyway.
-            let thumb = match &kind {
-                AttachmentKind::ImageFile(path) => std::fs::read(path)
-                    .ok()
-                    .and_then(|bytes| prepare_thumbnail(&bytes)),
-                _ => None,
-            };
-            self.push_attachment(name, kind, thumb);
+            let id = self.push_attachment(name, kind.clone());
+            // A picture's bytes are read and decoded off this update: a dropped
+            // screenshot is megabytes of PNG, and the frame that took the drop is the
+            // frame the reader is looking at ([`Composer::make_thumbnails`]).
+            if let AttachmentKind::ImageFile(path) = kind {
+                wanted.push((id, Thumbnail::File(path)));
+            }
         }
+        self.make_thumbnails(wanted, cx);
         cx.notify();
     }
 
@@ -1271,49 +1293,91 @@ impl Composer {
     /// mean. Nothing else in a clipboard is an attachment here — text is the input's own
     /// paste, untouched, and a copied file is what the picker and a drop are for.
     fn attach_pasted_image(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(image) = cx.read_from_clipboard().and_then(|item| {
+        // The clipboard is the platform's to read and this thread's to ask: the bytes
+        // themselves are copied out of the pasteboard once, and nothing else about them
+        // is done here.
+        let Some((format, bytes)) = cx.read_from_clipboard().and_then(|item| {
             item.entries().iter().find_map(|entry| match entry {
-                ClipboardEntry::Image(image) => Some(image.clone()),
+                ClipboardEntry::Image(image) => Some((image.format, image.bytes.clone())),
                 _ => None,
             })
         }) else {
             return false;
         };
-        let name = format!("{PASTED_NAME}.{}", image.format.extension());
-        let thumb = prepare_thumbnail(&image.bytes);
+        let name = format!("{PASTED_NAME}.{}", format.extension());
         let kind = AttachmentKind::ImageBytes {
-            media_type: image.format.mime_type().to_string(),
-            bytes: Arc::new(image.bytes.clone()),
+            media_type: format.mime_type().to_string(),
+            bytes: Arc::new(bytes.clone()),
         };
-        self.push_attachment(name, kind, thumb);
+        let id = self.push_attachment(name, kind);
+        self.make_thumbnails(vec![(id, Thumbnail::Bytes(bytes))], cx);
         cx.notify();
         true
     }
 
-    /// Put one attachment on the draft, giving it the next id: where all three ways of
-    /// adding one land — the picker, a paste, a drop — so the strip's own rule is written
-    /// once.
+    /// Make the pictures of the tiles just attached, off the UI thread, and put each on
+    /// its tile as it lands.
+    ///
+    /// Decoding a Retina screenshot and fitting it onto the tile is 30ms in a release
+    /// build and 560ms in a debug one (measured 2026-10-02, a 2538×1456 PNG: 21ms of
+    /// decode and 9ms of resize at release speed). A paste or a drop is a *keypress*:
+    /// done in the update that took it, that is the whole window — the box, the
+    /// transcript streaming beside it, the lane column's dots — stopping once per
+    /// picture, and three pasted screenshots are a second of the reader waiting on
+    /// their own keyboard. So the tile goes on the draft at once (it draws the file
+    /// glyph until its picture lands) and the decode runs on the background executor.
+    fn make_thumbnails(&mut self, wanted: Vec<(u64, Thumbnail)>, cx: &mut Context<Self>) {
+        if wanted.is_empty() {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            for (id, source) in wanted {
+                let picture = cx
+                    .background_executor()
+                    .spawn(async move { source.picture() });
+                let Some(picture) = picture.await else {
+                    continue;
+                };
+                let updated = this.update(cx, |composer, cx| {
+                    // The tile may be gone by the time its picture is ready — taken off
+                    // the strip, or sent with the message — and a thumbnail with no tile
+                    // is nothing to keep.
+                    if composer
+                        .attachments
+                        .iter()
+                        .any(|attachment| attachment.id == id)
+                    {
+                        composer.thumbs.insert(id, picture);
+                        cx.notify();
+                    }
+                });
+                if updated.is_err() {
+                    // The composer is gone: nothing is left to put a picture on.
+                    return;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Put one attachment on the draft, giving it the next id and answering with it:
+    /// where all three ways of adding one land — the picker, a paste, a drop — so the
+    /// strip's own rule is written once. Its picture, if it is one, is made by
+    /// [`Composer::make_thumbnails`] and put on the tile when it lands.
     ///
     /// It also unfolds the strip on the *first* attachment: the tiles are where a reader
     /// checks what they just picked, and where a file picked by mistake is taken back, so
     /// a strip that appeared shut would hide the answer to the dialog they had just
     /// answered. After that the strip is theirs — adding a fourth does not re-open one
     /// they folded.
-    fn push_attachment(
-        &mut self,
-        name: String,
-        kind: AttachmentKind,
-        thumb: Option<Arc<RenderImage>>,
-    ) {
+    fn push_attachment(&mut self, name: String, kind: AttachmentKind) -> u64 {
         let id = self.next_attachment;
         self.next_attachment += 1;
-        if let Some(thumb) = thumb {
-            self.thumbs.insert(id, thumb);
-        }
         if self.attachments.is_empty() {
             self.attachments_open = true;
         }
         self.attachments.push(Attachment { id, name, kind });
+        id
     }
 
     /// Take one attachment off the message — the tile's own `×`.
@@ -5342,6 +5406,73 @@ mod tests {
             assert!(
                 window.find("attachments-panel").visible(),
                 "the tiles are still there"
+            );
+        });
+    }
+
+    /// A Retina screenshot's own bytes, as macOS puts one on the clipboard: 2538×1456
+    /// (a 13" display captured whole) with the detail a screenshot of a terminal and an
+    /// editor has — about a megabyte of PNG.
+    fn retina_screenshot() -> Vec<u8> {
+        let image = image::RgbaImage::from_fn(2538, 1456, |x, y| {
+            let band = ((y / 18) % 3) as u8 * 40;
+            let ink = if y % 18 == 0 || (x + y) % 41 < 2 {
+                0xC0
+            } else {
+                band
+            };
+            image::Rgba([ink, ink.wrapping_add(band), 0xFF, 0xFF])
+        });
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .expect("encode a PNG");
+        bytes.into_inner()
+    }
+
+    /// How long a keypress that attaches one picture may take before the reader has
+    /// waited on the window: generous, because this is a loaded machine's frame budget
+    /// and not a stopwatch on one machine — and far below the crop a decoded screenshot
+    /// costs.
+    const PASTE_BUDGET: std::time::Duration = std::time::Duration::from_millis(120);
+
+    /// §5.5: `⌘V` with a *screenshot* on the clipboard is a keypress, and the frame it
+    /// happens in is not the picture's to hold: decoding 2538×1456 and fitting it onto
+    /// the tile is tens of milliseconds (30ms release, 560ms in this build, measured
+    /// 2026-10-02), and a reader who pastes a few of them waits on their own keyboard
+    /// for a second — the box, the transcript streaming beside it and the lanes column
+    /// all frozen while one tile's picture is made.
+    ///
+    /// The tile is therefore on the draft at once and gets its thumbnail from the
+    /// background executor: this asserts the paste itself, and that the picture lands.
+    #[gpui_kit::test]
+    fn a_pasted_retina_screenshot_does_not_stall_the_paste(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            window.click(f.input_frame(cx), cx);
+        });
+        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_image(
+            &gpui_kit::Image::from_bytes(gpui_kit::ImageFormat::Png, retina_screenshot()),
+        ));
+
+        let started = std::time::Instant::now();
+        f.act(cx, |window, cx| window.press("cmd-v", cx));
+        let pasted = started.elapsed();
+        assert!(
+            pasted < PASTE_BUDGET,
+            "the paste waited on the picture ({pasted:?}); the decode belongs off the \
+             frame that pasted it"
+        );
+        assert_eq!(f.attached(cx).len(), 1, "the picture is on the draft");
+
+        // And the picture itself arrives: the tile draws it once the worker is done.
+        cx.run_until_parked();
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window.try_find("attachment-picture-0").is_some(),
+                "the tile's picture is made off the frame and put on it"
             );
         });
     }

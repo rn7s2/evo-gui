@@ -16,6 +16,8 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
 use serde_json::json;
 use swarm_client::harness::{serving_argv, with_stub_home, TempDir};
 use swarm_client::{
@@ -340,6 +342,66 @@ fn the_real_server_refuses_the_way_the_contract_says() {
     // clean exit.
     let shutdown = server_shutdown(&client);
     assert!(shutdown.is_ok(), "{shutdown:?}");
+}
+
+/// §5.5: a turn carrying a pasted picture is *answered*, not timed out.
+///
+/// Measured 2026-10-02 against `/usr/local/bin/evo-agent`: a turn whose image is
+/// 314 KB of PNG (419 KB of base64) is answered 8.7 s in, and one of 640 KB (854 KB
+/// of base64 — the payload the journal held) 36 s in, while a body of the same size
+/// made of *words* is answered in 41 ms. The cost is the server's own handling of a
+/// base64 image, and it grows faster than the image: twice the picture, four times
+/// the wait. A client whose patience is the base 30 s therefore reports a *refusal*
+/// for a turn the session has already taken and journalled — which is how the same
+/// pasted picture ended up in the session three times. The patience is the body's
+/// own size since then (`HttpClient::patience_for_body`), and this is that, on the
+/// binary the app runs.
+///
+/// Slow on purpose — the answer lands most of a minute after the request — and run
+/// only where the other real-binary tests run (`EVO_AGENT_BIN` + a `stub_home.sh`
+/// home). The picture is a GIF by its magic and a filler: what the server charges
+/// for is how much base64 it decodes, and evo is told the media type by the
+/// client's own field.
+#[test]
+fn a_turn_carrying_a_screenshot_is_answered_not_timed_out() {
+    let Some((_dir, server)) = server("real-big-send") else {
+        return;
+    };
+    let client = server.client().clone();
+    client
+        .snapshot(&["session".to_owned()], Some(1))
+        .expect("a snapshot");
+
+    // 640 KB of picture: 854 KB of base64, the size the journal held for the
+    // screenshot that reported this.
+    let mut picture = b"GIF89a".to_vec();
+    picture.resize(640 * 1024, 0);
+    let data = BASE64.encode(&picture);
+    assert!(data.len() > 850 * 1024, "{}", data.len());
+
+    let started = std::time::Instant::now();
+    let reply = client
+        .op(
+            "input.send",
+            json!({
+                "text": "look at this",
+                "images": [{"name": "pasted image.gif", "media_type": "image/gif",
+                            "data": data}],
+                "queue": "now",
+                "topic": "session",
+            }),
+        )
+        .expect("the send is answered, not dropped");
+    let took = started.elapsed();
+    assert!(reply.ok, "{reply:?}");
+    assert!(
+        reply.result["item_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty()),
+        "and it names the turn it took: {reply:?}"
+    );
+    eprintln!("note: a 854 KB base64 picture was answered {took:?} after it was sent");
+    let _ = client.op("run.interrupt", json!({"scope": "session"}));
 }
 
 fn server_shutdown(client: &Client) -> Result<(), Error> {

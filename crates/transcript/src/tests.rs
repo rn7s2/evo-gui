@@ -3755,3 +3755,359 @@ fn a_zoom_keeps_the_readers_place(cx: &mut TestAppContext) {
     set_zoom(cx, 0.75);
     assert_eq!(top_row_in_pane(cx, &ids).as_deref(), Some(after.as_str()));
 }
+
+// --- the record under a storm of the ops a live session makes --------------------------
+
+/// The storm's own randomness: a deterministic walk, so a failing interleaving is the same
+/// one on every run — the ops are what matters here, not luck.
+struct Storm(u64);
+
+impl Storm {
+    fn step(&mut self) -> u64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        self.0 >> 33
+    }
+
+    fn pick(&mut self, n: usize) -> usize {
+        (self.step() % n as u64) as usize
+    }
+
+    fn one_in(&mut self, n: u64) -> bool {
+        self.step().is_multiple_of(n)
+    }
+}
+
+/// The record as the storm believes it is: the view's own copy is held to it.
+#[derive(Default)]
+struct Record {
+    items: Vec<Item>,
+}
+
+impl Record {
+    fn ids(&self) -> Vec<String> {
+        self.items.iter().map(|item| item.id.clone()).collect()
+    }
+
+    /// The view's `upsert`: by id, in place, or at the end when it is new.
+    fn add(&mut self, item: Item) {
+        match self.items.iter().position(|held| held.id == item.id) {
+            Some(index) => self.items[index] = item,
+            None => self.items.push(item),
+        }
+    }
+
+    /// The view's `prepend`: older items in front of what is held, each held once.
+    fn prepend(&mut self, older: Vec<Item>) {
+        let mut fresh: Vec<Item> = older
+            .into_iter()
+            .filter(|item| !self.items.iter().any(|held| held.id == item.id))
+            .collect();
+        if fresh.is_empty() {
+            return;
+        }
+        fresh.append(&mut self.items);
+        self.items = fresh;
+    }
+
+    fn remove(&mut self, id: &str) -> bool {
+        let before = self.items.len();
+        self.items.retain(|item| item.id != id);
+        self.items.len() != before
+    }
+}
+
+/// The list's own shape, the slots it was last told to hold, and the record the view
+/// holds: three numbers that have to be one row's worth of each other.
+fn shape(
+    view: &Entity<TranscriptView>,
+    cx: &gpui_kit::VisualTestContext,
+) -> (usize, crate::Slots, usize) {
+    cx.read(|cx| {
+        let view = view.read(cx);
+        (
+            view.list.item_count(),
+            view.slots,
+            view.data.read(cx).items.len(),
+        )
+    })
+}
+
+/// Everything a live session's ops have to leave true, after the frames they caused.
+fn in_step(
+    view: &Entity<TranscriptView>,
+    record: &Record,
+    when: &str,
+    cx: &mut gpui_kit::VisualTestContext,
+) {
+    let (held, slots, rows) = shape(view, cx);
+    let ids: Vec<String> = cx.read(|cx| {
+        view.read(cx)
+            .data
+            .read(cx)
+            .items
+            .iter()
+            .map(|i| i.id.clone())
+            .collect()
+    });
+    assert_eq!(
+        ids,
+        record.ids(),
+        "{when}: the view holds the ops' record, in order"
+    );
+    let (slots_now, pinned, newest) = cx.read(|cx| {
+        let view = view.read(cx);
+        (
+            view.slots_now(cx),
+            view.is_following_tail(cx),
+            view.data.read(cx).items.last().map(|item| item.id.clone()),
+        )
+    });
+    assert_eq!(
+        slots, slots_now,
+        "{when}: the list was told what the record is now"
+    );
+    assert_eq!(
+        slots.len(),
+        held,
+        "{when}: the list holds what it was told ({held} in the list, {slots:?} in the view)"
+    );
+    assert_eq!(
+        rows,
+        record.items.len(),
+        "{when}: the record is the ops' own"
+    );
+    if !pinned {
+        return;
+    }
+    let Some(newest) = newest else { return };
+    let built = cx.update(|window, _| {
+        window
+            .try_find(row_id("transcript-measure", &newest))
+            .is_some()
+    });
+    assert!(
+        built,
+        "{when}: following the tail, so the newest row ({newest}) is built"
+    );
+    let bottom = row_box(cx, row_id("transcript-measure", &newest)).bottom();
+    let pane = pane(cx).bottom();
+    // The design's own slack: within 24px of the foot counts as being at the latest.
+    assert!(
+        bottom <= pane + px(crate::pin::SLACK),
+        "{when}: following the tail, so the newest row is not below the fold ({bottom:?} against {pane:?})"
+    );
+}
+
+fn turn(id: &str) -> Item {
+    user(
+        id,
+        "a turn of its own, long enough that its row is a few lines tall and the whole \
+         list is taller than the pane it is read in",
+    )
+}
+
+/// A long session, driven the way a live one is: snapshots and `topic.reset`s, items
+/// streaming in and being rewritten, older pages spliced in above the reader, rows leaving
+/// the record, a queued turn being sent, a run ending in an abort — with the reader at the
+/// tail and, now and then, nudging the wheel the way a reader does.
+///
+/// Whatever the interleaving, the list holds the record, and a reader who is following the
+/// tail has the newest row on screen: a transcript that stops a row short of the record is
+/// a reader looking at a conversation that ended, while the session goes on.
+#[gpui_kit::test]
+fn the_list_is_the_record_under_a_storm_of_live_ops(cx: &mut TestAppContext) {
+    let mut storm = Storm(0x5eed_0001);
+    let opening: Vec<Item> = (0..30).map(|i| turn(&format!("e_{i:04}"))).collect();
+    let (view, cx) = open_in(cx, 1000., opening.clone());
+    frames(cx, 3);
+    let mut record = Record { items: opening };
+    let mut fresh = 30usize;
+    let mut waiting: Option<String> = None;
+
+    // A reader who is following the tail, past the first pane of the record.
+    assert!(cx.read(|cx| view.read(cx).is_following_tail(cx)));
+    assert!(gap(&view, cx) <= 0.5, "the fixture opens at its tail");
+
+    for round in 0..240 {
+        let when = format!("round {round}");
+        match storm.pick(12) {
+            // A new item arrives: the run's next assistant message, a tool row, a notice,
+            // a compaction, a goal.
+            0..=2 => {
+                fresh += 1;
+                let item = match storm.pick(5) {
+                    0 => turn(&format!("e_{fresh:04}")),
+                    1 => assistant(
+                        &format!("e_{fresh:04}"),
+                        "writing it out as it goes",
+                        "streaming",
+                    ),
+                    2 => tool(
+                        &format!("e_{fresh:04}"),
+                        "call_1",
+                        "bash",
+                        "the output of it",
+                        false,
+                    ),
+                    3 => notice(&format!("e_{fresh:04}"), "info", "session ready"),
+                    _ => compaction(&format!("e_{fresh:04}")),
+                };
+                view.update(cx, |view, cx| {
+                    view.upsert(item.clone(), cx);
+                });
+                record.add(item);
+            }
+            // A message already in the record is rewritten: text arriving token by token,
+            // a status flip, a tool row gaining its result.
+            3 | 4 => {
+                let index = storm.pick(record.items.len().max(1));
+                let id = record.items[index].id.clone();
+                let item = assistant(&id, "the rest of the answer, as it streams in", "streaming");
+                view.update(cx, |view, cx| {
+                    view.upsert(item.clone(), cx);
+                });
+                record.add(item);
+            }
+            // The turn the reader typed while the run was going: it is queued, then sent.
+            5 => {
+                fresh += 1;
+                let id = format!("q_{fresh:04}");
+                view.update(cx, |view, cx| {
+                    view.upsert(queued(&id, "sent while the run was going"), cx);
+                });
+                record.add(queued(&id, "sent while the run was going"));
+                waiting = Some(id);
+            }
+            6 => {
+                if let Some(id) = waiting.take() {
+                    let item = user(&id, "sent while the run was going");
+                    view.update(cx, |view, cx| {
+                        view.upsert(item.clone(), cx);
+                    });
+                    record.add(item);
+                }
+            }
+            // A row leaves the record.
+            7 => {
+                if record.items.len() > 4 {
+                    let index = storm.pick(record.items.len());
+                    let id = record.items[index].id.clone();
+                    view.update(cx, |view, cx| {
+                        view.remove(&id, cx);
+                    });
+                    record.remove(&id);
+                }
+            }
+            // An older page lands above the reader, as the scrollback walks back.
+            8 => {
+                let oldest = record.items.len();
+                let older: Vec<Item> = (oldest..oldest + 10)
+                    .map(|i| turn(&format!("old_{i:04}")))
+                    .collect();
+                view.update(cx, |view, cx| {
+                    view.set_history(true, true, cx);
+                    view.prepend(older.clone(), cx);
+                    view.set_history(true, false, cx);
+                });
+                record.prepend(older);
+            }
+            // The topic says what it always says about the history behind the record.
+            9 => {
+                let (has_older, loading) = (storm.one_in(2), storm.one_in(2));
+                view.update(cx, |view, cx| view.set_history(has_older, loading, cx));
+            }
+            // A `topic.reset`, or a fresh snapshot: the record is replaced outright.
+            10 => {
+                if storm.one_in(8) {
+                    let items: Vec<Item> = (0..20)
+                        .map(|i| turn(&format!("r_{fresh}_{i:03}")))
+                        .collect();
+                    view.update(cx, |view, cx| view.replace(items.clone(), cx));
+                    record = Record { items };
+                    waiting = None;
+                } else {
+                    view.update(cx, |view, cx| view.set_running(storm.one_in(2), cx));
+                }
+            }
+            // The reader nudges the wheel: still at the tail, and the window in which a
+            // scroll counts as theirs is open.
+            _ => {
+                wheel(cx, if storm.one_in(2) { 6. } else { -6. });
+            }
+        }
+        frames(cx, 1 + storm.pick(3));
+        in_step(&view, &record, &when, cx);
+    }
+}
+
+// --- what the view declined, and why it is counted ------------------------------------
+
+/// A notice the server itself does not keep (`durable: false`): a line about the
+/// machine, said again at every boot, and not part of the conversation.
+fn ephemeral_notice(id: &str) -> Item {
+    item(json!({
+        "id": id, "ts": 1, "kind": "notice", "severity": "info",
+        "text": "session ready", "source": "swarm", "durable": false
+    }))
+}
+
+/// The record *plus* the items the view declined is the topic's own list — that is the
+/// invariant the tab holds the two lists to (`TabContent::hold_the_record_to_the_topic`),
+/// and it only holds if a declined item is counted rather than forgotten.
+#[gpui_kit::test]
+fn a_notice_the_server_does_not_keep_is_counted_not_just_dropped(cx: &mut TestAppContext) {
+    let (view, cx) = open_in(cx, 1000., vec![user("e_1", "hi")]);
+    let declined = |cx: &gpui_kit::VisualTestContext| cx.read(|cx| view.read(cx).declined(cx));
+    let held = |cx: &gpui_kit::VisualTestContext| cx.read(|cx| view.read(cx).items(cx).len());
+    assert_eq!((held(cx), declined(cx)), (1, 0), "nothing declined yet");
+
+    // A durable notice *is* the record: it is a row, and it is not counted as declined.
+    view.update(cx, |view, cx| {
+        view.upsert(notice("n_1", "info", "the swarm started"), cx);
+    });
+    assert_eq!((held(cx), declined(cx)), (2, 0));
+
+    // An ephemeral one is not a row — and is counted, which is what makes the two
+    // lists comparable at all.
+    view.update(cx, |view, cx| {
+        view.upsert(ephemeral_notice("n_2"), cx);
+    });
+    assert_eq!((held(cx), declined(cx)), (2, 1), "declined, and said so");
+
+    // Offered again — a patch for the same notice, which the stream does send — it is
+    // still the same one item.
+    view.update(cx, |view, cx| {
+        view.upsert(ephemeral_notice("n_2"), cx);
+    });
+    assert_eq!((held(cx), declined(cx)), (2, 1), "counted once");
+
+    // A record replaced outright re-counts from what it was given, and an item a page
+    // brings in front of the reader is counted the same way.
+    view.update(cx, |view, cx| {
+        view.replace(vec![user("e_1", "hi"), ephemeral_notice("n_3")], cx);
+    });
+    assert_eq!(
+        (held(cx), declined(cx)),
+        (1, 1),
+        "re-counted from the topic"
+    );
+    view.update(cx, |view, cx| {
+        view.prepend(vec![ephemeral_notice("n_4")], cx);
+    });
+    assert_eq!((held(cx), declined(cx)), (1, 2), "a page is counted too");
+
+    // And an item the topic no longer holds leaves the count with it.
+    view.update(cx, |view, cx| {
+        view.remove("n_3", cx);
+        view.remove("n_4", cx);
+    });
+    assert_eq!((held(cx), declined(cx)), (1, 0), "gone is gone");
+
+    // A view nobody has told holds nothing and declined nothing: the two lists agree
+    // at the start as well as after every op.
+    view.update(cx, |view, cx| view.clear(cx));
+    assert_eq!((held(cx), declined(cx)), (0, 0));
+}

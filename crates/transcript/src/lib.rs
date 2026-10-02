@@ -173,6 +173,12 @@ pub(crate) struct TranscriptData {
     pub(crate) field_documents: HashMap<(ItemId, &'static str), Entity<TextViewState>>,
     /// Items the reader has opened.
     pub(crate) expanded: HashSet<ItemId>,
+    /// The ids of items the topic holds and this view is not the place for — a notice
+    /// the server itself does not keep (`is_part_of_the_record`). Counted rather than
+    /// forgotten so that the two lists can be held to each other: with them, the
+    /// record is the topic's own list, and a view that missed a row is a view that
+    /// says so ([`TranscriptView::declined`]).
+    pub(crate) declined: HashSet<ItemId>,
     /// The whole of a tool call's result, for the calls the server shortened: fetched with
     /// `GET /items/<id>` the first time the reader opens one.
     pub(crate) full_results: HashMap<ItemId, String>,
@@ -474,6 +480,7 @@ impl TranscriptView {
                 documents: HashMap::new(),
                 field_documents: HashMap::new(),
                 expanded: HashSet::new(),
+                declined: HashSet::new(),
                 full_results: HashMap::new(),
                 show_thinking: false,
                 running: false,
@@ -563,6 +570,13 @@ impl TranscriptView {
     /// The items currently shown, in order.
     pub fn items<'a>(&'a self, cx: &'a App) -> &'a [Item] {
         &self.data.read(cx).items
+    }
+
+    /// How many items this view has been offered and is not the place for: notices
+    /// the server itself does not keep. The record plus these is the topic's own
+    /// list, which is the invariant the tab holds the two to.
+    pub fn declined(&self, cx: &App) -> usize {
+        self.data.read(cx).declined.len()
     }
 
     /// Whether the agent is running. While it is, the transcript shows its working
@@ -751,7 +765,17 @@ impl TranscriptView {
         // A record replaced outright is not the one an earlier walk gave up on.
         self.barren = false;
         self.data.update(cx, |data, _| {
-            data.items = items.into_iter().filter(is_part_of_the_record).collect();
+            let mut kept = Vec::with_capacity(items.len());
+            let mut declined = HashSet::new();
+            for item in items {
+                if is_part_of_the_record(&item) {
+                    kept.push(item);
+                } else {
+                    declined.insert(item.id.clone());
+                }
+            }
+            data.items = kept;
+            data.declined = declined;
             data.reindex();
             data.retain_documents();
         });
@@ -773,11 +797,14 @@ impl TranscriptView {
     pub fn prepend(&mut self, items: Vec<Item>, cx: &mut Context<Self>) {
         let held = self.asking.is_some();
         let added = self.data.update(cx, |data, _| {
-            let fresh: Vec<Item> = items
-                .into_iter()
-                .filter(is_part_of_the_record)
-                .filter(|item| data.index_of(&item.id).is_none())
-                .collect();
+            let mut fresh: Vec<Item> = Vec::new();
+            for item in items {
+                if !is_part_of_the_record(&item) {
+                    data.declined.insert(item.id.clone());
+                } else if data.index_of(&item.id).is_none() {
+                    fresh.push(item);
+                }
+            }
             if fresh.is_empty() {
                 return 0;
             }
@@ -814,6 +841,10 @@ impl TranscriptView {
     /// head of every transcript.
     pub fn upsert(&mut self, item: Item, cx: &mut Context<Self>) -> bool {
         if !is_part_of_the_record(&item) {
+            // Not a row, but still one of the items the topic holds: counted so the
+            // record and the topic can be held to each other ([`Self::declined`]).
+            self.data
+                .update(cx, |data, _| data.declined.insert(item.id.clone()));
             return false;
         }
         let (changed, at, fresh) = self
@@ -868,9 +899,13 @@ impl TranscriptView {
         true
     }
 
-    /// Drop one item the topic no longer has.
+    /// Drop one item the topic no longer has. Returns whether a row left the record: an
+    /// item the view declined was never one.
     pub fn remove(&mut self, id: &str, cx: &mut Context<Self>) -> bool {
         let removed = self.data.update(cx, |data, _| {
+            // Whatever the topic held it as here goes with it: the row, or the count of
+            // a notice that was never a row.
+            data.declined.remove(id);
             let index = data.index_of(id)?;
             data.items.remove(index);
             data.reindex();
@@ -900,6 +935,7 @@ impl TranscriptView {
             data.index.clear();
             data.turns.clear();
             data.thinking = 0;
+            data.declined.clear();
             data.documents.clear();
             data.field_documents.clear();
             data.expanded.clear();
