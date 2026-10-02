@@ -27,6 +27,8 @@
 //! stream that cannot reconnect (checked against the process, once).
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -321,7 +323,7 @@ fn run(
     cancel: BootCancel,
 ) {
     let mut engine = Engine {
-        updates,
+        updates: Updates::new(updates),
         topics: tab_topics(),
     };
     engine.send(Update::Booting);
@@ -606,7 +608,7 @@ fn fetch_off_loop(engine: &Engine, client: &Client, fetch: Fetch) {
                     page,
                 },
             };
-            let _ = updates.send_blocking(message);
+            updates.send(message);
         });
 }
 
@@ -627,7 +629,7 @@ fn post(engine: &Engine, client: &Client, rid: String, request: OpRequest) {
                 Ok(reply) => reply,
                 Err(error) => lost_reply(&client, &rid, &op, &args, sent_at_ms, error),
             };
-            let _ = updates.send_blocking(Update::OpReply {
+            updates.send(Update::OpReply {
                 rid,
                 op,
                 reply: Box::new(reply),
@@ -749,15 +751,76 @@ fn now_millis() -> u64 {
         .unwrap_or_default()
 }
 
+/// The engine's end of the update channel, and the one thing to say when nobody is
+/// taking what it sends.
+///
+/// Every send here is fire-and-forget on purpose — a tab that fell behind must not
+/// hold the stream up — so an update nobody takes vanishes without a trace, and that
+/// is how a dead reader hides: the engine writes into a closed channel for the rest
+/// of the tab's life and nothing anywhere says so. The first one is said once, with
+/// what it was. It is a bug in this client, not something a reader can act on.
+#[derive(Clone)]
+struct Updates {
+    updates: Sender<Update>,
+    /// How many have been dropped, and whether that has been said.
+    dropped: Arc<AtomicUsize>,
+    said: Arc<AtomicBool>,
+}
+
+impl Updates {
+    fn new(updates: Sender<Update>) -> Updates {
+        Updates {
+            updates,
+            dropped: Arc::new(AtomicUsize::new(0)),
+            said: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Hand one over. `false` when there was nobody left to take it.
+    fn send(&self, update: Update) -> bool {
+        let update = match self.updates.send_blocking(update) {
+            Ok(()) => return true,
+            Err(error) => error.into_inner(),
+        };
+        let dropped = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
+        if !self.said.swap(true, Ordering::Relaxed) {
+            eprintln!(
+                "evo-desktop: the tab stopped taking updates — {dropped} dropped, the first was a {}",
+                what(&update)
+            );
+        }
+        false
+    }
+}
+
+/// One update, named for the one line said when it could not be handed over.
+fn what(update: &Update) -> &'static str {
+    match update {
+        Update::Booting => "boot",
+        Update::Ready { .. } => "ready",
+        Update::BootFailed { .. } => "boot failure",
+        Update::Snapshot { .. } => "snapshot",
+        Update::Op { .. } => "frame",
+        Update::Stream { .. } => "stream status",
+        Update::OpReply { .. } => "reply",
+        Update::ItemsBefore { .. } => "page of older items",
+        Update::Item { .. } => "item",
+        Update::Media { .. } => "image",
+        Update::FetchFailed { .. } => "failed read",
+        Update::ServerGone => "server gone",
+        Update::Exited { .. } => "exit",
+    }
+}
+
 /// The engine's own state: where updates go, and what to read.
 struct Engine {
-    updates: Sender<Update>,
+    updates: Updates,
     topics: Vec<String>,
 }
 
 impl Engine {
     fn send(&mut self, update: Update) -> bool {
-        self.updates.send_blocking(update).is_ok()
+        self.updates.send(update)
     }
 
     /// Hand a snapshot's topics over, one update each: the UI applies them topic by
@@ -927,5 +990,39 @@ mod tests {
             json!({"outcome": "unknown"}),
             "and marks the outcome as unknown, which is what the UI reads"
         );
+    }
+
+    /// A tab whose UI stopped taking updates is the one failure with no other
+    /// witness: every send is fire-and-forget, so the count and the one line are
+    /// all there is to see from the outside.
+    #[test]
+    fn updates_nobody_takes_are_counted_and_the_first_is_named() {
+        let (sender, receiver) = async_channel::bounded(1);
+        let updates = Updates::new(sender);
+        // The tab is gone: its receiver went with it.
+        drop(receiver);
+        assert!(!updates.send(Update::Booting));
+        assert!(!updates.send(Update::Snapshot {
+            topic: "session".into(),
+            body: json!({}),
+        }));
+        assert_eq!(updates.dropped.load(Ordering::Relaxed), 2);
+        assert!(
+            updates.said.load(Ordering::Relaxed),
+            "said once, and only once"
+        );
+
+        // The name is one line's worth, and it is the update's own.
+        assert_eq!(what(&Update::Booting), "boot");
+        assert_eq!(
+            what(&Update::Op {
+                topic: "session".into(),
+                op: Op::StreamReset {
+                    reason: "restarted".into()
+                },
+            }),
+            "frame"
+        );
+        assert_eq!(what(&Update::ServerGone), "server gone");
     }
 }
