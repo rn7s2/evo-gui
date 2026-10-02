@@ -142,7 +142,7 @@ out of there.
 │ Workers  Use swarm [●]  [ 6 ▾ ]                               │    all three rows
 ├───────────────────────────────────────────────────────────────┤
 │ History                                                       │
-│  ~/coding/foo       4 lanes · 2h ago · coordinator: gpt-…     │
+│  ~/coding/foo       4 lanes · 2h ago · Coordinator: gpt-…     │
 │  ~/coding/bar       6 lanes · yesterday                       │
 │  …                                                            │
 └───────────────────────────────────────────────────────────────┘
@@ -184,12 +184,12 @@ the agent header are the same height on the same surface, so the rule under them
 
 ```
 ┌──────────────────────┬────────────────────────────────────────────┐
-│ Lanes 2 of 6 busy    │ main  coordinator                          │
+│ Lanes 2 of 6 busy    │ Coordinator                                │
 ├──────────────────────┼────────────────────────────────────────────┤
-│ ● main   coordinator │        the agent's transcript              │
-│ ◐ lane 1 the view …  │                                            │
-│ ○ lane 2        idle │  ┌──────────────────────────────────────┐  │
-│ ✗ lane 3        down │  │ Todos 1/3         ⌃                  │  │
+│ ● Coordinator        │        the agent's transcript              │
+│ ◐ Lane 1 the view …  │                                            │
+│ ○ Lane 2        idle │  ┌──────────────────────────────────────┐  │
+│ ✗ Lane 3        down │  │ Todos 1/3         ⌃                  │  │
 │                      │  │ Message the coordinator…             │  │
 │ ~/coding/evo-gui     │  │ (Enter to send, Shift+Enter)         │  │
 │                      │  │ [stub-a medium] [ctx 48k/936k]       │  │
@@ -199,7 +199,7 @@ the agent header are the same height on the same surface, so the rule under them
 ```
 
 - **The lanes column** (left, 180–480 px, 260 at rest): the band says `Lanes` on one side and
-  `N of M busy` on the other, and under it `main` (the coordinator) comes first, then one row per
+  `N of M busy` on the other, and under it `Coordinator` comes first, then one row per
   lane at 32 px: a 9 px dot, the name, the task it was given (truncated, dim), and the state — or
   the step clock while it works — at the far end, right-aligned in tabular figures. In a
   single-agent session (§7.2) the band carries no `N of M busy` at all and the column is its one
@@ -210,7 +210,7 @@ the agent header are the same height on the same surface, so the rule under them
   row mixes 5% of the ink into it, selecting one 9% and the name goes medium. While the pointer is
   on a **working** lane's row that row offers a small **Stop** — `run.interrupt`, scope `lane`, the
   one thing a person may do to a lane. A click selects that agent, and `↓`/`↑` with `Home`/`End`
-  walks the rows. `main`'s state is the session's own — `idle`, `running`, `compacting`, or
+  walks the rows. `Coordinator`'s state is the session's own — `idle`, `running`, `compacting`, or
   `waiting on lanes` while the swarm holds it for them. All of it is the `swarm` topic's `lanes[]`
   (§4.3) plus the session's status; nothing is inferred — and a single agent's column is that
   session's status alone, its server publishing no lanes at all. The folder the swarm runs in is
@@ -221,8 +221,8 @@ the agent header are the same height on the same surface, so the rule under them
   and drag (20 / 28 / 44 px tall at 35 / 60 / 90%). A drag clamps the agent column to 180–480 px and
   leaves the conversation at least 420; a double-click puts the column back to 260, and the width is
   shared by every tab and kept in `app.json`.
-- **The conversation** (right, at least 420 px): the agent header — the name (`coordinator`, `Main`
-  in a single-agent session, or `lane N`), its task (dim, truncated), and, when that agent's
+- **The conversation** (right, at least 420 px): the agent header — the name (`Coordinator`, `Main`
+  in a single-agent session, or `Lane N`), its task (dim, truncated), and, when that agent's
   transcript carries thinking text, a quiet **Show thinking**
   toggle — then that agent's items — the coordinator's `session` topic, or that lane's `lane:N`
   topic. Assistant text is **rendered markdown that stays rendered while it

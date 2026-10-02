@@ -56,6 +56,20 @@ impl AgentKey {
             AgentKey::Coordinator => None,
         }
     }
+
+    /// What the UI calls this agent: a swarm's `Coordinator`, the one agent of a
+    /// single-agent session `Main`, and a lane `Lane N`.
+    ///
+    /// An agent's name, so it is capitalised wherever it is drawn — the lanes column's
+    /// rows, the band over the conversation, the composer's drawer — and the three say
+    /// it from here rather than from three of their own literals.
+    pub fn name(self, swarm: bool) -> String {
+        match self {
+            AgentKey::Coordinator if swarm => "Coordinator".to_string(),
+            AgentKey::Coordinator => "Main".to_string(),
+            AgentKey::Lane(n) => format!("Lane {n}"),
+        }
+    }
 }
 
 /// One item's change, as the UI's row views need it.

@@ -577,11 +577,9 @@ impl TabContent {
         let agent = self.selected_agent();
         // What the band calls the agent it is over: a swarm's coordinator, or the one
         // agent a single-agent session has — there is nobody to coordinate (§7.2).
-        let name = match agent {
-            AgentKey::Coordinator if self.swarm(cx) => SharedString::from("coordinator"),
-            AgentKey::Coordinator => SharedString::from("Main"),
-            AgentKey::Lane(n) => SharedString::from(format!("lane {n}")),
-        };
+        // `AgentKey::name` is where those names are written once, for this band, the
+        // lane column's rows and the composer's drawer alike.
+        let name = SharedString::from(agent.name(self.swarm(cx)));
         let task = self.header_task(agent);
         h_flex()
             .id("transcript-header")
@@ -600,6 +598,8 @@ impl TabContent {
                 // `.ws-head{font-size:14px}` with `.ws-agent-name{font-weight:500}` — the
                 // design's medium, which is `widgets::text::MEDIUM` in this font stack.
                 div()
+                    .id("transcript-agent-name")
+                    .aria_label(name.clone())
                     .font_weight(widgets::text::MEDIUM)
                     .text_size(px(14.))
                     .child(name),

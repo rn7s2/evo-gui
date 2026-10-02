@@ -2049,7 +2049,7 @@ const CARD_INNER_RADIUS: f32 = CARD_RADIUS - 1.;
 /// task, a prompt or a note looks like. Neither is invented: a call that names
 /// neither is drawn as its name alone.
 ///
-/// A `delegate` to lane 5 with a task reads `→ lane 5` and the task; a `bash` with
+/// A `delegate` to Lane 5 with a task reads `→ Lane 5` and the task; a `bash` with
 /// a command reads `→ make test` and nothing else, because that is all it was.
 pub(crate) fn tool_sentence(args: &Value) -> (String, String) {
     const WHERE: [&str; 9] = [
@@ -2071,7 +2071,7 @@ pub(crate) fn tool_sentence(args: &Value) -> (String, String) {
                 // A lane is named as the design names it; everything else is what
                 // the argument says.
                 target = if key == "lane" {
-                    format!("lane {value}")
+                    format!("Lane {value}")
                 } else {
                     value
                 };
@@ -2512,7 +2512,7 @@ fn report_row(
                 .child(
                     div()
                         .font_weight(FontWeight::SEMIBOLD)
-                        .child(format!("lane {}", report.lane)),
+                        .child(format!("Lane {}", report.lane)),
                 )
                 .child(div().text_color(palette.muted_foreground).child("report"))
                 .child(

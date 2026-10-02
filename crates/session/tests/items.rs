@@ -127,7 +127,7 @@ fn every_kind_of_item_parses_into_its_fields() {
         panic!("e_9 is a human action")
     };
     assert_eq!(action.action, "interrupt");
-    assert_eq!(action.lanes_label().as_deref(), Some("lane 2"));
+    assert_eq!(action.lanes_label().as_deref(), Some("Lane 2"));
 
     // A run's outcome is said in the run's own words.
     let ItemKind::RunOutcome(outcome) = &topic.item("e_12").unwrap().kind else {
@@ -161,7 +161,7 @@ fn one_line_of_an_item_says_what_it_is() {
     assert_eq!(summary("e_4"), "goal created");
     assert_eq!(summary("e_2"), "context · global-memory");
     assert_eq!(summary("e_8"), "command /lore");
-    assert_eq!(summary("e_9"), "interrupt lane 2");
+    assert_eq!(summary("e_9"), "interrupt Lane 2");
     assert_eq!(summary("e_5"), "lane 3 is down");
     assert_eq!(
         summary("e_10"),
