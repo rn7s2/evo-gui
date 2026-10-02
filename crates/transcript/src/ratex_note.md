@@ -27,6 +27,6 @@ literally outside ASCII — `α`, `×`, `→`, a typographic quote; write `\alph
 (an inline formula has a line's width, so keep a long one in its own `$$…$$`
 paragraph, which scrolls sideways when it is wider than the pane).
 
-Nothing inside fenced code, inline code, indented code or raw HTML is math, so a
-dollar sign in a code sample needs no escaping. A copy of a formula gives back
-the LaTeX you wrote.
+Code — fenced, inline, or indented — is never read as math, so a dollar sign in a
+code sample needs no escaping, and an HTML block is drawn as the markup it is. A
+copy of a formula gives back the LaTeX you wrote.
