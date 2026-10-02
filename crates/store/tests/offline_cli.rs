@@ -521,3 +521,33 @@ fn the_fixtures_are_the_contract_shapes() {
     );
     assert!(check["workers"].is_u64(), "check has no workers");
 }
+
+/// A one-off script of its own, made executable: what a test wants when the
+/// script — not the fixtures — is the point.
+fn script(name: &str, body: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = std::env::temp_dir().join(format!("store-script-{}-{name}.sh", std::process::id()));
+    fs::write(&path, body).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+/// A document larger than a pipe buffer still arrives (§9.4).
+///
+/// `check --json` prints every model the session has, and a child that fills a
+/// pipe nobody is draining blocks writing it — it would sit there until the bound
+/// ran out and come back as a timeout. Eight megabytes is far past any pipe
+/// buffer, so this fails the moment the two readers stop being there.
+#[test]
+fn a_document_bigger_than_a_pipe_still_arrives() {
+    const BYTES: usize = 8 * 1024 * 1024;
+    let bin = script(
+        "big",
+        &format!(
+            "#!/bin/sh\nprintf '{{\"blob\":\"'\nhead -c {BYTES} /dev/zero | tr '\\0' x\nprintf '\"}}'\n"
+        ),
+    );
+    let body = cli::run_json(&bin, &[]).unwrap();
+    assert_eq!(body["blob"].as_str().unwrap().len(), BYTES);
+    fs::remove_file(&bin).unwrap();
+}

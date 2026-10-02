@@ -158,9 +158,9 @@ pub fn parse(body: &Value) -> Vec<Session> {
     list.iter().filter_map(Session::from_json).collect()
 }
 
-/// Run `bin sessions --json …` and read the index.
+/// Run `bin sessions --json …` and read the index, within [`cli::SESSIONS_TIMEOUT`].
 pub fn fetch(bin: &Path, query: &SessionsQuery) -> Result<Vec<Session>, CliError> {
-    let body = cli::run_json(bin, &query.argv())?;
+    let body = cli::run_json_within(bin, &query.argv(), cli::SESSIONS_TIMEOUT)?;
     Ok(parse(&body))
 }
 

@@ -2275,10 +2275,19 @@ const CATALOG_STALE: &str = "Couldn't refresh the model list — using the last 
 ///
 /// The child's own stderr is not in the line: it is evidence a person can read in
 /// `app.log`, and it may quote a value this app has no business putting on screen.
+///
+/// A check that never *answered* is the exception, and says only what happened: `evo-swarm
+/// did not answer within 30s` is a line about the binary, and pointing at Settings would
+/// promise a fix Settings does not have. (The bound is the app's and the read is already
+/// stopped by the time the line is drawn — [`store::cli::PROBE_TIMEOUT`], §9.7.)
 fn check_failed(error: &CliError) -> Problem {
+    let message = match error {
+        CliError::TimedOut { .. } => error.summary(),
+        _ => format!("{} — fix it in Settings…", error.summary()),
+    };
     Problem {
         code: "check_failed".to_string(),
-        message: format!("{} — fix it in Settings…", error.summary()),
+        message,
     }
 }
 
@@ -3612,6 +3621,36 @@ mod tests {
             assert!(window.find("catalog-problem").visible());
             assert!(window.find(PROBLEMS_ID).visible());
         });
+    }
+
+    /// A check that never answered is a line about the read, not about a setting: what
+    /// happened is that the binary did not answer within its bound, and a sentence
+    /// promising a fix in Settings would promise one Settings does not have (§9.1).
+    #[test]
+    fn a_check_that_never_answered_does_not_point_at_settings() {
+        let timed_out = check_failed(&CliError::TimedOut {
+            bin: PathBuf::from("/usr/local/bin/evo-swarm"),
+            after: store::cli::PROBE_TIMEOUT,
+        });
+        assert_eq!(
+            timed_out.line(),
+            "/usr/local/bin/evo-swarm did not answer within 30s"
+        );
+        assert_eq!(timed_out.code, "check_failed");
+
+        // Everything else is what it was: the binary that could not run, and where a
+        // path is fixed.
+        let missing = check_failed(&CliError::NotFound {
+            bin: PathBuf::from("/usr/local/bin/evo-swarm"),
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "no such file"),
+        });
+        assert!(
+            missing
+                .line()
+                .starts_with("/usr/local/bin/evo-swarm could not be run — fix it in Settings…"),
+            "{}",
+            missing.line()
+        );
     }
 
     /// §2: a row resumes its session in the folder it ran in — and only a row the app had
