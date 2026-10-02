@@ -245,27 +245,30 @@ fn the_two_interrupt_scopes_a_person_has() {
     let client = server.client().clone();
     wait_for_lanes(&client, 2);
 
-    // §5.5/§7.4: stopping the swarm stops every lane; stopping one lane stops it.
+    // §5.5/§7.4: both scopes are accepted, and each names the lanes it *stopped*.
+    // Both lanes are idle here, so neither scope stopped anything: an idle lane's
+    // interrupt answers `[]`, and since evo-agent#106 the swarm no longer counts
+    // such a lane as stopped. A busy lane being named — and the idle one not — is
+    // proofs t10 (`t10_stop_swarm_names_only_busy_lanes`), which gives one lane
+    // work first; t05 has the coordinator told.
     let swarm_scope = client
         .op("run.interrupt", json!({"scope": "swarm"}))
         .unwrap();
     assert!(swarm_scope.ok, "{swarm_scope:?}");
-    let stopped = swarm_scope.result["interrupted"]
-        .as_array()
-        .expect("a list");
-    for n in 1..=2 {
-        assert!(
-            stopped
-                .iter()
-                .any(|name| name == &json!(format!("lane:{n}"))),
-            "{stopped:?}"
-        );
-    }
+    assert_eq!(
+        swarm_scope.result["interrupted"],
+        json!([]),
+        "idle lanes are not stopped lanes: {swarm_scope:?}"
+    );
     let lane_scope = client
         .op("run.interrupt", json!({"scope": "lane", "lane": 2}))
         .unwrap();
     assert!(lane_scope.ok, "{lane_scope:?}");
-    assert_eq!(lane_scope.result["interrupted"], json!(["lane:2"]));
+    assert_eq!(
+        lane_scope.result["interrupted"],
+        json!([]),
+        "an idle lane answers with nothing stopped: {lane_scope:?}"
+    );
 
     // §7.4 would have the interrupt leave a `human_action` item on the
     // coordinator's topic, so the coordinator is always told a person stopped it:

@@ -48,12 +48,20 @@ pub fn serving_argv(ready_file: &Path, extra: &[&str]) -> Vec<String> {
 ///
 /// `EVO_TEST_HOME` is a `scripts/stub_home.sh` directory; it becomes the child's
 /// `HOME`/`EVO_HOME` (`EVO_TEST_EVO_HOME` overrides the latter), and the
-/// variables that would tie the child to *our* evo session are dropped. Without
-/// `EVO_TEST_HOME` the config is returned as it was, so a test in a normal
-/// environment behaves as before.
+/// variables that would tie the child to *our* evo session are dropped.
+///
+/// There is no fallback to the real `HOME`: a server started there reads the
+/// person's own `init.lisp`, calls their own providers — real requests, real
+/// spend — and writes its sessions into their history. A test that reached a
+/// real binary without a stub home is stopped here, loudly, instead.
 pub fn with_stub_home(config: ServerConfig) -> ServerConfig {
     let Some(home) = std::env::var_os("EVO_TEST_HOME") else {
-        return config;
+        panic!(
+            "EVO_TEST_HOME is not set: a test against a real evo binary never runs in \
+             the real HOME (it would call your own providers and write your history). \
+             Start a stub home with `scripts/stub_home.sh start DIR` and set \
+             EVO_TEST_HOME=DIR"
+        );
     };
     let home = PathBuf::from(home);
     let evo_home = std::env::var_os("EVO_TEST_EVO_HOME")
@@ -105,7 +113,13 @@ pub fn fake_config(dir: &Path, extra: &[&str]) -> std::io::Result<ServerConfig> 
     }
     let borrowed: Vec<&str> = extra.iter().map(String::as_str).collect();
     let argv = serving_argv(&config.ready_file, &borrowed);
-    let mut config = with_stub_home(config.with_argv(argv));
+    // The fake needs no home at all; the real swarm, pointed at by EVO_SWARM_BIN,
+    // must never get the person's own (see `with_stub_home`).
+    let mut config = if real {
+        with_stub_home(config.with_argv(argv))
+    } else {
+        config.with_argv(argv)
+    };
     if real {
         config.shutdown_grace = STOP_PATIENCE;
         config.term_grace = Duration::from_secs(15);
