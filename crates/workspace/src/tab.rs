@@ -3199,6 +3199,141 @@ mod tests {
             .expect("the tab window");
     }
 
+    /// The sequence the real journal shows at the moment a reader reported their
+    /// transcript going quiet, item for item: a long `bash` call in flight, the
+    /// reader's words sent into it (a queued row), the call aborted, the goal notice
+    /// the aborted run minted, the queued row taken and answered, and the turns after
+    /// it — every one of which the reader did not see
+    /// (`~/.evo/sessions/-Users-bytedance-coding-evo-gui/20261001T112141Z_…sexp`,
+    /// entries 1932-1943: the tool result with `:is-error t`, a `:source :goal`
+    /// notice, the user's own entry, then four more assistant and tool entries).
+    ///
+    /// Nothing in the region is unusual — no removal, no reset, no id that moves —
+    /// and this is the claim tested: the view takes every item of it, in the order
+    /// the session published them, with the reader's own turn among the newest rows.
+    #[gpui_kit::test]
+    fn the_journals_own_sequence_at_the_reported_freeze_is_ordinary(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (window, tab, dir) = live_tab(cx);
+        pump_until(cx, "the tab's server", |_| {
+            dir.path().join("ready.json").exists()
+        });
+        let control = swarm_client::harness::Control::attach(dir.path()).expect("the fake server");
+        pump_until(cx, "the tab's own stream", |_| {
+            !control.requests_on("/stream").is_empty()
+        });
+
+        // The call in flight when the reader typed — a bash row, running.
+        control
+            .emit(serde_json::json!({
+                "op": "item.add", "topic": "session", "after": null,
+                "item": {"id": "t_call", "kind": "tool", "ts": 1, "call_id": "toolu_01Ny",
+                         "name": "bash", "args": {"command": "cargo test"},
+                         "status": "running", "result": null, "parent": "e_before"}
+            }))
+            .expect("emit");
+        // The reader's words, queued into it: what the view publishes the moment they
+        // are typed, with the id the entry will keep.
+        control
+            .emit(serde_json::json!({
+                "op": "item.add", "topic": "session", "after": "t_call",
+                "item": {"id": "c292ff93", "kind": "user", "ts": 2,
+                         "text": "wait. evo-agent CI failing 7 checks. what are them? why?",
+                         "images": [], "status": "queued", "queue": "now"}
+            }))
+            .expect("emit");
+        // The abort: the same row, now an error, and the goal notice the run left.
+        control
+            .emit(serde_json::json!({
+                "op": "item.patch", "topic": "session", "id": "t_call",
+                "patch": {"status": "error",
+                          "result": {"text": "Tool error: Command aborted by user.",
+                                     "chars": 41, "truncated": false}}
+            }))
+            .expect("emit");
+        control
+            .emit(serde_json::json!({
+                "op": "item.add", "topic": "session", "after": "c292ff93",
+                "item": {"id": "06e743d2", "kind": "notice", "ts": 3, "severity": "info",
+                         "text": "◆ goal g-fb41: complete", "source": "goal", "durable": true}
+            }))
+            .expect("emit");
+        control
+            .emit(serde_json::json!({
+                "op": "item.add", "topic": "session", "after": "06e743d2",
+                "item": {"id": "ro_1", "kind": "run_outcome", "ts": 4, "outcome": "aborted",
+                         "error": null}
+            }))
+            .expect("emit");
+        // Taken, and answered: the row is the same one, sent.
+        control
+            .emit(serde_json::json!({
+                "op": "item.patch", "topic": "session", "id": "c292ff93",
+                "patch": {"status": "sent"}
+            }))
+            .expect("emit");
+        for (id, step) in [("e_answer", 5u64), ("t_after", 6), ("e_answer2", 7)] {
+            control
+                .emit(serde_json::json!({
+                    "op": "item.add", "topic": "session", "after": null,
+                    "item": {"id": id, "kind": "assistant", "ts": step,
+                             "text": "and the answer", "status": "final"}
+                }))
+                .expect("emit");
+        }
+
+        let wanted = vec![
+            "t_call".to_string(),
+            "c292ff93".to_string(),
+            "06e743d2".to_string(),
+            "ro_1".to_string(),
+            "e_answer".to_string(),
+            "t_after".to_string(),
+            "e_answer2".to_string(),
+        ];
+        pump_until(cx, "every item of the sequence in the transcript", |cx| {
+            held_ids(&tab, cx) == wanted
+        });
+
+        // And the reader's own turn is taken, not still queued: the row the sequence
+        // ends on is what the session says it is.
+        let sent = cx.read(|cx| {
+            tab.read(cx)
+                .transcripts
+                .get(&AgentKey::Coordinator)
+                .map(|view| {
+                    view.read(cx)
+                        .items(cx)
+                        .iter()
+                        .find(|item| item.id == "c292ff93")
+                        .map(|item| session::ItemKind::label(&item.kind).to_string())
+                })
+                .unwrap_or_default()
+        });
+        assert_eq!(sent.as_deref(), Some("user"));
+
+        // The reader is at the foot of the list, following it — which is what the
+        // reader who reported this saw (no "Jump to latest"), and what makes a row
+        // that never arrives a row they cannot see. That the newest row is *built* and
+        // above the fold when the view follows its tail is the transcript's own storm
+        // test's; this one is about the sequence that got here.
+        let (following, away) = cx.read(|cx| {
+            let view = tab
+                .read(cx)
+                .transcripts
+                .get(&AgentKey::Coordinator)
+                .cloned()
+                .expect("the coordinator's transcript");
+            (
+                view.read(cx).is_following_tail(cx),
+                view.read(cx).is_away_from_latest(cx),
+            )
+        });
+        assert!(following && !away, "the transcript is at its latest");
+        cx.update_window(window, |_, window, cx| window.render_frame(cx))
+            .expect("the tab window");
+    }
+
     /// §4: a refused op is a line above the composer, in the reply's own words, and
     /// never a modal — the page keeps its place and the line leaves on its own.
     #[gpui_kit::test]
