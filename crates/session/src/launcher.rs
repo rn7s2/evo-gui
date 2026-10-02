@@ -420,11 +420,12 @@ fn effort_levels(model: &Value) -> Vec<String> {
 /// count and the history list.
 ///
 /// Every control opens on a **resolved** value (§7.2): all five from `check --json`, or
-/// from the catalog where the check has nothing to say (the two models), or — before a
-/// check has answered — from evo's own last fallback (the ladder's middle rung and
-/// [`DEFAULT_WORKERS`]). A value the launcher resolved is re-resolved whenever a document
-/// arrives — the check is newer than the catalog, and the catalog newer than nothing —
-/// while a control the person set themselves stays where they put it.
+/// from the catalog where the check has nothing to say (the two models, and the
+/// coordinator's own effort — its `default_thinking`), or — before either has answered —
+/// from evo's own last fallback (the ladder's middle rung and [`DEFAULT_WORKERS`]). A
+/// value the launcher resolved is re-resolved whenever a document arrives — the check is
+/// newer than the catalog, and the catalog newer than nothing — while a control the person
+/// set themselves stays where they put it.
 ///
 /// What a control *shows* and what a launch *passes* are two different things: only the
 /// controls the person set are flags ([`Launcher::plan`]), and the ones the launcher
@@ -441,6 +442,11 @@ pub struct Launcher {
     default_model: Option<(String, String)>,
     /// Every registration the last catalog listed.
     models: Vec<ModelOption>,
+    /// The level the last catalog says a fresh session of *this* program starts on
+    /// (`default_thinking`): the coordinator's own, resolved by evo, and what a single
+    /// agent has instead of a check's `thinking`. `None` on a program that predates the
+    /// field, and then nothing is resolved from it.
+    default_thinking: Option<String>,
     /// The levels a launch flag may carry, weakest first.
     levels: Vec<String>,
     /// The two cards' model fields, the coordinator's first.
@@ -480,7 +486,8 @@ impl Launcher {
     ///
     /// `check` is a swarm's own answer — `--workers`, `--lane-model` and each lane's
     /// reachability are questions a single agent does not ask — so turning the switch off
-    /// drops it, and the two model fields fall back to what the catalog says. A check's
+    /// drops it, and the two model fields — and the coordinator's effort, which is then
+    /// the catalog's own `default_thinking` — fall back to what the catalog says. A check's
     /// answer that arrives after the switch moved is dropped by key ([`Launcher::set_check`]).
     pub fn set_swarm(&mut self, swarm: bool) -> bool {
         if self.swarm == swarm {
@@ -500,6 +507,7 @@ impl Launcher {
         let before = self.clone();
         self.models = model_options(catalog);
         self.levels = thinking_levels(catalog);
+        self.default_thinking = string(catalog, "default_thinking");
         self.default_model = catalog
             .get("default_model")
             .and_then(|default| Some((string(default, "id")?, string(default, "provider")?)))
@@ -721,15 +729,24 @@ impl Launcher {
             if self.effort_by_hand[role.slot()] {
                 continue;
             }
-            let resolved = self.check.as_ref().and_then(|check| {
-                string(
-                    check,
-                    match role {
-                        Role::Coordinator => "thinking",
-                        Role::Lanes => "lane_thinking",
-                    },
-                )
-            });
+            // The coordinator's level is a session's own, so it comes from the
+            // resolution that is about this launch: the swarm's `check` when there is
+            // one, else the level the catalog says a fresh session of this program
+            // starts on — which is the whole of what a single agent answers with, and
+            // the reason the switch off is not a guess at the ladder's middle. A lane's
+            // level is a swarm's question and no other program's: `--lane-thinking` is
+            // `check`'s `lane_thinking`, and until it answers the middle rung stands.
+            let resolved = match role {
+                Role::Coordinator => self
+                    .check
+                    .as_ref()
+                    .and_then(|check| string(check, "thinking"))
+                    .or_else(|| self.default_thinking.clone()),
+                Role::Lanes => self
+                    .check
+                    .as_ref()
+                    .and_then(|check| string(check, "lane_thinking")),
+            };
             self.efforts[role.slot()] = resolved
                 .and_then(|level| self.levels.iter().position(|rung| *rung == level))
                 .unwrap_or_else(|| middle(&self.levels));
@@ -794,6 +811,7 @@ impl Launcher {
             || self.workers != before.workers
             || self.check != before.check
             || self.default_model != before.default_model
+            || self.default_thinking != before.default_thinking
     }
 }
 
