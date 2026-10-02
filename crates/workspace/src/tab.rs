@@ -2380,6 +2380,36 @@ mod tests {
         cx.update(|cx| assert!(!tab.read(cx).swarm(cx)));
     }
 
+    /// §7.2: the workers card's switch is one page's, for one launch, and a tab back on
+    /// the empty page has started nothing — so it opens on a swarm again, whatever the
+    /// launch that led here was asked for.
+    #[gpui_kit::test]
+    fn a_tab_back_on_the_page_opens_on_a_swarm_again(cx: &mut TestAppContext) {
+        let (_window, tab) = running_tab(cx);
+        tab.update(cx, |tab, _| {
+            tab.state = TabState::Running {
+                folder: PathBuf::from("/tmp/proj"),
+            };
+        });
+        tab.update(cx, |tab, cx| tab.set_use_swarm(false, cx));
+        cx.update(|cx| {
+            assert!(
+                !tab.read(cx).swarm(cx),
+                "a launch asked for one agent: the switch says so"
+            )
+        });
+
+        // Back to the New Swarm page: this tab has started nothing, and the page it is
+        // on is the one every tab opens on.
+        tab.update(cx, |tab, cx| tab.set_state(TabState::Empty, cx));
+        cx.update(|cx| {
+            assert!(
+                tab.read(cx).swarm(cx),
+                "the page it came back to opens on a swarm"
+            )
+        });
+    }
+
     /// §7.3: the reveal is offered before any thinking has arrived, to an agent whose
     /// effort is a rung that thinks. The quietest rung and an effort nobody has read
     /// wait for text.

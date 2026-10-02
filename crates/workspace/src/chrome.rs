@@ -2147,6 +2147,14 @@ mod tests {
             "and so does the tab"
         );
 
+        // And the launch this page would make is one `evo-agent` — the *program*, not a
+        // flag: the window starts what the page's own plan says (§7.2, §1).
+        assert_eq!(
+            program_of(cx, &page),
+            Some(store::launch::Program::Agent),
+            "the switch off is one `evo-agent`, not a swarm"
+        );
+
         // Another tab is another launch: it opens on a swarm, and the switch drawn on
         // it says so.
         let second =
@@ -2154,6 +2162,11 @@ mod tests {
         assert!(
             cx.update(|_, cx| second.read(cx).swarm(cx)),
             "a page opened afterwards opens on a swarm"
+        );
+        assert_eq!(
+            program_of(cx, &second),
+            Some(store::launch::Program::Swarm),
+            "and its launch is `evo-swarm`"
         );
         assert_eq!(
             cx.update(|window, cx| {
@@ -2176,6 +2189,26 @@ mod tests {
             "app.json is untouched by a switch"
         );
         assert!(!before.contains("use_swarm"), "and never carried one: {before}");
+    }
+
+    /// The program a page's own launch would be: the plan its controls add up to, put
+    /// through the same `launch_spec` the window starts one with.
+    fn program_of(
+        cx: &mut VisualTestContext,
+        page: &Entity<crate::TabContent>,
+    ) -> Option<store::launch::Program> {
+        let plan = cx.update(|_, cx| page.read(cx).launch_plan(cx));
+        // The tab directory only names the launch's ready file; the program is the
+        // plan's own (`crate::launch::launch_spec`).
+        crate::launch::launch_spec(
+            &LaunchEnv::default(),
+            &Launch::New {
+                folder: PathBuf::from("/tmp/proj"),
+                plan,
+            },
+            &store::paths::TabId::new(),
+        )
+        .program
     }
 
     /// §7.3: a split stops where the page says it does. A column has a range, and
