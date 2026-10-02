@@ -104,9 +104,15 @@ const MENU_MAX_W: Pixels = px(560.);
 /// margin a line needs at the row's trailing edge, or it reads as cropped even when it
 /// is not. Measured against the real window: 44 px still ellipsised the five-level line.
 const MENU_CHROME: Pixels = px(64.);
-const CHEVRON: &str = "⌄";
+/// The select's own chevron: the kit's icon, at the size the composer's strips turn over
+/// (`crates/composer`), and the design's own inset from the field's right edge
+/// (`.select-chevron{right:11px}`).
+///
+/// The design draws the text glyph `⌄`, whose ink sits at the foot of its line box, so a
+/// browser puts it where the design's `top:5px` says. An icon has no line box: it is
+/// centred in the field by layout, which is the same place without an offset to the pixel.
+const CHEVRON_SIZE: Pixels = px(12.);
 const CHEVRON_RIGHT: Pixels = px(11.);
-const CHEVRON_TOP: Pixels = px(5.);
 /// `.number-input{height:28px}` and `.number-input button{width:25px}`.
 const COUNT_H: Pixels = px(28.);
 const COUNT_STEP: Pixels = px(25.);
@@ -878,10 +884,11 @@ impl EmptyTabState {
 
     /// The workers card's switch (§7.2): a swarm from here, or one `evo-agent`.
     ///
-    /// The value is the window's — one for the app, remembered in `app.json`, so the next
-    /// tab opens with it too — and this is the window handing it back. What the page does
-    /// with it is everything the switch is for: the lanes' controls grey and go inert, and
-    /// the launch is asked about itself again, which off is no `check` at all.
+    /// It is this page's own value — one empty tab's, for the one launch it makes — and
+    /// it is written down nowhere: another tab has its own, and the next launch opens on
+    /// a swarm like every page does. What the page does with it is everything the switch
+    /// is for: the lanes' controls grey and go inert, and the launch is asked about itself
+    /// again, which off is no `check` at all.
     fn set_use_swarm(&mut self, swarm: bool, cx: &mut Context<Self>) {
         if !self.launcher.set_swarm(swarm) {
             return;
@@ -1134,14 +1141,12 @@ impl EmptyTabState {
         cx.notify();
     }
 
-    /// The switch was flipped on this page: the value is the app's and every tab's, so
-    /// the window is asked for it rather than this page deciding alone. The window hands
-    /// it straight back — [`EmptyTabState::set_use_swarm`] — and writes it down for the
-    /// next launch.
+    /// The switch was flipped on this page (§7.2): whether *this* launch is a swarm or
+    /// one `evo-agent`, and nothing else — not another tab's, not the next launch's.
+    ///
+    /// The page changes its own value; nobody is told, because there is nobody to tell.
     fn set_swarm(&mut self, swarm: bool, cx: &mut Context<Self>) {
-        let _ = self
-            .tab
-            .update(cx, |tab, cx| tab.request_use_swarm(swarm, cx));
+        self.set_use_swarm(swarm, cx);
     }
 
     /// A folder pick, synchronously: what a test injects in place of the dialog.
@@ -1404,17 +1409,29 @@ impl EmptyTabState {
                         })
                     })
                     .child(
-                        // `.select-chevron{position:absolute;right:11px;top:5px}`: the
-                        // design draws its own chevron, under the control, so the control's
-                        // trailing icon is asked for nothing.
+                        // `.select-chevron{position:absolute;right:11px}`: the design draws
+                        // its own chevron, under the control, so the control's trailing icon
+                        // is asked for nothing. It spans the field's whole height and centres
+                        // the glyph in it — the field is 34px and the icon is 12 — so where
+                        // it lands is the box's own middle, not a line box's floor.
                         div()
                             .absolute()
                             .right(CHEVRON_RIGHT)
-                            .top(CHEVRON_TOP)
-                            .text_size(px(design::FONT_BASE))
-                            .line_height(px(design::FONT_BASE * 1.5))
+                            .top_0()
+                            .bottom_0()
+                            .flex()
+                            .items_center()
                             .text_color(theme.muted_foreground)
-                            .child(CHEVRON),
+                            .child(
+                                // Named because an `Icon` has no element identity of its
+                                // own: this is the glyph's own box, which is what the test
+                                // below measures against the field.
+                                div()
+                                    .id(ElementId::Name(format!("{id}-chevron").into()))
+                                    .test_support()
+                                    .flex_none()
+                                    .child(Icon::new(IconName::ChevronDown).size(CHEVRON_SIZE)),
+                            ),
                     )
                     .child(
                         // The control fills the frame and draws nothing of its own: the
@@ -2322,8 +2339,12 @@ impl TabContent {
         cx.notify();
     }
 
-    /// The workers card's switch, as the window holds it (§7.2): one value for the app,
-    /// remembered in `app.json`, so every tab and the next launch open with it.
+    /// The workers card's switch on this page (§7.2): a swarm from here, or one
+    /// `evo-agent`.
+    ///
+    /// It is the *page's* own value — one empty tab's, for the launch it makes — and
+    /// nothing else holds one: not the window, not `app.json`, not the tab beside it.
+    /// Every page opens on a swarm, and a tab that comes back to the page is a fresh one.
     pub fn set_use_swarm(&mut self, swarm: bool, cx: &mut Context<Self>) {
         let state = self.choosers.state.clone();
         state.update(cx, |state, cx| state.set_use_swarm(swarm, cx));
@@ -2409,13 +2430,6 @@ impl TabContent {
     /// `--thinking`, `--workers`, and the lanes' `--lane-model` and `--lane-thinking`.
     pub fn launch_plan(&self, cx: &App) -> LaunchPlan {
         self.choosers.plan(cx)
-    }
-
-    /// Ask the window for a different program: whether a launch from here is a swarm or
-    /// one agent is the app's own setting, so this page reports the intent like every
-    /// other control that belongs to the window.
-    pub fn request_use_swarm(&mut self, swarm: bool, cx: &mut Context<Self>) {
-        cx.emit(TabContentEvent::UseSwarm(swarm));
     }
 
     /// A folder is chosen: hand the window the launch it asked for — the models, the
@@ -4010,18 +4024,14 @@ mod tests {
             where_they_are(window)
         });
 
+        // The switch is this page's own (§7.2): flipping it changes the page, and asks
+        // nobody — not the window, not the tab beside it.
         f.act(cx, |window, cx| window.click(SWARM_SWITCH_ID, cx));
-        assert_eq!(
-            f.events().last(),
-            Some(&TabContentEvent::UseSwarm(false)),
-            "the switch asks the window, which owns the value"
+        assert!(
+            f.events().is_empty(),
+            "a flip is not the window's business: {:?}",
+            f.events()
         );
-        // What the window answers with comes back through `set_use_swarm`; the fixture has
-        // no window of its own to answer, so this is that answer.
-        let tab = f.tab.clone();
-        f.act(cx, |_, cx| {
-            tab.update(cx, |tab, cx| tab.set_use_swarm(false, cx))
-        });
         f.render(cx);
 
         let after = f.act(cx, |window, cx| {
@@ -4333,6 +4343,44 @@ mod tests {
                 control.bounds().size.width,
                 box_.bounds().size.width - px(2.)
             );
+        });
+    }
+
+    /// §7.2: every select on the page is centred in its field by layout. The design draws
+    /// the text glyph `⌄`, and the field is where that went wrong: a glyph's ink sits at
+    /// the foot of its line box, so the design's `top:5px` put its ink low in a 34px box —
+    /// the icons have no line box, so this box's own middle is where they are, and this is
+    /// the test that says so for both cards' model fields.
+    #[gpui_kit::test]
+    fn the_selects_chevron_is_centred_in_its_field(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.set_catalog(cx, &catalog_body());
+        f.render(cx);
+        f.act(cx, |window, _| {
+            for id in [COORDINATOR_MODEL_ID, WORKERS_MODEL_ID] {
+                let field = window.find(ElementId::Name(format!("{id}-box").into())).bounds();
+                let chevron = window
+                    .find(ElementId::Name(format!("{id}-chevron").into()))
+                    .bounds();
+                assert_eq!(chevron.size.height, CHEVRON_SIZE, "{id}: the glyph's box");
+                let off = (chevron.center().y - field.center().y).as_f32().abs();
+                assert!(
+                    off <= 0.5,
+                    "{id}: the chevron's centre is {off}px off the field's: {chevron:?} in {field:?}"
+                );
+                // The inset is measured from inside the field's hairline, which is where
+                // an absolutely positioned child lands — and where the browser measures
+                // `right:11px` from too, since `.select-summary`'s border is its own.
+                assert_eq!(
+                    chevron.right(),
+                    field.right() - px(1.) - CHEVRON_RIGHT,
+                    "{id}: the design's own inset from the field's right edge"
+                );
+                assert!(
+                    chevron.top() > field.top() && chevron.bottom() < field.bottom(),
+                    "{id}: inside the field it belongs to: {chevron:?} in {field:?}"
+                );
+            }
         });
     }
 }

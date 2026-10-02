@@ -242,10 +242,6 @@ pub enum TabContentEvent {
     /// conversation (§7.3): the column goes back to the width it starts at. The
     /// window owns the width, so the gesture is reported rather than acted on.
     ResetPane,
-    /// Someone flipped the workers card's own switch (§7.2): a swarm from here on,
-    /// or one `evo-agent`. One value for the app — every tab and the next launch
-    /// open with it — so the window owns it, and the page reports the intent.
-    UseSwarm(bool),
 }
 
 /// Which of the two screens a [`TabContent`] opens on (§7.1, §7.2): a New Swarm
@@ -697,9 +693,17 @@ impl TabContent {
 
     /// The tab's own state, told to the window: a screen change is a keyboard
     /// change (§7.1).
+    ///
+    /// A tab back on the New Swarm page has started nothing, and the workers card's
+    /// switch is that page's for one launch (§7.2): it opens on a swarm again, whatever
+    /// it was flipped to before the launch that led here.
     fn set_state(&mut self, state: TabState, cx: &mut Context<Self>) {
         if self.state != state {
+            let back_to_the_page = state == TabState::Empty;
             self.state = state;
+            if back_to_the_page {
+                self.set_use_swarm(true, cx);
+            }
             cx.emit(TabContentEvent::ScreenChanged);
             self.sync_folder(cx);
         }
@@ -2371,6 +2375,36 @@ mod tests {
             tab.set_use_swarm(true, cx);
         });
         cx.update(|cx| assert!(!tab.read(cx).swarm(cx)));
+    }
+
+    /// §7.2: the workers card's switch is one page's, for one launch, and a tab back on
+    /// the empty page has started nothing — so it opens on a swarm again, whatever the
+    /// launch that led here was asked for.
+    #[gpui_kit::test]
+    fn a_tab_back_on_the_page_opens_on_a_swarm_again(cx: &mut TestAppContext) {
+        let (_window, tab) = running_tab(cx);
+        tab.update(cx, |tab, _| {
+            tab.state = TabState::Running {
+                folder: PathBuf::from("/tmp/proj"),
+            };
+        });
+        tab.update(cx, |tab, cx| tab.set_use_swarm(false, cx));
+        cx.update(|cx| {
+            assert!(
+                !tab.read(cx).swarm(cx),
+                "a launch asked for one agent: the switch says so"
+            )
+        });
+
+        // Back to the New Swarm page: this tab has started nothing, and the page it is
+        // on is the one every tab opens on.
+        tab.update(cx, |tab, cx| tab.set_state(TabState::Empty, cx));
+        cx.update(|cx| {
+            assert!(
+                tab.read(cx).swarm(cx),
+                "the page it came back to opens on a swarm"
+            )
+        });
     }
 
     /// §7.3: the reveal is offered before any thinking has arrived, to an agent whose

@@ -140,9 +140,12 @@ a model is a launch that runs it:
   `evo-swarm serve` — a coordinator and its pool of lanes; off, it is
   `evo-agent serve`, one agent, addressed as `Main` on the page that opens, and
   launched with the coordinator's `--model` and `--thinking` and nothing a lane
-  would take. It is a value of the window's, like the tab strip's order: one for
-  every tab, written to `app.json` when you change it and read again at the next
-  launch. Off, the Workers card's model, its effort and the count grey **in
+  would take. It is **this page's own**, for the launch this page makes: every
+  empty tab opens with it on, and flipping it changes nothing outside the page in
+  front of you — not the tab beside it, not a tab opened afterwards, and not the
+  file the app remembers things in. Start the session and the tab leaves the page;
+  come back to the page — a launch that failed, a session that ended — and it is a
+  fresh page with the switch on again. Off, the Workers card's model, its effort and the count grey **in
   place** — the same boxes in the same places, taking no click, no keystroke and
   no tab stop, so nothing moves under the pointer that flipped it — and those are
   no longer the launch's own questions: with no `check` to ask (`evo-agent` has no
