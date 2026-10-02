@@ -32,7 +32,7 @@ use session::{
     Notice, NoticeSeverity, QueuePosition, RunOutcome, ToolItem, UserItem, UserStatus,
 };
 
-use crate::imgcheck::{picture, MIN_PICTURE};
+use crate::imgcheck::{is_tiny, picture, MIN_PICTURE};
 use crate::ImageState;
 
 use crate::style::{mix, text_style, Palette, BLOCK_GAP, GROUP_GAP, TIGHT_GAP, TURN_GAP};
@@ -966,45 +966,48 @@ fn image_row(
                 let view = view.clone();
                 let click_id = id.clone();
                 let name = image.name.clone();
-                div()
+                let slot = div()
                     .id(row_id(format!("transcript-image-{n}"), id))
                     .cursor_pointer()
                     .rounded(palette.radius)
                     .border_1()
                     .border_color(palette.border)
                     .overflow_hidden()
-                    // A frame is a box a reader can see and click whatever the picture's
-                    // own size: a 1×1 screenshot is not a dot in the middle of nothing.
-                    // The floor is a floor, not a size, so a wide picture keeps the frame
-                    // it had, and `decode_image` bakes a small one up to meet it.
-                    .min_w(palette.scaled(MIN_PICTURE))
-                    .min_h(palette.scaled(MIN_PICTURE))
                     .flex()
                     .items_center()
-                    .justify_center()
-                    .on_click(move |_, _, cx| {
-                        let _ =
-                            view.update(cx, |view, cx| view.toggle_image_size(&click_id, n, cx));
-                    })
-                    .aria_label(format!(
-                        "{name} — click to {}",
-                        if full { "shrink" } else { "open" }
-                    ))
-                    // The frame's `overflow_hidden` does not round what it clips, so the
-                    // picture carries the frame's radius less its border itself — or its
-                    // square corners show outside the frame's curve.
-                    .child(
-                        picture(
-                            frame.clone(),
-                            palette.scaled(if full { FULL_IMAGE } else { THUMBNAIL }),
-                            palette.scaled(IMAGE_WIDTH),
-                        )
-                        .id(row_id(format!("transcript-image-picture-{n}"), id))
-                        .rounded(palette.radius - px(1.))
-                        .test_support(),
+                    .justify_center();
+                // The frame is the picture's fitted size and the 1px border around it, so no
+                // side of it is left as an empty band. A picture too small to be one at all
+                // (`is_tiny`: a 20×10, a one-pixel-tall strip) is held open at the design's
+                // `MIN_PICTURE` instead, so it is still a box a reader can see and click.
+                let slot = if is_tiny(frame) {
+                    slot.min_w(palette.scaled(MIN_PICTURE))
+                        .min_h(palette.scaled(MIN_PICTURE))
+                } else {
+                    slot
+                };
+                slot.on_click(move |_, _, cx| {
+                    let _ = view.update(cx, |view, cx| view.toggle_image_size(&click_id, n, cx));
+                })
+                .aria_label(format!(
+                    "{name} — click to {}",
+                    if full { "shrink" } else { "open" }
+                ))
+                // The frame's `overflow_hidden` does not round what it clips, so the
+                // picture carries the frame's radius less its border itself — or its
+                // square corners show outside the frame's curve.
+                .child(
+                    picture(
+                        frame.clone(),
+                        palette.scaled(if full { FULL_IMAGE } else { THUMBNAIL }),
+                        palette.scaled(IMAGE_WIDTH),
                     )
-                    .test_support()
-                    .into_any_element()
+                    .id(row_id(format!("transcript-image-picture-{n}"), id))
+                    .rounded(palette.radius - px(1.))
+                    .test_support(),
+                )
+                .test_support()
+                .into_any_element()
             }
             Some(ImageState::Failed) => placeholder(
                 row_id(format!("transcript-image-note-{n}"), id),

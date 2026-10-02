@@ -6,7 +6,10 @@
 
 use std::sync::Arc;
 
-use gpui_kit::{img, ImageSource, RenderImage, Styled as _, StyledImage as _};
+use gpui_kit::{
+    img, px, size, ImageSource, Img, ObjectFit, Pixels, RenderImage, Size, Styled as _,
+    StyledImage as _,
+};
 
 /// The smallest picture a row draws, in logical pixels at 100%: a screenshot that is 1×1,
 /// or an icon that is 8×8, is a box a reader can see rather than a dot.
@@ -72,13 +75,46 @@ fn baked(decoded: ::image::RgbaImage) -> ::image::RgbaImage {
 /// One picture at `max_h` tall and `max_w` wide, keeping its own aspect ratio, with a
 /// fallback for a frame GPUI cannot draw. Both bounds come from the caller: a picture in
 /// a row is content, so it is drawn at the design's own size times the reader's zoom.
-pub fn picture(
-    image: Arc<RenderImage>,
-    max_h: gpui_kit::Pixels,
-    max_w: gpui_kit::Pixels,
-) -> gpui_kit::Img {
+pub fn picture(image: Arc<RenderImage>, max_h: Pixels, max_w: Pixels) -> Img {
+    let fitted = fitted_size(&image, max_h, max_w);
     img(ImageSource::Render(image))
-        .object_fit(gpui_kit::ObjectFit::Contain)
-        .max_h(max_h)
-        .max_w(max_w)
+        // The element *is* the picture's own box, so filling it is what drawing the picture
+        // in its own shape means. `Contain` would round the two together and could leave a
+        // half-pixel band on one side of a picture it had already sized.
+        .object_fit(ObjectFit::Fill)
+        .w(fitted.width)
+        .h(fitted.height)
+}
+
+/// Whether a frame must be held open for this picture: one so small that hugging it exactly
+/// would leave a dot — a 20×10, whose bake stops at 40×20, or a one-pixel-tall strip.
+///
+/// A picture this module baked *up* to `MIN_PICTURE` is not one of these: a 1×1 or an 8×8
+/// arrives 48×48 and holds its own frame open, which is what "baked up to fill the box"
+/// means. Everything else — a screenshot, an icon that was always 64×64 — hugs.
+pub fn is_tiny(image: &RenderImage) -> bool {
+    let pixels = image.size(0);
+    pixels.width.0.max(pixels.height.0) < MIN_PICTURE as i32
+}
+
+/// The size a picture is drawn at: its own shape, inside the caps, and no larger than the
+/// picture itself.
+///
+/// GPUI fits a picture *inside* the element's box and leaves the rest of the box empty, so
+/// an element sized the picture's own way would draw a 1000×600 shot 200×120 in a 520×120
+/// box — a 320px band beside it — and a 300×900 one 40×120 in a 300×120 box. The frame
+/// around it must hug what is drawn, which means the element has to be the fitted size, so
+/// the fit is computed here from the picture's own dimensions.
+pub fn fitted_size(image: &RenderImage, max_h: Pixels, max_w: Pixels) -> Size<Pixels> {
+    let pixels = image.size(0);
+    let (width, height) = (pixels.width.0 as f32, pixels.height.0 as f32);
+    // A `RenderImage` this module built is one logical pixel per pixel (`decode_image`,
+    // whose frames come from `RenderImage::new`, which leaves the scale factor at 1).
+    if width <= 0. || height <= 0. {
+        return size(px(0.), px(0.));
+    }
+    let scale = (f32::from(max_w) / width)
+        .min(f32::from(max_h) / height)
+        .min(1.);
+    size(px(width * scale), px(height * scale))
 }

@@ -1029,27 +1029,27 @@ fn an_arriving_image_re_measures_the_row_it_lands_in(cx: &mut TestAppContext) {
         "and is never drawn over: {grown:?} then {after:?}"
     );
 
-    // The thumbnail is the design's own box at the reader's zoom — a screenshot is read,
-    // not framed, so it grows with the rest of the row (§7.2) — and its frame is the
-    // rounded one, the border's 2px around it.
+    // The thumbnail is the design's own box at the reader's zoom — a screenshot is read, not
+    // framed, so it grows with the rest of the row (§7.2) — and its frame is the rounded one,
+    // the border's 2px around what the picture was fitted to (168×120 of the 1400×1000 it is).
     let thumbnail = |cx: &mut gpui_kit::VisualTestContext| {
         row_box(cx, row_id("transcript-image-0", "u_1")).size
     };
     assert_eq!(
         thumbnail(cx),
-        gpui_kit::size(px(522.), px(122.)),
-        "`IMAGE_WIDTH` 520 by `THUMBNAIL` 120, inside the frame's 1px border"
+        gpui_kit::size(px(170.), px(122.)),
+        "the fitted 168×120 of a 1400×1000, inside the frame's 1px border"
     );
     set_zoom(cx, 1.5);
     assert_eq!(
         thumbnail(cx),
-        gpui_kit::size(px(782.), px(182.)),
+        gpui_kit::size(px(254.), px(182.)),
         "half again as large at 150% — a screenshot is read, not framed (§7.2)"
     );
     set_zoom(cx, 0.75);
     assert_eq!(
         thumbnail(cx),
-        gpui_kit::size(px(392.), px(92.)),
+        gpui_kit::size(px(128.), px(92.)),
         "and smaller at 75%"
     );
 }
@@ -1112,23 +1112,20 @@ fn an_image_that_arrives_off_screen_is_measured_when_it_comes_back(cx: &mut Test
     );
 }
 
-/// A picture smaller than its frame is a box, not a dot.
+/// A picture too small for the box it is drawn in is a box, not a dot: `decode_image` bakes
+/// it up by whole pixels, and a frame that has not the picture's own size to hug is held open
+/// at `MIN_PICTURE` (scaled by the reader's zoom like the rest of the row).
 ///
-/// `decode_image` bakes a small picture up by whole pixels, and the frame floors its own
-/// size at `MIN_PICTURE` (scaled by the reader's zoom like the rest of the row), so a 1×1
-/// screenshot or an 8×8 icon is something a reader can see and click: a 48×48 block in a
-/// 48px box, centred. A picture that is large enough to fill the box is untouched.
+/// A picture that is large enough to be drawn in its own shape hugs its frame instead
+/// (`a_frame_hugs_the_picture_it_draws`), so the floor here is for the two cases that would
+/// otherwise be a dot or a line: a 1×1 and an 8×8, baked to 48×48, and a 20×10, whose bake
+/// stops at 40×20.
 #[gpui_kit::test]
 fn a_picture_smaller_than_its_frame_is_a_box_not_a_dot(cx: &mut TestAppContext) {
-    let (view, cx) = open_in(cx, 1200., vec![user_with_image("u_1", 4)]);
+    let (view, cx) = open_in(cx, 1200., vec![user_with_image("u_1", 3)]);
     view.update(cx, |view, cx| view.on_fetch_image(|_, _, _, _| {}, cx));
     frames(cx, 2);
-    for (n, (w, h)) in [
-        (0u32, (1u32, 1u32)),
-        (1, (8, 8)),
-        (2, (20, 10)),
-        (3, (1000, 600)),
-    ] {
+    for (n, (w, h)) in [(0u32, (1u32, 1u32)), (1, (8, 8)), (2, (20, 10))] {
         let picture = crate::decode_image(&transcript_png_sized(w, h)).expect("a decodable PNG");
         view.update(cx, |view, cx| view.set_image("u_1", n, picture, cx));
     }
@@ -1162,13 +1159,13 @@ fn a_picture_smaller_than_its_frame_is_a_box_not_a_dot(cx: &mut TestAppContext) 
         }
     };
 
-    // Baked up to the box: a 1×1 and an 8×8 are both a 48×48 block of whole pixels, in a
-    // frame 48 wide inside its 1px border.
+    // Baked up to the box: a 1×1 and an 8×8 are both a 48×48 block of whole pixels, which
+    // holds its own frame open — 48 and the 1px border.
     for n in 0..2 {
         assert_eq!(
             drawn(cx, n).size,
             gpui_kit::size(px(48.), px(48.)),
-            "a picture too small for the box is baked up to it"
+            "a picture too small for the box is baked up to fill it"
         );
         assert_eq!(
             frame(cx, n).size,
@@ -1178,9 +1175,9 @@ fn a_picture_smaller_than_its_frame_is_a_box_not_a_dot(cx: &mut TestAppContext) 
         centred(cx, n);
     }
 
-    // A 20×10 bakes to 40×20 — a whole number of pixels, not a stretch to the box — so the
-    // floor is what a reader sees: the frame is still the 48px box, the picture centred in
-    // it.
+    // A 20×10 bakes to 40×20 — a whole number of pixels, not a stretch to the box — which
+    // is a dot in one direction, so the frame is the 48px floor and the picture is centred
+    // on it rather than hugging it.
     assert_eq!(drawn(cx, 2).size, gpui_kit::size(px(40.), px(20.)));
     assert_eq!(
         frame(cx, 2).size,
@@ -1189,30 +1186,28 @@ fn a_picture_smaller_than_its_frame_is_a_box_not_a_dot(cx: &mut TestAppContext) 
     );
     centred(cx, 2);
 
-    // A picture with the pixels to fill the frame is unchanged: the caps, and its own
-    // corners inside the rounded one.
-    assert_eq!(
-        frame(cx, 3).size,
-        gpui_kit::size(px(522.), px(122.)),
-        "`IMAGE_WIDTH` 520 by `THUMBNAIL` 120, inside the frame's 1px border"
-    );
-    assert_eq!(drawn(cx, 3).size, gpui_kit::size(px(520.), px(120.)));
-    centred(cx, 3);
-
-    // The floor follows the reader's zoom like everything else in the row (§7.2). What is
-    // baked is baked — a 48px picture stays a crisp 48px in the larger box.
+    // The floor follows the reader's zoom like everything else in the row (§7.2), and what
+    // is baked is baked: a 20×10's floor is 72 at 150%, while a 1×1's 48px block holds its
+    // own frame — half again as large around it would be a band on every side, which is the
+    // whole of what a frame must not be.
     set_zoom(cx, 1.5);
     assert_eq!(
         frame(cx, 0).size,
-        gpui_kit::size(px(72.), px(72.)),
-        "half again as large at 150%"
+        gpui_kit::size(px(50.), px(50.)),
+        "the picture's own 48 and its border, at any zoom"
     );
     assert_eq!(drawn(cx, 0).size, gpui_kit::size(px(48.), px(48.)));
-    assert_eq!(frame(cx, 3).size, gpui_kit::size(px(782.), px(182.)));
+    assert_eq!(
+        frame(cx, 2).size,
+        gpui_kit::size(px(72.), px(72.)),
+        "the floor is half again as large at 150%"
+    );
+    centred(cx, 0);
+    centred(cx, 2);
     set_zoom(cx, 1.0);
 
-    // Opened, a tiny picture is a box as well — the full cap does not change what a 48px
-    // block is — while one with the pixels to spare opens into them.
+    // Opened, a tiny picture is a box as well: the full cap does not change what a 48px
+    // block is, and the frame around it is still the block and its border.
     cx.update(|window, cx| window.click(row_id("transcript-image-0", "u_1"), cx));
     frames(cx, 2);
     assert_eq!(
@@ -1222,15 +1217,135 @@ fn a_picture_smaller_than_its_frame_is_a_box_not_a_dot(cx: &mut TestAppContext) 
     );
     assert_eq!(drawn(cx, 0).size, gpui_kit::size(px(48.), px(48.)));
     centred(cx, 0);
-    cx.update(|window, cx| window.click(row_id("transcript-image-3", "u_1"), cx));
+}
+
+/// A frame hugs the picture it draws: its size is the picture's fitted size — the picture's
+/// own shape, inside the thumbnail's caps — plus the 1px border, so the picture fills it and
+/// no side is left as an empty band.
+///
+/// GPUI fits a picture inside the element's box and leaves the rest of the box empty, so an
+/// element sized 520×120 would draw a 1000×600 shot 200×120 with a 320px band beside it, and
+/// a 300×900 one 40×120 with a band each side of its 40. Hence `fitted_size`, which is why
+/// the element is sized rather than the box.
+#[gpui_kit::test]
+fn a_frame_hugs_the_picture_it_draws(cx: &mut TestAppContext) {
+    let (view, cx) = open_in(cx, 1200., vec![user_with_image("u_1", 4)]);
+    view.update(cx, |view, cx| view.on_fetch_image(|_, _, _, _| {}, cx));
     frames(cx, 2);
+    let pictures = [
+        (0u32, (1000u32, 600u32)),
+        (1, (300, 900)),
+        (2, (1400, 1000)),
+        (3, (100, 100)),
+    ];
+    for (n, (w, h)) in pictures {
+        let picture = crate::decode_image(&transcript_png_sized(w, h)).expect("a decodable PNG");
+        view.update(cx, |view, cx| view.set_image("u_1", n, picture, cx));
+    }
+    frames(cx, 2);
+
+    let frame = |cx: &mut gpui_kit::VisualTestContext, n: u32| {
+        row_box(cx, row_id(format!("transcript-image-{n}"), "u_1"))
+    };
+    let drawn = |cx: &mut gpui_kit::VisualTestContext, n: u32| {
+        row_box(cx, row_id(format!("transcript-image-picture-{n}"), "u_1"))
+    };
+    // The whole of "hugs": the frame is the picture and its border, and nothing else — the
+    // picture's box starts at the frame's own 1px, and ends at its 1px.
+    let hugs = |cx: &mut gpui_kit::VisualTestContext, n: u32, source: (u32, u32)| {
+        let (frame, picture) = (frame(cx, n), drawn(cx, n));
+        assert_eq!(
+            (
+                f32::from(frame.size.width) - f32::from(picture.size.width),
+                f32::from(frame.size.height) - f32::from(picture.size.height),
+            ),
+            (2., 2.),
+            "picture {n}: no band on any side of the {}×{} it was made from",
+            source.0,
+            source.1
+        );
+        assert_eq!(
+            (
+                f32::from(picture.origin.x - frame.origin.x),
+                f32::from(picture.origin.y - frame.origin.y),
+            ),
+            (1., 1.),
+            "picture {n}: and the picture sits on the frame's own border"
+        );
+        let kept = f32::from(picture.size.width) / f32::from(picture.size.height);
+        let own = source.0 as f32 / source.1 as f32;
+        assert!(
+            (kept - own).abs() < 0.005,
+            "picture {n}: drawn {kept} to one, its own shape being {own}"
+        );
+    };
+
+    // 1000×600 is wider than the thumbnail's 520×120, so the height is what fits: 200×120.
     assert_eq!(
-        frame(cx, 3).size,
-        gpui_kit::size(px(522.), px(342.)),
-        "and a 1000×600 opens to `FULL_IMAGE`'s 340"
+        drawn(cx, 0).size,
+        gpui_kit::size(px(200.), px(120.)),
+        "a 1000×600 fits `THUMBNAIL` 120 and brings its own width"
     );
-    assert_eq!(drawn(cx, 3).size, gpui_kit::size(px(520.), px(340.)));
-    centred(cx, 3);
+    assert_eq!(frame(cx, 0).size, gpui_kit::size(px(202.), px(122.)));
+    // 300×900 is taller: the width is what fits, 40.
+    assert_eq!(
+        drawn(cx, 1).size,
+        gpui_kit::size(px(40.), px(120.)),
+        "a 300×900 fits the same 120 and brings its own width"
+    );
+    assert_eq!(frame(cx, 1).size, gpui_kit::size(px(42.), px(122.)));
+    // 1400×1000 fit both ways.
+    assert_eq!(drawn(cx, 2).size, gpui_kit::size(px(168.), px(120.)));
+    assert_eq!(frame(cx, 2).size, gpui_kit::size(px(170.), px(122.)));
+    // A picture under both caps is its own size — the caps are caps, and nothing is
+    // enlarged to meet them.
+    assert_eq!(drawn(cx, 3).size, gpui_kit::size(px(100.), px(100.)));
+    assert_eq!(frame(cx, 3).size, gpui_kit::size(px(102.), px(102.)));
+    for (n, source) in pictures {
+        hugs(cx, n, source);
+    }
+
+    // At 150% the caps are half again as large, and what fits them follows.
+    set_zoom(cx, 1.5);
+    assert_eq!(drawn(cx, 0).size, gpui_kit::size(px(300.), px(180.)));
+    assert_eq!(frame(cx, 0).size, gpui_kit::size(px(302.), px(182.)));
+    assert_eq!(drawn(cx, 1).size, gpui_kit::size(px(60.), px(180.)));
+    assert_eq!(frame(cx, 1).size, gpui_kit::size(px(62.), px(182.)));
+    assert_eq!(drawn(cx, 2).size, gpui_kit::size(px(252.), px(180.)));
+    assert_eq!(
+        drawn(cx, 3).size,
+        gpui_kit::size(px(100.), px(100.)),
+        "a picture under the caps is still its own size (§7.2)"
+    );
+    for (n, source) in pictures {
+        hugs(cx, n, source);
+    }
+    set_zoom(cx, 1.0);
+
+    // Opened, the cap is `FULL_IMAGE` 340: the same fits, and the same hug.
+    for (n, source) in pictures {
+        cx.update(|window, cx| window.click(row_id(format!("transcript-image-{n}"), "u_1"), cx));
+        frames(cx, 2);
+        hugs(cx, n, source);
+    }
+    assert_eq!(
+        drawn(cx, 0).size,
+        gpui_kit::size(px(520.), px(312.)),
+        "a 1000×600 opens to 520 wide"
+    );
+    assert_eq!(frame(cx, 0).size, gpui_kit::size(px(522.), px(314.)));
+    assert_eq!(
+        drawn(cx, 2).size,
+        gpui_kit::size(px(476.), px(340.)),
+        "a 1400×1000 opens to 340 tall"
+    );
+    assert_eq!(frame(cx, 2).size, gpui_kit::size(px(478.), px(342.)));
+    assert_eq!(
+        drawn(cx, 3).size,
+        gpui_kit::size(px(100.), px(100.)),
+        "and a 100×100 is still its own size"
+    );
+    assert_eq!(frame(cx, 3).size, gpui_kit::size(px(102.), px(102.)));
 }
 
 /// A picture too small for its box is blown up **by whole pixels**, and nothing else is
