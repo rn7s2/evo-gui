@@ -1908,6 +1908,26 @@ fn a_commands_output_is_drawn_even_though_the_server_does_not_keep_it(
     });
 }
 
+/// A command's output that ends on a line break (`/model`'s list) is drawn without it:
+/// the text view would draw a trailing break as a literal hard-break `\` after the last
+/// line.
+#[gpui_kit::test]
+fn a_notice_is_drawn_without_its_trailing_line_break(cx: &mut TestAppContext) {
+    let list = item(json!({
+        "id": "n_list", "ts": 2, "kind": "notice", "severity": "info",
+        "text": "model:\n  stub  stub-a  200k ctx · current\n  stub  stub-b  100k ctx\n",
+        "source": "command", "durable": false
+    }));
+    let (_view, cx) = open!(cx, vec![list]);
+    cx.update(|window, cx| window.render_frame(cx));
+    cx.update(|window, _| {
+        assert_eq!(
+            window.find(row_id("transcript-notice", "n_list")).label(),
+            Some("command · model:\n  stub  stub-a  200k ctx · current\n  stub  stub-b  100k ctx"),
+        );
+    });
+}
+
 /// A system line is drawn in the ink its severity earns: info is chrome, warn and
 /// error are the design's two colours — and none of them is the accent a link
 /// would be drawn in.
