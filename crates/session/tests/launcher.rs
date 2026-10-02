@@ -432,6 +432,140 @@ fn a_check_opens_the_sliders_and_the_count_on_what_it_resolved() {
     );
 }
 
+/// The workers card's switch and the coordinator's effort (§7.2): off, the level is the one
+/// a single agent's own catalog publishes for a fresh session — `default_thinking`, which
+/// `evo-agent catalog --json` now carries. It used to be the ladder's middle rung, which is
+/// what a client with nothing to read would guess.
+#[test]
+fn the_switch_off_opens_the_coordinator_on_the_agents_own_level() {
+    let swarm = |level: &str| {
+        json!({
+            "models": [{"id": "m", "provider": "p", "ready": true}],
+            "default_model": {"id": "m", "provider": "p"},
+            "thinking_levels": ["low", "medium", "high", "xhigh", "max"],
+            "default_thinking": level
+        })
+    };
+    let mut launcher = Launcher::new();
+    launcher.set_catalog(&swarm("high"));
+    launcher.set_check(&json!({"ok": true, "thinking": "low", "lane_thinking": "low"}));
+    assert_eq!(
+        launcher.level(Role::Coordinator),
+        Some("low"),
+        "on, the swarm's own `check` resolution"
+    );
+
+    // Off: the page reads `evo-agent catalog --json`, and the card opens on what it says.
+    assert!(launcher.set_swarm(false));
+    launcher.set_catalog(&swarm("max"));
+    assert_eq!(
+        launcher.level(Role::Coordinator),
+        Some("max"),
+        "a single agent opens on the level its own catalog publishes"
+    );
+    assert_eq!(
+        launcher.level(Role::Lanes),
+        Some("medium"),
+        "a lane's level is the swarm's question, which a single agent does not answer"
+    );
+    assert!(launcher.plan().is_default(), "shown, not passed");
+
+    // A check that arrives while the switch is off is not this program's answer.
+    assert!(
+        !launcher.set_check(&json!({"ok": true, "thinking": "xhigh"})),
+        "a single agent has no check to ask"
+    );
+    assert_eq!(launcher.level(Role::Coordinator), Some("max"));
+
+    // Back on: the swarm's own resolution, asked for again.
+    assert!(launcher.set_swarm(true));
+    launcher.set_catalog(&swarm("high"));
+    launcher.set_check(&json!({"ok": true, "thinking": "xhigh", "lane_thinking": "low"}));
+    assert_eq!(launcher.level(Role::Coordinator), Some("xhigh"));
+    assert_eq!(launcher.level(Role::Lanes), Some("low"));
+
+    // And off once more, which is the toggle the person did.
+    assert!(launcher.set_swarm(false));
+    launcher.set_catalog(&swarm("max"));
+    assert_eq!(launcher.level(Role::Coordinator), Some("max"));
+}
+
+/// A program that predates the field says nothing, and nothing is invented from it: the
+/// middle rung stands, exactly as it did before `default_thinking` existed.
+#[test]
+fn a_catalog_without_a_default_level_leaves_the_middle_rung() {
+    let mut launcher = Launcher::new();
+    launcher.set_swarm(false);
+    launcher.set_catalog(&json!({
+        "models": [{"id": "m", "provider": "p", "ready": true}],
+        "default_model": {"id": "m", "provider": "p"},
+        "thinking_levels": ["low", "medium", "high"]
+    }));
+    assert_eq!(launcher.level(Role::Coordinator), Some("medium"));
+
+    // A level the ladder does not list is not a rung either: the slider stays on the
+    // middle rather than on a level no flag could carry.
+    launcher.set_catalog(&json!({
+        "models": [{"id": "m", "provider": "p", "ready": true}],
+        "thinking_levels": ["low", "medium", "high"],
+        "default_thinking": "extreme"
+    }));
+    assert_eq!(launcher.level(Role::Coordinator), Some("medium"));
+}
+
+/// A slider the person moved is theirs: neither the switch nor a catalog that says
+/// something else moves it, in either direction — and it is what the launch passes.
+#[test]
+fn a_slider_the_person_moved_survives_the_switch_and_the_catalog() {
+    let agent = json!({
+        "models": [{"id": "m", "provider": "p", "ready": true}],
+        "default_model": {"id": "m", "provider": "p"},
+        "thinking_levels": ["low", "medium", "high", "xhigh", "max"],
+        "default_thinking": "max"
+    });
+    let mut launcher = Launcher::new();
+    launcher.set_swarm(false);
+    launcher.set_catalog(&agent);
+    assert_eq!(launcher.level(Role::Coordinator), Some("max"));
+    // A person drags it down to `high`.
+    assert!(launcher.set_effort(Role::Coordinator, 2));
+    assert_eq!(launcher.level(Role::Coordinator), Some("high"));
+
+    // The catalog answers again — another program's level, and this one's — and the
+    // slider does not move.
+    launcher.set_catalog(&json!({
+        "models": [{"id": "m", "provider": "p", "ready": true}],
+        "thinking_levels": ["low", "medium", "high", "xhigh", "max"],
+        "default_thinking": "low"
+    }));
+    assert_eq!(launcher.level(Role::Coordinator), Some("high"));
+
+    // On, where the swarm resolves a level of its own.
+    launcher.set_swarm(true);
+    launcher.set_check(&json!({"ok": true, "thinking": "xhigh", "lane_thinking": "xhigh"}));
+    assert_eq!(
+        launcher.level(Role::Coordinator),
+        Some("high"),
+        "the person's rung stands over the check's"
+    );
+    assert_eq!(
+        launcher.plan().thinking.as_deref(),
+        Some("high"),
+        "and it is what the launch passes as `--thinking`"
+    );
+    assert_eq!(
+        launcher.level(Role::Lanes),
+        Some("xhigh"),
+        "the other card follows"
+    );
+
+    // Back off: still theirs.
+    launcher.set_swarm(false);
+    launcher.set_catalog(&agent);
+    assert_eq!(launcher.level(Role::Coordinator), Some("high"));
+    assert_eq!(launcher.plan().thinking.as_deref(), Some("high"));
+}
+
 /// A control the person moved is theirs: a later check leaves it where they put it, while
 /// the one beside it follows.
 #[test]

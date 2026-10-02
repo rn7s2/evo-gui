@@ -2576,8 +2576,21 @@ mod tests {
             ],
             "default_model": {"id": "evo-agent-model", "provider": "acme"},
             "thinking_levels": ["low", "medium", "high"],
+            // The level a fresh session starts on, which every catalog document of
+            // `evo-agent` main carries (`:thinking` is `medium` in a plain home).
+            "default_thinking": "medium",
             "warnings": []
         })
+    }
+
+    /// The same body from a home whose `:thinking` is something else — what a person's own
+    /// configuration says a single agent starts on. The ladder is the one such a program
+    /// publishes (`low medium high xhigh max`), so the level it names is a rung on it.
+    fn agent_catalog_at(level: &str) -> Value {
+        let mut body = agent_catalog_body();
+        body["thinking_levels"] = serde_json::json!(["low", "medium", "high", "xhigh", "max"]);
+        body["default_thinking"] = Value::String(level.to_string());
+        body
     }
 
     /// A `/catalog` body as `evo-swarm catalog --json` prints it (§5.6): the default
@@ -3100,6 +3113,81 @@ mod tests {
                 },
             }]
         );
+    }
+
+    /// §7.2, and the workers card's switch: off, the Coordinator's card opens on the level
+    /// `evo-agent catalog --json` publishes for a fresh session (`default_thinking`) — the
+    /// rung evo itself would start on. It used to open on the middle of the ladder, which is
+    /// what a page with nothing to read guessed, and what made a `:thinking :max` home show
+    /// `medium` the moment the switch was flipped off.
+    #[gpui_kit::test]
+    fn a_single_agents_card_opens_on_the_level_its_catalog_publishes(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.set_catalog(cx, &catalog_body());
+        f.set_check(
+            cx,
+            CheckReport {
+                thinking: Some("xhigh".to_string()),
+                lane_thinking: Some("low".to_string()),
+                ..check(
+                    ("claude-opus-4.5", "anthropic"),
+                    ("claude-opus-4.5", "anthropic"),
+                    Vec::new(),
+                )
+            },
+        );
+        f.render(cx);
+        let state = f.state(cx);
+        let tab = f.tab.clone();
+        f.act(cx, |_, cx| {
+            assert_eq!(
+                state.read(cx).launcher.level(Card::Coordinator),
+                Some("xhigh"),
+                "on, the swarm's own resolution"
+            )
+        });
+
+        // Off: this page reads `evo-agent catalog --json` for itself, and what that says a
+        // session starts on is what the card shows.
+        f.set_agent_catalog(cx, &agent_catalog_at("max"));
+        f.set_use_swarm(cx, false);
+        f.render(cx);
+        f.act(cx, |window, cx| {
+            assert_eq!(
+                state.read(cx).launcher.level(Card::Coordinator),
+                Some("max"),
+                "the level the agent's own catalog publishes"
+            );
+            assert!(
+                window.find(COORDINATOR_EFFORT_ID).visible(),
+                "drawn where the person reads it"
+            );
+            assert_eq!(
+                tab.read(cx).launch_plan(cx).thinking,
+                None,
+                "shown, not passed: evo resolves the level itself"
+            );
+        });
+
+        // On again: the swarm's own resolution, out of the check this page already has.
+        f.set_use_swarm(cx, true);
+        f.render(cx);
+        f.act(cx, |_, cx| {
+            assert_eq!(
+                state.read(cx).launcher.level(Card::Coordinator),
+                Some("xhigh")
+            )
+        });
+
+        // And off once more — the toggle the person did — which is the level's own again.
+        f.set_use_swarm(cx, false);
+        f.render(cx);
+        f.act(cx, |_, cx| {
+            assert_eq!(
+                state.read(cx).launcher.level(Card::Coordinator),
+                Some("max")
+            )
+        });
     }
 
     /// §7.2: a control the launcher opened moves when `check` answers; a control the person

@@ -293,6 +293,21 @@ impl Catalog {
     pub fn warnings(&self) -> Vec<String> {
         string_array(self.body.get("warnings"))
     }
+
+    /// The level a fresh session of this program starts on — `default_thinking`, spelled
+    /// like [`Catalog::thinking_levels`].
+    ///
+    /// Every catalog document carries it: `evo-agent catalog --json`,
+    /// `evo-swarm catalog --json` and a running server's `GET /catalog`. It is what evo
+    /// itself resolves for a session with no flag — the journal's own level, then the
+    /// `:thinking` setting, then `medium` — which is why a single agent's card can open on
+    /// the person's configured effort instead of on a rung this client guessed.
+    ///
+    /// `None` on a program that predates the field, which is evo not having said: the
+    /// caller keeps whatever it did before.
+    pub fn default_thinking(&self) -> Option<String> {
+        string(&self.body, "default_thinking")
+    }
 }
 
 impl CheckReport {
@@ -449,6 +464,29 @@ mod tests {
         );
         // A body that names none names none — not an empty list of rungs.
         assert!(Catalog::empty().thinking_levels().is_empty());
+    }
+
+    /// The level a fresh session starts on: evo's own answer, in the same body, and
+    /// nothing on a program that predates the field.
+    #[test]
+    fn the_default_thinking_is_the_programs_own_answer() {
+        let catalog = Catalog::from_json(json!({
+            "models": [],
+            "thinking_levels": ["low", "medium", "high", "xhigh", "max"],
+            "default_thinking": "max"
+        }));
+        assert_eq!(catalog.default_thinking().as_deref(), Some("max"));
+        // A body without it — an older `evo-agent`, an older `evo-swarm` — says nothing,
+        // and an empty string is nothing said too.
+        assert_eq!(Catalog::empty().default_thinking(), None);
+        assert_eq!(
+            Catalog::from_json(json!({"thinking_levels": ["low"]})).default_thinking(),
+            None
+        );
+        assert_eq!(
+            Catalog::from_json(json!({"default_thinking": ""})).default_thinking(),
+            None
+        );
     }
 
     #[test]

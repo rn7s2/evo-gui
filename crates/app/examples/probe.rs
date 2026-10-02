@@ -9,7 +9,9 @@
 //! and `swarm.lisp`, the real session index) with a throwaway app root seeded
 //! from `~/.evo/desktop/app.json`, so the user's own `app.json` is never written.
 //! `--world stub` runs in `crates/proofs`' fixture: the scripted model, so a tab can
-//! be launched and driven without spending anything.
+//! be launched and driven without spending anything. `PROBE_THINKING=<level>` writes
+//! that level into the stub home's own settings, so a script can see what a control
+//! opens on when the person's `:thinking` is not the default.
 //!
 //! The script is one step per line (`#` starts a comment):
 //!
@@ -110,6 +112,12 @@ fn run(world: &str, out: &Path, script: &str) -> Result<(), Error> {
         lisp.push_str(
             "(evo:register-model \"stub-b\" :provider :stub :context-window 100000 :max-output 4000 :effort t)\n",
         );
+        // `PROBE_THINKING`: the level this world's home is configured at, so a script
+        // can watch what a card opens on when a person's own setting is not the
+        // default. evo publishes it as `default_thinking` (§5.6).
+        if let Ok(level) = std::env::var("PROBE_THINKING") {
+            lisp.push_str(&format!("(evo:set-setting :thinking :{level})\n"));
+        }
         std::fs::write(&init, lisp)?;
         f.enter();
         let bins = Binaries {
