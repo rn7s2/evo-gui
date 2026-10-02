@@ -2211,7 +2211,7 @@ impl TabContent {
                     // same message again. The line above the composer is the server's
                     // own reason for it ([`notice_words`]).
                     self.composer.update(cx, |composer, cx| {
-                        composer.request_finished(reply.ok, window, cx)
+                        composer.send_finished(reply.ok, window, cx)
                     });
                     // A message the server took answers the refusal above it: the
                     // reader fixed what was wrong and sent again, and a red line that

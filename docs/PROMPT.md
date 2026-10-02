@@ -389,8 +389,13 @@ the agent header are the same height on the same surface, so the rule under them
   Send and a Stop side by side:
   - nothing going on: the button reads **Send**, in the primary face at rest whatever the draft
     (`.composer-send` has no disabled look) — with nothing in the input there is nothing to send,
-    so the click and `Enter` do nothing; with text, clicking posts `input.send`. The one thing
-    that greys it is this composer's own request in flight.
+    so the click and `Enter` do nothing; with text, clicking posts `input.send`.
+  - a message posted and not yet answered — half a minute, for a turn carrying a screenshot —
+    is the one state the button *says*: it reads **Sending…** with the kit's spinner, the click
+    does nothing (the same message is not posted twice), and the draft stays in the input,
+    visible and selectable but read-only, so it cannot be edited under what is already on its
+    way. It is a state of the *send*, not of the box: `Esc` and the Stop face still interrupt the
+    running agent while the message is in flight, which is exactly when a reader wants them.
   - anything going on — the coordinator's own run (`running`/`compacting` from `state.status`), a
     coordinator held `waiting` on its lanes, or a lane still working: the *same* button reads
     **■ Stop swarm** and clicking posts `run.interrupt` with scope `swarm` — it interrupts and
