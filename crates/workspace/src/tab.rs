@@ -738,6 +738,19 @@ impl TabContent {
         }
     }
 
+    /// Tell every transcript which program this tab is (§7.2).
+    ///
+    /// An empty transcript's invitation is the coordinator's — `Ask the coordinator to
+    /// get started` — or the one agent's, so the program reaches the view when it is
+    /// made and again on every batch while the tab runs. A cached view keeps the copy it
+    /// was last told, which is why this goes through `set_swarm`, which notifies.
+    fn sync_swarm(&mut self, cx: &mut Context<Self>) {
+        let swarm = self.swarm(cx);
+        for view in self.transcripts.values() {
+            view.update(cx, |view, cx| view.set_swarm(swarm, cx));
+        }
+    }
+
     /// The process behind the tab: the swarm's own pid, once `/health` has
     /// answered (§3). Diagnostics, and how §9.7's failure modes are exercised.
     pub fn swarm_pid(&self) -> Option<u32> {
@@ -1185,6 +1198,10 @@ impl TabContent {
         coordinator.update(cx, |view, cx| view.set_agent(AgentKey::Coordinator, cx));
         self.transcripts
             .insert(AgentKey::Coordinator, coordinator.clone());
+        // A transcript born here is the program this launch started (§7.2): a resume, a
+        // retry and a fresh tab all come through this door, and an empty view already
+        // knows whether it is a swarm's or one agent's.
+        self.sync_swarm(cx);
         // Which program this tab just started: the launch said so, and the page, the
         // column and the box all read it from here (§7.2).
         let swarm = self.swarm(cx);
@@ -1521,6 +1538,9 @@ impl TabContent {
                     .clone()
                     .update(cx, |view, cx| view.set_agent(*agent, cx));
             }
+            // A view made here is the tab's program too, however late it is first shown
+            // (§7.2).
+            self.sync_swarm(cx);
         }
         // A view that has just been made knows whose transcript it is, and what its
         // rows may ask for.
@@ -1630,6 +1650,9 @@ impl TabContent {
             composer.set_swarm_busy(busy, cx);
             composer.set_swarm(swarm, cx);
         });
+        // The same program, told to the transcripts: only an empty one draws it, and it
+        // draws the coordinator's invitation or the one agent's (§7.2).
+        self.sync_swarm(cx);
     }
 
     /// Feed the composer's drawer from the catalog (§5.6): the same `/catalog` body the
@@ -1803,6 +1826,10 @@ impl TabContent {
         view.update(cx, |view, cx| view.set_agent(agent, cx));
         if created {
             self.wire_view(&agent, cx);
+            // And which program the tab is: a lane first shown mid-run draws no
+            // invitation, but the coordinator's own view may be empty and is the one
+            // program's or the other's (§7.2).
+            self.sync_swarm(cx);
         }
         self.push(changes, cx);
         self.sync_agents(cx);

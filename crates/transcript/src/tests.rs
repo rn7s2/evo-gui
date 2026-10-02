@@ -936,6 +936,126 @@ fn an_empty_transcript_names_the_agent(cx: &mut TestAppContext) {
     });
 }
 
+/// The invitation an empty transcript draws, and the detail under it: a swarm's
+/// coordinator has lanes to hand the work to, and the one agent of a single-agent
+/// session has nobody to coordinate. The tab says which program it is, and a cached
+/// view is a subtree that only redraws when it is notified.
+#[gpui_kit::test]
+fn an_empty_transcript_invites_the_agent_the_tab_is_showing(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (host, cx) = cx.add_window_view(|_window, cx| TranscriptHost::new(cx));
+    let view = cx.read(|cx| host.read(cx).transcript.clone());
+
+    // A view nobody has told is a swarm's: the copy the app drew before it had a
+    // program to ask.
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        assert_eq!(
+            empty_note_line(window),
+            "Ask the coordinator to get started"
+        );
+        assert_eq!(
+            empty_detail_line(window),
+            "It plans the work and hands tasks to its lanes."
+        );
+    });
+
+    // One agent: no lanes, and no coordinator to plan the work for it.
+    view.update(cx, |view, cx| view.set_swarm(false, cx));
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        assert_eq!(empty_note_line(window), "Ask the agent to get started");
+        assert_eq!(
+            empty_detail_line(window),
+            "It does the work itself — there are no lanes to hand it to."
+        );
+    });
+
+    // A lane's own line is its own either way, and a lane has no detail under it.
+    view.update(cx, |view, cx| {
+        view.set_agent(session::AgentKey::Lane(3), cx)
+    });
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        assert_eq!(
+            empty_note_line(window),
+            "Lane 3 hasn't been given work yet."
+        );
+        assert!(
+            window.try_find("transcript-empty-detail").is_none(),
+            "one line is all a lane's empty transcript says"
+        );
+    });
+
+    // And a swarm's view is a swarm's again once it is told so: the tab says which
+    // program it is, both ways.
+    view.update(cx, |view, cx| {
+        view.set_agent(session::AgentKey::Coordinator, cx);
+        view.set_swarm(true, cx);
+    });
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        assert_eq!(
+            empty_note_line(window),
+            "Ask the coordinator to get started"
+        );
+        assert_eq!(
+            empty_detail_line(window),
+            "It plans the work and hands tasks to its lanes."
+        );
+    });
+}
+
+/// The program a tab is is a cached transcript's own news: a view told it is one agent's
+/// draws again, and being told the same thing twice is not news at all.
+///
+/// The app embeds the transcript as a cached subtree (§7.3), whose own elements are not
+/// observable in this harness, so what this holds is the frame: how many times the view
+/// built itself.
+#[gpui_kit::test]
+fn the_program_a_tab_is_renders_the_cached_transcript_again(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (host, cx) = cx.add_window_view(|_window, cx| CachedHost::new(cx));
+    let view = cx.read(|cx| host.read(cx).transcript.clone());
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let rendered = cx.read(|cx| view.read(cx).renders());
+    assert!(rendered > 0, "the cached view rendered when it was shown");
+
+    view.update(cx, |view, cx| view.set_swarm(false, cx));
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        cx.read(|cx| view.read(cx).renders()) > rendered,
+        "one agent's program is the empty transcript's own news, so the cached view is drawn again"
+    );
+
+    let settled = cx.read(|cx| view.read(cx).renders());
+    view.update(cx, |view, cx| view.set_swarm(false, cx));
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert_eq!(
+        cx.read(|cx| view.read(cx).renders()),
+        settled,
+        "the same program again changes nothing"
+    );
+}
+
+/// The invitation's own line, as the empty transcript is drawing it.
+fn empty_note_line(window: &Window) -> String {
+    window
+        .find("transcript-empty-note")
+        .label()
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// The detail under it.
+fn empty_detail_line(window: &Window) -> String {
+    window
+        .find("transcript-empty-detail")
+        .label()
+        .unwrap_or_default()
+        .to_string()
+}
+
 /// An image is fetched once, when its row is on screen, and drawn from the bytes: the
 /// row says it is loading until they arrive, and says so calmly when they cannot be
 /// decoded.

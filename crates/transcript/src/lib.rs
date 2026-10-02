@@ -65,7 +65,8 @@ use gpui_kit::{
     div, linear_color_stop, linear_gradient, list, px, Animation, AnimationExt as _, AnyElement,
     App, AppContext as _, Bounds, BoxShadow, Context, Entity, FocusHandle, Hsla,
     InteractiveElement as _, IntoElement, ListAlignment, ListState, MouseButton,
-    ParentElement as _, Pixels, Render, Styled as _, Task, TestSupportExt as _, Window,
+    ParentElement as _, Pixels, Render, StatefulInteractiveElement as _, Styled as _, Task,
+    TestSupportExt as _, Window,
 };
 use session::{AgentKey, Item, ItemId, ItemKind};
 use std::time::Duration;
@@ -171,6 +172,10 @@ pub(crate) struct TranscriptData {
     /// Whether the agent is running (`status: running`): the list's foot shows the
     /// working pips until a row of the turn shows the work itself.
     pub(crate) running: bool,
+    /// Whether this transcript is a swarm's or one agent's (§7.2): an empty one invites
+    /// the reader to the coordinator, which has lanes to hand work to, or to the one
+    /// agent, which has none. The tab says which when it makes the view.
+    pub(crate) swarm: bool,
     pub(crate) copy_feedback: Arc<CopyFeedback>,
     pub(crate) focus: FocusHandle,
     /// What the owner does for each thing a row can ask for.
@@ -464,6 +469,10 @@ impl TranscriptView {
                 full_results: HashMap::new(),
                 show_thinking: false,
                 running: false,
+                // A view nobody has told is a swarm's: that is the program the
+                // transcript's own records are about, and the app sets the real one
+                // when it makes the view (`TranscriptView::set_swarm`).
+                swarm: true,
                 copy_feedback: Arc::new(CopyFeedback::default()),
                 on_load_older: RefCell::new(None),
                 on_fetch_item: RefCell::new(None),
@@ -522,6 +531,25 @@ impl TranscriptView {
         self.reaches_the_foot.set(true);
         self.list.scroll_to_end();
         cx.notify();
+    }
+
+    /// Whether this transcript is a swarm's coordinator's or one agent's (§7.2).
+    ///
+    /// The tab says which when it makes the view, and again whenever the program is
+    /// known: an empty transcript's copy is the coordinator's or the one agent's, and a
+    /// `set_swarm` that does not tell the view would leave a cached subtree drawing the
+    /// other program's invitation.
+    pub fn set_swarm(&mut self, swarm: bool, cx: &mut Context<Self>) {
+        if self.data.read(cx).swarm == swarm {
+            return;
+        }
+        self.data.update(cx, |data, _| data.swarm = swarm);
+        cx.notify();
+    }
+
+    /// Whether this transcript is a swarm's.
+    pub fn swarm(&self, cx: &App) -> bool {
+        self.data.read(cx).swarm
     }
 
     /// The items currently shown, in order.
@@ -1207,20 +1235,28 @@ fn images_wanted(data: &mut TranscriptData, index: usize) -> Vec<(ItemId, u32)> 
     wanted
 }
 
-/// What an empty transcript says, per agent.
-fn empty_note(agent: AgentKey) -> (String, Option<&'static str>) {
+/// What an empty transcript says, per program and agent.
+///
+/// A swarm's coordinator plans the work and hands it to its lanes; one agent has nobody
+/// to coordinate and does the work itself, which is the whole of the difference the tab
+/// tells this view about (§7.2). A lane's line is its own either way.
+fn empty_note(agent: AgentKey, swarm: bool) -> (String, Option<&'static str>) {
     match agent {
-        AgentKey::Coordinator => (
+        AgentKey::Coordinator if swarm => (
             "Ask the coordinator to get started".to_string(),
             Some("It plans the work and hands tasks to its lanes."),
+        ),
+        AgentKey::Coordinator => (
+            "Ask the agent to get started".to_string(),
+            Some("It does the work itself — there are no lanes to hand it to."),
         ),
         AgentKey::Lane(n) => (format!("Lane {n} hasn't been given work yet."), None),
     }
 }
 
 /// The transcript before its first item: a quiet, centred invitation.
-fn empty_state(agent: AgentKey, palette: &Palette) -> AnyElement {
-    let (note, detail) = empty_note(agent);
+fn empty_state(agent: AgentKey, swarm: bool, palette: &Palette) -> AnyElement {
+    let (note, detail) = empty_note(agent, swarm);
     let mut column = v_flex()
         .size_full()
         .justify_center()
@@ -1239,16 +1275,22 @@ fn empty_state(agent: AgentKey, palette: &Palette) -> AnyElement {
 
     column = column.child(
         div()
+            .id("transcript-empty-note")
+            .aria_label(note.clone())
             .text_size(palette.font_size)
             .text_color(palette.foreground)
-            .child(note),
+            .child(note)
+            .test_support(),
     );
     if let Some(detail) = detail {
         column = column.child(
             div()
+                .id("transcript-empty-detail")
+                .aria_label(detail.to_string())
                 .text_size(palette.font_size - px(2.))
                 .text_color(palette.muted_foreground)
-                .child(detail),
+                .child(detail)
+                .test_support(),
         );
     }
 
@@ -1290,7 +1332,8 @@ impl Render for TranscriptView {
         let palette = Palette::from_app(cx);
 
         if self.data.read(cx).items.is_empty() {
-            return empty_state(self.agent, &palette).into_any_element();
+            let swarm = self.data.read(cx).swarm;
+            return empty_state(self.agent, swarm, &palette).into_any_element();
         }
 
         // The scrollback walks itself back: the topic says there is more behind the
