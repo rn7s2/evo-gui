@@ -242,10 +242,6 @@ pub enum TabContentEvent {
     /// conversation (§7.3): the column goes back to the width it starts at. The
     /// window owns the width, so the gesture is reported rather than acted on.
     ResetPane,
-    /// Someone flipped the workers card's own switch (§7.2): a swarm from here on,
-    /// or one `evo-agent`. One value for the app — every tab and the next launch
-    /// open with it — so the window owns it, and the page reports the intent.
-    UseSwarm(bool),
 }
 
 /// Which of the two screens a [`TabContent`] opens on (§7.1, §7.2): a New Swarm
@@ -697,9 +693,17 @@ impl TabContent {
 
     /// The tab's own state, told to the window: a screen change is a keyboard
     /// change (§7.1).
+    ///
+    /// A tab back on the New Swarm page has started nothing, and the workers card's
+    /// switch is that page's for one launch (§7.2): it opens on a swarm again, whatever
+    /// it was flipped to before the launch that led here.
     fn set_state(&mut self, state: TabState, cx: &mut Context<Self>) {
         if self.state != state {
+            let back_to_the_page = state == TabState::Empty;
             self.state = state;
+            if back_to_the_page {
+                self.set_use_swarm(true, cx);
+            }
             cx.emit(TabContentEvent::ScreenChanged);
             self.sync_folder(cx);
         }
