@@ -57,6 +57,15 @@ impl Feed {
         }
     }
 
+    /// Whether an update of this kind has arrived and was not taken by an
+    /// [`Feed::expect`] — what a test asks to say something did *not* happen.
+    pub fn saw(&mut self, wanted: impl Fn(&Update) -> bool) -> bool {
+        while let Ok(update) = self.updates.try_recv() {
+            self.seen.push(update);
+        }
+        self.seen.iter().any(wanted)
+    }
+
     /// Forget what has already arrived: what a test does when it cares only about
     /// what happens *next* (a restart emits the same updates as a boot).
     pub fn forget(&mut self) {

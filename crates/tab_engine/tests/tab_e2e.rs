@@ -322,6 +322,56 @@ fn a_topic_reset_whose_snapshot_fails_is_asked_for_again() {
     drop(handle);
 }
 
+/// A lane's topic whose re-read fails is asked for again too — but it is not the
+/// coordinator reconnecting: the stream is live and the lane keeps what it had, so
+/// the tab must not raise the coordinator's `reconnecting` badge over it (a lane
+/// mirror the server could not snapshot left a working swarm's tab saying
+/// "reconnecting…" for as long as it ran).
+#[test]
+fn a_lane_reset_whose_snapshot_fails_does_not_say_the_tab_is_reconnecting() {
+    let (dir, handle, updates) = tab("lane-reset-retry", &[]);
+    let mut feed = Feed::new(updates);
+    serving(&mut feed);
+    let control = Control::attach(dir.path()).unwrap();
+    feed.expect("the first snapshot", snapshot_of("session"));
+
+    control
+        .snapshot_body(json!({
+            "lane:2": {"state": {"status": "idle"}, "items": [{"id": "e_4", "kind": "user", "ts": 4}]}
+        }))
+        .unwrap();
+    control.fail_snapshots(2).unwrap();
+    control
+        .emit(json!({"op": "topic.reset", "topic": "lane:2", "reason": "lane_restarted"}))
+        .unwrap();
+
+    feed.expect("the topic.reset frame", |update| {
+        matches!(
+            update,
+            Update::Op {
+                op: Op::TopicReset { .. },
+                ..
+            }
+        )
+    });
+    // Two that failed, then the one that lands: the lane did catch up.
+    let update = feed.expect("the re-read lane", snapshot_of("lane:2"));
+    let Update::Snapshot { body, .. } = update else {
+        unreachable!()
+    };
+    assert_eq!(body["items"][0]["id"], "e_4");
+    assert!(
+        control.requests_on("/snapshot").len() >= 3,
+        "the failed reads were asked for again"
+    );
+    // And at no point did the tab call its stream anything but live.
+    assert!(
+        !feed.saw(|update| matches!(update, Update::Stream { status } if status.is_reconnecting())),
+        "a lane's re-read raised the coordinator's reconnecting badge"
+    );
+    drop(handle);
+}
+
 #[test]
 fn a_refetch_asks_for_every_topic_again() {
     let (dir, handle, updates) = tab("refetch", &[]);
