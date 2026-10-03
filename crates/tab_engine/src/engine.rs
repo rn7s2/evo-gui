@@ -535,10 +535,13 @@ fn engine_loop(
                             // from the position that read was atomic at.
                             live.stream.resume_from(snapshot.cursor());
                         }
-                        // The tab is live again, and stops saying otherwise.
-                        engine.send(Update::Stream {
-                            status: crate::types::StreamStatus::Connected,
-                        });
+                        // The tab is live again, and stops saying otherwise — if
+                        // this read was one that made it say so.
+                        if holds_the_tab(topic.as_deref()) {
+                            engine.send(Update::Stream {
+                                status: crate::types::StreamStatus::Connected,
+                            });
+                        }
                     }
                     None if server.is_running() => {
                         let next = waited
@@ -562,8 +565,20 @@ fn engine_loop(
     }
 }
 
-/// Ask again for a snapshot that failed, once `next` has gone by — and say the tab
-/// is catching up until it lands.
+/// Whether a re-read that has not landed leaves the tab itself behind: the whole
+/// tab's (the stream is parked until it lands) or the coordinator's own topic.
+///
+/// A lane's or the swarm's topic is not: the stream is live, the lane keeps the
+/// items it had and folds every op after them, and the badge this would raise is
+/// the coordinator's — a lane whose snapshot the server cannot answer is not a
+/// coordinator that is reconnecting.
+fn holds_the_tab(topic: Option<&str>) -> bool {
+    topic.is_none_or(|topic| topic == swarm_client::TOPIC_SESSION)
+}
+
+/// Ask again for a snapshot that failed, once `next` has gone by — and, when the
+/// read is one the tab is waiting on ([`holds_the_tab`]), say the tab is catching
+/// up until it lands.
 ///
 /// The retry is a timer, not a wait here: the engine thread still takes ops and
 /// frames while a tab is behind, which is the only reason a reset can be retried
@@ -574,9 +589,11 @@ fn ask_again(
     topic: Option<String>,
     next: Duration,
 ) {
-    engine.send(Update::Stream {
-        status: crate::types::StreamStatus::Reconnecting { retry_in: next },
-    });
+    if holds_the_tab(topic.as_deref()) {
+        engine.send(Update::Stream {
+            status: crate::types::StreamStatus::Reconnecting { retry_in: next },
+        });
+    }
     let commands = commands.clone();
     let _ = thread::Builder::new()
         .name("evo-tab-reset".into())
