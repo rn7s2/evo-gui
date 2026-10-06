@@ -555,9 +555,10 @@ fn fenced_block(text: &str, i: usize) -> Option<usize> {
     } else {
         return None;
     };
-    let mut end = i;
     let mut lines = text[i..].split_inclusive('\n');
-    lines.next();
+    // The opening fence's own line is part of the block: counting from `i` without it
+    // would end the block short — inside its text, even inside a character.
+    let mut end = i + lines.next().map_or(0, str::len);
     for line in lines {
         end += line.len();
         if line.trim_start().starts_with(marker) {
@@ -875,6 +876,14 @@ mod tests {
         assert!(
             links("```\nsee src/main.rs\n```\n", &disk).is_empty(),
             "a fenced block is source, not prose"
+        );
+        assert!(
+            links("```a\n中\n```\nsee src/main.rs", &disk).len() == 1,
+            "a block ends at its closing fence, not short of it inside a character"
+        );
+        assert!(
+            links("```rust\nsrc/main.rs\n```\n", &disk).is_empty(),
+            "the opening fence's own line is counted"
         );
         assert!(
             links("    src/main.rs\n", &disk).is_empty(),
