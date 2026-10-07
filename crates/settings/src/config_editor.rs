@@ -1,11 +1,11 @@
-//! The raw-config file editor: one page over evo's own four config documents.
+//! The raw-config file editor: one page over evo's own five config documents.
 //!
 //! The app's second Settings surface (§13). [`crate::SettingsPanel`] edits the two
 //! binaries and the theme; this page shows the user's own evo configuration as text,
 //! for a global scope (`~/.evo/`) or a project's (`<folder>/.evo/`): `init.lisp`,
-//! `swarm.lisp`, `memory.sexp`, `lore.sexp`.
+//! `post-init.lisp`, `swarm.lisp`, `memory.sexp`, `lore.sexp`.
 //!
-//! The four documents are file tabs, each keeping its own [`EditorState`], so a draft
+//! The five documents are file tabs, each keeping its own [`EditorState`], so a draft
 //! survives switching tabs and the page being hidden. Everything that touches a file
 //! — read, SBCL check, write — runs on the background executor.
 //!
@@ -66,9 +66,10 @@ const PATH_CHARS: usize = 72;
 fn slot(file: ConfigFile) -> usize {
     match file {
         ConfigFile::Init => 0,
-        ConfigFile::Swarm => 1,
-        ConfigFile::Memory => 2,
-        ConfigFile::Lore => 3,
+        ConfigFile::PostInit => 1,
+        ConfigFile::Swarm => 2,
+        ConfigFile::Memory => 3,
+        ConfigFile::Lore => 4,
     }
 }
 
@@ -128,7 +129,7 @@ enum Status {
 
 /// The one page that edits evo's raw config files (§13).
 pub struct ConfigEditor {
-    buffers: [Buffer; 4],
+    buffers: [Buffer; ConfigFile::ALL.len()],
     selected: ConfigFile,
     /// The document whose save is in flight, while one is.
     saving: Option<ConfigFile>,
@@ -137,7 +138,7 @@ pub struct ConfigEditor {
 }
 
 impl ConfigEditor {
-    /// A page over `scope`'s four documents, each already being read.
+    /// A page over `scope`'s five documents, each already being read.
     pub fn new(scope: ConfigScope, window: &mut Window, cx: &mut Context<Self>) -> ConfigEditor {
         let mut subscriptions = Vec::new();
         let mut buffers: Vec<Buffer> = Vec::with_capacity(ConfigFile::ALL.len());
@@ -171,7 +172,7 @@ impl ConfigEditor {
                 status: Status::Loading,
             });
         }
-        let buffers: [Buffer; 4] = match buffers.try_into() {
+        let buffers: [Buffer; ConfigFile::ALL.len()] = match buffers.try_into() {
             Ok(buffers) => buffers,
             Err(_) => unreachable!("one buffer per document"),
         };
@@ -658,6 +659,7 @@ fn tab_label(file: ConfigFile, dirty: bool) -> SharedString {
 fn tab_id(file: ConfigFile) -> &'static str {
     match file {
         ConfigFile::Init => "config-file-tab-init",
+        ConfigFile::PostInit => "config-file-tab-post-init",
         ConfigFile::Swarm => "config-file-tab-swarm",
         ConfigFile::Memory => "config-file-tab-memory",
         ConfigFile::Lore => "config-file-tab-lore",
@@ -921,9 +923,9 @@ mod tests {
         open(cx, Scratch::new(name))
     }
 
-    /// The four documents are offered as tabs, and the page opens on `init.lisp`.
+    /// The five documents are offered as tabs, and the page opens on `init.lisp`.
     #[gpui_kit::test]
-    fn the_four_documents_are_offered(cx: &mut TestAppContext) {
+    fn the_five_documents_are_offered(cx: &mut TestAppContext) {
         let f = page(cx, "tabs");
         f.act(cx, |window, cx| {
             window.render_frame(cx);

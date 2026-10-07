@@ -1,4 +1,4 @@
-//! The four user files Settings edits by hand: where they are, and how they are
+//! The five user files Settings edits by hand: where they are, and how they are
 //! read and written without losing anybody's work.
 //!
 //! evo is configured by Lisp and by sexpr streams, and these are its own files
@@ -93,7 +93,7 @@ pub enum ConfigScope {
 }
 
 impl ConfigScope {
-    /// The directory the four files live in (`.evo` is appended to a project
+    /// The directory the five files live in (`.evo` is appended to a project
     /// folder).
     pub fn dir(&self) -> PathBuf {
         match self {
@@ -103,11 +103,13 @@ impl ConfigScope {
     }
 }
 
-/// The four files the raw editors can open.
+/// The five files the raw editors can open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ConfigFile {
     /// `init.lisp` — models, providers and settings, re-evaluated on every boot.
     Init,
+    /// `post-init.lisp` — configuration evaluated after extensions load.
+    PostInit,
     /// `swarm.lisp` — the swarm's coordinator and lane configuration.
     Swarm,
     /// `memory.sexp` — curated memory, one form per entry.
@@ -118,8 +120,9 @@ pub enum ConfigFile {
 
 impl ConfigFile {
     /// Every file, in the order a panel shows them.
-    pub const ALL: [ConfigFile; 4] = [
+    pub const ALL: [ConfigFile; 5] = [
         ConfigFile::Init,
+        ConfigFile::PostInit,
         ConfigFile::Swarm,
         ConfigFile::Memory,
         ConfigFile::Lore,
@@ -129,6 +132,7 @@ impl ConfigFile {
     pub fn file_name(self) -> &'static str {
         match self {
             ConfigFile::Init => "init.lisp",
+            ConfigFile::PostInit => "post-init.lisp",
             ConfigFile::Swarm => "swarm.lisp",
             ConfigFile::Memory => "memory.sexp",
             ConfigFile::Lore => "lore.sexp",
@@ -136,7 +140,7 @@ impl ConfigFile {
     }
 }
 
-/// Where one of the four files is, in this scope.
+/// Where one of the five files is, in this scope.
 pub fn path(scope: &ConfigScope, file: ConfigFile) -> PathBuf {
     scope.dir().join(file.file_name())
 }
@@ -516,13 +520,18 @@ mod tests {
     }
 
     #[test]
-    fn the_four_files_and_their_paths() {
-        assert_eq!(ConfigFile::ALL.len(), 4);
+    fn the_config_files_and_their_paths() {
+        assert_eq!(ConfigFile::ALL.len(), 5);
         let project = ConfigScope::Project(PathBuf::from("/coding/foo"));
         assert_eq!(
             path(&project, ConfigFile::Init),
             PathBuf::from("/coding/foo/.evo/init.lisp")
         );
+        assert_eq!(
+            path(&project, ConfigFile::PostInit),
+            PathBuf::from("/coding/foo/.evo/post-init.lisp")
+        );
+        assert!(path(&ConfigScope::Global, ConfigFile::PostInit).ends_with(".evo/post-init.lisp"));
         assert_eq!(
             path(&project, ConfigFile::Swarm),
             PathBuf::from("/coding/foo/.evo/swarm.lisp")
