@@ -798,6 +798,17 @@ pub struct ModelRow {
     pub reason: Option<String>,
 }
 
+/// A drawer row's element name: the **registration** the row offers, not the id alone.
+///
+/// Two registrations of one id (`stub-a` direct and behind a proxy, the same model on
+/// two endpoints) are two rows, and they must not be two elements with one name: gpui
+/// settles an element's interaction by that name, so naming both rows
+/// `drawer-model-<id>` leaves **both** of them taking no click at all — the choice never
+/// leaves the drawer, and nothing says why.
+fn drawer_row_id(id: &str, provider: &str) -> ElementId {
+    ElementId::from(format!("drawer-model-{id}-{provider}"))
+}
+
 /// What the caret is on, as the server last said: the question it is waiting on, and
 /// the answer to the last one.
 ///
@@ -2680,7 +2691,7 @@ impl Composer {
             let hover = paint::color(paint::mix(palette.fg, ITEM_HOVER_MIX, palette.sidebar));
             let active = paint::color(paint::mix(palette.fg, ITEM_CHOSEN_MIX, palette.sidebar));
             let mut row = h_flex()
-                .id(ElementId::from(format!("drawer-model-{}", model.id)))
+                .id(drawer_row_id(&model.id, &model.provider))
                 .test_support()
                 .aria_label(spoken)
                 .h(DRAWER_ITEM)
@@ -4630,7 +4641,7 @@ mod tests {
                 "the drawer folds out inside the box: {drawer:?} in {box_:?}"
             );
             assert!(
-                window.find("drawer-model-stub-a").visible(),
+                window.find("drawer-model-stub-a-openai").visible(),
                 "the catalog's models are in it"
             );
             assert!(
@@ -4643,6 +4654,75 @@ mod tests {
             window.render_frame(cx);
             assert!(window.try_find("composer-drawer").is_none());
         });
+    }
+
+    /// §5.6, and the user's report: two registrations of one id are two rows, and each
+    /// row takes a click and sends `model.set` for **its own** registration — the one
+    /// below the fold included.
+    ///
+    /// The rows were named by the id alone, so one id under two providers put two
+    /// elements under one name, and gpui settles an element's interaction by that name:
+    /// **neither** row took a click (nothing left the drawer, and nothing said why),
+    /// while the TUI's picker — which names a registration by its whole entry — could
+    /// choose it. Measured on the drawer before the fix: a press on either `stub-a` row
+    /// produced no `model.set` at all, and the unique `stub-b` row below them did.
+    #[gpui_kit::test]
+    fn a_second_registration_of_an_id_is_a_row_that_takes_a_click(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.act(cx, |window, cx| {
+            f.composer.update(cx, |composer, cx| {
+                let models = vec![
+                    ModelRow {
+                        id: "stub-a".to_string(),
+                        provider: "stub".to_string(),
+                        detail: "200k ctx".to_string(),
+                        effort_levels: catalog_levels(),
+                        reason: None,
+                    },
+                    ModelRow {
+                        id: "stub-a".to_string(),
+                        provider: "stub2".to_string(),
+                        detail: "272k ctx".to_string(),
+                        effort_levels: catalog_levels(),
+                        reason: None,
+                    },
+                    ModelRow {
+                        id: "stub-b".to_string(),
+                        provider: "stub".to_string(),
+                        detail: "100k ctx".to_string(),
+                        effort_levels: Vec::new(),
+                        reason: None,
+                    },
+                ];
+                composer.set_catalog(catalog_levels(), models, Vec::new(), cx)
+            });
+            f.set_agent(&state_with(&["model"]), cx);
+            window.render_frame(cx);
+            window.click(chip_id("model"), cx);
+            window.render_frame(cx);
+        });
+        let (first, second) = f.act(cx, |window, _| {
+            (
+                window.find("drawer-model-stub-a-stub").bounds(),
+                window.find("drawer-model-stub-a-stub2").bounds(),
+            )
+        });
+        assert_eq!(
+            second.top() - first.top(),
+            DRAWER_ITEM,
+            "one row apart, in the catalog's own order"
+        );
+        f.act(cx, |window, cx| {
+            window.click("drawer-model-stub-a-stub2", cx)
+        });
+        assert_eq!(
+            f.events(),
+            vec![ComposerEvent::ModelSet {
+                id: "stub-a".to_string(),
+                provider: "stub2".to_string(),
+            }],
+            "the click sends the registration the row names, not the id's first one"
+        );
     }
 
     /// The drawer's models are the catalog's, and picking one is a `model.set`; the
@@ -4660,7 +4740,9 @@ mod tests {
             window.click(chip_id("model"), cx);
             window.render_frame(cx);
         });
-        f.act(cx, |window, cx| window.click("drawer-model-stub-b", cx));
+        f.act(cx, |window, cx| {
+            window.click("drawer-model-stub-b-openai", cx)
+        });
         assert_eq!(
             f.events(),
             vec![ComposerEvent::ModelSet {
@@ -4792,7 +4874,7 @@ mod tests {
             // region is born in: `scroll_to_item` asked here is answered against the
             // frame before it, when the region was not there, and leaves the list at
             // its top with the ticked row under the fold.
-            let chosen = window.find("drawer-model-stub-j");
+            let chosen = window.find("drawer-model-stub-j-openai");
             assert!(
                 chosen.visible()
                     && chosen.bounds().top() >= region.top()
@@ -4823,7 +4905,7 @@ mod tests {
                 "the third row is one the region opens on"
             );
             let region = window.find("drawer-models").bounds();
-            let chosen = window.find("drawer-model-stub-c").bounds();
+            let chosen = window.find("drawer-model-stub-c-openai").bounds();
             assert!(
                 chosen.top() >= region.top() && chosen.bottom() <= region.bottom(),
                 "and it is in view: {chosen:?} in {region:?}"
@@ -4852,10 +4934,10 @@ mod tests {
                     window.try_find("drawer-models").is_none(),
                     "{count} models are not a region"
                 );
-                let first = window.find("drawer-model-stub-a").bounds();
+                let first = window.find("drawer-model-stub-a-openai").bounds();
                 let last = window
                     .find(format!(
-                        "drawer-model-stub-{}",
+                        "drawer-model-stub-{}-openai",
                         char::from(b'a' + count - 1)
                     ))
                     .bounds();
@@ -4900,7 +4982,9 @@ mod tests {
         );
         // Nothing here is a button: the crate's own event log stays empty whichever
         // model is pressed.
-        f.act(cx, |window, cx| window.click("drawer-model-stub-b", cx));
+        f.act(cx, |window, cx| {
+            window.click("drawer-model-stub-b-openai", cx)
+        });
         assert_eq!(
             f.events(),
             vec![],

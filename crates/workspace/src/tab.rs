@@ -4171,8 +4171,8 @@ mod tests {
             window.click("composer-chip-model", cx);
             window.render_frame(cx);
             assert!(
-                window.find("drawer-model-stub-a").visible()
-                    && window.find("drawer-model-stub-b").visible(),
+                window.find("drawer-model-stub-a-openai").visible()
+                    && window.find("drawer-model-stub-b-openai").visible(),
                 "the catalog's registrations are in the drawer"
             );
             assert!(
@@ -4180,12 +4180,12 @@ mod tests {
                 "and the ladder the session accepts"
             );
             assert_eq!(
-                window.find("drawer-model-stub-b").label(),
+                window.find("drawer-model-stub-b-openai").label(),
                 Some("openai · stub-b no API key"),
                 "a registration evo cannot reach is listed with evo's own reason"
             );
             assert_eq!(
-                window.find("drawer-model-stub-a").label(),
+                window.find("drawer-model-stub-a-openai").label(),
                 Some("openai · stub-a 200k ctx · vision · effort low, medium, high, xhigh, max"),
                 "and a model it can run is listed with the catalog's own line: the ctx \
                  window, the modalities, and the levels that registration takes"
@@ -4194,7 +4194,7 @@ mod tests {
         .expect("the page");
 
         cx.update_window(window, |_, window, cx| {
-            window.click("drawer-model-stub-b", cx)
+            window.click("drawer-model-stub-b-openai", cx)
         })
         .expect("the page");
         assert_eq!(
