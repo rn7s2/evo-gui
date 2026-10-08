@@ -303,8 +303,11 @@ pub(crate) fn text_style(cx: &App) -> TextViewStyle {
         .border_color(rule_soft);
 
     // A fenced block: the muted surface, 10px 12px of padding, and the design's
-    // 10px above and below.
+    // 10px above and below. Its type is the mono size at the reader's zoom: the kit
+    // sets a block's size itself (its theme's `mono_md`, a fixed 13px), so a block
+    // that did not say its own would stay put while the prose around it zooms.
     let code_block = StyleRefinement::default()
+        .text_size(palette.payload_size)
         .my(px(10.))
         .px(px(12.))
         .py(px(10.))
@@ -364,6 +367,22 @@ mod tests {
         div, point, size, AppContext as _, Bounds, Context, Entity, IntoElement,
         ParentElement as _, Quad, Render, TestAppContext, Window, WindowBounds, WindowOptions,
     };
+
+    /// A fenced block's type follows the reader's zoom like the prose around it: the kit
+    /// sets a block at its own fixed mono size, so the style has to say the zoomed one.
+    #[gpui_kit::test]
+    fn a_code_block_is_set_at_the_mono_size_at_the_readers_zoom(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        for zoom in [0.75, 1.0, 1.5] {
+            cx.update(|cx: &mut App| crate::TranscriptZoom(zoom).set(cx));
+            let style = cx.update(|cx: &mut App| text_style(cx));
+            assert_eq!(
+                style.code_block().text.font_size,
+                Some(px(design::FONT_MONO * zoom).into()),
+                "a code block at {zoom}×"
+            );
+        }
+    }
 
     /// Every cell is inside its row; a cell's type would shadow the header's.
     #[gpui_kit::test]

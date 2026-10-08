@@ -174,7 +174,9 @@ pub(crate) struct TranscriptData {
     /// Items the reader has opened.
     pub(crate) expanded: HashSet<ItemId>,
     /// The ids of items the topic holds and this view is not the place for — the
-    /// serve's own ephemeral status line (`is_part_of_the_record`). Counted rather than
+    /// serve's own ephemeral status line and evo's goal notices
+    /// (`is_part_of_the_record`), and a goal transition told a second time
+    /// (`echoes_a_goal_row`). Counted rather than
     /// forgotten so that the two lists can be held to each other: with them, the
     /// record is the topic's own list, and a view that missed a row is a view that
     /// says so ([`TranscriptView::declined`]).
@@ -768,7 +770,7 @@ impl TranscriptView {
             let mut kept = Vec::with_capacity(items.len());
             let mut declined = HashSet::new();
             for item in items {
-                if is_part_of_the_record(&item) {
+                if is_part_of_the_record(&item) && !echoes_a_goal_row(&kept, &item) {
                     kept.push(item);
                 } else {
                     declined.insert(item.id.clone());
@@ -799,10 +801,22 @@ impl TranscriptView {
         let added = self.data.update(cx, |data, _| {
             let mut fresh: Vec<Item> = Vec::new();
             for item in items {
-                if !is_part_of_the_record(&item) {
+                if !is_part_of_the_record(&item) || echoes_a_goal_row(&fresh, &item) {
                     data.declined.insert(item.id.clone());
                 } else if data.index_of(&item.id).is_none() {
                     fresh.push(item);
+                }
+            }
+            // A page that ends on the transition the held record opens with — the
+            // page boundary falling between a goal's two items — gives its own copy
+            // up: the one already drawn stays where the reader sees it.
+            if let (Some(older), Some(held)) = (
+                fresh.iter().rposition(|item| goal_of(item).is_some()),
+                first_goal(&data.items),
+            ) {
+                if goal_of(&fresh[older]).is_some_and(|older| same_transition(older, held)) {
+                    let item = fresh.remove(older);
+                    data.declined.insert(item.id);
                 }
             }
             if fresh.is_empty() {
@@ -836,11 +850,16 @@ impl TranscriptView {
     /// Add or replace one item, by its id. Returns whether the view changed.
     ///
     /// The serve's own ephemeral status line — `session ready`, at the top of every
-    /// session — is not part of the conversation: it is dropped here rather than drawn
+    /// session — is not part of the conversation, nor is a goal notice or a goal
+    /// transition told twice: it is dropped here rather than drawn
     /// at the head of every transcript. A command's output is a `notice` item too, and
     /// stays: see [`is_part_of_the_record`].
     pub fn upsert(&mut self, item: Item, cx: &mut Context<Self>) -> bool {
-        if !is_part_of_the_record(&item) {
+        let echo = {
+            let data = self.data.read(cx);
+            data.index_of(&item.id).is_none() && echoes_a_goal_row(&data.items, &item)
+        };
+        if echo || !is_part_of_the_record(&item) {
             // Not a row, but still one of the items the topic holds: counted so the
             // record and the topic can be held to each other ([`Self::declined`]).
             self.data
@@ -1249,14 +1268,74 @@ impl TranscriptView {
 /// `source: serve`, §4.1). Being outside the journal is not what makes a notice noise:
 /// a command's output (`/lore`, `/model`, `/eval`, an extension's own) is published as
 /// a live `notice` item with `source: command` and `durable: false` too, and it is
-/// exactly what the reader asked to see. Every other notice, and everything else,
-/// including a durable notice, is the record.
+/// exactly what the reader asked to see.
+///
+/// evo's **goal** notices (`◆ goal created: …`, `◆ goal paused`, `◆ goal g-…:
+/// complete` after every run while the goal stands) go too: each restates a
+/// transition the goal's own `goal` item already draws, so the reader would read it
+/// twice. `/goal` with no argument answers as a `command` notice and stays.
+///
+/// Every other notice, and everything else, including a durable notice, is the record.
 fn is_part_of_the_record(item: &Item) -> bool {
     !matches!(
         &item.kind,
         ItemKind::Notice(notice)
-            if !notice.durable && notice.source == NoticeSource::Serve
+            if (!notice.durable && notice.source == NoticeSource::Serve)
+                || notice.source == NoticeSource::Goal
     )
+}
+
+/// Whether `item` says again what the last goal row in `before` already says.
+///
+/// evo tells the record about one goal transition more than once: `/goal <objective>`
+/// journals the goal itself (a `goal` item, `created`), a `◆ goal created: …` notice
+/// (`source: goal`, dropped by [`is_part_of_the_record`] — every one of those restates a
+/// transition a goal item draws), and the message it steers the agent with, whose
+/// origin is the same transition (a second `goal` item, `created`, same id and
+/// objective). `resume` and a refined objective do the same. The reader is shown the
+/// transition once: the first of the two, which carries the budget.
+///
+/// Only the transitions that can be told twice are matched. A `continue` follows
+/// another `continue` as a new nudge, never as a copy of it, so it always stays.
+fn echoes_a_goal_row(before: &[Item], item: &Item) -> bool {
+    let Some(goal) = goal_of(item) else {
+        return false;
+    };
+    before
+        .iter()
+        .rev()
+        .find_map(goal_of)
+        .is_some_and(|last| same_transition(last, goal))
+}
+
+/// The goal transition an item is, when it is one.
+fn goal_of(item: &Item) -> Option<&session::GoalItem> {
+    match &item.kind {
+        ItemKind::Goal(goal) => Some(goal),
+        _ => None,
+    }
+}
+
+/// The first goal transition among `items`.
+fn first_goal(items: &[Item]) -> Option<&session::GoalItem> {
+    items.iter().find_map(goal_of)
+}
+
+/// Whether two goal items tell the same transition: one of those evo says twice, of the
+/// same goal, to the same objective.
+fn same_transition(a: &session::GoalItem, b: &session::GoalItem) -> bool {
+    use session::GoalEventKind as Event;
+    let told_twice = matches!(
+        a.event,
+        Event::Created | Event::Resumed | Event::ObjectiveUpdated
+    );
+    told_twice
+        && a.event == b.event
+        && a.goal_id == b.goal_id
+        && match (&a.objective, &b.objective) {
+            (Some(a), Some(b)) => a == b,
+            _ => true,
+        }
 }
 
 /// Whether an item carries thinking text a reader could reveal. The view counts these
@@ -1365,8 +1444,8 @@ fn loading_line(palette: &Palette) -> AnyElement {
         .flex()
         .justify_center()
         .pb(px(6.))
-        .text_size(px(11.))
-        .line_height(px(16.))
+        .text_size(palette.scaled(11.))
+        .line_height(palette.scaled(16.))
         .text_color(palette.muted_foreground)
         .child("Loading earlier items…")
         .test_support()
@@ -1593,7 +1672,9 @@ impl TranscriptView {
 
         let pill = div()
             .id("transcript-jump")
-            .h(px(28.))
+            // The pill's words are transcript text: they, and the box around them,
+            // follow the reader's zoom like the rows under it.
+            .h(palette.scaled(28.))
             .flex()
             .items_center()
             .gap_1()
@@ -1605,7 +1686,7 @@ impl TranscriptView {
             // surface — not the kit theme's own input token, which is the
             // widget border in this app's theme.
             .bg(palette.input)
-            .text_size(px(12.))
+            .text_size(palette.scaled(12.))
             .text_color(palette.foreground)
             // `.ws-main .jump`: `box-shadow: 0 2px 8px rgba(60,40,10,.12)`.
             .shadow(vec![BoxShadow::new(

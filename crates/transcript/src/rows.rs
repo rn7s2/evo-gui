@@ -1143,6 +1143,11 @@ fn quiet_row(
         text,
         block,
     } = row;
+    // The header is one line of a fixed height: a head with line breaks in it (a goal's
+    // objective is the reader's own prose, lists and all) shows its first line, with
+    // `…` for the rest, or its later lines spill out of the row over the rows around
+    // it. The block under the header keeps the words as they were written.
+    let head = one_line(&head);
     let view = view.clone();
     let aria = match &trailing {
         Some(trailing) => format!("{head} {trailing}"),
@@ -1611,7 +1616,7 @@ fn assistant_row(
     if let Some(error) = assistant.error.as_deref().filter(|error| !error.is_empty()) {
         row = row.child(
             div()
-                .text_sm()
+                .text_size(palette.scaled(14.)) // the kit's `text_sm`, at the reader's zoom
                 .text_color(palette.destructive)
                 .child(format!("error: {error}")),
         );
@@ -2133,10 +2138,12 @@ fn status_pill(status: &str, colour: Hsla, palette: &Palette, tick: bool) -> Any
     if tick {
         // `<Tick/>` in the design: `m5 12 5 5L20 7` of a 24-unit box, 3 units of
         // stroke, round caps — the same painter as the strip's glyphs.
+        // At the reader's zoom, like the word beside it.
+        let size = f32::from(palette.scaled(TICK_GLYPH));
         pill = pill.child(glyph::stroked(
-            TICK_GLYPH,
+            size,
             TICK_STROKE,
-            &tick_lines(),
+            &tick_lines(size),
             pill_ink(colour, palette),
         ));
     }
@@ -2151,9 +2158,8 @@ const TICK_STROKE: f32 = 1.4;
 const PILL_HEIGHT: f32 = 20.;
 const PILL_SIZE: f32 = 11.5;
 
-/// The tick `m5 12 5 5L20 7`, scaled to [`TICK_GLYPH`].
-fn tick_lines() -> Vec<(Point<Pixels>, Point<Pixels>)> {
-    let size = TICK_GLYPH;
+/// The tick `m5 12 5 5L20 7`, scaled to `size` ([`TICK_GLYPH`] at the reader's zoom).
+fn tick_lines(size: f32) -> Vec<(Point<Pixels>, Point<Pixels>)> {
     let at = |x: f32, y: f32| point(px(x / 24. * size), px(y / 24. * size));
     vec![(at(5., 12.), at(10., 17.)), (at(10., 17.), at(20., 7.))]
 }
@@ -2177,6 +2183,9 @@ fn caret(expanded: bool, palette: &Palette) -> AnyElement {
     // toggle a fresh animation.
     let (from, to) = if expanded { (0., 1.) } else { (1., 0.) };
     let easing = widgets::effort::cubic_bezier(0.25, 0.1, 0.25, 1.0);
+    // The glyph is drawn at the reader's zoom, like the words beside it; the slot it
+    // sits in keeps the design's width, which a card's body is indented by.
+    let size = f32::from(palette.scaled(CARET_GLYPH)).min(DISCLOSURE_WIDTH);
 
     div()
         .w(px(DISCLOSURE_WIDTH))
@@ -2191,16 +2200,16 @@ fn caret(expanded: bool, palette: &Palette) -> AnyElement {
                     expanded as usize,
                 )))
                 .flex_none()
-                .size(px(CARET_GLYPH))
+                .size(px(size))
                 .with_animation(
                     ElementId::from(("transcript-tool-caret-motion", expanded as usize)),
                     Animation::new(CARET_TURN).with_easing(easing),
                     move |el, delta| {
                         let angle = (from + (to - from) * delta) * std::f32::consts::FRAC_PI_2;
                         el.child(glyph::stroked(
-                            CARET_GLYPH,
+                            size,
                             CARET_STROKE,
-                            &chevron_lines(angle),
+                            &chevron_lines(size, angle),
                             colour,
                         ))
                     },
@@ -2211,8 +2220,7 @@ fn caret(expanded: bool, palette: &Palette) -> AnyElement {
 
 /// The chevron `m9 6 6 6-6 6` of the design's 24-unit box, at `size`, turned by
 /// `angle` about its own centre — two strokes through its three points.
-fn chevron_lines(angle: f32) -> Vec<(Point<Pixels>, Point<Pixels>)> {
-    let size = CARET_GLYPH;
+fn chevron_lines(size: f32, angle: f32) -> Vec<(Point<Pixels>, Point<Pixels>)> {
     let (sin, cos) = angle.sin_cos();
     let turn = |x: f32, y: f32| {
         let (x, y) = (x * size, y * size);

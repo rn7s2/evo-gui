@@ -3341,7 +3341,7 @@ mod tests {
         let wanted = vec![
             "t_call".to_string(),
             "c292ff93".to_string(),
-            "06e743d2".to_string(),
+            // The goal notice is not a row: the goal's own item says what it says.
             "ro_1".to_string(),
             "e_answer".to_string(),
             "t_after".to_string(),

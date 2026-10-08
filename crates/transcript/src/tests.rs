@@ -17,8 +17,8 @@ use session::{Item, ItemKind};
 
 use crate::rows::{
     cap_fields, cap_text, json_fields, row_id, take_chars, thinking_tail, Cap, FieldValue,
-    CONTEXT_BLOCK_LINES, RESULT_LIMIT, TC_BODY_INDENT, THINKING_TAIL_CHARS, TURN_LABEL_OVERHANG,
-    USER_LINE, VALUE_LIMIT,
+    CONTEXT_BLOCK_LINES, RESULT_LIMIT, TC_BODY_INDENT, THINKING_TAIL_CHARS, TOOL_ROW_HEIGHT,
+    TURN_LABEL_OVERHANG, USER_LINE, VALUE_LIMIT,
 };
 use crate::TranscriptView;
 
@@ -861,6 +861,110 @@ fn a_goal_row_reads_the_objective_and_never_the_goal_id() {
         "paused",
         "a transition with no objective says what happened to the goal"
     );
+}
+
+/// What evo journals for one `/goal <objective>` (a real session's entries, in order):
+/// the goal itself, a `◆ goal created: …` notice with `source: goal`, and the message the
+/// goal steers the agent with, whose origin is the same transition — a second `goal`
+/// item, `created`, same id and objective. The reader is told once.
+fn goal_created_as_evo_journals_it(objective: &str) -> Vec<Item> {
+    vec![
+        user("u_0", "before"),
+        goal("e_goal", "created", objective),
+        item(json!({
+            "id": "e_notice", "ts": 1, "kind": "notice", "severity": "info",
+            "text": format!("◆ goal created: {objective}"), "source": "goal", "durable": true
+        })),
+        item(json!({
+            "id": "e_steer", "ts": 1, "kind": "goal", "event": "created", "goal_id": "b1",
+            "objective": objective
+        })),
+    ]
+}
+
+fn held_ids(view: &Entity<TranscriptView>, cx: &App) -> Vec<String> {
+    view.read(cx)
+        .items(cx)
+        .iter()
+        .map(|item| item.id.clone())
+        .collect()
+}
+
+#[gpui_kit::test]
+fn a_goal_set_with_goal_is_one_row_however_the_record_arrives(cx: &mut TestAppContext) {
+    let objective = "fix evo-gui bugs:\n- zooming\n- \"/goal\" shows two texts";
+
+    // As a snapshot.
+    let (view, cx) = open!(cx, goal_created_as_evo_journals_it(objective));
+    cx.read(|cx| {
+        assert_eq!(held_ids(&view, cx), ["u_0", "e_goal"]);
+        assert_eq!(view.read(cx).declined(cx), 2, "the notice and the echo");
+    });
+
+    // Live, one item at a time.
+    view.update(cx, |view, cx| view.clear(cx));
+    for item in goal_created_as_evo_journals_it(objective) {
+        view.update(cx, |view, cx| {
+            view.upsert(item, cx);
+        });
+    }
+    cx.read(|cx| assert_eq!(held_ids(&view, cx), ["u_0", "e_goal"]));
+
+    // Paged back, a page at a time, with the boundary between the two goal items.
+    view.update(cx, |view, cx| view.clear(cx));
+    let mut record = goal_created_as_evo_journals_it(objective);
+    let newer = record.split_off(2);
+    view.update(cx, |view, cx| {
+        view.replace(newer, cx);
+        view.prepend(record, cx);
+    });
+    cx.read(|cx| {
+        assert_eq!(
+            held_ids(&view, cx),
+            ["u_0", "e_steer"],
+            "the page gives its copy up; the row already drawn stays"
+        );
+    });
+
+    // Its header is one line of the row's height, not the objective's three.
+    view.update(cx, |view, cx| {
+        view.replace(goal_created_as_evo_journals_it(objective), cx)
+    });
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        let header = window.find(row_id("transcript-goal", "e_goal"));
+        assert_eq!(
+            header.label(),
+            Some("Goal · created — fix evo-gui bugs: … · 12k/50k")
+        );
+        assert_eq!(header.bounds().size.height, px(TOOL_ROW_HEIGHT));
+    });
+}
+
+/// A transition that is not one evo tells twice is never folded: a nudge after a nudge
+/// is a nudge, and a second resume is a resume after a pause.
+#[gpui_kit::test]
+fn goal_transitions_that_repeat_on_purpose_all_stay(cx: &mut TestAppContext) {
+    let (view, cx) = open!(
+        cx,
+        vec![
+            goal("e_1", "created", "ship it"),
+            goal("e_2", "continue", "ship it"),
+            goal("e_3", "continue", "ship it"),
+            goal("e_4", "paused", "ship it"),
+            goal("e_5", "resumed", "ship it"),
+            goal("e_6", "paused", "ship it"),
+            goal("e_7", "resumed", "ship it"),
+            goal("e_8", "objective_updated", "ship it now"),
+            goal("e_9", "objective_updated", "ship it today"),
+        ]
+    );
+    cx.read(|cx| {
+        assert_eq!(
+            held_ids(&view, cx),
+            ["e_1", "e_2", "e_3", "e_4", "e_5", "e_6", "e_7", "e_8", "e_9"]
+        );
+    });
 }
 
 #[gpui_kit::test]
@@ -1840,9 +1944,7 @@ fn a_notice_the_server_does_not_keep_is_not_in_the_transcript(cx: &mut TestAppCo
 /// `/eval`'s answer, a command's refusal. It is what the reader asked to see, so it is
 /// the record — a row, drawn and kept, and not counted as declined.
 #[gpui_kit::test]
-fn a_commands_output_is_drawn_even_though_the_server_does_not_keep_it(
-    cx: &mut TestAppContext,
-) {
+fn a_commands_output_is_drawn_even_though_the_server_does_not_keep_it(cx: &mut TestAppContext) {
     let saying = item(json!({
         "id": "n_cmd", "ts": 2, "kind": "notice", "severity": "info",
         "text": "no lore — /lore <text> adds durable guidance",
