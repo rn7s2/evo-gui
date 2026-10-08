@@ -11,6 +11,7 @@
 //!
 //! ```text
 //!   main ──▶ run()
+//!             ├── login env: a terminal's environment, for every child
 //!             ├── single instance: lock, or knock and exit 0
 //!             ├── window (bounds from app.json, clamped to the display)
 //!             ├── activation watcher: a second launch raises this window
@@ -23,6 +24,7 @@ mod bounds;
 mod housekeeping;
 mod launcher;
 mod logging;
+mod login_env;
 mod menus;
 mod quit;
 mod settings;
@@ -212,6 +214,10 @@ pub const HOST_ENV: &[(&str, &str)] = &[("EVO_BABY_EVO", "0")];
 /// Open the app: one instance, one window, and the background loads. Returns
 /// when the process is done.
 pub fn run() {
+    // First of all, while this is the only thread: an app the Dock started has
+    // launchd's environment, not a terminal's, and every server a tab starts
+    // inherits this process's. Make it the one a terminal would give.
+    let login_env = login_env::adopt();
     let root = Root::default();
     let log = AppLog::open(&root);
     log.info(format!(
@@ -220,6 +226,11 @@ pub fn run() {
         std::process::id(),
         root.path().display()
     ));
+    if login_env.failed() {
+        log.warn(login_env.to_string());
+    } else {
+        log.info(login_env.to_string());
+    }
 
     // §2 rule 1: one instance. A second launch asks the first to come forward
     // and leaves with success — the user asked for the app, and it is up.

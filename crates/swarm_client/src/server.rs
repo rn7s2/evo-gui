@@ -711,10 +711,10 @@ fn spawn(cfg: &ServerConfig, stdin: &StdinClose) -> Result<Child> {
 
 /// The child's environment.
 ///
-/// Everything that would tie a server to *our* evo session is removed first, the
-/// caller's variables come next, and nothing else is added: the token travels in
-/// the ready file, not the environment, and parent death is stdin EOF, not a pid
-/// to watch.
+/// Everything that would tie a server to *our* evo session is removed first,
+/// `PWD` names the folder it runs in, the caller's variables come next, and
+/// nothing else is added: the token travels in the ready file, not the
+/// environment, and parent death is stdin EOF, not a pid to watch.
 pub(crate) fn apply_environment(command: &mut Command, cfg: &ServerConfig) {
     for name in SCRUB_ENV
         .iter()
@@ -723,6 +723,9 @@ pub(crate) fn apply_environment(command: &mut Command, cfg: &ServerConfig) {
     {
         command.env_remove(name);
     }
+    // A shell sets `PWD` to the folder it runs a command in; the child runs in
+    // `cfg.cwd`, so that is its `PWD` too — not whatever folder the app was in.
+    command.env("PWD", &cfg.cwd);
     for (key, value) in &cfg.extra_env {
         command.env(key, value);
     }
@@ -854,6 +857,7 @@ mod tests {
         assert!(!text.contains("EVO_SERVE_TOKEN="), "{text}");
         assert!(text.contains("EVO_SESSIONS_DIR=/mine"), "{text}");
         assert!(text.contains("KEEP_ME=yes"), "{text}");
+        assert!(text.lines().any(|l| l == "PWD=/tmp"), "{text}");
     }
 
     #[test]
