@@ -327,11 +327,20 @@ pub fn run() {
             // A held ⌘Q: the window sees the key down and up — the menu item
             // cannot — and this is what the hold runs when it is complete (§9.8).
             let held = quit::watch_held_quit(cx, &view);
+            // A tab that held a session was removed: the history is stale and
+            // should be re-read so the freed session appears in the empty tabs.
+            let history_refresh = {
+                let bin = cx.global::<Shell>().binaries.evo_agent.clone();
+                cx.subscribe(&view, move |_, _: &workspace::HistoryStale, cx| {
+                    startup::load_history(cx, bin.clone());
+                })
+            };
             let closing = cx.on_window_closed(|cx: &mut App, _id| quit::begin(cx));
             cx.update_global::<Shell, _>(|shell, _| {
                 shell.view = Some(view.downgrade());
                 shell.subscriptions.push(closing);
                 shell.subscriptions.push(held);
+                shell.subscriptions.push(history_refresh);
             });
 
             // A launch while we are already running does nothing but raise this.

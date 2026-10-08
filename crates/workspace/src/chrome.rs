@@ -112,6 +112,11 @@ gpui_kit::actions!(
 #[derive(Clone, Debug)]
 pub struct QuitHeld;
 
+/// A tab that held a session was removed: the history list is stale and should
+/// be refreshed (excluding sessions still held by open tabs).
+#[derive(Clone, Debug)]
+pub struct HistoryStale;
+
 /// Show the tab at this index (0-based) — what ⌘1…⌘8 are.
 ///
 /// A number rather than eight near-identical actions: the eight bindings differ
@@ -537,6 +542,16 @@ impl WorkspaceView {
         swarms
     }
 
+    /// Session paths held by currently open tabs (running or booting): the
+    /// history list should not offer these for resume, since a second swarm on
+    /// the same journal would fork it.
+    pub fn held_session_paths(&self, cx: &App) -> Vec<PathBuf> {
+        self.tabs
+            .iter()
+            .filter_map(|tab| tab.read(cx).session_path().map(Path::to_path_buf))
+            .collect()
+    }
+
     /// What the app does when the window is closed (§9.8). Without a hook the
     /// window stops every tab's swarm and closes itself.
     pub fn set_quit_hook(&mut self, hook: QuitHook) {
@@ -638,6 +653,11 @@ impl WorkspaceView {
 
     /// The catalog and the session list the app has learned, applied to every tab
     /// (and to every empty tab opened later) (§9.4, §9.5).
+    ///
+    /// Sessions held by open tabs are excluded from the history: two swarms on
+    /// one journal would fork it, and showing a row the user cannot click is
+    /// confusing. The master list is kept unfiltered so a later refresh (or a
+    /// tab closing) can re-evaluate.
     pub fn set_launcher_data(
         &mut self,
         data: LauncherData,
@@ -645,7 +665,14 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         self.launcher = data;
-        let data = self.launcher.clone();
+        let held = self.held_session_paths(cx);
+        let mut data = self.launcher.clone();
+        if !held.is_empty() {
+            data.history.retain(|entry| {
+                let entry_path = std::path::Path::new(&entry.session_path);
+                !held.iter().any(|h| h == entry_path)
+            });
+        }
         for tab in &self.tabs {
             let data = data.clone();
             tab.update(cx, |tab, cx| tab.set_launcher_data(&data, window, cx));
@@ -822,7 +849,15 @@ impl WorkspaceView {
         // A tab opened now shows what the app already learned (§9.4, §9.5). The
         // workers card's own switch is *not* the window's to hand over: a new page
         // starts on a swarm, whatever another tab's switch says (§7.2).
-        let launcher = self.launcher.clone();
+        // Sessions held by other open tabs are excluded from history (§7.1).
+        let held = self.held_session_paths(cx);
+        let mut launcher = self.launcher.clone();
+        if !held.is_empty() {
+            launcher.history.retain(|entry| {
+                let entry_path = std::path::Path::new(&entry.session_path);
+                !held.iter().any(|h| h == entry_path)
+            });
+        }
         tab.update(cx, |tab, cx| {
             tab.set_launcher_data(&launcher, window, cx);
         });
@@ -1120,6 +1155,9 @@ impl WorkspaceView {
         };
         let was_shown = index == self.selected;
         let tab = self.tabs.remove(index);
+        // A tab that held a session just freed it: the history list is stale
+        // and the app should re-read the index, excluding what is still open.
+        let had_session = tab.read(cx).session_path().is_some();
         self.subscriptions.retain(|(closed, _)| *closed != id);
         // The engine this close was watching is not the window's to hold any more:
         // the tab that was running it is gone, and so is the watch.
@@ -1134,6 +1172,10 @@ impl WorkspaceView {
         }
         if self.tabs.is_empty() {
             self.open_empty_tab(window, cx);
+            // The new empty tab needs up-to-date history too.
+            if had_session {
+                cx.emit(HistoryStale);
+            }
             return;
         }
         // The tab that took the closed one's place, or the new last tab.
@@ -1142,6 +1184,9 @@ impl WorkspaceView {
             // The keyboard does not go with the closed tab (§7.1): the tab that
             // took its place is what is being looked at now.
             self.focus_selected(window, cx);
+        }
+        if had_session {
+            cx.emit(HistoryStale);
         }
         cx.notify();
     }
@@ -1391,6 +1436,7 @@ impl WorkspaceView {
 }
 
 impl EventEmitter<QuitHeld> for WorkspaceView {}
+impl EventEmitter<HistoryStale> for WorkspaceView {}
 
 impl Render for WorkspaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {

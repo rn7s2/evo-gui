@@ -131,7 +131,11 @@ pub fn refresh_catalog(cx: &mut App) {
 /// A failure is not an empty history: a read that could not run says why, and
 /// the empty tabs show that line instead of claiming there is nothing to resume
 /// (§9.5).
-fn load_history(cx: &mut App, bin: PathBuf) {
+///
+/// Called at startup, and again whenever a tab that held a session is removed
+/// ([`workspace::HistoryStale`]): the newly freed session should appear in the
+/// history of every empty tab that is still open.
+pub fn load_history(cx: &mut App, bin: PathBuf) {
     let log = cx.global::<Shell>().log.clone();
     launcher::set_history_loading(cx, true);
 
