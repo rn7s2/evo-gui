@@ -5984,13 +5984,17 @@ mod tests {
 
         // The server took it: the box is free again, and the next message goes.
         f.act(cx, |window, cx| {
-            f.composer
-                .update(cx, |composer, cx| composer.request_finished(true, window, cx));
+            f.composer.update(cx, |composer, cx| {
+                composer.request_finished(true, window, cx)
+            });
             window.render_frame(cx);
             f.type_draft("hello", window, cx);
             window.press("enter", cx);
         });
-        assert_eq!(f.events().last(), Some(&ComposerEvent::Send("hello".into())));
+        assert_eq!(
+            f.events().last(),
+            Some(&ComposerEvent::Send("hello".into()))
+        );
 
         // A command that hands text back frees the box the same way.
         f.act(cx, |window, cx| {
@@ -6004,7 +6008,10 @@ mod tests {
             window.render_frame(cx);
             window.press("enter", cx);
         });
-        assert_eq!(f.events().last(), Some(&ComposerEvent::Send("edit me".into())));
+        assert_eq!(
+            f.events().last(),
+            Some(&ComposerEvent::Send("edit me".into()))
+        );
     }
 
     /// The input grows with what is typed and stops at half the pane

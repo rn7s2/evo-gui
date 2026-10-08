@@ -51,10 +51,22 @@ const LOADS: Duration = Duration::from_secs(3);
 /// with. Two are the core's own (`/lore` with nothing set, `/model`'s list); two are an
 /// extension's, so the warn and error inks are exercised through a real server too.
 const SAID: [(&str, &str, NoticeSeverity); 4] = [
-    ("/lore", "no lore — /lore <text> adds durable guidance", NoticeSeverity::Info),
+    (
+        "/lore",
+        "no lore — /lore <text> adds durable guidance",
+        NoticeSeverity::Info,
+    ),
     ("/model", "stub  stub-a", NoticeSeverity::Info),
-    ("/note-warn", "a warning from an extension", NoticeSeverity::Warn),
-    ("/note-error", "an error from an extension", NoticeSeverity::Error),
+    (
+        "/note-warn",
+        "a warning from an extension",
+        NoticeSeverity::Warn,
+    ),
+    (
+        "/note-error",
+        "an error from an extension",
+        NoticeSeverity::Error,
+    ),
 ];
 
 #[gpui_kit::test]
@@ -235,7 +247,11 @@ fn tab_state(cx: &mut TestAppContext, tab: &Entity<TabContent>) -> TabState {
 
 /// The notice item the transcript holds whose text carries `needle`, with the words it
 /// was said with.
-fn notice(cx: &mut TestAppContext, tab: &Entity<TabContent>, needle: &str) -> Option<(String, Notice)> {
+fn notice(
+    cx: &mut TestAppContext,
+    tab: &Entity<TabContent>,
+    needle: &str,
+) -> Option<(String, Notice)> {
     let view = cx.update(|cx| tab.read(cx).transcript().cloned())?;
     let items = cx.update(|cx| view.read(cx).items(cx).to_vec());
     items.iter().find_map(|item| match &item.kind {
