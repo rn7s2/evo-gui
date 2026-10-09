@@ -89,6 +89,10 @@ pub fn install(cx: &mut App) {
         KeyBinding::new("cmd-=", ZoomIn, None),
         KeyBinding::new("cmd--", ZoomOut, None),
         KeyBinding::new("cmd-0", ActualSize, None),
+        // ⌃`: the terminal pane, in the tab being shown. Bound here rather than
+        // inside a window for the same reason as the tab keys below — one keymap
+        // for the app — and handled by the window's chrome, which owns the tabs.
+        KeyBinding::new("ctrl-`", workspace::ToggleTerminal, None),
     ]);
     // The Window menu's tab items are the workspace's actions, and their key
     // equivalents come from the same place: the app's keymap, read once, when

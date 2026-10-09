@@ -365,6 +365,8 @@ pub struct TabContent {
     /// A close was asked for while an editor here holds unsaved changes: the page
     /// draws the Discard / Keep Editing question instead of the tab going.
     pub(crate) close_prompt: bool,
+    /// Whether the terminal pane is open for this tab.
+    pub(crate) terminal_open: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -627,6 +629,7 @@ impl TabContent {
             project_settings: false,
             thinking_level: None,
             close_prompt: false,
+            terminal_open: false,
             _subscriptions: vec![
                 history_subscription,
                 composer_subscription,
@@ -687,6 +690,12 @@ impl TabContent {
     /// Whether the tab was closed and its swarm is still on its way out.
     pub fn is_terminating(&self) -> bool {
         self.terminating
+    }
+
+    /// Toggle the terminal pane open/closed.
+    pub fn toggle_terminal(&mut self, cx: &mut Context<Self>) {
+        // TODO: implemented during terminal integration
+        cx.notify();
     }
 
     /// Close the tab's swarm and freeze the page until it has exited: the server is
