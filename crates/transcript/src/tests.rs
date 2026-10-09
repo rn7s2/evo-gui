@@ -1393,20 +1393,36 @@ impl Drop for Local {
     }
 }
 
-/// The element a drawn picture wears, by the reference it came from.
-fn picture_id(url: &str) -> gpui_kit::ElementId {
-    gpui_kit::ElementId::from(format!("{}:{url}", crate::markdown::IMAGE_ID))
+/// The prefix a drawn picture's element-id starts with, for the reference it came from.
+fn picture_id_prefix(url: &str) -> String {
+    format!("{}:{url}:", crate::markdown::IMAGE_ID)
 }
 
-/// Where a drawn picture is, if it is drawn at all.
+/// Where a drawn picture is, if it is drawn at all.  When a message carries the same
+/// URL more than once, this returns the first match; use [`drawn_pictures`] to see them all.
 fn drawn_picture(
     cx: &mut gpui_kit::VisualTestContext,
     url: &str,
 ) -> Option<gpui_kit::Bounds<gpui_kit::Pixels>> {
+    drawn_pictures(cx, url).into_iter().next()
+}
+
+/// Bounds of every drawn picture that matches `url` (there is one per occurrence).
+fn drawn_pictures(
+    cx: &mut gpui_kit::VisualTestContext,
+    url: &str,
+) -> Vec<gpui_kit::Bounds<gpui_kit::Pixels>> {
+    let prefix = picture_id_prefix(url);
     cx.update(|window, _| {
-        window
-            .try_find(picture_id(url))
-            .map(|element| element.bounds())
+        gpui_kit::base::test_support::snapshots(window)
+            .into_iter()
+            .filter(|snap| {
+                snap.path()
+                    .last()
+                    .is_some_and(|id| format!("{id:?}").contains(&prefix))
+            })
+            .map(|snap| snap.bounds())
+            .collect()
     })
 }
 
@@ -1518,6 +1534,31 @@ fn a_still_record_reads_its_picture_with_nothing_else_moving(cx: &mut TestAppCon
     assert!(
         view.update(cx, |view, cx| view.items(cx).len()) == 1,
         "the record is exactly the one that was replaced, untouched"
+    );
+}
+
+/// Two references to the same file in one message are two distinct pictures: they share
+/// one cache entry but wear different element ids (disambiguated by source offset).
+#[gpui_kit::test]
+fn two_references_to_the_same_file_are_two_pictures(cx: &mut TestAppContext) {
+    let local = Local::new("dup");
+    let url = local.url(&local.picture());
+    let (_view, cx) = open_in(
+        cx,
+        1200.,
+        vec![assistant(
+            "a_1",
+            &format!("first:\n\n![a]({url})\n\nsecond:\n\n![b]({url})\n\ndone."),
+            "final",
+        )],
+    );
+    cx.run_until_parked();
+    frames(cx, 4);
+    let pictures = drawn_pictures(cx, &url);
+    assert_eq!(pictures.len(), 2, "both references are drawn: {pictures:?}");
+    assert_ne!(
+        pictures[0].origin, pictures[1].origin,
+        "at different positions"
     );
 }
 

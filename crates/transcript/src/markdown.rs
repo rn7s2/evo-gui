@@ -128,9 +128,16 @@ impl MarkdownPlugin for ImageFallback {
             // to fit and keeps its shape.
             if f32::from(width) > 0. {
                 if let Some(frame) = self.images.frame_of(&reference.url) {
+                    // The source-range start disambiguates two references to the
+                    // same file in one document, which would otherwise share one
+                    // element-id slot and panic in the test registry.
+                    let offset = node.source_range().map_or(0, |range| range.start);
                     return Some(InlineElement::new(
                         imgcheck::picture_within(frame, width)
-                            .id(ElementId::from(format!("{IMAGE_ID}:{}", reference.url)))
+                            .id(ElementId::from(format!(
+                                "{IMAGE_ID}:{}:{offset}",
+                                reference.url
+                            )))
                             .test_support(),
                     ));
                 }
