@@ -599,15 +599,22 @@ impl AgentList {
             .px(px(LANE_PAD))
             .justify_start()
             .rounded(px(RADIUS))
+            .bg(paint::color(row_hover_fill(palette)))
             .text_size(LANE_FONT)
             .text_color(paint::color(palette.muted_fg))
             .cursor_default()
             .disabled(disabled)
             .accessibility_label(ADD_LANE_LABEL)
             .when(!disabled, |row| {
-                row.hover(move |row| row.text_color(paint::color(palette.fg)))
+                row.hover(move |row| {
+                    row.bg(paint::color(row_fill(true, palette)))
+                        .text_color(paint::color(palette.fg))
+                })
             })
-            .focus_visible(move |row| row.text_color(paint::color(palette.primary)))
+            .focus_visible(move |row| {
+                row.bg(paint::color(row_fill(true, palette)))
+                    .text_color(paint::color(palette.primary))
+            })
             .when(disabled, |row| row.opacity(0.45))
             // The ancestor that holds the keyboard would otherwise take the press, as it
             // does for a lane's row.
