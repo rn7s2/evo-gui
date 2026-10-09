@@ -57,7 +57,7 @@ verified; a title-only message is not acceptable. Every message ends with the tr
   server publishes them, so the same session reads the same here and in the TUI
   (`crates/composer`). The app composes none of it.
 - The agent column is resizable by dragging the split (180–480 px, starting at 260), and
-  its width is shared by every tab and kept in `app.json`; the conversation keeps 420 px.
+  its width is shared by every tab and kept in `app.json`; the conversation keeps 360 px.
   A double-click on the split puts it back.
 - The transcript is `gpui::list` over the whole record (`crates/transcript/src/lib.rs`): only the
   rows the pane can reach are built, their heights live in the list's own sum tree, and every op

@@ -81,10 +81,10 @@ const STROKE_EM: f64 = 0.04;
 /// before the picture is made, so a formula past it costs a length check.
 ///
 /// The number is the *narrowest* column the app has: the conversation pane never
-/// goes below `store::app_state::CENTER_MIN` (420px), which leaves about 388px of
-/// measure, and the type size the transcript draws at is 16px — so 24em is 384px,
+/// goes below `store::app_state::CENTER_MIN` (360px), which leaves about 328px of
+/// measure, and the type size the transcript draws at is 16px — so 20em is 320px,
 /// and anything an inline line is allowed to draw fits the pane it is in.
-const INLINE_MAX_EM: f64 = 24.;
+const INLINE_MAX_EM: f64 = 20.;
 
 /// The same bound for a **display** formula, which does scroll — past this a
 /// picture is not worth rasterizing, and the source is easier to read anyway.
@@ -1291,7 +1291,7 @@ mod drawn_in_a_window {
         });
     }
 
-    /// A narrow pane (`store::app_state::CENTER_MIN`, 420px): a display formula is
+    /// A narrow pane (`store::app_state::CENTER_MIN`): a display formula is
     /// drawn in a box of its own, one spelling of `$$…$$` or the other, and that box
     /// is never wider than the reading measure — the widest a formula is ever given,
     /// whatever the pane. (Following a *narrower* parent is the kit's to give: it lays
@@ -1310,7 +1310,8 @@ mod drawn_in_a_window {
             .join(" + ");
         let text = format!("before\n\n$${formula}$$\n\nthe same one inline $${formula}$$ after");
         let document = cx.update(|cx| cx.new(|cx| TextViewState::markdown(&text, cx)));
-        let (_host, cx) = cx.add_window_view(|_, _cx| Host::new(document, 420.));
+        let (_host, cx) =
+            cx.add_window_view(|_, _cx| Host::new(document, store::app_state::CENTER_MIN));
         let blocks = blocks(&text);
         assert_eq!(
             blocks.len(),

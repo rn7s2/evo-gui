@@ -23,7 +23,7 @@ pub const MAX_TABS: usize = 64;
 /// Window size the app opens with, before clamping to the display work area.
 pub const DEFAULT_SIZE: (f32, f32) = (1600.0, 1000.0);
 /// Smallest window the app allows.
-pub const MIN_SIZE: (f32, f32) = (1000.0, 700.0);
+pub const MIN_SIZE: (f32, f32) = (900.0, 700.0);
 
 /// Where the window was last seen.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
@@ -97,8 +97,10 @@ pub const LEFT_MIN: f32 = 180.0;
 pub const LEFT_MAX: f32 = 480.0;
 
 /// The conversation column never goes below this: the transcript is what the page
-/// is for, and a page that is mostly chrome is not a page (§7.3).
-pub const CENTER_MIN: f32 = 420.0;
+/// is for, and a page that is mostly chrome is not a page (§7.3). Lowered from the
+/// design's 420 so a narrow window — or one with a terminal pane beside the
+/// conversation — still has room for both columns.
+pub const CENTER_MIN: f32 = 360.0;
 
 /// The scale the transcript's text is drawn at, and the range the View menu's
 /// Zoom In / Zoom Out work in (§7.2).

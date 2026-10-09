@@ -219,9 +219,9 @@ the agent header are the same height on the same surface, so the rule under them
   path on hover.
 - **The split**: a 9 px band with a 1 px hairline down it, and the pill that grows on hover, press
   and drag (20 / 28 / 44 px tall at 35 / 60 / 90%). A drag clamps the agent column to 180–480 px and
-  leaves the conversation at least 420; a double-click puts the column back to 260, and the width is
+  leaves the conversation at least 360; a double-click puts the column back to 260, and the width is
   shared by every tab and kept in `app.json`.
-- **The conversation** (right, at least 420 px): the agent header — the name (`Coordinator`, `Main`
+- **The conversation** (right, at least 360 px): the agent header — the name (`Coordinator`, `Main`
   in a single-agent session, or `Lane N`), its task (dim, truncated), and, when that agent's
   transcript carries thinking text, a quiet **Show thinking**
   toggle — then that agent's items — the coordinator's `session` topic, or that lane's `lane:N`

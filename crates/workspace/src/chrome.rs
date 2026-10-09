@@ -42,8 +42,13 @@ const APP_NAME: &str = "Evo Desktop";
 pub const DEFAULT_WINDOW_SIZE: Size<Pixels> = size(px(1600.), px(1000.));
 
 /// The smallest window that still fits the lane column, a transcript and the
-/// composer side by side (§7.3).
-pub const MIN_WINDOW_SIZE: Size<Pixels> = size(px(1000.), px(700.));
+/// composer side by side (§7.3). The schema's own [`store::app_state::MIN_SIZE`],
+/// in pixels, so the window the OS is asked to keep as small as the page's own
+/// minimum.
+pub const MIN_WINDOW_SIZE: Size<Pixels> = size(
+    px(store::app_state::MIN_SIZE.0),
+    px(store::app_state::MIN_SIZE.1),
+);
 
 /// The page's widths, as the panels ended up: the first panel's and the last
 /// panel's, with the middle column left to take what remains (§7.3).

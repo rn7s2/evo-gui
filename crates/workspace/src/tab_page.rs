@@ -4,7 +4,7 @@
 //! The page is two columns (the design's `.workspace`): the swarm's agents on the
 //! left, and on the right the selected agent's conversation — the header, the
 //! transcript, and the composer's box at the foot of it. The split keeps the design's
-//! limits (180–480 for the agent column, 420 for the conversation), and a double-click
+//! limits (180–480 for the agent column, 360 for the conversation), and a double-click
 //! puts it back where it starts.
 //!
 //! The parts are real crates — `agent_list`, `transcript` (`crates/widgets`' chips and

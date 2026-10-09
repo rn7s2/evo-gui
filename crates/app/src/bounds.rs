@@ -189,7 +189,7 @@ mod tests {
             stored(None, None, 200.0, 150.0),
             area(0.0, 0.0, 2000.0, 1400.0),
         );
-        assert_eq!(parts(got), (500.0, 350.0, 1000.0, 700.0));
+        assert_eq!(parts(got), (550.0, 350.0, 900.0, 700.0));
     }
 
     #[test]

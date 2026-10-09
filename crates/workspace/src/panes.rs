@@ -77,14 +77,15 @@ mod tests {
     /// that is not a window the app opens, and the answer is still a page.
     #[test]
     fn the_smallest_window_still_fits_a_page() {
-        let fitted = fit(Panes::default(), 1000.0);
+        let smallest = store::app_state::MIN_SIZE.0;
+        let fitted = fit(Panes::default(), smallest);
         assert_eq!(
             fitted,
             Panes::default(),
             "the column opens where it always opens"
         );
         assert!(
-            fitted.left + CENTER_MIN <= 1000.0,
+            fitted.left + CENTER_MIN <= smallest,
             "{fitted:?} leaves the conversation less than {CENTER_MIN}"
         );
         assert!(fitted.left <= LEFT_DEFAULT && fitted.left >= LEFT_MIN);
