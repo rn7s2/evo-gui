@@ -1,0 +1,15 @@
+[package]
+name = "terminal"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+gpui-kit = { workspace = true }
+alacritty_terminal = { workspace = true }
+portable-pty = { workspace = true }
+anyhow = { workspace = true }
+store = { path = "../store" }
+# The reader thread's wakeups reach the UI through a channel, the way every other
+# off-thread I/O path in this app reports back (`workspace::bridge`): the thread
+# sends, a GPUI task awaits, and the pane is updated on the UI thread.
+async-channel = "2"
