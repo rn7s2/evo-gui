@@ -343,7 +343,8 @@ tables, quotes, rules, inline code — with four decisions worth knowing:
   Remote or unreadable references keep the `[image: alt]` fallback. No remote
   images are fetched and no disk cache is written;
 - **raw HTML** is shown as its source, mono and muted — markup reads as markup;
-- a **link** opens only `http`, `https`, `mailto` or a path that is really there;
+- a **link** opens only `http`, `https`, `mailto` or a named path that is really there;
+  `/` itself is never opened even though it exists.
   a `file:`, `javascript:` or bare-fragment target is left alone.
 
 The same is true of the rows that say something in a person's or an agent's own words —
