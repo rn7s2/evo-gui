@@ -96,6 +96,8 @@ pub struct Shell {
     /// The terminal pane's font family `app.json` held at launch (§13). What the
     /// Settings panel opens on, and what Save puts back.
     pub terminal_font: String,
+    /// The terminal pane's type size `app.json` held at launch (§13).
+    pub terminal_font_size: f32,
     /// Set once the quit sequence has begun.
     pub quitting: bool,
     /// Subscriptions that must outlive the closure that made them.
@@ -117,6 +119,7 @@ impl Shell {
             recents: state.recents,
             zoom: state.zoom,
             terminal_font: state.terminal_font,
+            terminal_font_size: state.terminal_font_size,
             launcher: Launcher::new(cache),
             view: None,
             tracker: None,

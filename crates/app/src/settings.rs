@@ -35,7 +35,12 @@ pub fn open(window: &mut Window, cx: &mut App) -> Entity<SettingsPanel> {
     let (values, log) = {
         let shell = cx.global::<Shell>();
         (
-            SettingsValues::from_state(&shell.binaries, shell.theme, shell.terminal_font.clone()),
+            SettingsValues::from_state(
+                &shell.binaries,
+                shell.theme,
+                shell.terminal_font.clone(),
+                shell.terminal_font_size,
+            ),
             shell.log.clone(),
         )
     };
@@ -112,6 +117,7 @@ pub fn apply(values: &SettingsValues, cx: &mut App) {
     state.binaries = values.binaries();
     state.theme = values.theme;
     state.terminal_font = values.terminal_font.clone();
+    state.terminal_font_size = values.terminal_font_size;
     match state.save(&root) {
         Ok(()) => log.info(format!("settings: saved {}", opened(values))),
         Err(error) => log.error(format!(
@@ -125,7 +131,17 @@ pub fn apply(values: &SettingsValues, cx: &mut App) {
         shell.binaries = values.binaries();
         shell.theme = values.theme;
         shell.terminal_font = values.terminal_font.clone();
+        shell.terminal_font_size = values.terminal_font_size;
     }
+
+    // The font every open terminal draws with, from this save on: the panes read one
+    // global, so this is what makes a font chosen here show up in a terminal that is
+    // already up — and what a window opened later reads before its first pane exists.
+    terminal::TerminalFont {
+        family: values.terminal_font.clone().into(),
+        size: values.terminal_font_size,
+    }
+    .set(cx);
 
     // Read the new binaries' versions again: the About dialog's second line and the
     // empty tab's "evo-swarm not found" line both follow what was just saved (§9.4).
@@ -146,7 +162,7 @@ pub fn apply(values: &SettingsValues, cx: &mut App) {
 /// The one line both halves log: what was chosen, in the app's own words.
 fn opened(values: &SettingsValues) -> String {
     format!(
-        "evo-swarm {}, evo-agent {}, theme {}, terminal font {}",
+        "evo-swarm {}, evo-agent {}, theme {}, terminal font {} {}",
         values.evo_swarm.display(),
         values.evo_agent.display(),
         match values.theme {
@@ -155,5 +171,6 @@ fn opened(values: &SettingsValues) -> String {
             store::app_state::Theme::Dark => "dark",
         },
         values.terminal_font,
+        values.terminal_font_size,
     )
 }

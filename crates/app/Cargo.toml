@@ -22,6 +22,8 @@ settings = { path = "../settings" }
 # The reader's transcript zoom (§7.2): the View menu's three actions set it, and
 # the global is what every open transcript reads.
 transcript = { path = "../transcript" }
+# The terminal's font (§13): Settings saves it, the global is what every pane reads.
+terminal = { path = "../terminal" }
 serde_json = { workspace = true }
 async-channel = "2"
 libc = "0.2"

@@ -164,6 +164,17 @@ pub fn install(cx: &mut App) {
     if let Some(stored) = cx.try_global::<Shell>().map(|shell| shell.zoom) {
         TranscriptZoom::clamped(stored).set(cx);
     }
+    // The terminal's font, the same way: what `app.json` says, before any pane
+    // draws. Without a [`Shell`] the panes use the theme's monospace.
+    if let Some(font) = cx
+        .try_global::<Shell>()
+        .map(|shell| terminal::TerminalFont {
+            family: shell.terminal_font.clone().into(),
+            size: shell.terminal_font_size,
+        })
+    {
+        cx.set_global(font);
+    }
 
     cx.set_menus(menus());
 }

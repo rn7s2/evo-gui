@@ -29,10 +29,11 @@ use std::time::Duration;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::select::{SearchableVec, Select, SelectItem, SelectState};
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{
-    h_flex, v_flex, ActiveTheme as _, Disableable as _, StyledExt as _, Theme as ComponentTheme,
-    ThemeMode,
+    h_flex, v_flex, ActiveTheme as _, Disableable as _, IndexPath, StyledExt as _,
+    Theme as ComponentTheme, ThemeMode,
 };
 use gpui_kit::prelude::*;
 use gpui_kit::{
@@ -62,6 +63,7 @@ pub const AGENT_STATUS_ID: &str = "settings-evo-agent-status";
 pub const THEME_ID: &str = "settings-theme";
 pub const THEME_CHOICES_ID: &str = "settings-theme-choices";
 pub const TERMINAL_FONT_ID: &str = "settings-terminal-font";
+pub const TERMINAL_FONT_SIZE_ID: &str = "settings-terminal-font-size";
 pub const RESET_ID: &str = "settings-reset";
 pub const CANCEL_ID: &str = "settings-cancel";
 pub const SAVE_ID: &str = "settings-save";
@@ -73,6 +75,17 @@ const LABEL_WIDTH: gpui_kit::Pixels = px(96.);
 /// against the field beside it.
 const LABEL_GAP: gpui_kit::Pixels = px(12.);
 const FIELD_HEIGHT: gpui_kit::Pixels = px(38.);
+
+/// The size chooser's own column: wide enough for three digits, and no wider — the family
+/// beside it takes the rest of the row.
+const SIZE_WIDTH: gpui_kit::Pixels = px(80.);
+
+/// The sizes the size chooser offers (§13). The design's own size is in the middle of them,
+/// and a value that is not one of these — a hand-edited file, a size this list drops — is
+/// added to the row the panel opens on.
+const SIZES: [f32; 13] = [
+    9., 10., 11., 12., 13., 14., 15., 16., 17., 18., 20., 22., 24.,
+];
 
 /// The dialog's small type: the status lines and the note, one line each. The size is the
 /// one the lane list uses for its own small type, and the leading is tighter than the default
@@ -95,24 +108,28 @@ const TITLE: &str = "Settings";
 const SUBTITLE: &str = "The two binaries the app spawns, the app's theme, and the terminal's font.";
 const THEME_LABEL: &str = "Theme";
 const TERMINAL_FONT_LABEL: &str = "Terminal Font";
+const TERMINAL_FONT_SIZE_LABEL: &str = "Terminal Font Size";
 const CHOOSE_LABEL: &str = "Choose…";
 const RESET_LABEL: &str = "Reset to defaults";
 const CANCEL_LABEL: &str = "Cancel";
 const SAVE_LABEL: &str = "Save";
 /// The note that keeps a running tab from looking broken when the paths change (§13).
-const NOTE: &str = "New tabs use these; a tab that is already running keeps what it started with.";
+const NOTE: &str =
+    "New tabs use the binaries; a running tab keeps its own. The terminal font applies at once.";
 
 /// The three themes, in the order the segmented row shows them.
 const THEMES: [StoredTheme; 3] = [StoredTheme::System, StoredTheme::Light, StoredTheme::Dark];
 
 /// What the panel edits, and what `Save` hands over.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SettingsValues {
     pub evo_swarm: PathBuf,
     pub evo_agent: PathBuf,
     pub theme: StoredTheme,
     /// The terminal pane's font family.
     pub terminal_font: String,
+    /// The size the terminal pane draws that family at, in points.
+    pub terminal_font_size: f32,
 }
 
 impl SettingsValues {
@@ -121,12 +138,14 @@ impl SettingsValues {
         binaries: &Binaries,
         theme: StoredTheme,
         terminal_font: String,
+        terminal_font_size: f32,
     ) -> SettingsValues {
         SettingsValues {
             evo_swarm: binaries.evo_swarm.clone(),
             evo_agent: binaries.evo_agent.clone(),
             theme,
             terminal_font,
+            terminal_font_size,
         }
     }
 
@@ -145,12 +164,85 @@ impl Default for SettingsValues {
             &Binaries::default(),
             StoredTheme::System,
             store::design::MONO_FONT.to_owned(),
+            store::design::FONT_MONO,
         )
     }
 }
 
+/// One point size the size chooser offers: the number is what it is called, in the dropdown
+/// and in the trigger.
+#[derive(Clone, Debug, PartialEq)]
+struct SizeItem(f32);
+
+impl SizeItem {
+    /// The number as the row shows it: `13`, and `13.5` for the sizes this list does not
+    /// carry — a hand-edited file may say anything, and the row still has to name it.
+    fn label(&self) -> SharedString {
+        SharedString::from(format!("{}", self.0))
+    }
+}
+
+impl SelectItem for SizeItem {
+    type Value = f32;
+
+    fn title(&self) -> SharedString {
+        self.label()
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.0
+    }
+
+    /// A search over the sizes matches on the number as it is shown, so typing `1` narrows
+    /// the list the way the family list's own search does.
+    fn matches(&self, query: &str) -> bool {
+        self.label().to_lowercase().contains(&query.to_lowercase())
+    }
+}
+
+/// The sizes the size chooser offers, with `current` among them whatever it is.
+fn size_items(current: f32) -> Vec<SizeItem> {
+    let mut sizes = SIZES.to_vec();
+    if !sizes.contains(&current) {
+        sizes.push(current);
+        sizes.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    }
+    sizes.into_iter().map(SizeItem).collect()
+}
+
+/// The families the family chooser offers: everything this machine has, alphabetically and
+/// without the duplicates a font family is installed under more than once.
+///
+/// `current` is in the list whatever the machine has: a family saved here and since
+/// uninstalled is still what the terminal draws with (or falls back from), and a field that
+/// silently opened on something else would be a lie about `app.json`.
+fn font_families(window: &Window, current: &str) -> Vec<SharedString> {
+    let mut names = window.text_system().all_font_names();
+    names.sort_by_key(|name| name.to_lowercase());
+    names.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+
+    let mut families: Vec<SharedString> = names.into_iter().map(SharedString::from).collect();
+    // The values that need a row whatever this machine has installed: what `app.json` says
+    // (a family that was since uninstalled is still what the terminal is set to), and what
+    // Reset puts back — the design's own monospace.
+    for carried in [current, store::design::MONO_FONT] {
+        if !families.iter().any(|family| family.as_ref() == carried) {
+            families.insert(0, SharedString::from(carried));
+        }
+    }
+    families
+}
+
+/// The row of the item a select opens on, if the list has one.
+fn row_of<T: PartialEq>(items: &[T], value: &T) -> Option<IndexPath> {
+    items
+        .iter()
+        .position(|item| item == value)
+        .map(|row| IndexPath::default().row(row))
+}
+
 /// What the panel tells its owner.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum SettingsEvent {
     /// `Save`: persist these, and spawn the next tab with them. A [`DismissEvent`] follows,
     /// so the dialog closes on the same path Cancel takes.
@@ -234,9 +326,11 @@ pub struct SettingsPanel {
     /// One counter per row: an answer is only taken if it is the answer to the newest
     /// question that row has asked.
     revisions: [u64; 2],
-    /// The terminal pane's font family. A draft like the paths: it takes effect when
-    /// the app saves it, not as it is typed.
-    terminal_font: Entity<InputState>,
+    /// The terminal pane's font. Drafts like the paths: they take effect when the app
+    /// saves them, not as they are chosen. The family is searchable — a machine has
+    /// hundreds of them — and the size is a short list.
+    terminal_font: Entity<SelectState<SearchableVec<SharedString>>>,
+    terminal_font_size: Entity<SelectState<Vec<SizeItem>>>,
     /// The choice being shown. Unlike the paths, it is applied as it is chosen.
     theme: StoredTheme,
     /// The mode in force when the panel opened — what Cancel puts back.
@@ -283,20 +377,25 @@ impl SettingsPanel {
             })
             .collect();
 
-        // The font is not a path: nothing is run for it and nothing is checked, so it
-        // has no subscription to keep.
-        let font = values.terminal_font.clone();
+        // The font is not a path: nothing is run for it and nothing is checked, so the two
+        // choosers have no subscription to keep. Each opens on what the app has — and the
+        // family list carries that value even on a machine where it is not installed.
+        let families = font_families(window, &values.terminal_font);
+        let family_row = row_of(&families, &SharedString::from(values.terminal_font.clone()));
         let terminal_font = cx.new(|cx| {
-            InputState::new(window, cx)
-                .default_value(font)
-                .placeholder("font family name")
+            SelectState::new(SearchableVec::new(families), family_row, window, cx).searchable(true)
         });
+
+        let sizes = size_items(values.terminal_font_size);
+        let size_row = row_of(&sizes, &SizeItem(values.terminal_font_size));
+        let terminal_font_size = cx.new(|cx| SelectState::new(sizes, size_row, window, cx));
 
         let mut panel = SettingsPanel {
             fields,
             checks: [Check::Checking, Check::Checking],
             revisions: [0, 0],
             terminal_font,
+            terminal_font_size,
             theme: values.theme,
             // Read now, before anything is previewed: this is what Cancel puts back.
             opened_mode: cx.theme().mode,
@@ -333,7 +432,18 @@ impl SettingsPanel {
             evo_swarm: self.path(Binary::Swarm, cx),
             evo_agent: self.path(Binary::Agent, cx),
             theme: self.theme,
-            terminal_font: self.terminal_font.read(cx).value().to_string(),
+            terminal_font: self
+                .terminal_font
+                .read(cx)
+                .selected_value()
+                .map(|family| family.to_string())
+                .unwrap_or_default(),
+            terminal_font_size: self
+                .terminal_font_size
+                .read(cx)
+                .selected_value()
+                .copied()
+                .unwrap_or(store::design::FONT_MONO),
         }
     }
 
@@ -520,14 +630,42 @@ impl SettingsPanel {
     }
 
     /// The defaults, as §13 names them: `/usr/local/bin/evo-{swarm,agent}`, System, and
-    /// the design's own monospace.
+    /// the design's own monospace at its own size.
     fn reset(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let binaries = Binaries::default();
         self.take_picked(Binary::Swarm, binaries.evo_swarm, window, cx);
         self.take_picked(Binary::Agent, binaries.evo_agent, window, cx);
         self.choose_theme(StoredTheme::System, window, cx);
-        self.terminal_font.update(cx, |field, cx| {
-            field.set_value(store::design::MONO_FONT, window, cx);
+        self.choose_font(
+            store::design::MONO_FONT,
+            store::design::FONT_MONO,
+            window,
+            cx,
+        );
+    }
+
+    /// Choose the terminal's font — a family and the size it draws at, together, because
+    /// `app.json` holds them as one setting. Reset is the panel's own use of it: the two
+    /// choosers follow the values rather than the other way round.
+    ///
+    /// Public because the rows' popups are the kit's own machinery: a host with no pointer
+    /// to spend on one — a capture, an app test — can still put the panel's draft where it
+    /// wants it, and the value it sets is the value `Save` hands over.
+    pub fn choose_font(
+        &mut self,
+        family: impl Into<SharedString>,
+        size: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let family = family.into();
+        self.terminal_font.update(cx, |state, cx| {
+            state.set_selected_value(&family, window, cx);
+            cx.notify();
+        });
+        self.terminal_font_size.update(cx, |state, cx| {
+            state.set_selected_value(&size, window, cx);
+            cx.notify();
         });
         cx.notify();
     }
@@ -730,37 +868,46 @@ impl SettingsPanel {
             )
     }
 
-    /// The terminal pane's font: a family name, typed. Nothing is run for it and
-    /// nothing is checked — the pane draws with it from the next save on — so the row
-    /// is the field and its label, where a path row is a field, a chooser and a
-    /// verdict.
-    fn terminal_font_row(&self, _window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let radius = cx.theme().radius;
-        let field_bg = cx.theme().input_background();
+    /// The terminal pane's font: the family it draws with, and the size, as two choosers on
+    /// the row's line. The family takes the room — a machine has hundreds of names, and its
+    /// list is searchable for them — and the size gets a narrow column of its own, wide
+    /// enough for a number.
+    fn terminal_font_row(&self) -> impl IntoElement {
         h_flex()
             .items_center()
             .gap(LABEL_GAP)
             .child(row_label(TERMINAL_FONT_LABEL, Some(FIELD_HEIGHT)))
             .child(
-                div()
+                // The same grid as a path row: the family starts where a path
+                // field's box does (inside the ring's inset), and the size sits
+                // where the Choose… button does, the same gap away.
+                h_flex()
                     .flex_1()
                     .min_w_0()
-                    .h(FIELD_HEIGHT)
-                    .flex()
+                    .gap_2()
                     .items_center()
-                    .rounded(radius)
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .bg(field_bg)
                     .child(
-                        Input::new(&self.terminal_font)
-                            .id(TERMINAL_FONT_ID)
-                            .aria_label(TERMINAL_FONT_LABEL)
-                            .w_full()
-                            .cleanable(true)
-                            .appearance(false)
-                            .bordered(false)
-                            .focus_bordered(false),
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .h(FIELD_HEIGHT)
+                            .pl(FIELD_RING)
+                            .child(
+                                Select::new(&self.terminal_font)
+                                    .id(TERMINAL_FONT_ID)
+                                    .accessibility_label(TERMINAL_FONT_LABEL)
+                                    .w_full()
+                                    .h(FIELD_HEIGHT),
+                            ),
+                    )
+                    .child(
+                        div().flex_none().w(SIZE_WIDTH).h(FIELD_HEIGHT).child(
+                            Select::new(&self.terminal_font_size)
+                                .id(TERMINAL_FONT_SIZE_ID)
+                                .accessibility_label(TERMINAL_FONT_SIZE_LABEL)
+                                .w_full()
+                                .h(FIELD_HEIGHT),
+                        ),
                     ),
             )
     }
@@ -864,7 +1011,7 @@ impl Render for SettingsPanel {
             .child(self.binary_row(Binary::Swarm, window, cx))
             .child(self.binary_row(Binary::Agent, window, cx))
             .child(self.theme_row(window, cx))
-            .child(self.terminal_font_row(window, cx))
+            .child(self.terminal_font_row())
             // The buttons sit on the dialog's floor, however much room is left.
             .child(div().flex_1())
             .child(self.note(cx))
@@ -960,20 +1107,36 @@ mod tests {
             self.write_into(cx, id, text, false)
         }
 
-        /// Replace the terminal font field's whole value: select all, then type over it, the
-        /// way renaming a font does.
-        fn replace_font(&self, cx: &mut TestAppContext, text: &str) {
+        /// The value a chooser's trigger is showing, which is what a person reads there:
+        /// the kit exposes the committed selection as the control's accessible value.
+        fn shown(&self, cx: &mut TestAppContext, id: &'static str) -> String {
+            self.act(cx, |window, cx| {
+                window.render_frame(cx);
+                window.find(id).value().unwrap_or_default().to_string()
+            })
+        }
+
+        /// Choose a family in the family list, as the dropdown does — through its own state,
+        /// because opening a popup and clicking a row is the kit's business, not the panel's.
+        fn choose_family(&self, cx: &mut TestAppContext, family: &str) {
             let field = cx.update(|cx| self.panel.read(cx).terminal_font.clone());
             self.act(cx, |window, cx| {
-                let handle = field.read(cx).focus_handle(cx);
-                window.focus(&handle, cx);
-                window.press("cmd-a", cx);
-                if text.is_empty() {
-                    // Nothing to type: clearing the selection is what a person presses.
-                    window.press("backspace", cx);
-                } else {
-                    window.input(text, cx);
-                }
+                field.update(cx, |state, cx| {
+                    state.set_selected_value(&SharedString::from(family), window, cx);
+                    cx.notify();
+                });
+                window.render_frame(cx);
+            });
+        }
+
+        /// The same for the size.
+        fn choose_size(&self, cx: &mut TestAppContext, size: f32) {
+            let field = cx.update(|cx| self.panel.read(cx).terminal_font_size.clone());
+            self.act(cx, |window, cx| {
+                field.update(cx, |state, cx| {
+                    state.set_selected_value(&size, window, cx);
+                    cx.notify();
+                });
                 window.render_frame(cx);
             });
         }
@@ -1178,6 +1341,8 @@ mod tests {
                 PANEL_ID,
                 SWARM_PATH_ID,
                 THEME_ID,
+                TERMINAL_FONT_ID,
+                TERMINAL_FONT_SIZE_ID,
                 RESET_ID,
                 CANCEL_ID,
                 SAVE_ID,
@@ -1273,6 +1438,7 @@ mod tests {
                 evo_agent: PathBuf::from("/usr/local/bin/evo-agent"),
                 theme: StoredTheme::Dark,
                 terminal_font: store::design::MONO_FONT.to_owned(),
+                terminal_font_size: store::design::FONT_MONO,
             })]
         );
         // Save closes the dialog the same way Cancel does, so the app has one path out.
@@ -1282,9 +1448,9 @@ mod tests {
     #[gpui_kit::test]
     fn cancel_hands_over_nothing_and_puts_the_theme_back(cx: &mut TestAppContext) {
         let f = fixture(cx);
-        // A font typed, like a path: it is a draft on the same panel, so Cancel is the
-        // only way out that does not carry it.
-        f.replace_font(cx, "Fira Code");
+        // A font chosen, like a path typed: it is a draft on the same panel, so Cancel is
+        // the only way out that does not carry it.
+        f.choose_size(cx, 16.);
         f.focus_theme_row(cx);
         f.press(cx, "right"); // System -> Light
         f.press(cx, "right"); // Light -> Dark
@@ -1387,27 +1553,41 @@ mod tests {
         assert_eq!(f.checks(cx)[1], Check::Checking);
     }
 
+    /// §13: the two font choosers open on what the app has — a family this machine may not
+    /// even have installed, which the list carries anyway — and Save hands over what was
+    /// chosen.
     #[gpui_kit::test]
-    fn the_terminal_font_opens_on_the_apps_own_and_is_saved_as_typed(cx: &mut TestAppContext) {
+    fn the_terminal_font_opens_on_the_apps_own_and_is_saved_as_chosen(cx: &mut TestAppContext) {
         let f = open_with(
             SettingsValues::from_state(
                 &Binaries::default(),
                 StoredTheme::Light,
                 "JetBrains Mono".to_owned(),
+                11.5,
             ),
             Some(installed()),
             cx,
         );
-        // The field opens on what the app has, not on the default: the app hands the panel
-        // `app.json`'s font.
+        // The row opens on what the app has, not on the defaults: the app hands the panel
+        // `app.json`'s font. A size this list does not carry is a row of its own.
+        assert_eq!(f.shown(cx, TERMINAL_FONT_ID), "JetBrains Mono");
+        assert_eq!(f.shown(cx, TERMINAL_FONT_SIZE_ID), "11.5");
         assert_eq!(f.values(cx).terminal_font, "JetBrains Mono");
+        assert_eq!(f.values(cx).terminal_font_size, 11.5);
 
-        f.replace_font(cx, "Fira Code");
-        assert_eq!(f.values(cx).terminal_font, "Fira Code");
+        // A family and a size chosen in the lists, which is what the trigger then shows.
+        f.choose_family(cx, store::design::MONO_FONT);
+        f.choose_size(cx, 16.);
+        assert_eq!(f.shown(cx, TERMINAL_FONT_ID), store::design::MONO_FONT);
+        assert_eq!(f.shown(cx, TERMINAL_FONT_SIZE_ID), "16");
+        assert_eq!(f.values(cx).terminal_font, store::design::MONO_FONT);
+        assert_eq!(f.values(cx).terminal_font_size, 16.);
+
         f.click(cx, SAVE_ID);
         let events = f.events();
         let SettingsEvent::Saved(saved) = &events[0];
-        assert_eq!(saved.terminal_font, "Fira Code");
+        assert_eq!(saved.terminal_font, store::design::MONO_FONT);
+        assert_eq!(saved.terminal_font_size, 16.);
         // A font is not a path: nothing is run for it, so the paths' own verdicts are the
         // ones the panel opened with.
         assert_eq!(
@@ -1419,18 +1599,96 @@ mod tests {
         );
     }
 
+    /// §13: the family list is the machine's own — every installed name, each of them once —
+    /// and it carries the values that have to have a row whatever is installed: what the app
+    /// is set to, and the design's monospace, which is what Reset puts back.
+    #[gpui_kit::test]
+    fn the_family_list_is_the_machines_plus_what_must_be_choosable(cx: &mut TestAppContext) {
+        const NOT_INSTALLED: &str = "A Family That Is Not Installed";
+        let f = fixture(cx);
+        let (offered, installed) = cx
+            .update_window(f.window, |_, window, _| {
+                (
+                    font_families(window, NOT_INSTALLED),
+                    window.text_system().all_font_names(),
+                )
+            })
+            .expect("the settings window");
+
+        let offered: Vec<String> = offered.iter().map(|family| family.to_string()).collect();
+        let mut deduped = installed;
+        deduped.sort_by_key(|name| name.to_lowercase());
+        deduped.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+
+        for name in &deduped {
+            assert_eq!(
+                offered
+                    .iter()
+                    .filter(|family| family.as_str() == name)
+                    .count(),
+                1,
+                "{name} is offered once: {offered:?}"
+            );
+        }
+        let missing = [NOT_INSTALLED, store::design::MONO_FONT]
+            .into_iter()
+            .filter(|carried| !deduped.iter().any(|name| name == carried))
+            .count();
+        assert_eq!(
+            offered.len(),
+            deduped.len() + missing,
+            "the machine's own list, plus the carried values that are missing from it: {offered:?}"
+        );
+        assert!(offered.iter().any(|family| family == NOT_INSTALLED));
+        assert!(offered
+            .iter()
+            .any(|family| family == store::design::MONO_FONT));
+
+        // And a chosen family is only choosable because the list has it: this is what makes
+        // Reset's own answer reachable.
+        f.choose_family(cx, store::design::MONO_FONT);
+        assert_eq!(f.values(cx).terminal_font, store::design::MONO_FONT);
+    }
+
+    /// §13: the size list is the design's own row of sizes, in order and without repeats, and
+    /// a size that is not one of them — a hand-edited file — is added to it rather than
+    /// dropped.
+    #[test]
+    fn the_size_list_carries_its_own_sizes_and_the_value_the_app_has() {
+        let listed: Vec<f32> = size_items(store::design::FONT_MONO)
+            .into_iter()
+            .map(|item| item.0)
+            .collect();
+        assert_eq!(listed, SIZES.to_vec());
+        assert!(listed.windows(2).all(|pair| pair[0] < pair[1]), "in order");
+
+        let carried: Vec<f32> = size_items(11.5).into_iter().map(|item| item.0).collect();
+        assert_eq!(carried.len(), SIZES.len() + 1);
+        assert!(carried.contains(&11.5));
+        assert!(
+            carried.windows(2).all(|pair| pair[0] < pair[1]),
+            "a carried size keeps the list in order: {carried:?}"
+        );
+        // A size the list already has is not added twice.
+        assert_eq!(size_items(13.).len(), SIZES.len());
+    }
+
     #[gpui_kit::test]
     fn reset_puts_the_designs_monospace_back_in_the_font_row(cx: &mut TestAppContext) {
         let f = fixture(cx);
-        f.replace_font(cx, "Fira Code");
-        assert_ne!(f.values(cx), SettingsValues::default());
-
+        f.choose_family(cx, store::design::MONO_FONT);
+        f.choose_size(cx, 20.);
         f.click(cx, RESET_ID);
         assert_eq!(f.values(cx).terminal_font, store::design::MONO_FONT);
+        assert_eq!(f.values(cx).terminal_font_size, store::design::FONT_MONO);
+        assert_eq!(f.shown(cx, TERMINAL_FONT_ID), store::design::MONO_FONT);
+        assert_eq!(f.shown(cx, TERMINAL_FONT_SIZE_ID), "13");
+
+        // And a reset after a size was chosen puts that back too, from a row of its own.
+        f.choose_size(cx, 11.);
+        assert_ne!(f.values(cx), SettingsValues::default());
+        f.click(cx, RESET_ID);
         assert_eq!(f.values(cx), SettingsValues::default());
-        // An emptied field is still a value: nothing is checked and nothing is refused.
-        f.replace_font(cx, "");
-        assert_eq!(f.values(cx).terminal_font, "");
     }
 
     #[gpui_kit::test]
@@ -1440,6 +1698,7 @@ mod tests {
         assert_eq!(f.label(cx, AGENT_PATH_ID), "evo-agent path");
         assert_eq!(f.label(cx, THEME_ID), THEME_LABEL);
         assert_eq!(f.label(cx, TERMINAL_FONT_ID), TERMINAL_FONT_LABEL);
+        assert_eq!(f.label(cx, TERMINAL_FONT_SIZE_ID), TERMINAL_FONT_SIZE_LABEL);
         for (id, expected) in [
             (SWARM_CHOOSE_ID, CHOOSE_LABEL),
             (AGENT_CHOOSE_ID, CHOOSE_LABEL),
@@ -1519,6 +1778,8 @@ mod tests {
                 AGENT_CHOOSE_ID,
                 AGENT_STATUS_ID,
                 THEME_ID,
+                TERMINAL_FONT_ID,
+                TERMINAL_FONT_SIZE_ID,
                 RESET_ID,
                 CANCEL_ID,
                 SAVE_ID,

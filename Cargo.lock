@@ -1810,6 +1810,7 @@ dependencies = [
  "settings",
  "store",
  "tab_engine",
+ "terminal",
  "transcript",
  "workspace",
 ]

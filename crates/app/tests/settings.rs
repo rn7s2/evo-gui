@@ -20,7 +20,7 @@ use gpui_kit::{
 use session::LaunchPlan;
 use settings::{
     Check, SettingsPanel, AGENT_PATH_ID, PANEL_ID, SAVE_ID, SWARM_CHOOSE_ID, SWARM_PATH_ID,
-    TERMINAL_FONT_ID, THEME_ID,
+    TERMINAL_FONT_ID, TERMINAL_FONT_SIZE_ID, THEME_ID,
 };
 use store::app_state::{AppState, Binaries, Theme};
 use store::model_cache::ModelCache;
@@ -31,8 +31,11 @@ use workspace::{LaunchEnv, TabContentEvent, TabState, WorkspaceView};
 /// says which binary it could not run — and an agent path that is not there either.
 const SAVED_SWARM: &str = "/nonexistent/evo-swarm-from-settings";
 const SAVED_AGENT: &str = "/nonexistent/evo-agent-from-settings";
-/// And the terminal's font family, which is a value like the paths (§13).
-const SAVED_FONT: &str = "JetBrains Mono";
+/// And the terminal's font, which is a value like the paths (§13): a family and the size it
+/// draws at. The family is the design's own monospace — a family every machine either has or
+/// is offered anyway — and the size is one the panel's own list of sizes carries.
+const SAVED_FONT: &str = "Menlo";
+const SAVED_FONT_SIZE: f32 = 16.;
 
 /// How long a boot that cannot succeed is given to say so.
 const WAIT: Duration = Duration::from_secs(60);
@@ -159,6 +162,21 @@ fn type_into(cx: &mut TestAppContext, window: AnyWindowHandle, id: &'static str,
     .expect("typing into the panel");
 }
 
+/// Choose the terminal's font the way the panel's own rows do: its family and its size,
+/// through the panel's own API. The dropdown popups themselves are the kit's machinery and
+/// are not drivable in this harness — a bare kit `Select` in a bare window does not open its
+/// menu from a click either — so what this drives is the choice landing in the panel, which
+/// is what the app's half takes from here (§13).
+fn choose_font(cx: &mut TestAppContext, window: AnyWindowHandle, panel: &Entity<SettingsPanel>) {
+    cx.update_window(window, |_, window, cx| {
+        panel.update(cx, |panel, cx| {
+            panel.choose_font(SAVED_FONT, SAVED_FONT_SIZE, window, cx)
+        });
+        window.render_frame(cx);
+    })
+    .expect("choosing a font");
+}
+
 /// Choose one of the three theme choices by clicking its third of the row — the
 /// same gesture the settings crate's own capture uses.
 fn choose_theme(cx: &mut TestAppContext, window: AnyWindowHandle, fraction: f32) {
@@ -248,10 +266,11 @@ fn saving_settings_persists_them_and_the_next_tab_spawns_with_them(cx: &mut Test
         "the embedded panel takes the whole box the dialog gives it"
     );
 
-    // A person's edits: two paths typed over, a font family, and Dark clicked.
+    // A person's edits: two paths typed over, a font family and a size chosen from the
+    // dropdowns, and Dark clicked.
     type_into(cx, window, SWARM_PATH_ID, SAVED_SWARM);
     type_into(cx, window, AGENT_PATH_ID, SAVED_AGENT);
-    type_into(cx, window, TERMINAL_FONT_ID, SAVED_FONT);
+    choose_font(cx, window, &panel);
     choose_theme(cx, window, 5. / 6.);
 
     // What the panel will hand over, checked before Save: a gesture that missed —
@@ -268,8 +287,40 @@ fn saving_settings_persists_them_and_the_next_tab_spawns_with_them(cx: &mut Test
     assert_eq!(typed.theme, Theme::Dark, "and the theme that was clicked");
     assert_eq!(
         typed.terminal_font, SAVED_FONT,
-        "and the terminal font that was typed"
+        "and the font family that was chosen"
     );
+    assert_eq!(
+        typed.terminal_font_size, SAVED_FONT_SIZE,
+        "and the size that was chosen"
+    );
+
+    // The two choosers are drawn inside the dialog and are showing what was chosen: a row
+    // clipped by the dialog's edge would be a value nobody could see or correct.
+    let (family, size_field) = cx
+        .update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            (
+                window.find(TERMINAL_FONT_ID),
+                window.find(TERMINAL_FONT_SIZE_ID),
+            )
+        })
+        .expect("the dialog is drawn");
+    assert_eq!(
+        family.value(),
+        Some(SAVED_FONT),
+        "the family chooser shows the chosen family"
+    );
+    assert_eq!(
+        size_field.value(),
+        Some("16"),
+        "and the one beside it the chosen size"
+    );
+    for (what, bounds) in [("family", family.bounds()), ("size", size_field.bounds())] {
+        assert!(
+            bounds.left() >= slot.left() && bounds.right() <= slot.right(),
+            "the {what} chooser is inside the dialog's box, not clipped by it: {bounds:?} in {slot:?}"
+        );
+    }
 
     settle(cx, window, SAVE_ID);
     cx.update_window(window, |_, window, cx| {
@@ -298,19 +349,32 @@ fn saving_settings_persists_them_and_the_next_tab_spawns_with_them(cx: &mut Test
         state.terminal_font, SAVED_FONT,
         "and the terminal's font: the panel's value is `app.json`'s"
     );
+    assert_eq!(
+        state.terminal_font_size, SAVED_FONT_SIZE,
+        "and the size beside it"
+    );
     // ...and on the Shell, which is what a launch and the About dialog read.
     let (binaries, theme, font) = cx.update(|cx| {
         let shell = cx.global::<Shell>();
         (
             shell.binaries.clone(),
             shell.theme,
-            shell.terminal_font.clone(),
+            (shell.terminal_font.clone(), shell.terminal_font_size),
         )
     });
     assert_eq!(binaries.evo_swarm, PathBuf::from(SAVED_SWARM));
     assert_eq!(binaries.evo_agent, PathBuf::from(SAVED_AGENT));
     assert_eq!(theme, Theme::Dark);
-    assert_eq!(font, SAVED_FONT, "and the Settings panel reopens on it");
+    assert_eq!(
+        font,
+        (SAVED_FONT.to_owned(), SAVED_FONT_SIZE),
+        "and the Settings panel reopens on the font"
+    );
+    // ...and in the global every open terminal draws with (§13): a pane that was already up
+    // follows the choice without being reopened.
+    let drawing = cx.update(|cx| cx.global::<terminal::TerminalFont>().clone());
+    assert_eq!(drawing.family.as_ref(), SAVED_FONT);
+    assert_eq!(drawing.size, SAVED_FONT_SIZE);
 
     // The window's *next* tab spawns with them: the swarm binary it was started
     // with is the one Settings saved, and that is what its failure names.
