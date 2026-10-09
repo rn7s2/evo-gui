@@ -25,6 +25,12 @@ pub(crate) fn bytes(keystroke: &Keystroke, mode: TermMode) -> Option<Vec<u8>> {
         return None;
     }
 
+    // Ctrl+` is the terminal pane's own toggle: let it bubble to the window's
+    // action handler rather than sending a byte to the shell.
+    if keystroke.modifiers.control && keystroke.key.as_str() == "`" {
+        return None;
+    }
+
     // `control` turns a key into a control character, and a terminal sends the
     // character, not the key: `Ctrl+C` is 0x03, and the shell reads it as one.
     if keystroke.modifiers.control {

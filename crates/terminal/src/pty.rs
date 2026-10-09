@@ -14,6 +14,7 @@
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -146,6 +147,18 @@ impl Shell {
         let mut command = CommandBuilder::new(shell);
         command.cwd(cwd);
         command.env("TERM", TERM);
+        // The app inherits the environment of whatever launched it, and a launch
+        // from Terminal.app carries its identity: macOS's /etc/zshrc then runs
+        // Terminal's own session save/restore in this pane ("Restored session:").
+        // This pane is not Terminal.app, and says so.
+        command.env("TERM_PROGRAM", "EvoDesktop");
+        for variable in [
+            "TERM_PROGRAM_VERSION",
+            "TERM_SESSION_ID",
+            "SHELL_SESSION_ID",
+        ] {
+            command.env_remove(variable);
+        }
         let child = pty
             .slave
             .spawn_command(command)
@@ -180,7 +193,16 @@ impl Shell {
     /// The thread is not joined, and does not need to be: it ends when the pty
     /// goes (the pane ends the shell as it goes) or when the pane drops the
     /// receiving end of `wakeup`, whichever comes first.
-    pub(crate) fn drain(&self, term: SharedTerm, wakeup: Sender<()>) -> Result<()> {
+    ///
+    /// When the shell is gone (its end of the pty closed), `exited` is set and one
+    /// last wakeup is sent — blocking for the slot, so it cannot be coalesced away
+    /// — and the pane learns its shell has ended.
+    pub(crate) fn drain(
+        &self,
+        term: SharedTerm,
+        wakeup: Sender<()>,
+        exited: Arc<AtomicBool>,
+    ) -> Result<()> {
         let mut reader = self.master.try_clone_reader()?;
         thread::Builder::new()
             .name("terminal-pty".to_owned())
@@ -191,7 +213,11 @@ impl Shell {
                     let read = match reader.read(&mut chunk) {
                         // The shell exited, or the pty went with the pane:
                         // there is nothing left to read and nobody to read it.
-                        Ok(0) | Err(_) => return,
+                        Ok(0) | Err(_) => {
+                            exited.store(true, Ordering::SeqCst);
+                            let _ = wakeup.send_blocking(());
+                            return;
+                        }
                         Ok(read) => read,
                     };
                     {

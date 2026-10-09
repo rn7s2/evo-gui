@@ -25,6 +25,7 @@
 //! the integration's next step, not a decision made here.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use alacritty_terminal::grid::Dimensions as _;
@@ -35,17 +36,31 @@ use alacritty_terminal::vte::ansi::{Color, NamedColor};
 use gpui_kit::component::{ActiveTheme as _, Theme};
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    div, AbsoluteLength, App, Bounds, Div, FocusHandle, Focusable, KeyDownEvent, MouseButton,
-    MouseDownEvent, Pixels, Render, SharedString, Task, Window,
+    div, px, AbsoluteLength, App, Bounds, Div, EventEmitter, FocusHandle, Focusable, KeyDownEvent,
+    MouseButton, MouseDownEvent, Pixels, Render, SharedString, Task, Window,
 };
 
 use crate::keys;
 use crate::palette;
 use crate::pty::{default_shell, quiet, Cells, PtyEvents, SharedTerm, Shell, Writer};
+use crate::{SendBackTab, SendInterrupt, SendTab, TerminalFont, KEY_CONTEXT};
 
 /// The size a terminal starts at before it has been laid out once: what a
 /// terminal has always been, and what a shell's first line is wrapped to.
 const START: Cells = Cells::new(80, 24);
+
+/// The room between the pane's edges and the grid: enough that the text does
+/// not sit on the divider, little enough that a narrow pane keeps its columns.
+const PAD_X: Pixels = px(12.);
+const PAD_Y: Pixels = px(8.);
+
+/// What a pane tells its owner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerminalEvent {
+    /// The shell ended (`exit`, `^D`, or killed): there is nothing left to type
+    /// into, and the owner should put the pane away.
+    Exited,
+}
 
 /// The grid, drawn as monospace rows, with a shell on a pty behind it.
 pub struct TerminalPane {
@@ -70,10 +85,9 @@ pub struct TerminalPane {
     /// Keeps the wakeup task alive. Dropping it cancels the task, and the
     /// reader thread then finds the channel closed and stops.
     _wakeup: Task<()>,
-    /// A font family override: when set, the pane draws with this instead of
-    /// the theme's monospace. Set from the app's "Terminal Font" setting.
-    font_override: Option<SharedString>,
 }
+
+impl EventEmitter<TerminalEvent> for TerminalPane {}
 
 impl TerminalPane {
     /// A terminal in `working_dir`, on the user's own shell.
@@ -81,6 +95,7 @@ impl TerminalPane {
     /// `$SHELL` decides which shell that is — the shell a terminal window on this
     /// desktop would open — and `/bin/zsh` is what macOS puts behind it.
     pub fn new(working_dir: PathBuf, _window: &mut Window, cx: &mut Context<Self>) -> Self {
+        crate::bind_keys(cx);
         let size = START;
         let mut failure = None;
 
@@ -106,8 +121,9 @@ impl TerminalPane {
         // One wakeup at a time is enough for the pane to be drawn (see
         // `crate::pty`), so the channel is a slot rather than a queue.
         let (wakeup, woken) = async_channel::bounded(1);
+        let exited = Arc::new(AtomicBool::new(false));
         if let Some(shell) = &shell {
-            if let Err(error) = shell.drain(SharedTerm::clone(&term), wakeup) {
+            if let Err(error) = shell.drain(SharedTerm::clone(&term), wakeup, Arc::clone(&exited)) {
                 failure = Some(format!("{error:#}"));
             }
         }
@@ -116,7 +132,14 @@ impl TerminalPane {
         // wakeup. The task ends with the pane: the weak handle stops upgrading.
         let _wakeup = cx.spawn(async move |pane, cx| {
             while woken.recv().await.is_ok() {
-                if pane.update(cx, |_, cx| cx.notify()).is_err() {
+                let gone = exited.load(Ordering::SeqCst);
+                let alive = pane.update(cx, |_, cx| {
+                    cx.notify();
+                    if gone {
+                        cx.emit(TerminalEvent::Exited);
+                    }
+                });
+                if alive.is_err() || gone {
                     return;
                 }
             }
@@ -130,21 +153,6 @@ impl TerminalPane {
             focus: cx.focus_handle(),
             failure,
             _wakeup,
-            font_override: None,
-        }
-    }
-
-    /// Set the font family the terminal draws with, overriding the theme's
-    /// monospace. An empty string clears the override.
-    pub fn set_font_family(&mut self, family: &str, cx: &mut Context<Self>) {
-        let new = if family.is_empty() {
-            None
-        } else {
-            Some(SharedString::from(family.to_string()))
-        };
-        if new != self.font_override {
-            self.font_override = new;
-            cx.notify();
         }
     }
 
@@ -227,6 +235,16 @@ impl TerminalPane {
         cx.stop_propagation();
     }
 
+    /// Bytes for the shell, from an action a binding took before the key reached
+    /// [`Self::key_down`] — Tab and Ctrl-C, which the window would otherwise
+    /// spend on something else.
+    fn send(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
+        if let Ok(mut writer) = self.writer.lock() {
+            let _ = writer.write_all(bytes);
+        }
+        cx.stop_propagation();
+    }
+
     /// A click puts the keyboard in the terminal, the way it does in a terminal
     /// window: the click is the request, and there is nowhere else to put it.
     fn clicked(&mut self, _: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -259,7 +277,12 @@ impl Focusable for TerminalPane {
 impl Render for TerminalPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let metrics = metrics(window, theme, self.font_override.as_ref());
+        let (family, font_size) = match cx.try_global::<TerminalFont>() {
+            Some(font) if !font.family.trim().is_empty() => (font.family.clone(), px(font.size)),
+            Some(font) => (theme.mono_font_family.clone(), px(font.size)),
+            None => (theme.mono_font_family.clone(), theme.mono_font_size),
+        };
+        let metrics = metrics(window, family.clone(), font_size);
         let body = self.body(window, theme, metrics);
 
         // The grid is as many cells as fit in the box the pane was given: the
@@ -293,8 +316,13 @@ impl Render for TerminalPane {
             // The hook a key binding needs to say "in a terminal, this key is
             // the shell's" — and, for the chords that must stay the window's,
             // "except this one".
-            .key_context("Terminal")
+            .key_context(KEY_CONTEXT)
             .on_key_down(cx.listener(Self::key_down))
+            .on_action(cx.listener(|pane, _: &SendTab, _, cx| pane.send(b"\t", cx)))
+            .on_action(cx.listener(|pane, _: &SendBackTab, _, cx| pane.send(b"\x1b[Z", cx)))
+            .on_action(cx.listener(|pane, _: &SendInterrupt, _, cx| pane.send(b"\x03", cx)))
+            .px(PAD_X)
+            .py(PAD_Y)
             .on_mouse_down(MouseButton::Left, cx.listener(Self::clicked))
             .child(
                 div()
@@ -302,12 +330,8 @@ impl Render for TerminalPane {
                     .flex()
                     .flex_col()
                     .overflow_hidden()
-                    .font_family(
-                        self.font_override
-                            .clone()
-                            .unwrap_or_else(|| theme.mono_font_family.clone()),
-                    )
-                    .text_size(theme.mono_font_size)
+                    .font_family(family)
+                    .text_size(font_size)
                     .line_height(metrics.line)
                     .text_color(theme.foreground)
                     .children(body),
@@ -426,14 +450,15 @@ struct Metrics {
     line: Pixels,
 }
 
-/// Measure a cell of the grid: the given font family (or the theme's monospace
-/// if `None`), at the theme's monospace size, in the window's own text style.
-fn metrics(window: &Window, theme: &Theme, font_override: Option<&SharedString>) -> Metrics {
-    let size = theme.mono_font_size;
+/// Measure a cell of the grid: `family` at `size`, in the window's own text
+/// style.
+///
+/// The line is the *line box* that style gives this text — the same number the
+/// text is drawn in — and not the face's own ascent and descent: the pane tells
+/// the shell how many rows fit, so its rows have to be the rows on screen.
+fn metrics(window: &Window, family: SharedString, size: Pixels) -> Metrics {
     let mut style = window.text_style();
-    style.font_family = font_override
-        .cloned()
-        .unwrap_or_else(|| theme.mono_font_family.clone());
+    style.font_family = family;
     style.font_size = AbsoluteLength::Pixels(size);
     let line = style.line_height_in_pixels(window.rem_size());
     let text = window.text_system();

@@ -55,4 +55,65 @@ mod palette;
 mod pane;
 mod pty;
 
-pub use pane::TerminalPane;
+use gpui_kit::{App, Global, KeyBinding, SharedString};
+
+pub use pane::{TerminalEvent, TerminalPane};
+
+/// The key context every pane carries.
+pub const KEY_CONTEXT: &str = "Terminal";
+
+gpui_kit::actions!(
+    terminal,
+    [
+        /// Tab, sent to the shell (its completion) rather than moving the focus.
+        SendTab,
+        /// Shift-Tab, sent to the shell rather than moving the focus back.
+        SendBackTab,
+        /// Ctrl-C, sent to the shell as an interrupt. On macOS it already is one;
+        /// elsewhere the kit binds it to Copy, which a terminal must not take.
+        SendInterrupt,
+    ]
+);
+
+/// The font every terminal draws with: the app's "Terminal Font" settings.
+///
+/// One global for the app, so a Save in Settings is seen by every open pane on
+/// its next frame. Absent, a pane draws with the theme's own monospace.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TerminalFont {
+    pub family: SharedString,
+    pub size: f32,
+}
+
+impl Global for TerminalFont {}
+
+impl TerminalFont {
+    /// Make this the font every terminal draws with, and redraw the windows.
+    pub fn set(self, cx: &mut App) {
+        if cx.try_global::<TerminalFont>() == Some(&self) {
+            return;
+        }
+        cx.set_global(self);
+        cx.refresh_windows();
+    }
+}
+
+/// Set once the terminal's keys are in the keymap.
+struct KeysBound;
+impl Global for KeysBound {}
+
+/// Bind the keys a terminal must keep from the window: Tab and Shift-Tab, which
+/// the kit's root otherwise spends on moving the focus, and Ctrl-C. Bound in the
+/// terminal's own context, which is deeper than the root's, so these win only
+/// while a terminal has the keyboard. Idempotent.
+pub fn bind_keys(cx: &mut App) {
+    if cx.has_global::<KeysBound>() {
+        return;
+    }
+    cx.set_global(KeysBound);
+    cx.bind_keys([
+        KeyBinding::new("tab", SendTab, Some(KEY_CONTEXT)),
+        KeyBinding::new("shift-tab", SendBackTab, Some(KEY_CONTEXT)),
+        KeyBinding::new("ctrl-c", SendInterrupt, Some(KEY_CONTEXT)),
+    ]);
+}
