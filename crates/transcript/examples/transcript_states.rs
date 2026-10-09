@@ -482,6 +482,91 @@ fn files_setup(cx: &mut HeadlessAppContext, window: AnyWindowHandle, page: &Enti
     rows
 }
 
+/// The record the lane-switch states are about: a session that has run for a while,
+/// ending on the reader's own words — one row longer than the pane, so a pane showing the
+/// foot of the record is a pane full of them — with the answer to them arriving while
+/// another lane is on screen.
+fn lane_switch_record() -> Vec<Item> {
+    let mut record = Record::new();
+    for n in 1..=24 {
+        turn(
+            &mut record,
+            &format!(
+                "step {n}: carry on — the next unit, and keep the record long enough that \
+                 the list is what draws it"
+            ),
+        );
+        reply(
+            &mut record,
+            "The list measures a row when the pane reaches it, so a row nobody has laid \
+             out has no height at all yet.",
+            None,
+        );
+        call(
+            &mut record,
+            "bash",
+            json!({ "command": "cargo test -p transcript --test pane" }),
+            "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured\n".repeat(3),
+            false,
+        );
+    }
+    let long = "the reader's own turn, long enough that this one row is longer than the \
+                pane it is read in — many times over, so that a reader scrolled up into it \
+                is reading it, and not something else. "
+        .repeat(18);
+    turn(&mut record, &long);
+    record.items
+}
+
+/// The switch back to a session whose reader had scrolled up into their own message.
+///
+/// Another lane was on screen, so this transcript was not drawn while the answer arrived;
+/// the switch back is `TabModel::select`'s reset worked out in the view — the same items,
+/// the answer last, replaced outright. What the picture is of is the reader's place in it:
+/// the words the pane was showing before the switch are the words it must show after.
+fn switched_back(
+    cx: &mut HeadlessAppContext,
+    window: AnyWindowHandle,
+    page: &Entity<Page>,
+    swarm: bool,
+) -> usize {
+    let view = transcript_of(cx, page);
+    let items = lane_switch_record();
+    let rows = items.len();
+    cx.update(|cx| {
+        view.update(cx, |view, cx| {
+            // The program the tab is (§7.2): a swarm's coordinator, or the one agent of
+            // a single-agent session. Both take the same switch, and a record draws the
+            // same either way.
+            view.set_swarm(swarm, cx);
+            view.replace(items, cx);
+        })
+    });
+    frames(cx, window, 3);
+    // The reader wheels up into their own words: from here the list is theirs, and where
+    // it is at is the place the switch must keep.
+    for _ in 0..3 {
+        wheel(cx, window, SCREEN);
+    }
+    // The answer arrives while another lane is shown; the switch back re-reads the topic
+    // into the view — the same items, the answer last.
+    let answer = item(json!({
+        "id": item_id(rows), "ts": 2, "kind": "assistant", "status": "final",
+        "text": "the answer to the reader's own turn, written while another lane was on \
+                 screen: the row the switch must not hide.",
+        "model": "stub-a", "provider": "stub",
+    }));
+    cx.update(|cx| {
+        view.update(cx, |view, cx| view.upsert(answer, cx));
+    });
+    let held = cx.update(|cx| view.read(cx).items(cx).to_vec());
+    cx.update(|cx| {
+        view.update(cx, |view, cx| view.replace(held, cx));
+    });
+    frames(cx, window, 3);
+    rows + 1
+}
+
 // ---------------------------------------------------------------------------
 // The host: the app's own embedding, one cached view in a `flex_1` box.
 // ---------------------------------------------------------------------------
@@ -904,7 +989,7 @@ fn main() {
     // One entry per state: what it is called, the zoom it draws at, how wide its
     // window is (the reading measure's own bound is the pane, so a picture of the
     // measure needs a pane wider than it), and how it is reached.
-    let states: [(&str, f32, f32, Setup); 27] = [
+    let states: [(&str, f32, f32, Setup); 29] = [
         ("bottom", 1., WINDOW_SIZE.0, |_, _, _| ITEMS),
         ("tool-hover", 1., WINDOW_SIZE.0, |cx, window, _| {
             // A folded card under the pointer: the head's hover ink is the whole of
@@ -1158,6 +1243,18 @@ fn main() {
             frames(cx, window, 3);
             rows
         }),
+        // The switch back to a lane whose reader had scrolled up into their own turn,
+        // with the answer to it arriving while another lane was shown: the row the pane
+        // showed before the switch is the row it must show after (both programs).
+        ("lane-switch", 1., WINDOW_SIZE.0, |cx, window, page| {
+            switched_back(cx, window, page, true)
+        }),
+        (
+            "lane-switch-single",
+            1.,
+            WINDOW_SIZE.0,
+            |cx, window, page| switched_back(cx, window, page, false),
+        ),
     ];
 
     let mut cx = context();

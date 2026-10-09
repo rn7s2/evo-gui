@@ -315,6 +315,75 @@ fn older_items_page_into_the_topic_the_ui_asked_for() {
     assert!(!tab.topic("session").unwrap().has_older());
 }
 
+/// §5.2/§5.4: a snapshot is a window, and a refresh of a topic being shown — the
+/// engine re-reading it, a `topic.reset` — lands in the tab's model through
+/// `on_snapshot`. The rows the reader already walked back to stay in front of the
+/// window, and the window is the whole suffix: a row it no longer carries is gone,
+/// not left beside the refreshed conversation.
+#[test]
+fn a_refresh_keeps_the_paged_history_and_drops_the_rows_the_window_lost() {
+    let mut tab = open_tab();
+    assert_eq!(tab.items(AgentKey::Coordinator).len(), 18);
+
+    // The reader paged back to the record's own beginning.
+    tab.on_items_before("session", &fixture("items-before.json"));
+
+    // The window a refresh reads now: it opens at a held `e_2`, `e_3` has moved on,
+    // and `e_5` is no longer the server's.
+    let items: Vec<_> = topic_body(&fixture("snapshot-session.json"), "session")["items"]
+        .as_array()
+        .expect("the fixture's items")
+        .iter()
+        .filter(|item| item["id"] != "e_1" && item["id"] != "e_5")
+        .map(|item| {
+            let mut item = item.clone();
+            if item["id"] == "e_3" {
+                item["text"] = json!("changed by the server");
+            }
+            item
+        })
+        .collect();
+    let window = items.len();
+    let changes = tab.on_snapshot(
+        "session",
+        &json!({ "state": {}, "items": items, "has_more": true }),
+    );
+    let session = changes.for_topic("session").expect("the topic moved");
+    assert!(
+        session.reset && session.state,
+        "the view rebuilds from the model"
+    );
+    assert!(
+        session.items().is_empty(),
+        "a re-read is not a row at a time: the rows come from the model"
+    );
+
+    let ids: Vec<&str> = tab
+        .items(AgentKey::Coordinator)
+        .iter()
+        .map(|item| item.id.as_str())
+        .collect();
+    assert_eq!(ids[..3].to_vec(), ["e_0a", "e_0b", "e_1"]);
+    assert_eq!(ids[3], "e_2", "the window picked up at the overlap");
+    assert_eq!(ids.len(), 3 + window);
+    assert!(!ids.contains(&"e_5"), "the row the window lost is gone");
+    let ItemKind::Assistant(assistant) = &tab
+        .items(AgentKey::Coordinator)
+        .iter()
+        .find(|item| item.id == "e_3")
+        .unwrap()
+        .kind
+    else {
+        panic!("e_3 is an assistant item")
+    };
+    assert_eq!(assistant.text, "changed by the server");
+    assert!(
+        !tab.topic("session").unwrap().has_older(),
+        "the reader's pages reach the record's beginning: the window's own answer is \
+         about the window's front"
+    );
+}
+
 /// A coordinator whose own topic has not caught up still reads as waiting when the
 /// swarm says it is held for its lanes (§4.2): the row says what the swarm says, and
 /// never "idle" while lanes are out.

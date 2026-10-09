@@ -10,7 +10,7 @@ use gpui_kit::base::TextViewState;
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
     div, px, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, Styled as _, TestAppContext, TestSupportExt as _, Window,
+    ParentElement as _, Pixels, Render, Styled as _, TestAppContext, TestSupportExt as _, Window,
 };
 use serde_json::{json, Value};
 use session::{Item, ItemKind};
@@ -2535,6 +2535,29 @@ fn a_wheel_takes_the_list_off_its_tail_and_the_pill_appears(cx: &mut TestAppCont
     );
 }
 
+#[gpui_kit::test]
+fn an_unmeasured_tail_is_not_mistaken_for_a_complete_transcript(cx: &mut TestAppContext) {
+    let (view, cx) = open!(cx, vec![user("u_0", "the last user message")]);
+    for _ in 0..3 {
+        cx.update(|window, cx| window.render_frame(cx));
+    }
+    view.update(cx, |view, cx| {
+        for i in 1..40 {
+            view.upsert(assistant(&format!("a_{i}"), "newer answer", "final"), cx);
+        }
+        view.list.scroll_to(gpui_kit::ListOffset {
+            item_ix: 0,
+            offset_in_item: px(0.),
+        });
+        assert_eq!(view.list.max_offset_for_scrollbar().y, px(0.));
+        assert!(view.list.bounds_for_item(39).is_none());
+        assert!(
+            view.gap().is_infinite(),
+            "unmeasured newer rows are not the bottom of the transcript"
+        );
+    });
+}
+
 /// "↓ Jump to latest" goes to the tail — the latest row on screen — not to the head.
 #[gpui_kit::test]
 fn jump_to_latest_lands_on_the_tail(cx: &mut TestAppContext) {
@@ -4308,4 +4331,280 @@ fn a_notice_the_server_does_not_keep_is_counted_not_just_dropped(cx: &mut TestAp
     // at the start as well as after every op.
     view.update(cx, |view, cx| view.clear(cx));
     assert_eq!((held(cx), declined(cx)), (0, 0));
+}
+
+/// A record far taller than the pane, ending on the reader's own long turn — one row
+/// longer than the pane, so a reader scrolled up into it is reading it.
+fn long_record() -> Vec<Item> {
+    let long = "the reader's own turn, long enough that this one row is taller than the \
+                pane it is read in, many times over. "
+        .repeat(60);
+    let mut items: Vec<Item> = (0..200)
+        .map(|i| {
+            user(
+                &format!("u_{i:04}"),
+                "a turn of its own, long enough that its row is a few lines tall",
+            )
+        })
+        .collect();
+    items.push(user("u_long", &long));
+    items
+}
+
+/// The rows of the record the list has measured, and the height it holds for each — the
+/// heights its scroll range is the sum of, and the ones a reader's bar is drawn from.
+fn measured_heights(
+    view: &Entity<TranscriptView>,
+    cx: &gpui_kit::VisualTestContext,
+) -> Vec<(usize, Pixels)> {
+    cx.read(|cx| {
+        let view = view.read(cx);
+        (0..view.slots.rows)
+            .filter_map(|index| {
+                view.list
+                    .bounds_for_item(view.slots.at(index))
+                    .map(|bounds| (index, bounds.size.height))
+            })
+            .collect()
+    })
+}
+
+/// The range the list's scrollbar draws: the sum of the heights it has measured, less the
+/// pane it is read in.
+fn scroll_range(view: &Entity<TranscriptView>, cx: &gpui_kit::VisualTestContext) -> Pixels {
+    cx.read(|cx| view.read(cx).list.max_offset_for_scrollbar().y)
+}
+
+/// The switch: the answer arrives while the transcript is not drawn, and the column
+/// re-reads the topic into the view — the same items, the answer last (`replace`).
+fn switch_back_with_an_answer(view: &Entity<TranscriptView>, cx: &mut gpui_kit::VisualTestContext) {
+    view.update(cx, |view, cx| {
+        view.upsert(
+            assistant("u_new", "the answer to the reader's own turn", "final"),
+            cx,
+        )
+    });
+    let held: Vec<Item> = cx.read(|cx| view.read(cx).items(cx).to_vec());
+    view.update(cx, |view, cx| view.replace(held, cx));
+    frames(cx, 3);
+}
+
+/// A drag of the scrollbar's thumb to the bottom of its track, released before the frame
+/// that would have painted the move: what the kit's own drag does on its last mouse move
+/// (`set_offset_from_scrollbar` at the end of the range the bar draws), with the thumb
+/// already let go by the time the frame runs.
+fn drag_the_bar_to_the_bottom(view: &Entity<TranscriptView>, cx: &mut gpui_kit::VisualTestContext) {
+    view.update(cx, |view, _| {
+        view.list.scrollbar_drag_started();
+        let end = view.list.max_offset_for_scrollbar().y;
+        view.list
+            .set_offset_from_scrollbar(gpui_kit::point(px(0.), -end));
+        view.list.scrollbar_drag_ended();
+    });
+    frames(cx, 3);
+}
+
+/// The same drag held to the end of the track: a real drag's moves paint while the thumb
+/// is down, which is where the list's own drag flag is set.
+fn drag_the_bar_to_the_bottom_while_held(
+    view: &Entity<TranscriptView>,
+    cx: &mut gpui_kit::VisualTestContext,
+) {
+    view.update(cx, |view, _| {
+        view.list.scrollbar_drag_started();
+        let end = view.list.max_offset_for_scrollbar().y;
+        view.list
+            .set_offset_from_scrollbar(gpui_kit::point(px(0.), -end));
+    });
+    frames(cx, 3);
+    view.update(cx, |view, _| view.list.scrollbar_drag_ended());
+    frames(cx, 2);
+}
+
+/// A reader who drags the scrollbar's thumb to the bottom of its track has asked for the
+/// end of the record. The list's range is the sum of the rows it has *measured*, though,
+/// so the bottom of the track is only the end of the record while the rows behind it have
+/// been measured. A re-read that starts the list again would take those measurements with
+/// it, and a drag to the bottom would then leave the newest rows out of reach.
+///
+/// The switch this stands in for, as the app does it: `TabModel::select` marks the new
+/// agent's topic stale (`crates/session/src/tab.rs:364`), `TabContent::push` turns that
+/// into `plan.reset` (`crates/workspace/src/tab.rs:1565`) and calls `replace`
+/// (`:1637`) — and the selection also refetches the topic (`:1922`), whose snapshot is
+/// another reset. It is the same rows in the same order with the answer behind them, so
+/// the list keeps every height it has measured.
+///
+/// A wheel is no comparison in the bar's favour — it *does* reach the end, because a
+/// scroll the list clamps at its own end is read as the reader asking for the foot
+/// (`reaches_the_foot` → `scroll_to_end`), and a scrollbar drag never reports one.
+#[gpui_kit::test]
+fn a_scrollbar_drag_to_the_bottom_reaches_the_end_of_the_record(cx: &mut TestAppContext) {
+    let (view, cx) = open!(cx, long_record());
+    frames(cx, 2);
+
+    // The reader wheels up into their own turn: unpinned, and the tail is off screen.
+    for _ in 0..4 {
+        wheel(cx, 1080.);
+    }
+    assert!(!cx.read(|cx| view.read(cx).is_following_tail(cx)));
+
+    switch_back_with_an_answer(&view, cx);
+    assert!(
+        !drawn_row(cx, "u_new"),
+        "the switch keeps the reader's place: the answer is below them"
+    );
+
+    let before = cx.read(|cx| view.read(cx).list.logical_scroll_top());
+    drag_the_bar_to_the_bottom(&view, cx);
+    let after = cx.read(|cx| view.read(cx).list.logical_scroll_top());
+    let range = scroll_range(&view, cx);
+    assert!(
+        drawn_row(cx, "u_new"),
+        "the bottom of the track is the end of the record: the drag moved {before:?} -> \
+         {after:?} within a range of {range:?}, and the newest row is still not built"
+    );
+}
+
+/// The same ask with a wheel: one hard wheel to the foot does reach the end — the list
+/// clamps it at the end of what it has measured, and the view reads that as the reader
+/// asking for the bottom, which is what the scrollbar's drag has no way to say.
+#[gpui_kit::test]
+fn a_wheel_to_the_foot_reaches_the_end_of_the_record(cx: &mut TestAppContext) {
+    let (view, cx) = open!(cx, long_record());
+    frames(cx, 2);
+
+    for _ in 0..4 {
+        wheel(cx, 1080.);
+    }
+    switch_back_with_an_answer(&view, cx);
+    assert!(!drawn_row(cx, "u_new"), "the answer is below the reader");
+
+    wheel(cx, -100_000.);
+    assert!(
+        drawn_row(cx, "u_new"),
+        "the wheel reaches the end of the record"
+    );
+    assert!(cx.read(|cx| view.read(cx).is_following_tail(cx)));
+}
+
+/// A re-read that only extends the record keeps the list's own measurements — every row
+/// the reader has scrolled past holds the height it was measured at, so the bar still
+/// covers what they have read — while a row whose item changed under its id is measured
+/// again, since its height is the one thing the list cannot be trusted with.
+#[gpui_kit::test]
+fn an_extending_re_read_keeps_the_measured_heights_and_measures_a_changed_row(
+    cx: &mut TestAppContext,
+) {
+    let (view, cx) = open!(cx, long_record());
+    frames(cx, 2);
+
+    // The reader wheels up the record: the rows they pass are measured, and the bar's
+    // range grows to cover them.
+    for _ in 0..2 {
+        wheel(cx, 1080.);
+    }
+    let before = measured_heights(&view, cx);
+    let range_before = scroll_range(&view, cx);
+    assert!(
+        before.len() > 8,
+        "a window of rows is measured: {} of them",
+        before.len()
+    );
+    assert!(
+        range_before > px(1080.),
+        "and the bar covers more than a pane: {range_before:?}"
+    );
+
+    // The re-read: the same rows in the same order, one of them rewritten with far more
+    // words, and the answer arriving behind them.
+    let mut next: Vec<Item> = cx.read(|cx| view.read(cx).items(cx).to_vec());
+    let changed = before[before.len() / 2].0;
+    let rewritten = "the same turn, rewritten with a great many more words than it had \
+                     the first time — enough that its row is taller than the one the list \
+                     measured for it. "
+        .repeat(8);
+    next[changed] = user(&format!("u_{changed:04}"), &rewritten);
+    next.push(assistant(
+        "u_new",
+        "the answer to the reader's own turn",
+        "final",
+    ));
+    view.update(cx, |view, cx| view.replace(next, cx));
+    frames(cx, 3);
+
+    // Every row that was measured is still measured, at the height it was measured at...
+    let after = measured_heights(&view, cx);
+    for (index, height) in &before {
+        if *index == changed {
+            continue;
+        }
+        assert_eq!(
+            after
+                .iter()
+                .find(|(row, _)| row == index)
+                .map(|(_, height)| *height),
+            Some(*height),
+            "row {index} kept the height the list measured for it"
+        );
+    }
+    // ...the rewritten row is not: it is measured again, and it is taller...
+    let held_height = before
+        .iter()
+        .find(|(row, _)| *row == changed)
+        .expect("the rewritten row was measured before")
+        .1;
+    let measured = after
+        .iter()
+        .find(|(row, _)| *row == changed)
+        .expect("the rewritten row is measured again")
+        .1;
+    assert!(
+        measured > held_height,
+        "the rewritten row is measured again: {held_height:?} -> {measured:?}"
+    );
+    // ...and the bar still covers what it did before the re-read.
+    let range_after = scroll_range(&view, cx);
+    assert!(
+        range_after >= range_before,
+        "the bar kept its range: {range_before:?} -> {range_after:?}"
+    );
+}
+
+/// A drag of the bar to its own end reaches the record's end even when the list has just
+/// been started again — a re-read that is not the same rows in the same order (a
+/// compaction, a restart, a shorter record), where the rows behind the reader are
+/// unmeasured once more and the end of the bar is short of the end of the record. The
+/// thumb held at the bottom of the track is the reader's own ask, and the view takes them
+/// to the bottom of the record.
+#[gpui_kit::test]
+fn a_drag_to_the_bottom_reaches_the_end_after_the_list_starts_again(cx: &mut TestAppContext) {
+    let (view, cx) = open!(cx, long_record());
+    frames(cx, 2);
+    for _ in 0..4 {
+        wheel(cx, 1080.);
+    }
+    assert!(!cx.read(|cx| view.read(cx).is_following_tail(cx)));
+
+    // A record that is not the one held: the older half has been compacted away, so the
+    // row the reader was at is still there and the ids in front of it are not.
+    let held: Vec<Item> = cx.read(|cx| view.read(cx).items(cx).to_vec());
+    let mut next: Vec<Item> = held[100..].to_vec();
+    next.push(assistant(
+        "u_new",
+        "the answer to the reader's own turn",
+        "final",
+    ));
+    view.update(cx, |view, cx| view.replace(next, cx));
+    frames(cx, 3);
+    assert!(!drawn_row(cx, "u_new"), "the answer is below the reader");
+
+    drag_the_bar_to_the_bottom_while_held(&view, cx);
+    assert!(
+        drawn_row(cx, "u_new"),
+        "the thumb held at the bottom of the track asks for the record's end"
+    );
+    assert!(
+        cx.read(|cx| view.read(cx).is_following_tail(cx)),
+        "and the tail is followed again from there"
+    );
 }

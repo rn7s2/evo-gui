@@ -73,14 +73,42 @@ impl Topic {
     /// Replace the topic with a `/snapshot` body for it:
     /// `{"state":{…},"items":[…],"has_more":bool}`. A body without items (the `swarm`
     /// topic, which carries state only) leaves an empty list.
+    ///
+    /// The items are a *window* ([`crate::PAGE_ITEMS`]), and a reader who paged back
+    /// holds older items in front of it. When the body says there is more behind the
+    /// window and the window's first item is one already held below the front, the
+    /// prefix before it is the reader's own pages and is kept; the window replaces the
+    /// whole suffix, so a row the server has changed or dropped is not left stale, and
+    /// `has_older` stays the reader's own — the body's answer is about the window's
+    /// front, not the topic's. Without that overlap — a first read, a session switch, a
+    /// window that is the whole record — the window *is* the topic.
     pub fn apply_snapshot(&mut self, body: &Value) -> TopicChanges {
         self.state = TopicState::from_json(body.get("state").unwrap_or(&Value::Null));
         let items = parse_items(body.get("items"));
-        self.has_older = body
+        let has_more = body
             .get("has_more")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        self.set_items(items);
+        let prefix = if has_more {
+            items
+                .first()
+                .and_then(|first| self.index.get(&first.id).copied())
+                .filter(|index| *index > 0)
+        } else {
+            None
+        };
+        match prefix {
+            Some(prefix) => {
+                let mut merged = std::mem::take(&mut self.items);
+                merged.truncate(prefix);
+                merged.extend(items);
+                self.set_items(merged);
+            }
+            None => {
+                self.has_older = has_more;
+                self.set_items(items);
+            }
+        }
         TopicChanges {
             reset: true,
             state: true,

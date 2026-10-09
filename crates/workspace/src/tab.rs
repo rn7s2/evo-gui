@@ -1906,8 +1906,7 @@ impl TabContent {
         Some(now_millis().saturating_sub(started) / 1000)
     }
 
-    /// Show AGENT's transcript in the center column — and watch only the lane
-    /// being shown (§9.3, §14.4).
+    /// Show AGENT's transcript and refresh that topic without changing the stream.
     pub fn select_agent(&mut self, agent: AgentKey, cx: &mut Context<Self>) {
         if self.selected_agent() == agent {
             // Clicking the row already shown changes nothing — and reopening the
@@ -1918,8 +1917,9 @@ impl TabContent {
             let Some(live) = self.live.as_mut() else {
                 return;
             };
-            // One stream carries every topic (§5.3), so selecting an agent is the
-            // view's business alone: nothing new is subscribed to.
+            // One stream still carries every topic; the read catches a cached
+            // transcript up to what the server already holds.
+            live.engine.refetch_topic(&agent.topic());
             live.model.select(agent)
         };
         // An agent's view exists from the moment it is first shown, and lives as
@@ -3104,10 +3104,26 @@ mod tests {
         Entity<TabContent>,
         swarm_client::harness::TempDir,
     ) {
+        live_tab_of(cx, true)
+    }
+
+    /// The same tab, started as the program asked for (§7.2): a swarm, or the workers
+    /// card's other position — one `evo-agent`, the tab that has no lanes at all.
+    fn live_tab_of(
+        cx: &mut TestAppContext,
+        swarm: bool,
+    ) -> (
+        AnyWindowHandle,
+        Entity<TabContent>,
+        swarm_client::harness::TempDir,
+    ) {
         let dir = swarm_client::harness::TempDir::new("live-tab").expect("a temp dir");
         let config = swarm_client::harness::fake_config(dir.path(), &[]).expect("a config");
         let (engine, updates) = tab_engine::TabEngine::start(config);
         let (window, tab) = running_tab(cx);
+        if !swarm {
+            tab.update(cx, |tab, cx| tab.set_use_swarm(false, cx));
+        }
         let tab_dir = dir.path().to_path_buf();
         cx.update_window(window, |_, window, cx| {
             tab.update(cx, |tab, cx| {
@@ -3150,15 +3166,35 @@ mod tests {
 
     /// The ids one agent's transcript holds, in order.
     fn held_ids(tab: &Entity<TabContent>, cx: &TestAppContext) -> Vec<String> {
+        rows_of(tab, AgentKey::Coordinator, cx)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect()
+    }
+
+    /// One agent's transcript as its reader has it: every row's id and the text it
+    /// draws, in order. A count is not what the reader is looking at.
+    fn rows_of(
+        tab: &Entity<TabContent>,
+        agent: AgentKey,
+        cx: &TestAppContext,
+    ) -> Vec<(String, String)> {
         cx.read(|cx| {
             tab.read(cx)
                 .transcripts
-                .get(&AgentKey::Coordinator)
+                .get(&agent)
                 .map(|view| {
                     view.read(cx)
                         .items(cx)
                         .iter()
-                        .map(|item| item.id.clone())
+                        .map(|item| {
+                            let text = item
+                                .raw()
+                                .get("text")
+                                .and_then(serde_json::Value::as_str)
+                                .unwrap_or_default();
+                            (item.id.clone(), text.to_string())
+                        })
                         .collect()
                 })
                 .unwrap_or_default()
@@ -3169,8 +3205,27 @@ mod tests {
     fn turn(id: &str, text: &str) -> serde_json::Value {
         serde_json::json!({
             "op": "item.add", "topic": "session", "after": null,
-            "item": {"id": id, "kind": "user", "ts": 1, "text": text, "status": "sent"}
+            "item": wire_turn(id, text),
         })
+    }
+
+    /// An answer, as the stream publishes one.
+    fn answer(id: &str, text: &str) -> serde_json::Value {
+        serde_json::json!({
+            "op": "item.add", "topic": "session", "after": null,
+            "item": wire_answer(id, text),
+        })
+    }
+
+    /// A user turn, as a snapshot carries it (§5.2) — the same item `turn` emits.
+    fn wire_turn(id: &str, text: &str) -> serde_json::Value {
+        serde_json::json!({"id": id, "kind": "user", "ts": 1, "text": text, "status": "sent"})
+    }
+
+    /// An answer, as a snapshot carries it.
+    fn wire_answer(id: &str, text: &str) -> serde_json::Value {
+        serde_json::json!({"id": id, "kind": "assistant", "ts": 1, "text": text,
+                           "thinking": "", "status": "final"})
     }
 
     /// §9.1: the transcript holds the topic, and a view that has fallen behind it is
@@ -3251,6 +3306,172 @@ mod tests {
                 .unwrap_or_default()
         });
         assert_eq!(held_ids(&tab, cx), topic);
+        cx.update_window(window, |_, window, cx| window.render_frame(cx))
+            .expect("the tab window");
+    }
+
+    /// §7.3/§9.3: showing a lane again reads its topic; it does not re-show whatever
+    /// mirror the tab happens to hold.
+    ///
+    /// The shape a reader reported: the tab holds the lane's last user turn, the lane
+    /// has answered since (the server's own topic carries the answer), and no op for
+    /// that answer ever reached this client. A selection that only re-shows the local
+    /// mirror leaves the transcript ending at that turn, and nothing but a
+    /// terminate-and-resume would repair it.
+    #[gpui_kit::test]
+    fn a_lane_switched_back_to_shows_what_the_lane_wrote_since(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (window, tab, dir) = live_tab(cx);
+        pump_until(cx, "the tab's server", |_| {
+            dir.path().join("ready.json").exists()
+        });
+        let control = swarm_client::harness::Control::attach(dir.path()).expect("the fake server");
+        pump_until(cx, "the tab's own stream", |_| {
+            !control.requests_on("/stream").is_empty()
+        });
+
+        // The coordinator's rows, on its stream: the transcript a lane's read must
+        // leave exactly as it was.
+        control
+            .emit(turn("s_1", "delegate the first step"))
+            .expect("emit");
+        control.emit(answer("s_2", "lane 1 has it")).expect("emit");
+        let coordinator = vec![
+            ("s_1".to_string(), "delegate the first step".to_string()),
+            ("s_2".to_string(), "lane 1 has it".to_string()),
+        ];
+        pump_until(cx, "the coordinator's rows", |cx| {
+            rows_of(&tab, AgentKey::Coordinator, cx) == coordinator
+        });
+        // The same rows as that topic's own snapshot would carry them: a snapshot is
+        // never behind the ops a client has already applied.
+        control
+            .snapshot_body(serde_json::json!({"session": {
+                "state": {"status": "idle"},
+                "items": [wire_turn("s_1", "delegate the first step"),
+                          wire_answer("s_2", "lane 1 has it")],
+            }}))
+            .expect("the session snapshot");
+
+        // The lane as the tab first reads it: the task it was given, nothing after it
+        // yet. The fake has no lane until a test says so, so this read is what puts one
+        // in front of the client at all.
+        control
+            .snapshot_body(serde_json::json!({"lane:1": {
+                "state": {"status": "working"},
+                "items": [wire_turn("e_9", "t03 lane one step")],
+            }}))
+            .expect("the lane's snapshot");
+        control
+            .emit(serde_json::json!({"op": "topic.reset", "topic": "lane:1",
+                                     "reason": "lane_restarted"}))
+            .expect("emit");
+        pump_until(cx, "the lane's last user turn", |cx| {
+            rows_of(&tab, AgentKey::Lane(1), cx)
+                == vec![("e_9".to_string(), "t03 lane one step".to_string())]
+        });
+
+        // The lane has answered since, and no op for it ever reaches this client: what
+        // a lane writing while its items are missed leaves behind.
+        control
+            .snapshot_body(serde_json::json!({
+                "lane:1": {"state": {"status": "idle"}, "items": [
+                    wire_turn("e_9", "t03 lane one step"),
+                    wire_answer("e_10", "step taken"),
+                ]},
+                "lane:2": {"state": {"status": "idle"}, "items": [
+                    wire_turn("e_11", "lane two's own work"),
+                ]},
+            }))
+            .expect("the newer snapshots");
+
+        // Showing that lane carries the answer its own topic has.
+        tab.update(cx, |tab, cx| tab.select_agent(AgentKey::Lane(1), cx));
+        pump_until(cx, "the lane's own answer", |cx| {
+            rows_of(&tab, AgentKey::Lane(1), cx)
+                == vec![
+                    ("e_9".to_string(), "t03 lane one step".to_string()),
+                    ("e_10".to_string(), "step taken".to_string()),
+                ]
+        });
+
+        // Away to the other lane and back: each is read as it is shown, and neither
+        // one's rows are the other's.
+        tab.update(cx, |tab, cx| tab.select_agent(AgentKey::Lane(2), cx));
+        pump_until(cx, "the second lane's rows", |cx| {
+            rows_of(&tab, AgentKey::Lane(2), cx)
+                == vec![("e_11".to_string(), "lane two's own work".to_string())]
+        });
+        tab.update(cx, |tab, cx| tab.select_agent(AgentKey::Lane(1), cx));
+        pump_until(cx, "the first lane back", |cx| {
+            rows_of(&tab, AgentKey::Lane(1), cx)
+                == vec![
+                    ("e_9".to_string(), "t03 lane one step".to_string()),
+                    ("e_10".to_string(), "step taken".to_string()),
+                ]
+        });
+        cx.update(|cx| assert_eq!(tab.read(cx).selected_agent(), AgentKey::Lane(1)));
+
+        // And the coordinator's transcript is where the switching left it.
+        tab.update(cx, |tab, cx| tab.select_agent(AgentKey::Coordinator, cx));
+        pump_until(cx, "the coordinator's rows back", |cx| {
+            rows_of(&tab, AgentKey::Coordinator, cx) == coordinator
+        });
+        cx.update_window(window, |_, window, cx| window.render_frame(cx))
+            .expect("the tab window");
+    }
+
+    /// §7.2: one `evo-agent`'s tab has no lanes, so the coordinator is the only agent
+    /// its column can show — showing it again is not a switch, its own rows stay, and
+    /// no lane appears in a tab whose program never had one.
+    #[gpui_kit::test]
+    fn a_single_agents_coordinator_keeps_its_rows(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (window, tab, dir) = live_tab_of(cx, false);
+        cx.update(|cx| assert!(!tab.read(cx).swarm(cx), "one agent, not a swarm"));
+        pump_until(cx, "the tab's server", |_| {
+            dir.path().join("ready.json").exists()
+        });
+        let control = swarm_client::harness::Control::attach(dir.path()).expect("the fake server");
+        pump_until(cx, "the tab's own stream", |_| {
+            !control.requests_on("/stream").is_empty()
+        });
+
+        control
+            .emit(turn("e_1", "the reader's own words"))
+            .expect("emit");
+        control
+            .emit(answer("e_2", "and the agent's answer"))
+            .expect("emit");
+        let rows = vec![
+            ("e_1".to_string(), "the reader's own words".to_string()),
+            ("e_2".to_string(), "and the agent's answer".to_string()),
+        ];
+        pump_until(cx, "the one agent's rows", |cx| {
+            rows_of(&tab, AgentKey::Coordinator, cx) == rows
+        });
+        control
+            .snapshot_body(serde_json::json!({"session": {
+                "state": {"status": "idle"},
+                "items": [wire_turn("e_1", "the reader's own words"),
+                          wire_answer("e_2", "and the agent's answer")],
+            }}))
+            .expect("the session snapshot");
+
+        // Showing the agent it is already showing — the only selection such a tab has —
+        // leaves the rows alone.
+        tab.update(cx, |tab, cx| tab.select_agent(AgentKey::Coordinator, cx));
+        pump_until(cx, "the one agent's rows still there", |cx| {
+            rows_of(&tab, AgentKey::Coordinator, cx) == rows
+        });
+        cx.update(|cx| {
+            assert_eq!(tab.read(cx).selected_agent(), AgentKey::Coordinator);
+            let model = tab.read(cx).model().expect("a live tab");
+            assert!(
+                model.items(AgentKey::Lane(1)).is_empty(),
+                "one agent's tab has no lane to show"
+            );
+        });
         cx.update_window(window, |_, window, cx| window.render_frame(cx))
             .expect("the tab window");
     }

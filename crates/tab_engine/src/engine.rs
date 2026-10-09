@@ -26,6 +26,7 @@
 //! polling: a restart is an epoch, a stale view is a reset, and a dead server is a
 //! stream that cannot reconnect (checked against the process, once).
 
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -37,7 +38,7 @@ use serde_json::{json, Value};
 
 use session::{Op, OpRequest, OpSink};
 use swarm_client::{
-    BootCancel, Client, ErrorCode, EventStream, OpError, OpReply, Server, ServerConfig,
+    BootCancel, Client, Cursor, ErrorCode, EventStream, OpError, OpReply, Server, ServerConfig,
     ShutdownOutcome, Snapshot, StdinClose, StreamConfig, StreamFrame, StreamMsg,
 };
 
@@ -69,8 +70,13 @@ enum Inbound {
         rid: String,
         request: Box<OpRequest>,
     },
-    /// Re-read every topic.
-    Snapshot,
+    /// Re-read a snapshot (§5.2): every topic, or the one `topic` names. The UI
+    /// asks for the whole thing when it dropped updates it could not keep up with,
+    /// and for one topic when it wants that topic read back as it stands now.
+    Snapshot {
+        /// The one topic to read, `None` for every topic the tab subscribes to.
+        topic: Option<String>,
+    },
     /// A read the UI asked for (§5.4): older items, one whole item, image bytes.
     Fetch(Fetch),
     /// Stop the server the ladder's way and end the engine.
@@ -226,7 +232,20 @@ impl EngineHandle {
     /// Re-read every topic — what a UI asks for when it dropped updates it could
     /// not keep up with.
     pub fn refetch(&self) -> bool {
-        self.inbox.send_blocking(Inbound::Snapshot).is_ok()
+        self.inbox
+            .send_blocking(Inbound::Snapshot { topic: None })
+            .is_ok()
+    }
+
+    /// Re-read one topic — what a UI asks for when it wants the transcript it
+    /// shows read back as it stands now, without disturbing any other topic.
+    ///
+    /// The answer arrives as [`Update::Snapshot`] with that topic; one that does not
+    /// carry it is a failed read, retried on the tab's own clock.
+    pub fn refetch_topic(&self, topic: &str) -> bool {
+        self.send(Inbound::Snapshot {
+            topic: Some(topic.to_owned()),
+        })
     }
 
     /// `GET /items?topic=&before=&limit=`: a page of items older than `before`
@@ -325,6 +344,7 @@ fn run(
     let mut engine = Engine {
         updates: Updates::new(updates),
         topics: tab_topics(),
+        fences: BTreeMap::new(),
     };
     engine.send(Update::Booting);
 
@@ -468,8 +488,14 @@ fn engine_loop(
         };
         match message {
             Inbound::Shutdown => return None,
-            Inbound::Snapshot => {
-                engine.snapshot(&live.client, None);
+            Inbound::Snapshot { topic } => {
+                // An explicit topic read the server does not answer for is retried
+                // like a reset's; the whole-tab read is a point in time, not one.
+                if engine.snapshot(&live.client, topic.clone()).is_none() {
+                    if let Some(topic) = topic {
+                        ask_again(engine, commands, Some(topic), RESET_RETRY_FIRST);
+                    }
+                }
             }
             Inbound::Request { rid, request } => post(engine, &live.client, rid, *request),
             Inbound::Fetch(fetch) => fetch_off_loop(engine, &live.client, fetch),
@@ -829,10 +855,17 @@ fn what(update: &Update) -> &'static str {
     }
 }
 
-/// The engine's own state: where updates go, and what to read.
+/// The engine's own state: where updates go, what to read, and what the latest
+/// snapshot of each topic covered.
 struct Engine {
     updates: Updates,
     topics: Vec<String>,
+    fences: BTreeMap<String, SnapshotFence>,
+}
+
+struct SnapshotFence {
+    cursor: Cursor,
+    items: HashSet<String>,
 }
 
 impl Engine {
@@ -841,11 +874,25 @@ impl Engine {
     }
 
     /// Hand a snapshot's topics over, one update each: the UI applies them topic by
-    /// topic (`TabModel::on_snapshot`).
+    /// topic (`TabModel::on_snapshot`), and each is fenced at the read's cursor.
     fn topics_of(&mut self, snapshot: &Snapshot) {
+        let cursor = snapshot.cursor();
         for topic in snapshot.topic_names() {
             if let Some(body) = snapshot.topic(topic) {
                 let body = body.clone();
+                let items = body["items"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|item| item["id"].as_str().map(str::to_owned))
+                    .collect();
+                self.fences.insert(
+                    topic.to_owned(),
+                    SnapshotFence {
+                        cursor: cursor.clone(),
+                        items,
+                    },
+                );
                 self.send(Update::Snapshot {
                     topic: topic.to_owned(),
                     body,
@@ -855,24 +902,50 @@ impl Engine {
     }
 
     /// One frame, parsed: the UI's `TabModel::on_op`. A frame this build does not
-    /// know is not the UI's to draw, and is dropped.
+    /// know, or one the topic's own read already carries, is dropped.
     fn frame(&mut self, frame: StreamFrame) {
         let topic = frame.topic().unwrap_or_default().to_owned();
         if let Some(op) = Op::from_json(&frame.op, &frame.data) {
-            self.send(Update::Op { topic, op });
+            if !self.covered(&topic, frame.cursor.as_ref(), &op) {
+                self.send(Update::Op { topic, op });
+            }
         }
     }
 
-    /// Take a snapshot of everything, or of one topic after a `topic.reset`.
+    /// Only the read's epoch is ordered against it. A bounded read carries whole
+    /// state, but not mutations of older items the model may have paged in.
+    fn covered(&self, topic: &str, cursor: Option<&Cursor>, op: &Op) -> bool {
+        let (Some(fence), Some(cursor)) = (self.fences.get(topic), cursor) else {
+            return false;
+        };
+        if fence.cursor.epoch != cursor.epoch || cursor.seq > fence.cursor.seq {
+            return false;
+        }
+        match op {
+            Op::ItemAppend { id, .. } | Op::ItemPatch { id, .. } | Op::ItemRemove { id } => {
+                fence.items.contains(id)
+            }
+            // Adds at this cursor already exist in the read or its older pages.
+            Op::ItemAdd { .. } | Op::StatePatch { .. } => true,
+            _ => false,
+        }
+    }
+
+    /// Take a snapshot of everything, or of one topic after a `topic.reset` (or for
+    /// a UI's explicit refresh of it).
     ///
-    /// A failed snapshot is not fatal: the stream keeps running, and the next
-    /// reset asks again.
+    /// A snapshot that fails — including one whose body does not carry the topic
+    /// asked for, which is what a server that does not have the name answers — is
+    /// `None`, and the retry reads it again. The stream keeps running either way.
     fn snapshot(&mut self, client: &Client, topic: Option<String>) -> Option<Snapshot> {
         let topics = match &topic {
             Some(topic) => vec![topic.clone()],
             None => self.topics.clone(),
         };
         let snapshot = client.snapshot(&topics, Some(session::PAGE_ITEMS)).ok()?;
+        if let Some(wanted) = &topic {
+            snapshot.topic(wanted)?;
+        }
         self.topics_of(&snapshot);
         Some(snapshot)
     }

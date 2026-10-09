@@ -100,6 +100,20 @@ fn a_tab_drives_the_real_server_end_to_end() {
         matches!(update, Update::Op { op, .. } if matches!(op, session::Op::ItemAppend { .. }))
     });
 
+    assert!(handle.refetch_topic("session"));
+    let refreshed = feed.expect(
+        "the selected transcript refreshed",
+        |update| matches!(update, Update::Snapshot { topic, .. } if topic == "session"),
+    );
+    let Update::Snapshot { body, .. } = refreshed else {
+        unreachable!()
+    };
+    let items = body["items"].as_array().expect("refreshed items");
+    assert!(items.iter().any(|item| item["id"] == item_id));
+    assert!(items.iter().any(|item| {
+        item["kind"] == "assistant" && item["text"].as_str().is_some_and(|text| !text.is_empty())
+    }));
+
     // §5.4: the reads a scrollback and a tool row make.
     assert!(handle.page("session", None, 5));
     feed.expect(

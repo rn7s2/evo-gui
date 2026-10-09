@@ -760,13 +760,28 @@ impl TranscriptView {
         cx.notify();
     }
 
-    /// Replace the whole record, as a snapshot or a `topic.reset` does: every item is
-    /// held and drawn, and the list starts again at its latest item.
+    /// Replace the record, keeping measurements when its ids are unchanged or
+    /// extended and remeasuring changed rows. Other resets preserve a surviving
+    /// unpinned reading anchor.
     pub fn replace(&mut self, items: Vec<Item>, cx: &mut Context<Self>) {
+        let anchor = if self.pin.is_pinned() {
+            None
+        } else {
+            let offset = self.list.logical_scroll_top();
+            self.slots.record(offset.item_ix).and_then(|index| {
+                self.data
+                    .read(cx)
+                    .items
+                    .get(index)
+                    .map(|item| (item.id.clone(), offset.offset_in_item))
+            })
+        };
+        self.pin.settled();
         self.reaches_the_foot.set(true);
         // A record replaced outright is not the one an earlier walk gave up on.
         self.barren = false;
-        self.data.update(cx, |data, _| {
+        let held = self.data.read(cx).items.len();
+        let (extends, changed) = self.data.update(cx, |data, _| {
             let mut kept = Vec::with_capacity(items.len());
             let mut declined = HashSet::new();
             for item in items {
@@ -776,17 +791,59 @@ impl TranscriptView {
                     declined.insert(item.id.clone());
                 }
             }
+            let extends = kept.len() >= data.items.len()
+                && data
+                    .items
+                    .iter()
+                    .zip(&kept)
+                    .all(|(old, new)| old.id == new.id);
+            let changed: Vec<usize> = if extends {
+                data.items
+                    .iter()
+                    .zip(&kept)
+                    .enumerate()
+                    .filter(|(_, (old, new))| old != new)
+                    .map(|(index, _)| index)
+                    .collect()
+            } else {
+                Vec::new()
+            };
             data.items = kept;
             data.declined = declined;
             data.reindex();
             data.retain_documents();
+            (extends, changed)
         });
         self.asking = None;
-        let slots = self.slots_now(cx);
-        self.list.reset(slots.len());
-        self.slots = slots;
-        if self.pin.is_pinned() {
-            self.list.scroll_to_end();
+        if extends && self.slots.rows == held {
+            let rows = self.data.read(cx).items.len();
+            if rows > held {
+                let at = self.slots.at(held);
+                self.list.splice(at..at, rows - held);
+                self.slots.rows = rows;
+            }
+            self.sync_list(cx);
+            for index in changed {
+                let at = self.slots.at(index);
+                self.list.remeasure_items(at..at + 1);
+            }
+            if self.pin.is_pinned() {
+                self.list.scroll_to_end();
+            }
+        } else {
+            let slots = self.slots_now(cx);
+            self.list.reset(slots.len());
+            self.slots = slots;
+            if self.pin.is_pinned() {
+                self.list.scroll_to_end();
+            } else if let Some((id, offset_in_item)) = anchor {
+                if let Some(index) = self.data.read(cx).index_of(&id) {
+                    self.list.scroll_to(gpui_kit::ListOffset {
+                        item_ix: self.slots.at(index),
+                        offset_in_item,
+                    });
+                }
+            }
         }
         cx.notify();
     }
@@ -1137,10 +1194,6 @@ impl TranscriptView {
         // The list is anchored at or past its last item: it is on the foot of the
         // record, which is where a reader following the tail is.
         if self.list.logical_scroll_top().item_ix >= count {
-            return 0.;
-        }
-        // Nothing to scroll — the whole record is on screen — is the tail too.
-        if self.list.max_offset_for_scrollbar().y <= px(0.) {
             return 0.;
         }
         match self.list.bounds_for_item(count - 1) {
@@ -1770,10 +1823,27 @@ impl TranscriptView {
             // measured as the layout arrives at them, so the list is anchored at the
             // record's own foot rather than left a row short of it. That is the browser's
             // clamped `scrollTop`, read as the design's 0.
-            let at_the_foot = by_input && self.reaches_the_foot.get();
+            // A drag does not invoke the list's scroll handler. Reaching its
+            // measured range's end still asks for the record's unmeasured tail.
+            let max = f32::from(self.list.max_offset_for_scrollbar().y);
+            let by_the_bar = self.list.is_scrollbar_dragging()
+                && scrolled
+                && now.offset < before.offset
+                && (now.size.1 - before.size.1).abs() <= 0.5
+                && max > 0.
+                && -now.offset >= max - 0.5
+                && self.slots.rows > 0
+                && self
+                    .list
+                    .bounds_for_item(self.slots.at(self.slots.rows - 1))
+                    .is_none();
+            let at_the_foot = by_the_bar || (by_input && self.reaches_the_foot.get());
             if at_the_foot {
                 self.list.scroll_to_end();
                 cx.notify();
+            }
+            if by_the_bar {
+                self.pin.jumped();
             }
             let gap = if at_the_foot { 0. } else { self.gap() };
             // A scroll the view saw no input for — a drag of the scroll bar — is still

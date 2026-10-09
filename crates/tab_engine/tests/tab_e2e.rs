@@ -372,6 +372,113 @@ fn a_lane_reset_whose_snapshot_fails_does_not_say_the_tab_is_reconnecting() {
     drop(handle);
 }
 
+/// §5.2/§5.3: a `topic.reset` is answered by a re-read of that topic, and an answer
+/// that does not carry the topic is not that read.
+///
+/// A server that does not have a topic drops it from the snapshot body and still
+/// answers 200 — that is what `expand-topic-names` does with a name no provider
+/// answers for (a lane whose provider is gone, a name it never knew). Taking that
+/// as the re-read landing is what leaves a mirror behind for the tab's life: no
+/// `Update::Snapshot` is sent for the topic, no retry is armed (the read did not
+/// *fail*), and nothing else ever asks — a fresh tab (a restart, a resume) is the
+/// only way the lane is read back. A read that answers without the topic is a read
+/// that failed, and is asked for again like every other one (`ask_again`).
+#[test]
+fn a_topic_reset_whose_re_read_omits_the_topic_is_asked_for_again() {
+    // No `--workers`: the fake has no `lane:2` topic at all, so a snapshot that
+    // asks for it comes back carrying only the topics it does have.
+    let (dir, handle, updates) = tab("topic-reset-omitted", &[]);
+    let mut feed = Feed::new(updates);
+    serving(&mut feed);
+    let control = Control::attach(dir.path()).unwrap();
+    feed.expect("the first snapshot", snapshot_of("session"));
+
+    // The lane's own items reach the tab on the stream, so it holds a mirror of
+    // lane:2 without any snapshot ever having seeded it.
+    control
+        .emit(json!({
+            "op": "item.add", "topic": "lane:2", "after": null,
+            "item": {"id": "e_4", "kind": "user", "ts": 4, "text": "the lane's own turn",
+                     "status": "sent"}
+        }))
+        .unwrap();
+    feed.expect("the lane's own item", |update| {
+        matches!(update, Update::Op { topic, op: Op::ItemAdd { .. } } if topic == "lane:2")
+    });
+    // The boot's own reads are not what this test counts.
+    control.requests();
+
+    control
+        .emit(json!({"op": "topic.reset", "topic": "lane:2", "reason": "lane_restarted"}))
+        .unwrap();
+    feed.expect("the topic.reset frame", |update| {
+        matches!(
+            update,
+            Update::Op {
+                op: Op::TopicReset { .. },
+                ..
+            }
+        )
+    });
+
+    // One ask is the read the fake answers without `lane:2`; a second is the tab
+    // refusing to take that for the topic read back. Today only the first ever
+    // happens, which is the whole bug.
+    let asked = |control: &Control| {
+        control
+            .requests_on("/snapshot")
+            .iter()
+            .filter(|request| {
+                request["path"]
+                    .as_str()
+                    .is_some_and(|path| path.contains("lane%3A2") || path.contains("lane:2"))
+            })
+            .count()
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut asks = 0;
+    while asks < 2 {
+        asks += asked(&control);
+        assert!(
+            Instant::now() < deadline,
+            "the tab asked for lane:2 {asks} time(s): an answer without the topic was \
+             taken as the re-read, so the mirror the reset invalidated is never rebuilt"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    // And once the server can answer it, the lane is read back: the reset's re-read
+    // finally lands as a snapshot the tab's model can take.
+    control
+        .snapshot_body(json!({
+            "lane:2": {
+                "state": {"status": "idle"},
+                "items": [{"id": "e_4", "kind": "user", "ts": 4,
+                           "text": "the lane's own turn", "status": "sent"}]
+            }
+        }))
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !feed.saw(snapshot_of("lane:2")) {
+        assert!(
+            Instant::now() < deadline,
+            "the tab never read lane:2 back after its re-read went unanswered"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let update = feed.expect("the re-read lane", snapshot_of("lane:2"));
+    let mut model = TabModel::new();
+    common::apply(&mut model, update);
+    assert_eq!(
+        model
+            .agent_topic(AgentKey::Lane(2))
+            .map(|topic| topic.items().len()),
+        Some(1),
+        "the lane's mirror is the re-read snapshot"
+    );
+    drop(handle);
+}
+
 #[test]
 fn a_refetch_asks_for_every_topic_again() {
     let (dir, handle, updates) = tab("refetch", &[]);
@@ -390,6 +497,409 @@ fn a_refetch_asks_for_every_topic_again() {
         let path = request["path"].as_str().unwrap();
         assert!(path.contains("items=256"), "{path}");
     }
+    drop(handle);
+}
+
+/// §5.2: a UI can ask for one topic to be read back as it stands now, and that
+/// read is of that topic alone — not the whole tab's view behind the reader's
+/// back, and not a second subscription.
+#[test]
+fn a_refetch_of_one_topic_asks_only_for_that_topic() {
+    let (dir, handle, updates) = tab("refetch-topic", &[]);
+    let mut feed = Feed::new(updates);
+    serving(&mut feed);
+    let control = Control::attach(dir.path()).unwrap();
+    feed.expect("the first snapshot", snapshot_of("session"));
+
+    // The topic a lane's transcript reads, as the server has it now.
+    control
+        .snapshot_body(json!({
+            "lane:2": {
+                "state": {"status": "idle"},
+                "items": [{"id": "e_4", "kind": "user", "ts": 4,
+                           "text": "the lane's own turn", "status": "sent"}]
+            }
+        }))
+        .unwrap();
+    control.requests(); // the boot's own reads are not what this counts
+
+    assert!(handle.refetch_topic("lane:2"));
+    let update = feed.expect("the lane read back", snapshot_of("lane:2"));
+    let Update::Snapshot { body, .. } = update else {
+        unreachable!()
+    };
+    assert_eq!(body["items"][0]["id"], "e_4");
+
+    // One read, and it named the one topic it was about: `session`, `swarm` and
+    // the `lane:*` wildcard are not in it, so no other topic is disturbed.
+    let asked = control.requests_on("/snapshot");
+    assert_eq!(asked.len(), 1, "one read, not a view: {asked:?}");
+    let path = asked[0]["path"].as_str().unwrap();
+    assert_eq!(path, "/snapshot?topics=lane%3A2&items=256", "{path}");
+    drop(handle);
+}
+
+/// §5.2: a UI's explicit read of one topic that the server does not answer for is a
+/// read that failed, and is asked for again — the same clock a reset's re-read uses
+/// — rather than left as "the topic is empty".
+#[test]
+fn an_explicit_read_of_a_topic_the_server_does_not_have_is_asked_for_again() {
+    // No `--workers`: there is no `lane:2` for the first reads to come back with.
+    let (dir, handle, updates) = tab("refetch-topic-retry", &[]);
+    let mut feed = Feed::new(updates);
+    serving(&mut feed);
+    let control = Control::attach(dir.path()).unwrap();
+    feed.expect("the first snapshot", snapshot_of("session"));
+    control.requests(); // the boot's own reads are not what this counts
+
+    assert!(handle.refetch_topic("lane:2"));
+    let asks = |control: &Control| {
+        control
+            .requests_on("/snapshot")
+            .iter()
+            .filter(|request| {
+                request["path"]
+                    .as_str()
+                    .is_some_and(|path| path.contains("lane%3A2"))
+            })
+            .count()
+    };
+    // Two reads: the one the server answers without the topic, and the retry that
+    // refuses to take that for the topic read back.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut asked = 0;
+    while asked < 2 {
+        asked += asks(&control);
+        assert!(
+            Instant::now() < deadline,
+            "an explicit read of lane:2 was asked for {asked} time(s): an answer \
+             without the topic was taken as the read"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    // And it lands as soon as the server can answer it.
+    control
+        .snapshot_body(json!({
+            "lane:2": {
+                "state": {"status": "idle"},
+                "items": [{"id": "e_4", "kind": "user", "ts": 4,
+                           "text": "the lane's own turn", "status": "sent"}]
+            }
+        }))
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !feed.saw(snapshot_of("lane:2")) {
+        assert!(
+            Instant::now() < deadline,
+            "the explicit read never landed once the server had the topic"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    drop(handle);
+}
+
+/// §5.2/§5.3: a read of a topic is atomic at its own cursor, so a frame the stream
+/// hands over from at or before that cursor is one of the ops the read already
+/// folded in. Applying it again appends text the snapshot already holds a second
+/// time — the shape a `topic.reset`'s re-read, or an explicit refresh of a topic
+/// the UI shows, would take the reader's transcript on. A frame *after* the read
+/// is news and applies, once.
+#[test]
+fn a_frame_the_read_already_carries_is_not_applied_again() {
+    let (dir, handle, updates) = tab("read-fence", &[]);
+    let mut feed = Feed::new(updates);
+    serving(&mut feed);
+    let control = Control::attach(dir.path()).unwrap();
+    feed.expect("the first snapshot", snapshot_of("session"));
+
+    // One op on the stream, so the tab is reading a live topic whose seq has
+    // advanced past the boot's own read.
+    control
+        .emit(json!({
+            "op": "item.add", "topic": "session", "after": null,
+            "item": {"id": "e_0", "kind": "user", "ts": 1, "text": "before", "status": "sent"}
+        }))
+        .unwrap();
+    feed.expect("the op before the read", |update| {
+        matches!(
+            update,
+            Update::Op {
+                op: Op::ItemAdd { .. },
+                ..
+            }
+        )
+    });
+
+    // The topic as of now, and the cursor that read is atomic at: the re-read
+    // below reports the same seq, which is what makes its fence knowable here.
+    let at = control
+        .client()
+        .snapshot(&["session".to_owned()], Some(1))
+        .expect("the fake's own cursor");
+    control
+        .snapshot_body(json!({
+            "session": {
+                "state": {},
+                "items": [{"id": "e_1", "kind": "assistant", "ts": 10, "text": "abc",
+                           "thinking": "", "status": "streaming", "error": null}]
+            }
+        }))
+        .unwrap();
+    assert!(handle.refetch_topic("session"));
+    let update = feed.expect("the topic read back", snapshot_of("session"));
+    let mut model = TabModel::new();
+    common::apply(&mut model, update);
+    let text = |model: &TabModel| -> String {
+        model
+            .items(AgentKey::Coordinator)
+            .iter()
+            .find(|item| item.id == "e_1")
+            .and_then(|item| item.raw().get("text").and_then(|t| t.as_str()))
+            .map(str::to_owned)
+            .unwrap_or_default()
+    };
+    assert_eq!(text(&model), "abc", "the read is what the topic says");
+
+    // Three appends the stream replays behind the read: one before its cursor, one
+    // *at* it, and one after. The first two are already in the snapshot; the third
+    // is news. The cursor the stream reports is the `seq` the fake stamps the
+    // frame with, so the boundary is exercised exactly.
+    for (text, seq) in [
+        ("-old", at.seq.saturating_sub(1)),
+        ("-at", at.seq),
+        ("-new", at.seq + 1),
+    ] {
+        control
+            .emit(json!({
+                "op": "item.append", "topic": "session", "id": "e_1", "field": "text",
+                "text": text, "seq": seq
+            }))
+            .unwrap();
+    }
+
+    // The one after the read is the only one handed over — and it is not the
+    // replayed pair, because the stream keeps its order.
+    let update = feed.expect("the append after the read", |update| {
+        matches!(
+            update,
+            Update::Op { op: Op::ItemAppend { text, .. }, .. } if text == "-new"
+        )
+    });
+    assert!(
+        !feed.saw(|update| matches!(
+            update,
+            Update::Op { op: Op::ItemAppend { text, .. }, .. }
+                if text == "-old" || text == "-at"
+        )),
+        "an append the topic read already carried reached the UI"
+    );
+    common::apply(&mut model, update);
+
+    // Exactly once: the snapshot's text, then the one append after it.
+    assert_eq!(text(&model), "abc-new");
+    assert_eq!(
+        model
+            .items(AgentKey::Coordinator)
+            .iter()
+            .filter(|item| item.id == "e_1")
+            .count(),
+        1,
+        "the read did not duplicate the item either"
+    );
+    drop(handle);
+}
+
+/// One item's own text, as a model holds it — what its row draws.
+fn text_of(model: &TabModel, id: &str) -> Option<String> {
+    model
+        .items(AgentKey::Coordinator)
+        .iter()
+        .find(|item| item.id == id)
+        .and_then(|item| item.raw().get("text").and_then(|text| text.as_str()))
+        .map(str::to_owned)
+}
+
+/// §5.2/§5.3: a read of a topic is atomic at its cursor, but it is a *window* — the
+/// newest [`session::PAGE_ITEMS`] items with `has_more` below them — and a reader who
+/// has been watching holds items older than the window's front. An op the stream hands
+/// over for one of *those* is not something the read already folded in: the read does
+/// not carry that item at all, so discarding the op on its seq alone loses text, a
+/// patch or a removal the reader was owed, and the row it belongs to never moves again.
+/// The same older turn's op *after* the cursor is the control: it reaches the row, so
+/// what is missing is the fence and nothing else.
+#[test]
+fn a_queued_op_the_bounded_read_does_not_carry_still_applies() {
+    let (dir, handle, updates) = tab("read-fence-window", &[]);
+    let mut feed = Feed::new(updates);
+    serving(&mut feed);
+    let control = Control::attach(dir.path()).unwrap();
+    feed.expect("the first snapshot", snapshot_of("session"));
+
+    // The transcript as the reader has it: an older answer, the turn the server has
+    // since cancelled, and the turn after both.
+    control
+        .emit(json!({
+            "op": "item.add", "topic": "session", "after": null,
+            "item": {"id": "e_old", "kind": "assistant", "ts": 1, "text": "old answer",
+                     "thinking": "", "status": "streaming", "error": null}
+        }))
+        .unwrap();
+    control
+        .emit(json!({
+            "op": "item.add", "topic": "session", "after": "e_old",
+            "item": {"id": "e_gone", "kind": "user", "ts": 2, "text": "take this back",
+                     "status": "queued", "queue": "now"}
+        }))
+        .unwrap();
+    control
+        .emit(json!({
+            "op": "item.add", "topic": "session", "after": "e_gone",
+            "item": {"id": "e_new", "kind": "assistant", "ts": 3, "text": "abc",
+                     "thinking": "", "status": "streaming", "error": null}
+        }))
+        .unwrap();
+    let mut model = TabModel::new();
+    for _ in 0..3 {
+        let update = feed.expect("a turn of the reader's own transcript", |update| {
+            matches!(
+                update,
+                Update::Op {
+                    op: Op::ItemAdd { .. },
+                    ..
+                }
+            )
+        });
+        common::apply(&mut model, update);
+    }
+    let ids = |model: &TabModel| -> Vec<String> {
+        model
+            .items(AgentKey::Coordinator)
+            .iter()
+            .map(|item| item.id.clone())
+            .collect()
+    };
+    assert_eq!(
+        ids(&model),
+        vec![
+            "e_old".to_string(),
+            "e_gone".to_string(),
+            "e_new".to_string()
+        ],
+        "the reader holds all three turns before the read"
+    );
+
+    // The cursor the read below is atomic at, taken from the server itself: the window
+    // reports the same seq, which is what makes its fence knowable here.
+    let at = control
+        .client()
+        .snapshot(&["session".to_owned()], Some(1))
+        .expect("the fake's own cursor");
+
+    // A read of the topic as it stands now, and a *bounded* one: the newest item, more
+    // below it. The older two are not in it, so the model keeps the prefix it holds.
+    control
+        .snapshot_body(json!({
+            "session": {
+                "state": {},
+                "items": [{"id": "e_new", "kind": "assistant", "ts": 3, "text": "abc",
+                           "thinking": "", "status": "streaming", "error": null}],
+                "has_more": true
+            }
+        }))
+        .unwrap();
+    assert!(handle.refetch_topic("session"));
+    let update = feed.expect("the topic read back", snapshot_of("session"));
+    common::apply(&mut model, update);
+    assert_eq!(
+        ids(&model),
+        vec![
+            "e_old".to_string(),
+            "e_gone".to_string(),
+            "e_new".to_string()
+        ],
+        "the bounded window keeps the prefix the reader already had"
+    );
+
+    // Five frames the stream hands over behind that read: the older turns' own text,
+    // removal and patch, all at or before the read's cursor and carried by no window,
+    // then the same older turn's text again *after* the cursor — news, which the read
+    // cannot cover — and finally an append on the item the window does carry, which
+    // bounds the wait.
+    for (op, seq) in [
+        (
+            json!({
+                "op": "item.append", "topic": "session", "id": "e_old", "field": "text",
+                "text": "-queued"
+            }),
+            at.seq.saturating_sub(2),
+        ),
+        (
+            json!({"op": "item.remove", "topic": "session", "id": "e_gone"}),
+            at.seq.saturating_sub(1),
+        ),
+        (
+            json!({
+                "op": "item.patch", "topic": "session", "id": "e_old",
+                "patch": {"status": "final", "tokens": 7}
+            }),
+            at.seq,
+        ),
+        (
+            json!({
+                "op": "item.append", "topic": "session", "id": "e_old", "field": "text",
+                "text": "-after"
+            }),
+            at.seq + 1,
+        ),
+        (
+            json!({
+                "op": "item.append", "topic": "session", "id": "e_new", "field": "text",
+                "text": "-new"
+            }),
+            at.seq + 2,
+        ),
+    ] {
+        let mut op = op;
+        op["seq"] = json!(seq);
+        control.emit(op).unwrap();
+    }
+
+    // The last frame is the bound: by the time it lands, everything the read could not
+    // carry has been handed over and applied.
+    feed.feed_model(&mut model, |model| {
+        text_of(model, "e_new").as_deref() == Some("abc-new")
+    });
+
+    // What the reader is owed for the items no window carried. The append *after* the
+    // read is in there too, and on its own it proves the row was not frozen by the
+    // window: only the two ops the fence covered are missing.
+    assert_eq!(
+        text_of(&model, "e_old").as_deref(),
+        Some("old answer-queued-after"),
+        "the queued append for the retained prefix was discarded as read-carried"
+    );
+    let older = model
+        .items(AgentKey::Coordinator)
+        .iter()
+        .find(|item| item.id == "e_old")
+        .cloned()
+        .expect("the older turn");
+    assert_eq!(
+        older.raw().get("status").and_then(|v| v.as_str()),
+        Some("final"),
+        "the queued patch for the retained prefix was discarded as read-carried"
+    );
+    assert_eq!(
+        older.raw().get("tokens").and_then(|v| v.as_u64()),
+        Some(7),
+        "and every field of it"
+    );
+    assert!(
+        !ids(&model).contains(&"e_gone".to_string()),
+        "the queued removal of a retained prefix row was discarded as read-carried: \
+         the turn the server took back is still drawn"
+    );
     drop(handle);
 }
 

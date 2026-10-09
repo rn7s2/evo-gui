@@ -7,7 +7,7 @@
 mod common;
 
 use common::{fixture, topic_body};
-use serde_json::json;
+use serde_json::{json, Value};
 use session::{
     AssistantStatus, Item, ItemKind, LaneEventKind, NoticeSeverity, NoticeSource, Op,
     QueuePosition, ToolStatus, Topic, UserStatus,
@@ -191,6 +191,113 @@ fn a_snapshot_replaces_the_topic_and_says_so() {
     );
     assert_eq!(topic.state().status.label(), "running");
     assert_eq!(topic.state().queue, vec!["e_queued_1"]);
+}
+
+/// A snapshot is a window (§5.2), not the whole record: a reader who paged back holds
+/// items older than it, and a re-read of a topic being shown — a `topic.reset`, an
+/// explicit refresh — must not throw them away. The overlap says the window is the
+/// newest part of the same record, and the window is authoritative from there on.
+#[test]
+fn a_bounded_snapshot_keeps_the_pages_in_front_of_its_window() {
+    let mut topic = session_topic();
+    // The reader walked the scrollback back to the record's own beginning.
+    assert_eq!(
+        topic.prepend_items(&fixture("items-before.json")).prepended,
+        2
+    );
+    assert!(!topic.has_older(), "the page said it was the last of it");
+
+    // The server's newest window, slid forward: it opens at `e_2`, which the topic
+    // already holds behind the pages, carries a changed `e_3`, and no longer has
+    // `e_5` — a row the server has since dropped.
+    let items: Vec<Value> = topic_body(&fixture("snapshot-session.json"), "session")["items"]
+        .as_array()
+        .expect("the fixture's items")
+        .iter()
+        .filter(|item| item["id"] != "e_1" && item["id"] != "e_5")
+        .map(|item| {
+            let mut item = item.clone();
+            if item["id"] == "e_3" {
+                item["text"] = json!("changed by the server");
+            }
+            item
+        })
+        .collect();
+    let window = items.len();
+    let changes = topic.apply_snapshot(&json!({
+        "state": {}, "items": items, "has_more": true
+    }));
+    assert!(
+        changes.reset && changes.state,
+        "the UI rebuilds from the model"
+    );
+
+    // The pages are still in front; the window is the suffix, whole.
+    let ids: Vec<&str> = topic.items().iter().map(|item| item.id.as_str()).collect();
+    assert_eq!(ids[..3].to_vec(), ["e_0a", "e_0b", "e_1"]);
+    assert_eq!(ids[3], "e_2", "the window picked up at the overlap");
+    assert_eq!(ids.len(), 3 + window);
+    assert!(!ids.contains(&"e_5"), "the dropped row left the suffix");
+    let ItemKind::Assistant(assistant) = &topic.item("e_3").unwrap().kind else {
+        panic!("e_3 is an assistant item")
+    };
+    assert_eq!(
+        assistant.text, "changed by the server",
+        "the window is authoritative over the row it holds"
+    );
+    assert!(
+        !topic.has_older(),
+        "the reader's pages start at the record's beginning: the window's own answer \
+         is about the window's front, not the topic's"
+    );
+    assert_eq!(topic.index_of("e_5"), None, "the index follows the merge");
+    assert_eq!(
+        topic.index_of("e_3"),
+        ids.iter().position(|id| *id == "e_3")
+    );
+}
+
+/// The window is the topic when nothing in it is held — another record, a session
+/// switch — and when it is the whole record: an overlap alone is not a reason to keep
+/// a prefix, and neither is a window with nothing in front of it.
+#[test]
+fn a_window_that_is_not_a_newer_part_of_this_record_replaces_it() {
+    let mut topic = session_topic();
+    assert!(topic.has_older());
+
+    let window = |has_more: bool, ids: &[&str]| {
+        json!({
+            "state": {},
+            "items": ids
+                .iter()
+                .enumerate()
+                .map(|(n, id)| json!({"id": id, "kind": "user", "ts": n, "text": id}))
+                .collect::<Vec<Value>>(),
+            "has_more": has_more
+        })
+    };
+
+    // Nothing in the window is held: it is another record, and replaces this one
+    // whole — its own answer about what is behind it included.
+    topic.apply_snapshot(&window(true, &["x_1", "x_2"]));
+    assert_eq!(topic.items().len(), 2);
+    assert_eq!(topic.items()[0].id, "x_1");
+    assert!(topic.item("e_1").is_none(), "the record it left is gone");
+    assert!(topic.has_older(), "the window's own answer stands");
+
+    // A held row is not enough: this window is the *whole* record, so there is
+    // nothing in front of the overlap to keep.
+    topic.apply_snapshot(&window(false, &["x_2", "x_3"]));
+    assert_eq!(
+        topic
+            .items()
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>(),
+        ["x_2", "x_3"]
+    );
+    assert!(!topic.has_older(), "the window is the whole record");
+    assert!(topic.item("x_1").is_none(), "nothing before it is kept");
 }
 
 #[test]
