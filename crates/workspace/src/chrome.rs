@@ -59,8 +59,11 @@ fn panes_from_sizes(sizes: &[Pixels]) -> Option<Panes> {
     let [left, _] = sizes else {
         return None;
     };
+    // The page has no third panel yet — the terminal is toggled by action, not
+    // by the resizable group — so `right` stays at whatever the window has.
     Some(Panes {
         left: left.as_f32(),
+        right: 0.0,
     })
 }
 

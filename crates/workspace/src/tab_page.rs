@@ -878,17 +878,13 @@ fn effort_thinks(level: Option<&str>) -> bool {
     }
 }
 
-/// What the header's thinking control reads, shortcut and all.
-///
-/// The modifier is spelled the way each platform writes it — `⌃T` on macOS, where
-/// the glyph is the one the keyboard carries, and `Ctrl+T` elsewhere — because the
-/// hint is for the hand that is about to press the keys.
+/// What the header's thinking control reads: the capitalised verb and
+/// its object, nothing else — there is no keybinding for it.
 fn thinking_label(showing: bool) -> &'static str {
-    match (cfg!(target_os = "macos"), showing) {
-        (true, true) => "Hide Thinking (⌃T)",
-        (true, false) => "Show Thinking (⌃T)",
-        (false, true) => "Hide Thinking (Ctrl+T)",
-        (false, false) => "Show Thinking (Ctrl+T)",
+    if showing {
+        "Hide Thinking"
+    } else {
+        "Show Thinking"
     }
 }
 

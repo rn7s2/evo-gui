@@ -77,24 +77,32 @@ pub struct Binaries {
     pub evo_agent: PathBuf,
 }
 
-/// The tab page's agent column, in points (§7.3).
+/// The tab page's column widths, in points (§7.3).
 ///
-/// One width for the app, not one per tab: every tab's page is the same two
-/// columns — the agent list, and the conversation beside it — and a browser's
-/// sidebar is not per-tab either. Dragging the split between them changes this,
-/// and this is what `app.json` remembers — so the number, and how far it may be
-/// dragged, live with the schema rather than with the view that draws it.
+/// One set for the app, not one per tab: every tab's page is the same columns —
+/// the agent list, the conversation beside it, and the terminal when it is open —
+/// and a browser's sidebar is not per-tab either. Dragging the split between them
+/// changes this, and this is what `app.json` remembers — so the numbers, and how
+/// far they may be dragged, live with the schema rather than with the view that
+/// draws them.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 #[serde(default)]
 pub struct Panes {
     /// The agent list on the left.
     pub left: f32,
+    /// The terminal pane on the right (0.0 means collapsed/hidden).
+    pub right: f32,
 }
 
 /// Where the left column opens, and how far it may be dragged (§7.3).
 pub const LEFT_DEFAULT: f32 = 260.0;
 pub const LEFT_MIN: f32 = 180.0;
 pub const LEFT_MAX: f32 = 480.0;
+
+/// The terminal pane on the right: collapsed by default, with a drag range.
+pub const RIGHT_DEFAULT: f32 = 0.0; // collapsed
+pub const RIGHT_MIN: f32 = 200.0;
+pub const RIGHT_MAX: f32 = 800.0;
 
 /// The conversation column never goes below this: the transcript is what the page
 /// is for, and a page that is mostly chrome is not a page (§7.3). Lowered from the
@@ -114,20 +122,29 @@ pub const ZOOM_MAX: f32 = 2.0;
 
 impl Default for Panes {
     fn default() -> Panes {
-        Panes { left: LEFT_DEFAULT }
+        Panes {
+            left: LEFT_DEFAULT,
+            right: RIGHT_DEFAULT,
+        }
     }
 }
 
 impl Panes {
-    pub fn new(left: f32) -> Panes {
-        Panes { left }.sanitized()
+    pub fn new(left: f32, right: f32) -> Panes {
+        Panes { left, right }.sanitized()
     }
 
-    /// The same width, dragged back into its range — and into something that can
-    /// be drawn: a hand-edited file may say anything.
+    /// The same widths, dragged back into their ranges — and into something that
+    /// can be drawn: a hand-edited file may say anything.
     pub fn sanitized(self) -> Panes {
         Panes {
             left: ranged(self.left, LEFT_MIN, LEFT_MAX, LEFT_DEFAULT),
+            // right: 0 means collapsed; any positive value is clamped to its range
+            right: if self.right <= 0.0 {
+                0.0
+            } else {
+                ranged(self.right, RIGHT_MIN, RIGHT_MAX, RIGHT_DEFAULT)
+            },
         }
     }
 }
@@ -552,34 +569,50 @@ mod tests {
         fs::remove_dir_all(root.path()).unwrap();
     }
 
-    /// §7.3: the agent column is one app-wide width, and the file is allowed to
-    /// be wrong about it: a width outside its range, or one that is not a number
-    /// at all, opens at the default instead.
+    /// §7.3: the pane widths are remembered, and the file is allowed to be wrong
+    /// about them: a width outside its range, or one that is not a number at all,
+    /// opens at the default instead.
     #[test]
-    fn the_pane_width_is_remembered_and_dragged_back_into_range() {
+    fn the_pane_widths_are_remembered_and_dragged_back_into_range() {
         let root = temp_root("panes");
         let mut state = sample();
-        state.panes = Panes::new(300.0);
+        state.panes = Panes::new(300.0, 420.0);
         state.save(&root).unwrap();
-        assert_eq!(AppState::load(&root).panes, Panes { left: 300.0 });
+        assert_eq!(
+            AppState::load(&root).panes,
+            Panes {
+                left: 300.0,
+                right: 420.0,
+            }
+        );
 
-        // A file from before there was one, a hand-edited one, and one a window
-        // with a third column wrote — the width it names is simply not read.
+        // A file from before there were any, and a hand-edited one: the width it
+        // names is simply not read.
         root.ensure().unwrap();
         fs::write(root.app_json(), r#"{"version":1}"#).unwrap();
         assert_eq!(AppState::load(&root).panes, Panes::default());
         fs::write(root.app_json(), r#"{"version":1,"panes":{"left":9999}}"#).unwrap();
         assert_eq!(AppState::load(&root).panes, Panes::default());
-        fs::write(
-            root.app_json(),
-            r#"{"version":1,"panes":{"left":200,"right":640.5}}"#,
-        )
-        .unwrap();
-        assert_eq!(
-            AppState::load(&root).panes,
-            Panes { left: 200.0 },
-            "the width is read, the column that is gone is ignored"
-        );
+
+        // The right pane is collapsed unless it names a width it can be drawn at:
+        // zero, a negative, one below its minimum and one above its maximum all
+        // read as collapsed.
+        for body in [
+            r#"{"version":1,"panes":{"left":200,"right":0}}"#,
+            r#"{"version":1,"panes":{"left":200,"right":-40}}"#,
+            r#"{"version":1,"panes":{"left":200,"right":100}}"#,
+            r#"{"version":1,"panes":{"left":200,"right":9000}}"#,
+        ] {
+            fs::write(root.app_json(), body).unwrap();
+            assert_eq!(
+                AppState::load(&root).panes,
+                Panes {
+                    left: 200.0,
+                    right: 0.0,
+                },
+                "{body} leaves the terminal collapsed"
+            );
+        }
         fs::remove_dir_all(root.path()).unwrap();
     }
 
@@ -625,8 +658,13 @@ mod tests {
     fn the_pane_ranges_hold_together() {
         const _: () = assert!(LEFT_MIN < LEFT_DEFAULT && LEFT_DEFAULT < LEFT_MAX);
         const _: () = assert!(
+            RIGHT_DEFAULT == 0.0 && RIGHT_DEFAULT < RIGHT_MIN && RIGHT_MIN < RIGHT_MAX,
+            "the terminal opens collapsed, and its range is a range"
+        );
+        const _: () = assert!(
             LEFT_MAX + CENTER_MIN <= MIN_SIZE.0,
-            "the widest page fits the smallest window the app opens"
+            "the widest page fits the smallest window the app opens: the terminal is collapsed, \
+             so it is not part of the smallest page"
         );
     }
 
