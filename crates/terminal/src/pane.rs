@@ -36,7 +36,7 @@ use gpui_kit::component::{ActiveTheme as _, Theme};
 use gpui_kit::prelude::*;
 use gpui_kit::{
     div, AbsoluteLength, App, Bounds, Div, FocusHandle, Focusable, KeyDownEvent, MouseButton,
-    MouseDownEvent, Pixels, Render, Task, Window,
+    MouseDownEvent, Pixels, Render, SharedString, Task, Window,
 };
 
 use crate::keys;
@@ -70,6 +70,9 @@ pub struct TerminalPane {
     /// Keeps the wakeup task alive. Dropping it cancels the task, and the
     /// reader thread then finds the channel closed and stops.
     _wakeup: Task<()>,
+    /// A font family override: when set, the pane draws with this instead of
+    /// the theme's monospace. Set from the app's "Terminal Font" setting.
+    font_override: Option<SharedString>,
 }
 
 impl TerminalPane {
@@ -127,6 +130,21 @@ impl TerminalPane {
             focus: cx.focus_handle(),
             failure,
             _wakeup,
+            font_override: None,
+        }
+    }
+
+    /// Set the font family the terminal draws with, overriding the theme's
+    /// monospace. An empty string clears the override.
+    pub fn set_font_family(&mut self, family: &str, cx: &mut Context<Self>) {
+        let new = if family.is_empty() {
+            None
+        } else {
+            Some(SharedString::from(family.to_string()))
+        };
+        if new != self.font_override {
+            self.font_override = new;
+            cx.notify();
         }
     }
 
@@ -241,7 +259,7 @@ impl Focusable for TerminalPane {
 impl Render for TerminalPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let metrics = metrics(window, theme);
+        let metrics = metrics(window, theme, self.font_override.as_ref());
         let body = self.body(window, theme, metrics);
 
         // The grid is as many cells as fit in the box the pane was given: the
@@ -284,7 +302,11 @@ impl Render for TerminalPane {
                     .flex()
                     .flex_col()
                     .overflow_hidden()
-                    .font_family(theme.mono_font_family.clone())
+                    .font_family(
+                        self.font_override
+                            .clone()
+                            .unwrap_or_else(|| theme.mono_font_family.clone()),
+                    )
                     .text_size(theme.mono_font_size)
                     .line_height(metrics.line)
                     .text_color(theme.foreground)
@@ -404,20 +426,14 @@ struct Metrics {
     line: Pixels,
 }
 
-/// Measure a cell of the grid: the theme's monospace face, at the theme's
-/// monospace size, in the window's own text style.
-///
-/// The line is the *line box* that style gives this text — the same number the
-/// text is drawn in — and not the face's own ascent and descent, which are the
-/// ink's bounds and are a good deal tighter than a line of type. A grid whose
-/// rows were tighter than the lines drawn in them would overlap itself, and one
-/// whose rows were looser would leave gaps the shell's own drawing does not know
-/// about: the pane tells the shell how many rows fit, so its rows have to be the
-/// rows on screen.
-fn metrics(window: &Window, theme: &Theme) -> Metrics {
+/// Measure a cell of the grid: the given font family (or the theme's monospace
+/// if `None`), at the theme's monospace size, in the window's own text style.
+fn metrics(window: &Window, theme: &Theme, font_override: Option<&SharedString>) -> Metrics {
     let size = theme.mono_font_size;
     let mut style = window.text_style();
-    style.font_family = theme.mono_font_family.clone();
+    style.font_family = font_override
+        .cloned()
+        .unwrap_or_else(|| theme.mono_font_family.clone());
     style.font_size = AbsoluteLength::Pixels(size);
     let line = style.line_height_in_pixels(window.rem_size());
     let text = window.text_system();

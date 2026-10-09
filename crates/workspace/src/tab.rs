@@ -727,7 +727,13 @@ impl TabContent {
             // Create the terminal on first open; keep it across toggles.
             if self.terminal.is_none() {
                 let folder = self.working_dir();
-                self.terminal = Some(cx.new(|cx| terminal::TerminalPane::new(folder, window, cx)));
+                let font = store::app_state::AppState::load(&self.config.root).terminal_font;
+                let terminal =
+                    cx.new(|cx| terminal::TerminalPane::new(folder, window, cx));
+                if font != store::design::MONO_FONT {
+                    terminal.update(cx, |pane, cx| pane.set_font_family(&font, cx));
+                }
+                self.terminal = Some(terminal);
             }
         }
         cx.emit(TabContentEvent::PanesChanged(self.panes));
