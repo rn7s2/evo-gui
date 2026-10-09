@@ -584,14 +584,13 @@ impl AgentList {
     /// The list's last row while this is a swarm: one lane more ([`AgentListEvent::AddLane`]).
     ///
     /// A lane row's own shape — 32px, the list's inset, a 13px line — and the quietest
-    /// thing in the column: muted ink, the rows' own hover fill, and no dot, task or state
+    /// thing in the column: muted ink, a plus aligned with the dots, and no task or state
     /// cell. The kit's button is what makes it a keyboard's (focus, Tab stop, Enter/Space)
     /// and what makes `disabled` real. The owner disables it while adding a lane is not on
     /// offer — a request in flight, a busy coordinator, a full swarm — and gpui has no
     /// `aria-disabled` builder, so that is drawn, not named.
     fn add_lane_row(&self, palette: &'static Palette, cx: &Context<Self>) -> impl IntoElement {
         let disabled = self.add_lane_disabled;
-        let hover = row_hover_fill(palette);
         Button::new(ADD_LANE_ID)
             .track_focus(&self.add_focus)
             .h(px(LANE_ROW))
@@ -606,17 +605,9 @@ impl AgentList {
             .disabled(disabled)
             .accessibility_label(ADD_LANE_LABEL)
             .when(!disabled, |row| {
-                row.hover(move |row| {
-                    row.bg(paint::color(hover))
-                        .text_color(paint::color(palette.fg))
-                })
+                row.hover(move |row| row.text_color(paint::color(palette.fg)))
             })
-            // The keyboard's own arrival wears what the pointer's does, as the tab page's
-            // history rows wear their own fill.
-            .focus_visible(move |row| {
-                row.bg(paint::color(hover))
-                    .text_color(paint::color(palette.fg))
-            })
+            .focus_visible(move |row| row.text_color(paint::color(palette.primary)))
             .when(disabled, |row| row.opacity(0.45))
             // The ancestor that holds the keyboard would otherwise take the press, as it
             // does for a lane's row.
@@ -624,7 +615,26 @@ impl AgentList {
                 list.add_focus.focus(window, cx);
                 cx.emit(AgentListEvent::AddLane);
             }))
-            .child(ADD_LANE_LABEL)
+            .child(
+                h_flex()
+                    .gap(px(LANE_GAP))
+                    .items_center()
+                    .child(
+                        div()
+                            .id("agent-add-lane-icon")
+                            .test_support()
+                            .w(px(design::DOT))
+                            .flex_none()
+                            .text_center()
+                            .child("+"),
+                    )
+                    .child(
+                        div()
+                            .id("agent-add-lane-label")
+                            .test_support()
+                            .child("Add New Lane"),
+                    ),
+            )
     }
 
     /// Draw one row: dot, name, the task it was given, and the state at the end.
@@ -1286,6 +1296,14 @@ mod tests {
                 add.bounds().origin.y > last.origin.y,
                 "it comes after the last lane: {last:?} then {:?}",
                 add.bounds()
+            );
+            assert_eq!(
+                window.find("agent-add-lane-icon").bounds().origin.x,
+                last.origin.x + px(LANE_PAD),
+            );
+            assert_eq!(
+                window.find("agent-add-lane-label").bounds().origin.x,
+                last.origin.x + px(LANE_PAD + design::DOT + LANE_GAP),
             );
 
             window.click(ADD_LANE_ID, cx);
