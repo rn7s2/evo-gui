@@ -2,7 +2,7 @@
 //! rows a reader can act on, and the panel helpers that do not need a window.
 
 use std::cell::RefCell;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
@@ -1342,6 +1342,468 @@ fn an_image_that_arrives_off_screen_is_measured_when_it_comes_back(cx: &mut Test
     assert!(
         after.origin.y >= grown.origin.y + grown.size.height,
         "and the row after it sits under it, never over it: {grown:?} then {after:?}"
+    );
+}
+
+// --- the pictures a message points at on this machine ------------------------------------
+
+/// A folder of this test's own, with a picture in it and a file that is not one.
+///
+/// The name has to be the test's own: two tests run at once, and the cache is keyed by
+/// the path a reference resolved to.
+struct Local {
+    root: PathBuf,
+}
+
+impl Local {
+    fn new(name: &str) -> Local {
+        let root = std::env::temp_dir().join(format!(
+            "evo-transcript-local-{name}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a folder to point at");
+        std::fs::write(root.join("shot.png"), transcript_png_sized(60, 40))
+            .expect("a picture to point at");
+        std::fs::write(root.join("notes.txt"), "not a picture").expect("a file that is not one");
+        Local { root }
+    }
+
+    fn picture(&self) -> PathBuf {
+        self.root.join("shot.png")
+    }
+
+    fn text(&self) -> PathBuf {
+        self.root.join("notes.txt")
+    }
+
+    fn missing(&self) -> PathBuf {
+        self.root.join("gone.png")
+    }
+
+    /// The reference a message writes for a path: the `file://` URL form.
+    fn url(&self, path: &Path) -> String {
+        format!("file://{}", path.display())
+    }
+}
+
+impl Drop for Local {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+/// The element a drawn picture wears, by the reference it came from.
+fn picture_id(url: &str) -> gpui_kit::ElementId {
+    gpui_kit::ElementId::from(format!("{}:{url}", crate::markdown::IMAGE_ID))
+}
+
+/// Where a drawn picture is, if it is drawn at all.
+fn drawn_picture(
+    cx: &mut gpui_kit::VisualTestContext,
+    url: &str,
+) -> Option<gpui_kit::Bounds<gpui_kit::Pixels>> {
+    cx.update(|window, _| {
+        window
+            .try_find(picture_id(url))
+            .map(|element| element.bounds())
+    })
+}
+
+/// A message that points at a picture on this machine is drawn with the picture: the
+/// file is read (off the frame, by a worker), the row is measured again with it, and the
+/// row behind it moves down by exactly what the picture added.
+#[gpui_kit::test]
+fn a_picture_a_message_points_at_is_read_and_drawn(cx: &mut TestAppContext) {
+    let local = Local::new("drawn");
+    let url = local.url(&local.picture());
+    let (_view, cx) = open_in(
+        cx,
+        1200.,
+        vec![
+            assistant(
+                "a_1",
+                &format!("here it is:\n\n![a shot]({url})\n\nand that is the shot."),
+                "final",
+            ),
+            assistant("a_2", "the row after the picture", "final"),
+        ],
+    );
+
+    frames(cx, 2);
+    let loading = row_box(cx, row_id("transcript-message", "a_1")).size.height;
+    let before = row_box(cx, row_id("transcript-message", "a_2")).origin.y;
+    assert!(
+        drawn_picture(cx, &url).is_none(),
+        "nothing is drawn while the file is being read"
+    );
+
+    // The read and the decode are the worker's: they land on a later frame.
+    cx.run_until_parked();
+    frames(cx, 2);
+    let picture = drawn_picture(cx, &url).expect("the picture the worker read");
+    assert_eq!(
+        picture.size,
+        gpui_kit::size(px(60.), px(40.)),
+        "a picture narrower than the column is drawn at its own size"
+    );
+    let grown = row_box(cx, row_id("transcript-message", "a_1"));
+    assert!(
+        grown.size.height > loading,
+        "the row grows by the picture: {loading:?} -> {:?}",
+        grown.size.height
+    );
+    let after = row_box(cx, row_id("transcript-message", "a_2"));
+    assert_eq!(
+        after.origin.y - before,
+        grown.size.height - loading,
+        "the row behind it moves down by exactly what the picture added"
+    );
+    assert!(
+        after.origin.y >= grown.origin.y + grown.size.height,
+        "and is never drawn over: {grown:?} then {after:?}"
+    );
+}
+
+/// A record that is *still* — replaced once and then left alone — reads the picture it
+/// points at and draws it.
+///
+/// A row asks for the picture it points at while it is laid out, which is after the
+/// frame's builder that made it has run, so the asking is taken up where the list is
+/// painted ([`TranscriptView::on_painted`]). Nothing in this test renders a frame of its
+/// own, and nothing moves the record a second time: the frame the record lands on starts
+/// the read, and the only frame after it is the one the answer asks for. A view that only
+/// collected the asking in its builder would sit on the fallback for good here, because
+/// a record nobody touches is a view nobody renders again.
+#[gpui_kit::test]
+fn a_still_record_reads_its_picture_with_nothing_else_moving(cx: &mut TestAppContext) {
+    let local = Local::new("still");
+    let url = local.url(&local.picture());
+    let items = vec![assistant(
+        "a_1",
+        &format!("here it is:\n\n![a shot]({url})\n\nand that is the shot."),
+        "final",
+    )];
+
+    cx.update(gpui_kit::init);
+    let (host, cx) = cx.add_window_view(|_window, cx| PaneHost::new(1200., cx));
+    let view = cx.read(|cx| host.read(cx).transcript.clone());
+    // The record lands on the one frame it lands on — and from here on this test touches
+    // nothing: no second `replace`, no `set_items`, no `notify`, no frame of its own.
+    view.update(cx, |view, cx| view.replace(items, cx));
+
+    // The worker's read and the frame its answer asks for. `run_until_parked` is the
+    // whole of the pumping: it drives the executor the view's read was spawned on, and
+    // draws the frames a window would draw for it.
+    let drawn = {
+        let mut drawn = None;
+        for _ in 0..64 {
+            cx.run_until_parked();
+            drawn = drawn_picture(cx, &url);
+            if drawn.is_some() {
+                break;
+            }
+        }
+        drawn
+    };
+    let picture = drawn.expect(
+        "a still record draws its picture with nothing else moving: the asking is taken \
+         up where the list is painted, not in the builder that ran before the rows asked",
+    );
+    assert_eq!(
+        (picture.size.width, picture.size.height),
+        (px(60.), px(40.)),
+        "at the size the file is, in a column wider than it"
+    );
+    assert!(
+        view.update(cx, |view, cx| view.items(cx).len()) == 1,
+        "the record is exactly the one that was replaced, untouched"
+    );
+}
+
+/// A picture wider than the column is drawn to fit it, keeping its own shape — the
+/// column, not the reading measure, because a pane narrower than the measure is the
+/// reader's pane.
+#[gpui_kit::test]
+fn a_picture_wider_than_the_column_is_drawn_to_fit_it(cx: &mut TestAppContext) {
+    let local = Local::new("wide");
+    std::fs::write(local.picture(), transcript_png_sized(1400, 1000)).expect("a wide picture");
+    let url = local.url(&local.picture());
+    let (_view, cx) = open_in(
+        cx,
+        1200.,
+        vec![assistant("a_1", &format!("![a shot]({url})"), "final")],
+    );
+    cx.run_until_parked();
+    frames(cx, 2);
+
+    let picture = drawn_picture(cx, &url).expect("the picture");
+    assert_eq!(
+        picture.size.width,
+        measure_width(cx, "a_1"),
+        "the picture is exactly as wide as a line of the message may be"
+    );
+    // 1400×1000 fitted into it, its own shape kept.
+    let ratio = f32::from(picture.size.height) / f32::from(picture.size.width);
+    assert!(
+        (ratio - 1000. / 1400.).abs() < 0.001,
+        "and its shape is its own: {picture:?}"
+    );
+    // A narrower column, the same record: the picture is narrower with it.
+    set_zoom(cx, 0.75);
+    let narrower = drawn_picture(cx, &url).expect("still drawn");
+    assert!(
+        narrower.size.width < picture.size.width,
+        "at 75% the column is narrower and the picture with it: {narrower:?} vs {picture:?}"
+    );
+}
+
+/// A relative reference is measured from the folder the transcript runs in — and a
+/// reference that names no local file keeps the bracketed fallback: an address, a file
+/// that is not there, a file that is not a picture, and a relative path with no folder
+/// to measure it from.
+#[gpui_kit::test]
+fn a_reference_is_measured_from_the_folder_and_a_non_picture_falls_back(cx: &mut TestAppContext) {
+    let local = Local::new("fallback");
+    let remote = "https://example.com/a.png".to_string();
+    let gone = local.url(&local.missing());
+    let text = local.url(&local.text());
+    let body = format!(
+        "an address ![r]({remote}), a missing file ![g]({gone}), a text file ![t]({text}), \
+         and a relative one ![x](shot.png)"
+    );
+    let (view, cx) = open_in(cx, 1200., vec![assistant("a_1", &body, "final")]);
+    frames(cx, 2);
+    cx.run_until_parked();
+    frames(cx, 2);
+    for (url, what) in [
+        (&remote, "an address"),
+        (&gone, "a file that is not there"),
+        (&text, "a file that is not a picture"),
+        (&"shot.png".to_string(), "a relative path with no folder"),
+    ] {
+        assert!(
+            drawn_picture(cx, url).is_none(),
+            "{what} is not drawn as a picture"
+        );
+    }
+    // The message is plain text with four references in it, and nothing else.
+    assert!(
+        row_box(cx, row_id("transcript-message", "a_1")).size.height < px(120.),
+        "the references are the alt text they always were"
+    );
+
+    // Told its folder, the relative reference resolves against it and is drawn.
+    view.update(cx, |view, cx| view.set_folder(Some(local.root.clone()), cx));
+    frames(cx, 2);
+    cx.run_until_parked();
+    frames(cx, 2);
+    assert!(
+        drawn_picture(cx, "shot.png").is_some(),
+        "a relative reference is measured from the transcript's folder"
+    );
+}
+
+/// The picture is held once it is read: a file deleted while the row is still on screen
+/// does not take the picture with it — nothing is looked at again behind the reader's
+/// back.
+#[gpui_kit::test]
+fn a_picture_stays_drawn_after_its_file_is_deleted(cx: &mut TestAppContext) {
+    let local = Local::new("deleted");
+    let url = local.url(&local.picture());
+    let (_view, cx) = open_in(
+        cx,
+        1200.,
+        vec![assistant("a_1", &format!("![a shot]({url})"), "final")],
+    );
+    cx.run_until_parked();
+    frames(cx, 2);
+    let drawn = drawn_picture(cx, &url).expect("the picture");
+
+    std::fs::remove_file(local.picture()).expect("the file goes");
+    frames(cx, 3);
+    assert_eq!(
+        drawn_picture(cx, &url).map(|box_| box_.size),
+        Some(drawn.size),
+        "the picture the row was reading is still the picture it draws"
+    );
+}
+
+/// Another record is another record: a snapshot that is not the one held — a session
+/// switched, a leaf moved — is read as it stands, so the pictures of the record that is
+/// gone are gone with it, and the new record's are read for it.
+#[gpui_kit::test]
+fn a_replaced_record_reads_its_pictures_again(cx: &mut TestAppContext) {
+    let local = Local::new("replaced");
+    let url = local.url(&local.picture());
+    let body = format!("![a shot]({url})");
+    let (view, cx) = open_in(cx, 1200., vec![assistant("a_1", &body, "final")]);
+    cx.run_until_parked();
+    frames(cx, 2);
+    assert!(drawn_picture(cx, &url).is_some(), "the picture is drawn");
+
+    // The topic hands the tab a record that is not this one.
+    view.update(cx, |view, cx| {
+        view.replace(vec![assistant("b_1", &body, "final")], cx)
+    });
+    frames(cx, 1);
+    assert!(
+        drawn_picture(cx, &url).is_none(),
+        "the new record's picture is not the old one, carried over"
+    );
+    cx.run_until_parked();
+    frames(cx, 2);
+    assert!(
+        drawn_picture(cx, &url).is_some(),
+        "and it is read for the record that asked for it"
+    );
+}
+
+/// A pane of references that name nothing reads them once and then leaves them be,
+/// however many frames go by.
+///
+/// Two missing references fill a cache of two, and the third on screen has nowhere to go
+/// and keeps the fallback. It is refused on every frame after that — and refused without
+/// a read, because the two that fill the cache are asked for by name on each of those
+/// frames, which is what holds them.
+#[gpui_kit::test]
+fn a_pane_of_references_that_name_nothing_is_read_once_and_left_alone(cx: &mut TestAppContext) {
+    let local = Local::new("still-missing");
+    let missing: Vec<String> = (0..3)
+        .map(|n| local.url(&local.root.join(format!("gone-{n}.png"))))
+        .collect();
+    let body = format!(
+        "![a]({}) ![b]({}) ![c]({})",
+        missing[0], missing[1], missing[2]
+    );
+    let (view, cx) = open_in_with_pictures(cx, 1200., 2, vec![assistant("a_1", &body, "final")]);
+    cx.run_until_parked();
+    frames(cx, 2);
+    assert_eq!(
+        cx.read(|cx| view.read(cx).local_reads()),
+        2,
+        "the two there was room for are read"
+    );
+
+    // Five frames, each of which asks for the same three references in the same order.
+    for _ in 0..5 {
+        cx.run_until_parked();
+        frames(cx, 1);
+    }
+    assert_eq!(
+        cx.read(|cx| view.read(cx).local_reads()),
+        2,
+        "and the third is never read: a frame that can drop nothing must not queue one"
+    );
+    for url in &missing {
+        assert!(
+            drawn_picture(cx, url).is_none(),
+            "{url} keeps the fallback it has"
+        );
+    }
+}
+
+/// The pictures the next pane shows are read without the reader doing anything more.
+///
+/// Two missing references are on screen and hold the whole cache. A message arrives below
+/// them, tall enough that they leave the pane, and the two pictures it ends with are
+/// refused room on the frame it arrives on — the entries they would need were asked for
+/// on the pass before, and may be taken on the next one. That frame is asked for by the
+/// refusal itself, and the pictures land on it: no scroll, no press, no other message.
+#[gpui_kit::test]
+fn the_pictures_the_next_pane_shows_are_read_without_a_second_event(cx: &mut TestAppContext) {
+    let local = Local::new("next-pane");
+    let second = local.root.join("other.png");
+    std::fs::write(&second, transcript_png_sized(40, 60)).expect("a second picture");
+    let head = format!(
+        "![a]({}) ![b]({})",
+        local.url(&local.root.join("gone-a.png")),
+        local.url(&local.root.join("gone-b.png"))
+    );
+    let (c, d) = (local.url(&local.picture()), local.url(&second));
+    let tall = "the run went on, and on\n\n".repeat(40);
+    let body = format!("{tall}![c]({c}) ![d]({d})");
+
+    cx.update(gpui_kit::init);
+    let (host, cx) = cx.add_window_view(|_window, cx| PaneHost::new(1200., cx));
+    let view = cx.read(|cx| host.read(cx).transcript.clone());
+    view.update(cx, |view, cx| view.budget_local_pictures(2, cx));
+    view.update(cx, |view, cx| {
+        view.replace(vec![assistant("a_1", &head, "final")], cx)
+    });
+
+    // The two references on screen are read, and settle holding the cache between them.
+    cx.run_until_parked();
+    frames(cx, 2);
+    assert!(drawn_row(cx, "a_1"), "the references are on screen");
+    let read = cx.read(|cx| view.read(cx).local_reads());
+    assert_eq!(read, 2, "both are read");
+
+    // The message arrives, and the frame it lands on is the one that is refused: the
+    // entries the pictures would need are a pass old, and the frame they may be taken on
+    // has not happened yet.
+    view.update(cx, |view, cx| {
+        assert!(
+            view.upsert(assistant("a_2", &body, "final"), cx),
+            "a new row"
+        );
+    });
+    frames(cx, 1);
+    assert!(
+        !drawn_row(cx, "a_1"),
+        "and the row of references has left the pane"
+    );
+    assert_eq!(
+        cx.read(|cx| view.read(cx).local_reads()),
+        read,
+        "nothing was read on that frame"
+    );
+
+    // From here nothing happens but the pumping: this test draws no frame of its own, so
+    // every frame after the refused one is the view's own — the one the refusal asked
+    // for, and the one the pictures ask for when they land.
+    for _ in 0..8 {
+        cx.run_until_parked();
+    }
+    assert_eq!(
+        cx.read(|cx| view.read(cx).local_reads()),
+        read + 2,
+        "the next pane's pictures are read, without the reader doing anything"
+    );
+    assert!(drawn_picture(cx, &c).is_some(), "and the first is drawn");
+    assert!(drawn_picture(cx, &d).is_some(), "and the second");
+}
+
+/// A picture landing in a row above the reader is layout, not the reader's own scroll:
+/// a reader following the tail is still at the tail when it lands.
+#[gpui_kit::test]
+fn a_picture_landing_above_the_reader_keeps_them_at_the_tail(cx: &mut TestAppContext) {
+    let local = Local::new("pin");
+    let url = local.url(&local.picture());
+    std::fs::write(local.picture(), transcript_png_sized(1200, 900)).expect("a tall picture");
+    let mut items: Vec<Item> = (0..30)
+        .map(|n| user(&format!("u_{n:02}"), "a turn of its own"))
+        .collect();
+    items.push(assistant("a_1", &format!("![a shot]({url})"), "final"));
+    items.push(assistant("a_2", "the last row", "final"));
+    let (view, cx) = open_in(cx, 1200., items);
+    assert!(cx.read(|cx| view.read(cx).is_following_tail(cx)));
+    assert_eq!(gap(&view, cx), 0., "the reader is at the tail to start");
+
+    cx.run_until_parked();
+    frames(cx, 3);
+    assert!(
+        drawn_picture(cx, &url).is_some(),
+        "the picture landed above the tail"
+    );
+    assert!(
+        cx.read(|cx| view.read(cx).is_following_tail(cx)),
+        "the reader is still following"
+    );
+    assert_eq!(
+        gap(&view, cx),
+        0.,
+        "a picture landing above the reader is the layout's, not their scroll"
     );
 }
 
@@ -3805,6 +4267,25 @@ fn open_in(
     cx.update(gpui_kit::init);
     let (host, cx) = cx.add_window_view(|_window, cx| PaneHost::new(width, cx));
     let view = cx.read(|cx| host.read(cx).transcript.clone());
+    view.update(cx, |view, cx| view.replace(items, cx));
+    frames(cx, 2);
+    (view, cx)
+}
+
+/// Open a transcript in a pane `width` pixels wide whose picture cache holds at most
+/// `pictures` entries — a full cache in a couple of frames, without decoding megabytes to
+/// fill one. The budget is set before the record is shown, so nothing has been asked of
+/// the cache the view was made with.
+fn open_in_with_pictures(
+    cx: &mut TestAppContext,
+    width: f32,
+    pictures: usize,
+    items: Vec<Item>,
+) -> (Entity<TranscriptView>, &mut gpui_kit::VisualTestContext) {
+    cx.update(gpui_kit::init);
+    let (host, cx) = cx.add_window_view(|_window, cx| PaneHost::new(width, cx));
+    let view = cx.read(|cx| host.read(cx).transcript.clone());
+    view.update(cx, |view, cx| view.budget_local_pictures(pictures, cx));
     view.update(cx, |view, cx| view.replace(items, cx));
     frames(cx, 2);
     (view, cx)

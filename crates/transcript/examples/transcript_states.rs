@@ -482,6 +482,120 @@ fn files_setup(cx: &mut HeadlessAppContext, window: AnyWindowHandle, page: &Enti
     rows
 }
 
+/// The folder the picture states work in: a picture in it that is really there, a file
+/// that is not a picture, and nothing under the name the record asks about.
+///
+/// Short and under `/tmp` on purpose, like the links folder: what a picture of the state
+/// is for is the picture in the row, not what the machine's home is called.
+fn pictures_folder() -> PathBuf {
+    let root = PathBuf::from("/tmp/evo-pictures");
+    std::fs::create_dir_all(&root).expect("a folder to point at");
+    let shot = root.join("shot.png");
+    if !shot.exists() {
+        let bytes = png_bytes(image::RgbaImage::from_fn(1400, 1000, |x, y| {
+            image::Rgba([
+                (x * 255 / 1400) as u8,
+                (y * 255 / 1000) as u8,
+                if x < 8 || y < 8 || x + 8 > 1400 || y + 8 > 1000 {
+                    40
+                } else {
+                    160
+                },
+                255,
+            ])
+        }));
+        std::fs::write(&shot, bytes).expect("a picture to point at");
+    }
+    let notes = root.join("notes.txt");
+    if !notes.exists() {
+        std::fs::write(&notes, "not a picture\n").expect("a file that is not one");
+    }
+    root
+}
+
+/// A short record whose answer points at a picture on this machine — `reference`, the
+/// form the state is about — and at three that are not pictures: a file that is not
+/// there, a file that is not a picture, and an address. So a picture of the state shows
+/// what is drawn and what keeps the fallback.
+fn pictures_record(root: &Path, reference: &str) -> Vec<Item> {
+    let root = root.display().to_string();
+    let mut record = Record::new();
+    turn(
+        &mut record,
+        "what does the run look like? /tmp/evo-pictures is where the shots are",
+    );
+    reply(
+        &mut record,
+        &format!(
+            "Here it is:\n\n![the run]({reference})\n\n![gone](file://{root}/gone.png) \
+             ![notes](file://{root}/notes.txt) ![remote](https://evo.dev/run.png)"
+        ),
+        None,
+    );
+    record.items
+}
+
+/// How a state is reached: it opens its own record and says how many rows that record
+/// holds.
+type Setup = fn(&mut HeadlessAppContext, AnyWindowHandle, &Entity<Page>) -> usize;
+
+/// A picture state: it points the message at the file the way `reference` names it, so
+/// the two states differ only in the form of the reference — the `file://` URL a model
+/// writes, and a path relative to the folder the tab runs in.
+fn pictures_setup(
+    cx: &mut HeadlessAppContext,
+    window: AnyWindowHandle,
+    page: &Entity<Page>,
+    reference: fn(&Path) -> String,
+) -> usize {
+    let root = pictures_folder();
+    let view = transcript_of(cx, page);
+    let items = pictures_record(&root, &reference(&root));
+    let rows = items.len();
+    cx.update(|cx| {
+        view.update(cx, |view, cx| {
+            view.set_folder(Some(root), cx);
+            view.replace(items, cx);
+        })
+    });
+    // The read is a worker's: the picture lands a frame or two after the record does.
+    for _ in 0..6 {
+        cx.run_until_parked();
+        frames(cx, window, 2);
+    }
+    rows
+}
+
+/// The picture state that names the file as a URL.
+fn pictures_at_url(
+    cx: &mut HeadlessAppContext,
+    window: AnyWindowHandle,
+    page: &Entity<Page>,
+) -> usize {
+    pictures_setup(cx, window, page, picture_url)
+}
+
+/// The picture state that names the file relative to the tab's folder.
+fn pictures_beside_the_tab(
+    cx: &mut HeadlessAppContext,
+    window: AnyWindowHandle,
+    page: &Entity<Page>,
+) -> usize {
+    pictures_setup(cx, window, page, picture_relative)
+}
+
+/// The picture's address, the way a model that wrote it would: a `file://` URL of the
+/// file itself.
+fn picture_url(root: &Path) -> String {
+    format!("file://{}/shot.png", root.display())
+}
+
+/// The same picture, named the way a message names a file beside the project: a path
+/// relative to the folder the tab runs in.
+fn picture_relative(_root: &Path) -> String {
+    "shot.png".to_string()
+}
+
 /// The record the lane-switch states are about: a session that has run for a while,
 /// ending on the reader's own words — one row longer than the pane, so a pane showing the
 /// foot of the record is a pane full of them — with the answer to them arriving while
@@ -985,11 +1099,10 @@ fn main() {
     // scrollback's quiet line, then the reader's zoom, then a window that changes shape.
     // A state says how many rows the record it opened holds: the link states replace the
     // long record with a short one whose rows carry links.
-    type Setup = fn(&mut HeadlessAppContext, AnyWindowHandle, &Entity<Page>) -> usize;
     // One entry per state: what it is called, the zoom it draws at, how wide its
     // window is (the reading measure's own bound is the pane, so a picture of the
     // measure needs a pane wider than it), and how it is reached.
-    let states: [(&str, f32, f32, Setup); 29] = [
+    let states: [(&str, f32, f32, Setup); 31] = [
         ("bottom", 1., WINDOW_SIZE.0, |_, _, _| ITEMS),
         ("tool-hover", 1., WINDOW_SIZE.0, |cx, window, _| {
             // A folded card under the pointer: the head's hover ink is the whole of
@@ -1255,6 +1368,11 @@ fn main() {
             WINDOW_SIZE.0,
             |cx, window, page| switched_back(cx, window, page, false),
         ),
+        // The picture a message points at on this machine, in the column it is read in,
+        // and the same record in a pane narrower than the reading measure: the two the
+        // picture's own width is chosen by.
+        ("pictures", 1., WINDOW_SIZE.0, pictures_at_url),
+        ("pictures-narrow", 1., 620., pictures_beside_the_tab),
     ];
 
     let mut cx = context();

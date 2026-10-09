@@ -1,13 +1,15 @@
 //! What an assistant message is parsed with beyond CommonMark and GFM.
 //!
-//! Two constructs a model writes must not reach the renderer as they are:
+//! Three constructs a model writes must not reach the renderer as they are:
 //!
 //! * **an image reference.** `![alt](https://…)` becomes an `<img>` whose URI
 //!   the image loader fetches over the app's HTTP client
 //!   (`gpui::img::ImageAssetLoader::load`, `Resource::Uri` → `client.get`), so
 //!   a message could make this app issue a request to an address a model chose.
 //!   The reference is claimed here and drawn as its alt text — a transcript
-//!   says what a message *refers to*, it never goes and looks;
+//!   says what a message *refers to*, it never goes and looks. The one exception
+//!   is a reference to a file on this machine, which is drawn as the picture it
+//!   names: see [`ImageFallback`] and [`crate::images`];
 //! * **raw HTML.** The kit interprets the tags it knows (`<b>`, `<br>`) and
 //!   drops a node it cannot parse without leaving a trace, so text the reader
 //!   was meant to see disappears. The node is claimed and shown as the source
@@ -17,14 +19,19 @@
 //! a link is a run of flowing text, while anything a plugin renders is one
 //! atomic box that cannot be broken across a line.
 
-use std::sync::OnceLock;
+use std::sync::Arc;
 
 use gpui_kit::component::text::{
     markdown_ast::Node, InlineElement, InlineRenderContext, MarkdownExtensions, MarkdownNode,
     MarkdownParseContext, MarkdownPlugin,
 };
-use gpui_kit::{div, App, Div, FontWeight, IntoElement, ParentElement as _, Styled as _, Window};
+use gpui_kit::{
+    div, App, Div, ElementId, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
+    Styled as _, TestSupportExt as _, Window,
+};
 
+use crate::images::LocalImages;
+use crate::imgcheck;
 use crate::style::Palette;
 
 /// The node names of the three claims, so each renderer is found.
@@ -32,29 +39,56 @@ const IMAGE: &str = "transcript-image";
 const HTML: &str = "transcript-html";
 const HTML_BLOCK: &str = "transcript-html-block";
 
-/// The extensions every assistant message is parsed with, built once.
+/// The element id a drawn picture wears, so a test or a probe can find it: one name for
+/// every picture, told apart by the reference it came from.
+pub const IMAGE_ID: &str = "transcript-markdown-image";
+
+/// The extensions every assistant message is parsed with, built once per transcript —
+/// the image plugin holds that transcript's own cache of local pictures, so one is
+/// enough for the whole view and no two views share a picture.
 ///
-/// The kit compares extensions by revision, so handing the same ones to every
-/// row of every frame leaves the parsed documents alone.
-pub(crate) fn extensions() -> MarkdownExtensions {
-    static EXTENSIONS: OnceLock<MarkdownExtensions> = OnceLock::new();
-    EXTENSIONS
-        .get_or_init(|| {
-            MarkdownExtensions::default()
-                .plugin(ImageFallback)
-                .plugin(RawHtml)
-                .plugin(RawHtmlBlock)
-                // TeX math, the two forms the kit's parser already mints nodes
-                // for: `$…$` in a line, `$$…$$` of its own.
-                .plugin(crate::math::Inline)
-                .plugin(crate::math::Display)
+/// The kit compares extensions by revision, and this instance is handed to every row of
+/// every frame, so the parsed documents are left alone.
+pub(crate) fn extensions(images: &Arc<LocalImages>) -> MarkdownExtensions {
+    MarkdownExtensions::default()
+        .plugin(ImageFallback {
+            images: images.clone(),
         })
-        .clone()
+        .plugin(RawHtml)
+        .plugin(RawHtmlBlock)
+        // TeX math, the two forms the kit's parser already mints nodes for:
+        // `$…$` in a line, `$$…$$` of its own.
+        .plugin(crate::math::Inline)
+        .plugin(crate::math::Display)
 }
 
-/// What an image reference is drawn as: its alt text, in brackets, and nothing
-/// fetched.
-struct ImageFallback;
+/// The extensions a document is parsed with outside a view — a test, a demo — where
+/// there are no pictures of a record to hold: everything is claimed the same way, and
+/// every reference is drawn as its alt text.
+#[cfg(test)]
+pub(crate) fn test_extensions() -> MarkdownExtensions {
+    extensions(&Arc::new(LocalImages::new()))
+}
+
+/// One image reference: what it says, and what it names.
+struct Reference {
+    url: String,
+    alt: String,
+}
+
+/// What an image reference is drawn as.
+///
+/// A reference to a file on this machine is drawn as the picture: the file is read on a
+/// worker when the row is on screen ([`crate::images`]), and until it arrives — and for
+/// every reference that names no local file, or names one this app will not read — the
+/// alt text in brackets, which is what a reference has always been drawn as.
+///
+/// Nothing here reads, fetches or looks at the file system: the path is arithmetic on
+/// the reference ([`LocalImages::frame_of`] resolves it), and whether the file is really
+/// there is the worker's answer.
+struct ImageFallback {
+    images: Arc<LocalImages>,
+}
 
 impl MarkdownPlugin for ImageFallback {
     fn name(&self) -> &str {
@@ -65,13 +99,18 @@ impl MarkdownPlugin for ImageFallback {
         let Node::Image(image) = node else {
             return None;
         };
-        let alt = image.alt.trim();
-        let label = if alt.is_empty() {
-            "[image]".to_string()
-        } else {
-            format!("[image: {alt}]")
-        };
-        Some(MarkdownNode::new(IMAGE, ()).text(label))
+        let alt = image.alt.trim().to_string();
+        let label = bracket(&alt);
+        Some(
+            MarkdownNode::new(
+                IMAGE,
+                Reference {
+                    url: image.url.clone(),
+                    alt,
+                },
+            )
+            .text(label),
+        )
     }
 
     fn render_inline(
@@ -81,13 +120,43 @@ impl MarkdownPlugin for ImageFallback {
         _window: &mut Window,
         cx: &mut App,
     ) -> Option<InlineElement> {
-        // The element inherits the surrounding text style; only the color is
-        // its own, so a reference reads as an aside rather than as prose.
+        let reference = node.data::<Reference>();
+        let width = self.images.width();
+        if let Some(reference) = reference {
+            // The column's own width, and only ever set by the view that laid the row
+            // out: a picture narrower than it keeps its own size, a wider one is drawn
+            // to fit and keeps its shape.
+            if f32::from(width) > 0. {
+                if let Some(frame) = self.images.frame_of(&reference.url) {
+                    return Some(InlineElement::new(
+                        imgcheck::picture_within(frame, width)
+                            .id(ElementId::from(format!("{IMAGE_ID}:{}", reference.url)))
+                            .test_support(),
+                    ));
+                }
+            }
+        }
+        // Either the reference names no local file, or the picture is on its way, or it
+        // could not be read: the alt text, as a reference nobody can follow is drawn.
+        let label = match reference {
+            Some(reference) => bracket(&reference.alt),
+            None => node.as_text().to_string(),
+        };
         Some(InlineElement::new(
             div()
                 .text_color(Palette::from_app(cx).muted_foreground)
-                .child(node.as_text().to_string()),
+                .child(label),
         ))
+    }
+}
+
+/// What a reference is drawn as when it is not the picture: its alt text in brackets,
+/// which is what a transcript has always said about an image it does not show.
+fn bracket(alt: &str) -> String {
+    if alt.is_empty() {
+        "[image]".to_string()
+    } else {
+        format!("[image: {alt}]")
     }
 }
 

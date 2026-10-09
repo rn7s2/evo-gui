@@ -337,8 +337,11 @@ tables, quotes, rules, inline code — with four decisions worth knowing:
 
 - a **fence** is coloured for the grammars the app ships (`rust`, `python`,
   `javascript`, `typescript`, `bash`, `json`, `toml`) and plain otherwise;
-- an **image reference** is drawn as `[image: alt]` and nothing is fetched: an
-  `<img>` would make the app request a URL a model chose;
+- an **image reference** can show a local file: `file://`, absolute, `~/` or
+  project-relative paths. Reads and decoding run off the UI thread; decoded frames
+  share a bounded, view-owned memory cache. Closing the view releases its cache.
+  Remote or unreadable references keep the `[image: alt]` fallback. No remote
+  images are fetched and no disk cache is written;
 - **raw HTML** is shown as its source, mono and muted — markup reads as markup;
 - a **link** opens only `http`, `https`, `mailto` or a path that is really there;
   a `file:`, `javascript:` or bare-fragment target is left alone.

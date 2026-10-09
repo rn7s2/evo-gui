@@ -1182,7 +1182,7 @@ mod drawn_in_a_window {
                 .child(
                     TextView::new(&self.document)
                         .style(crate::style::text_style(cx))
-                        .markdown_extensions(crate::markdown::extensions()),
+                        .markdown_extensions(crate::markdown::test_extensions()),
                 )
         }
     }

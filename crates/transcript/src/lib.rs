@@ -34,6 +34,7 @@
 //! transcript.update(cx, |view, cx| view.upsert(item, cx));
 //! ```
 
+mod images;
 mod imgcheck;
 mod link;
 mod linkify;
@@ -67,20 +68,22 @@ use std::sync::Arc;
 
 use gpui_kit::base::TextViewState;
 use gpui_kit::component::scroll::ScrollableElement as _;
+use gpui_kit::component::text::MarkdownExtensions;
 use gpui_kit::component::{v_flex, ActiveTheme as _, Icon, IconName};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     div, linear_color_stop, linear_gradient, list, px, Animation, AnimationExt as _, AnyElement,
-    App, AppContext as _, Bounds, BoxShadow, Context, Entity, FocusHandle, Hsla,
+    App, AppContext as _, AsyncApp, Bounds, BoxShadow, Context, Entity, FocusHandle, Hsla,
     InteractiveElement as _, IntoElement, ListAlignment, ListState, MouseButton,
     ParentElement as _, Pixels, Render, StatefulInteractiveElement as _, Styled as _, Task,
-    TestSupportExt as _, Window,
+    TestSupportExt as _, WeakEntity, Window,
 };
 use session::{AgentKey, Item, ItemId, ItemKind, NoticeSource};
 use std::time::Duration;
 use widgets::effort::cubic_bezier;
 use widgets::paint;
 
+use crate::images::LocalImages;
 use crate::pin::{Action, Pin};
 use crate::rows::CopyFeedback;
 use crate::style::Palette;
@@ -212,6 +215,13 @@ pub(crate) struct TranscriptData {
     pub(crate) images: HashMap<(ItemId, u32), ImageState>,
     /// The images the reader opened at full size.
     pub(crate) full_images: HashSet<(ItemId, u32)>,
+    /// The pictures the record's Markdown points at *on this machine*, by resolved path:
+    /// read when a row carrying one is built, decoded once, and bounded
+    /// ([`crate::images`]). Held for the life of the view, and dropped with it.
+    pub(crate) local: Arc<LocalImages>,
+    /// The Markdown every document of this view is parsed with. One instance per view,
+    /// because the image plugin inside it holds that view's own pictures.
+    pub(crate) extensions: MarkdownExtensions,
 }
 
 impl TranscriptData {
@@ -458,11 +468,20 @@ pub struct TranscriptView {
     /// they are compiled in.
     #[cfg(any(test, feature = "test-support"))]
     renders: u64,
+    /// How many local pictures this view has put in front of a worker. Only the tests
+    /// read it, and only when they are compiled in: a picture read is the one thing a
+    /// cache that cannot fit what is on screen must not do over and over.
+    #[cfg(any(test, feature = "test-support"))]
+    local_reads: u64,
 }
 
 impl TranscriptView {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let reaches_the_foot = Rc::new(Cell::new(true));
+        // This view's own pictures: the plugin that draws them and this view share the
+        // one cache, and nothing of it outlives the view.
+        let local = Arc::new(LocalImages::new());
+        let extensions = markdown::extensions(&local);
         let list = ListState::new(0, ListAlignment::Top, LIST_OVERDRAW);
         // What the list's own scroll answered: which rows the pane reaches. The list
         // holds its state borrowed while it runs this, so the flag is all it may write.
@@ -499,6 +518,8 @@ impl TranscriptView {
                 on_open_link: RefCell::new(None),
                 images: HashMap::new(),
                 full_images: HashSet::new(),
+                local,
+                extensions,
             }),
             list,
             slots: Slots::default(),
@@ -514,6 +535,8 @@ impl TranscriptView {
             agent: AgentKey::Coordinator,
             #[cfg(any(test, feature = "test-support"))]
             renders: 0,
+            #[cfg(any(test, feature = "test-support"))]
+            local_reads: 0,
         };
         // A zoom the reader chose redraws every transcript on screen at once
         // (§7.2): the rows are measured again at the new size on the next frame.
@@ -534,6 +557,32 @@ impl TranscriptView {
     #[cfg(any(test, feature = "test-support"))]
     pub fn renders(&self) -> u64 {
         self.renders
+    }
+
+    /// How many local pictures this view has handed to a worker, since it was made.
+    ///
+    /// A cache that cannot hold everything on screen reads a picture when the pane
+    /// reaches it and not again until something leaves; a test holds the view to that
+    /// by counting the reads a long run of frames costs.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn local_reads(&self) -> u64 {
+        self.local_reads
+    }
+
+    /// A picture budget of a given size, for the tests: a full cache in a couple of
+    /// frames, without decoding megabytes to fill one.
+    ///
+    /// The plugin that draws the pictures is handed the cache it reads them from, so
+    /// both are replaced together — and this is called before a record is shown, when
+    /// neither has been asked for anything.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn budget_local_pictures(&mut self, max_entries: usize, cx: &mut Context<Self>) {
+        let local = Arc::new(LocalImages::budgeted(max_entries, u64::MAX));
+        let extensions = markdown::extensions(&local);
+        self.data.update(cx, |data, _| {
+            data.local = local;
+            data.extensions = extensions;
+        });
     }
 
     /// Show another agent's transcript. The new one opens at its latest item, as a
@@ -648,14 +697,17 @@ impl TranscriptView {
     /// A folder that moves re-reads every row: the paths that were links are measured
     /// from somewhere else now, and some that were not are.
     pub fn set_folder(&mut self, folder: Option<PathBuf>, cx: &mut Context<Self>) {
-        if !self.data.read(cx).paths.set_folder(folder) {
+        if !self.data.read(cx).paths.set_folder(folder.clone()) {
             return;
         }
         // The rows' own documents are derived from the text and the file system: the
-        // next frame reads them again, for the rows it builds.
+        // next frame reads them again, for the rows it builds. The pictures a relative
+        // path resolved to are of the folder that is gone, so they go with it.
         self.data.update(cx, |data, _| {
             data.documents.clear();
             data.field_documents.clear();
+            data.local.clear();
+            data.local.set_folder(folder);
         });
         cx.notify();
     }
@@ -703,6 +755,81 @@ impl TranscriptView {
         // again.
         self.remeasure_row(id, cx);
         cx.notify();
+    }
+
+    /// Start reading the local pictures the frame that was just painted asked for.
+    ///
+    /// The asks come from the rows' own layout (`LocalImages::frame_of`), which runs
+    /// after the rows were built, so they are collected where the list is painted —
+    /// [`Self::on_painted`] — and each one is read on a worker under the generation it
+    /// was asked in, so an answer that lands after the record was replaced belongs to
+    /// nothing.
+    fn read_requested_pictures(&mut self, cx: &mut Context<Self>) {
+        let (generation, wanted) = self.data.update(cx, |data, _| data.local.take_wanted());
+        if !wanted.is_empty() {
+            #[cfg(any(test, feature = "test-support"))]
+            {
+                self.local_reads += wanted.len() as u64;
+            }
+            let view = cx.weak_entity();
+            for path in wanted {
+                read_local_picture(view.clone(), generation, path, cx);
+            }
+        }
+        // A reference the pane is showing that there was no room for, in a cache whose
+        // oldest entries were last asked for a pass ago: the next frame can take one of
+        // them, so that frame is asked for — the picture lands on it rather than waiting
+        // for whatever moves the reader next. A refusal with nothing of the sort to gain
+        // asks for nothing: every frame would refuse the same reference again, and read
+        // nothing for ever.
+        //
+        // The ask goes through the executor rather than through `cx.notify`: this runs
+        // while the frame is being drawn, and a notification from inside a frame's own
+        // paint is not a frame anyone schedules.
+        if self.data.update(cx, |data, _| data.local.take_retry()) {
+            cx.spawn(async move |view, cx| {
+                let _ = view.update(cx, |_view, cx| cx.notify());
+            })
+            .detach();
+        }
+    }
+
+    /// One local picture read for this view: the frame the worker decoded, or `None`
+    /// for a file that could not be read.
+    ///
+    /// Nothing is measured when the cache did not change — an answer from a record that
+    /// has been replaced, or for an entry an eviction has already taken, is dropped
+    /// rather than drawn.
+    fn local_picture_read(
+        &mut self,
+        generation: u64,
+        path: PathBuf,
+        image: Option<Arc<gpui_kit::RenderImage>>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self
+            .data
+            .update(cx, |data, _| data.local.finish(generation, &path, image))
+        {
+            return;
+        }
+        // The picture is drawn where the reference was, and the row is a different
+        // height for it: every document that could be showing it lays its inline
+        // objects out afresh, and the list measures its rows again. A reader following
+        // the tail is put back on it by the pin, the same way a row that grew as its
+        // text arrived is.
+        let documents: Vec<Entity<TextViewState>> = {
+            let data = self.data.read(cx);
+            data.documents
+                .values()
+                .chain(data.field_documents.values())
+                .cloned()
+                .collect()
+        };
+        for document in documents {
+            document.update(cx, |document, cx| document.invalidate_inline_layout(cx));
+        }
+        self.remeasure_all(cx);
     }
 
     /// The image could not be fetched or decoded: the row says so, once.
@@ -812,6 +939,13 @@ impl TranscriptView {
             data.declined = declined;
             data.reindex();
             data.retain_documents();
+            // A record that is not an extension of the one held is another record —
+            // another session, a leaf moved, a page that replaced what was there — and
+            // the pictures read for the old one are not its. A snapshot of the *same*
+            // record keeps them: it is the same conversation, read again.
+            if !extends {
+                data.local.clear();
+            }
             (extends, changed)
         });
         self.asking = None;
@@ -1018,6 +1152,8 @@ impl TranscriptView {
             data.full_results.clear();
             data.images.clear();
             data.full_images.clear();
+            // The pictures belong to the record that asked for them.
+            data.local.clear();
         });
         self.pin.reset();
         self.asking = None;
@@ -1418,6 +1554,30 @@ fn images_wanted(data: &mut TranscriptData, index: usize) -> Vec<(ItemId, u32)> 
     wanted
 }
 
+/// Read one local picture on a worker and hand the frame back to the view.
+///
+/// The read and the decode are the worker's, so a screenshot costs the frame nothing
+/// while it is read. `generation` is the cache the ask belongs to: an answer that lands
+/// after that record was replaced is dropped rather than drawn into its successor.
+fn read_local_picture(
+    view: WeakEntity<TranscriptView>,
+    generation: u64,
+    path: PathBuf,
+    cx: &mut App,
+) {
+    let read = path.clone();
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        let task = cx
+            .background_executor()
+            .spawn(async move { crate::imgcheck::read_local_image(&read) });
+        let image = task.await;
+        let _ = view.update(cx, |view, cx| {
+            view.local_picture_read(generation, path, image, cx)
+        });
+    })
+    .detach();
+}
+
 /// What an empty transcript says, per program and agent.
 ///
 /// A swarm's coordinator plans the work and hands it to its lanes; one agent has nobody
@@ -1518,6 +1678,27 @@ impl Render for TranscriptView {
             let swarm = self.data.read(cx).swarm;
             return empty_state(self.agent, swarm, &palette).into_any_element();
         }
+
+        // The pictures this frame is about to draw: which pass it is (so nothing being
+        // drawn is evicted for a picture arriving beside it), and how wide the column
+        // actually is — a picture is bounded by the pane the reader has, not by the
+        // reading measure, which a narrow pane is not. Both are read once, here, before
+        // any row is built.
+        let column = {
+            let pane = self.list.viewport_bounds().size.width;
+            let width = if pane > px(0.) {
+                pane.min(palette.measure()) - px(2. * INSET)
+            } else {
+                // The pane has not been laid out yet: the reading measure's own content
+                // width is what it will be, and a picture is never given no width.
+                palette.measure_content()
+            };
+            width.max(px(0.))
+        };
+        self.data.update(cx, |data, _| {
+            data.local.begin_pass();
+            data.local.set_width(column);
+        });
 
         // The scrollback walks itself back: the topic says there is more behind the
         // oldest item held, so the next page is asked for here, and the answer brings
@@ -1802,6 +1983,14 @@ impl Drop for TranscriptView {
 /// list shorter than its pane.
 impl TranscriptView {
     fn on_painted(&mut self, cx: &mut Context<Self>) {
+        // What the rows this frame laid out asked for: a row asks for the picture it
+        // points at while it is laid out, which is *after* the builder that made it
+        // ran, so this is the first moment they are all in. Waiting for the next frame
+        // to ask for them again would leave a record that is not moving — a resumed
+        // topic, whose pictures are in the journal and whose view nobody touches —
+        // showing the fallback for good.
+        self.read_requested_pictures(cx);
+
         // Whose scroll this frame is — if it is a scroll at all. Only a frame in which
         // the reader's own wheel, key or press arrived, the offset moved, or the list or
         // its pane changed height is one the design's rule has anything to say about;

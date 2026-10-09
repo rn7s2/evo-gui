@@ -1,37 +1,29 @@
 <div align="center">
   <img src="assets/icon/icon-1024.png" width="128" alt="Evo Desktop">
   <h1>Evo Desktop</h1>
-  <p>A native macOS app for running <b>evo</b> agent swarms:<br>
-  a coordinator and its worker lanes, one tab per project.</p>
+  <p>A native macOS app for <b>evo</b>:<br>
+  run a swarm or a single agent, one tab per project.</p>
 </div>
 
-<p align="center"><picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/screens/02-lanes-working-dark.png">
-  <img src="docs/screens/02-lanes-working-light.png" width="880" alt="A running swarm: the Lanes column lists a coordinator and six lanes, one of them working, while the coordinator's transcript shows a delegate call and the Stop swarm button">
-</picture></p>
+<p align="center">
+  <img src="docs/screens/06-report-light.png" width="880" alt="Evo Desktop: a coordinator delegates a review to Lane 1, which returns a report with done, evidence and next steps">
+</p>
 
-One coordinator agent plans and delegates; a pool of worker lanes does the work in parallel.
-Evo Desktop is the window onto that swarm — a tab strip in the title bar, one tab per folder.
+Follow parallel work from delegation to the lane's report, or work with a single agent.
+Each project has its own tab, conversation and session.
 
 ## Features
 
-- **One tab per project.** Each tab is its own swarm in its own folder, and tabs you are
-  not looking at keep working.
-- **The whole swarm in one view.** The left column lists every lane — what it is on, and
-  whether it is idle, working, or down — and clicking one shows that agent's transcript.
-- **A live transcript.** Assistant text reads as Markdown while it streams: headings,
-  tables, highlighted code, TeX math. Tool calls expand onto their arguments and results.
-- **Choosers, not config files.** Pick the model, the effort and the lane count for a
-  launch on the spot; evo's own catalog fills the menus, and evo checks what would not run.
-- **Resume anything.** The history list shows every swarm evo can resume, newest first —
-  one click opens it again in the folder it ran in.
-- **Settings in the app.** **⌘,** sets your evo binaries and the theme; a Settings tab edits
-  evo's own files — `init.lisp`, `swarm.lisp`, memory and lore — globally or per project.
-
-<p align="center"><picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/screens/06-report-dark.png">
-  <img src="docs/screens/06-report-light.png" width="880" alt="A lane's report card — done, evidence, next — in the coordinator's transcript, above the composer">
-</picture></p>
+- **Project tabs.** Run a swarm or a single agent in each folder. Background tabs keep working.
+- **Live lane controls.** See each worker's task and status, open its transcript, stop it,
+  or grow the pool without restarting the swarm.
+- **Readable transcripts.** Streaming Markdown, highlighted code, TeX math and local images.
+  Expand tool calls to inspect their arguments and results; read lane reports alongside them.
+- **Launch choosers.** Pick models, effort and worker count from evo's own catalog,
+  with checks before launch.
+- **Session history.** Resume a swarm or single-agent session in the folder where it ran.
+- **Settings in the app.** Choose binaries and theme with **⌘,**. Edit evo's config,
+  memory and lore globally or per project in a Settings tab.
 
 ## Requirements
 
@@ -55,5 +47,5 @@ No API key handy? `scripts/stub_home.sh` runs the app against a scripted model i
 - [`docs/usage.md`](docs/usage.md) — driving it: tabs and shortcuts, the transcript,
   history, Settings, failures.
 - [`docs/architecture.md`](docs/architecture.md) — which crate owns what.
-- [`docs/screens.md`](docs/screens.md) — every captured state, in both themes.
+- [`docs/screens.md`](docs/screens.md) — the screenshot gallery and how to capture it.
 - Third-party notices for the bundled fonts and math typesetting: [`assets/licenses/`](assets/licenses/).

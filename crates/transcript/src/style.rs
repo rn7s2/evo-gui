@@ -571,7 +571,7 @@ mod tests {
             div().w(px(760.)).child(
                 TextView::new(&self.document)
                     .style(text_style(cx))
-                    .markdown_extensions(crate::markdown::extensions()),
+                    .markdown_extensions(crate::markdown::test_extensions()),
             )
         }
     }

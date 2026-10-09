@@ -18,11 +18,18 @@
 //! the real `~/.evo` alone, and the two binaries are the ones the environment
 //! names (`EVO_SWARM_BIN` / `EVO_AGENT_BIN`, else `/usr/local/bin`).
 //!
+//! The scripted model is this example's own adapter, `examples/screens_model.py`:
+//! the same test stub the proofs run, driven so that the few prompts a picture
+//! needs are answered in words a reader would read — one natural prompt in the
+//! transcript instead of a `CALL … {json}` line, prose instead of the stub's
+//! `ok: …` and its `slow0 slow1 …` filler. The tool calls are still made by that
+//! model and run by the real binaries. It is named through `EVO_STUB_MESSAGES`,
+//! before the fixture exists, which is where the fixture reads it.
+//!
 //! Every state is the swarm's own: the integration build serves tabs, so the
-//! pictures below are the pool coming up, a lane at work and its own transcript, a
-//! lane's report arriving as an item, a tool row opened, a prompt queued behind a
-//! run, the check's own line for a binary that cannot run, and the history a
-//! session leaves behind.
+//! pictures below are the launch page and one of its choosers, the pool coming up,
+//! a lane at work, the report that lane sends when its job is done, a tool row
+//! opened, a prompt queued behind a run, and the history a session leaves behind.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -36,7 +43,7 @@ use gpui_kit::{
     HeadlessAppContext, Point, WindowBounds, WindowOptions,
 };
 use proofs::fixture::Fixture;
-use session::{AgentKey, Item, ItemKind};
+use session::{AgentKey, Item, ItemKind, LaneStatus, Status};
 use store::app_state::{AppState, Binaries, Theme};
 use store::model_cache::ModelCache;
 use store::paths::Root as AppRoot;
@@ -53,15 +60,36 @@ const WAIT: Duration = Duration::from_secs(60);
 /// empty tab is what this waits on.
 const LOADS: Duration = Duration::from_secs(3);
 
-/// The prompt that makes the scripted model call a tool.
-const TOOL_PROMPT: &str = "CALL bash {\"command\": \"ls crates\"}";
+/// The prompt the README's picture is about: one natural delegation, which the
+/// scripted model makes the coordinator hand to lane 1 — with this same sentence
+/// as the task, so the tool row reads like the person's own words.
+const DELEGATE_PROMPT: &str = "Review local image rendering and report back.";
 
-/// A prompt whose answer streams in slowly: sixty deltas, a tenth of a second
-/// apart. Long enough to take a picture in the middle of it.
-const SLOW_PROMPT: &str = "SLOW the quick brown fox jumps over the lazy dog";
+/// The sources, shown by the tool the transcript already has: the scripted model
+/// turns this into `bash {"command": "ls crates/transcript/src"}`, and the files
+/// below are really in the fixture's folder, so the listing is true.
+const SOURCES_PROMPT: &str = "Show the transcript source files.";
+
+/// An answer that streams, so the picture is taken in the middle of it: the
+/// scripted model streams a real explanation for this prompt.
+const EXPLAIN_PROMPT: &str = "Explain how the image cache works.";
 
 /// A prompt typed while the answer above is still being written.
-const QUEUED_PROMPT: &str = "and then check the proofs";
+const QUEUED_PROMPT: &str = "Then summarise the trade-offs.";
+
+/// The transcript crate's own sources, by name: the ones the demo's `ls` shows
+/// and the report links to. Laid into the fixture's folder before the launch, so
+/// that both are about files that exist — and named one by one, so only these
+/// five public sources of the crate can ever be copied, and nothing else from
+/// this checkout. `images.rs` is the crate's newest file, beside `imgcheck.rs`
+/// and the view it feeds.
+const TRANSCRIPT_SOURCES: &[&str] = &[
+    "images.rs",
+    "imgcheck.rs",
+    "lib.rs",
+    "markdown.rs",
+    "rows.rs",
+];
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -95,10 +123,17 @@ fn main() {
 
 fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(dir)?;
+    // The model these pictures run: this example's own adapter, which the fixture
+    // starts where it would start the test stub. It has to be named before the
+    // fixture exists — that is when the stub is started.
+    std::env::set_var("EVO_STUB_MESSAGES", model_script());
     let fixture = Fixture::new("screens");
     // The app's own reads (`sessions --json`) and every child it spawns: the stub
     // home, the scripted model's address, the agent its lanes run.
     fixture.enter();
+    // And the project folder is a real one for the pictures: the sources the demo
+    // lists and links to are laid into it before anything runs.
+    seed_sources(&fixture.folder)?;
 
     let mut cx = HeadlessAppContext::with_platform(
         gpui_kit::platform::current_platform(true).text_system(),
@@ -151,43 +186,43 @@ fn capture(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     match state {
         TabState::Running { .. } => {
             println!("[capture] the tab came up: {}", fixture.folder.display());
-            live_states(&mut cx, window, dir, &view, &tab)?;
-            // The same window, one tab older: its history now has the session
-            // that tab just ran.
+            live_states(&mut cx, window, dir, &tab)?;
+            // Open sessions are excluded from resume history. Close this fixture's
+            // running tab through the app's shutdown path before showing its entry.
+            let finished = cx.update(|cx| tab.read(cx).id());
             let tabs = view.clone();
             cx.update_window(window, |_, window, cx| {
                 tabs.update(cx, |view, cx| {
                     view.add_tab(window, cx);
+                    view.close_tab(finished, window, cx);
                 });
             })?;
-            // The loads again, the way the app runs them at startup: the session
-            // that tab just ran is in the index now, and this is the read that
-            // puts it in the history list.
+            wait_for(&mut cx, "the session tab to close", |cx| {
+                cx.update(|cx| {
+                    view.read(cx)
+                        .tabs()
+                        .iter()
+                        .all(|tab| tab.read(cx).id() != finished)
+                        .then_some(())
+                })
+            });
             cx.update(evo_desktop::start_background_loads);
-            pump(&mut cx, LOADS);
+            wait_for(&mut cx, "the completed session in history", |cx| {
+                cx.update(|cx| {
+                    (!view
+                        .read(cx)
+                        .selected_tab()
+                        .read(cx)
+                        .history_rows(cx)
+                        .is_empty())
+                    .then_some(())
+                })
+            });
+            pump(&mut cx, Duration::from_millis(400));
             shot(&mut cx, window, dir, "07-history")?;
         }
         other => println!("[capture] the tab settled in {other:?}: no live states"),
     }
-
-    // --- a swarm that cannot run at all ----------------------------------------
-    //
-    // The same window machinery with a path that holds nothing: the empty tab's
-    // check line is about a binary that could not be run, and a launch in a folder
-    // is the failure screen.
-    let (broken_window, broken_view) = open(
-        &mut cx,
-        &fixture.root,
-        Binaries {
-            evo_swarm: PathBuf::from("/nonexistent/evo-swarm"),
-            evo_agent: fixture.bins.agent.clone(),
-        },
-    )?;
-    cx.update(evo_desktop::start_background_loads);
-    pump(&mut cx, LOADS);
-    shot(&mut cx, broken_window, dir, "08-check-problem")?;
-    boot_failure(&mut cx, broken_window, &broken_view, dir, &fixture.folder)?;
-    stop_tabs(&mut cx, &broken_view);
 
     // The tabs' servers are told to stop, the way the app's own quit tells them.
     stop_tabs(&mut cx, &view);
@@ -209,158 +244,112 @@ fn stop_tabs(cx: &mut HeadlessAppContext, view: &Entity<WorkspaceView>) {
     pump(cx, Duration::from_secs(2));
 }
 
-/// The tab page, as a person builds it: a lane at work, that lane's own
-/// transcript, a tool row opened, a prompt typed behind a run, and the report a
-/// lane sends when its work is done.
+/// The tab page, as a person builds it: one lane given one review, the report it
+/// sends when that is done, the sources behind a tool row, and an answer still
+/// being written with a prompt typed behind it.
 fn live_states(
     cx: &mut HeadlessAppContext,
     window: AnyWindowHandle,
     dir: &Path,
-    view: &Entity<WorkspaceView>,
     tab: &Entity<TabContent>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // --- the pool, and one lane given work --------------------------------------
+    //
+    // One delegation, sent as a sentence: the scripted model is what turns it into
+    // the coordinator's `delegate` call, so the transcript holds the person's own
+    // words instead of a `CALL … {json}` line, and the task the lane is given is
+    // that same sentence. The lane is waited for first — the tool hands work to a
+    // lane that is up, and this one delegation is what the picture is about.
     wait_for(cx, "the lanes to come up", |cx| {
         (lanes(cx, tab) >= 1).then_some(())
     });
     println!("[capture] {} lane(s)", lanes(cx, tab));
-    type_text(cx, window, tab, &delegate(1, &lane_task()))?;
+    wait_for(cx, "lane 1 to be ready", |cx| {
+        lane_idle(cx, tab, 1).then_some(())
+    });
+    type_text(cx, window, tab, DELEGATE_PROMPT)?;
     wait_for(cx, "lane 1 working", |cx| {
         lane_busy(cx, tab, 1).then_some(())
     });
     shot(cx, window, dir, "02-lanes-working")?;
 
-    // --- the strip itself ------------------------------------------------------
+    // --- the report the lane sends when that work is done ------------------------
     //
-    // The running tab and one New Swarm tab, opened by the strip's own button.
-    // A second click must select that same empty tab, not manufacture another.
-    click(cx, window, "tab-add".into())?;
-    pump(cx, Duration::from_millis(100));
-    click(cx, window, "tab-add".into())?;
-    let under_the_pointer = cx.update(|cx| {
-        let view = view.read(cx);
-        assert_eq!(view.tabs().len(), 2, "repeated + keeps one New Swarm tab");
-        assert_eq!(view.selected_index(), 1);
-        let tab = view.selected_tab().read(cx);
-        assert_eq!(tab.state(), &TabState::Empty);
-        assert_eq!(tab.title(cx).as_ref(), "New Swarm");
-        tab.id()
-    });
-    // The working tab stays selected; the empty tab is hovered so its fill and
-    // the active tab's outward corners are visible beside the trailing +.
-    cx.update_window(window, |_, window, cx| {
-        let view = view.clone();
-        view.update(cx, |view, cx| view.select_tab(0, window, cx));
-    })?;
-    cx.update_window(window, |_, window, cx| {
-        let at = window
-            .find(ElementId::NamedInteger(
-                "tab-label".into(),
-                under_the_pointer.get(),
-            ))
-            .bounds()
-            .center();
-        window.simulate_mouse_move(at, cx);
-    })?;
-    pump(cx, Duration::from_millis(400));
-    shot(cx, window, dir, "10-tabs")?;
-    // Back to the tab the rest of these states are about.
-    cx.update_window(window, |_, window, cx| {
-        let view = view.clone();
-        view.update(cx, |view, cx| {
-            view.select_tab(0, window, cx);
-            view.close_tab(under_the_pointer, window, cx);
-        });
-    })?;
-    pump(cx, Duration::from_millis(400));
+    // A lane reports by calling the `report` tool: that item is the coordinator's
+    // copy of it, and it arrives as a `lane_report` (§4.1) — fields, not prose.
+    // This report is the end of the job the picture above handed over, and it is
+    // taken here, before the tool row and the streaming answer below: the card is
+    // what a reader is meant to see, not the tail of a long scroll.
+    wait_for(cx, "lane 1's report", |cx| reported(cx, tab).then_some(()));
+    pump(cx, Duration::from_millis(800));
+    shot(cx, window, dir, "06-report")?;
 
-    // --- the lane's own transcript ---------------------------------------------
-    click(cx, window, agent_row(AgentKey::Lane(1)))?;
-    wait_for(cx, "lane 1 selected", |cx| {
-        (cx.update(|cx| tab.read(cx).selected_agent()) == AgentKey::Lane(1)).then_some(())
+    // --- the sources, by the tool the transcript already has ---------------------
+    //
+    // The prompt is a sentence; the model turns it into the `bash` call. The row is
+    // left open: its arguments and the listing it made are part of the picture
+    // below, the one taken while an answer is still being written.
+    wait_for(cx, "the coordinator to settle", |cx| {
+        coordinator_idle(cx, tab).then_some(())
     });
-    pump(cx, Duration::from_millis(600));
-    shot(cx, window, dir, "03-lane-transcript")?;
-    click(cx, window, agent_row(AgentKey::Coordinator))?;
-
-    // --- a tool row, opened -----------------------------------------------------
-    type_text(cx, window, tab, TOOL_PROMPT)?;
+    type_text(cx, window, tab, SOURCES_PROMPT)?;
     let tool = wait_for(cx, "the completed bash row", |cx| tool_item(cx, tab));
     click(cx, window, row("transcript-tool", &tool))?;
-    pump(cx, Duration::from_millis(600));
-    shot(cx, window, dir, "04-tool")?;
+    pump(cx, Duration::from_millis(200));
 
     // --- an answer still being written, and a prompt typed behind it -------------
-    type_text(cx, window, tab, SLOW_PROMPT)?;
+    //
+    // The answer streams a word at a time for about six seconds, so the picture
+    // lands in the middle of it; the second prompt is typed then and waits its turn
+    // behind the run — the queued card this picture is about.
+    wait_for(cx, "the coordinator to settle", |cx| {
+        coordinator_idle(cx, tab).then_some(())
+    });
+    type_text(cx, window, tab, EXPLAIN_PROMPT)?;
     wait_for(cx, "the answer to start streaming", |cx| {
         streaming(cx, tab).then_some(())
     });
     type_text(cx, window, tab, QUEUED_PROMPT)?;
     wait_for(cx, "the queued prompt", |cx| queued(cx, tab).then_some(()));
     shot(cx, window, dir, "05-queued")?;
-
-    // --- what the lane says when it is done -------------------------------------
-    //
-    // A lane reports by calling the `report` tool: that item is the coordinator's
-    // copy of it, and it arrives as a `lane_report` (§4.1) — fields, not prose.
-    wait_for(cx, "the queue to be taken", |cx| {
-        (!queued(cx, tab)).then_some(())
-    });
-    type_text(cx, window, tab, &delegate(1, &report_task()))?;
-    wait_for(cx, "lane 1's report", |cx| reported(cx, tab).then_some(()));
-    pump(cx, Duration::from_millis(800));
-    shot(cx, window, dir, "06-report")?;
     Ok(())
 }
 
-/// `CALL delegate {lane, task}` — the coordinator's own tool for giving a lane
-/// work, sent the way a person sends a prompt.
-fn delegate(lane: u32, task: &str) -> String {
-    format!(
-        "CALL delegate {}",
-        serde_json::json!({ "lane": lane, "task": task })
-    )
+/// The scripted model this capture runs: the adapter beside this file, which the
+/// fixture starts where it would start the test stub. Everything the model *says*
+/// is there; everything the app does with it is the app's own.
+fn model_script() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/screens_model.py")
 }
 
-/// A lane's first job: three seconds of delay, then a checklist — long enough to
-/// take the picture while the lane is working.
-fn lane_task() -> String {
-    format!(
-        "DELAY3 CALL todo {}",
-        serde_json::json!({ "items": [
-            { "text": "read the tab page", "status": "in-progress" },
-            { "text": "fix the empty column", "status": "pending" },
-        ]})
-    )
+/// The checkout this example is built in: `crates/app` → `crates` → the root.
+fn checkout() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("crates/app is under the checkout")
+        .to_path_buf()
 }
 
-/// A lane's second job: report back, which is what the coordinator hears.
-fn report_task() -> String {
-    format!(
-        "CALL report {}",
-        serde_json::json!({
-            "done": "the tab page reads the swarm's own topics",
-            "evidence": "crates/workspace/src/tab_page.rs, 61 workspace tests",
-            "next": "nothing",
-        })
-    )
-}
-
-/// A swarm that cannot come up says so, and offers a Retry (§9.7).
-/// A swarm that cannot come up says so, and offers a Retry (§9.7).
-fn boot_failure(
-    cx: &mut HeadlessAppContext,
-    window: AnyWindowHandle,
-    view: &Entity<WorkspaceView>,
-    dir: &Path,
-    folder: &Path,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let tab = cx.update(|cx| view.read(cx).selected_tab().clone());
-    launch(cx, &tab, folder);
-    wait_for(cx, "the failure screen", |cx| {
-        matches!(tab_state(cx, &tab), TabState::Failed { .. }).then_some(())
-    });
-    shot(cx, window, dir, "09-boot-failure")?;
+/// Lay the demo's sources into the fixture's folder, at the path a project keeps
+/// them: `crates/transcript/src`, so the tool row's `ls` prints them and the
+/// report's links name files that are really there. Only [`TRANSCRIPT_SOURCES`],
+/// and a missing one is a loud failure rather than a picture that lies.
+fn seed_sources(folder: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let from = checkout().join("crates/transcript/src");
+    let into = folder.join("crates/transcript/src");
+    std::fs::create_dir_all(&into)?;
+    for name in TRANSCRIPT_SOURCES {
+        let source = from.join(name);
+        if !source.is_file() {
+            return Err(format!(
+                "screens: {} is missing from this checkout — the demo's `ls` would lie",
+                source.display()
+            )
+            .into());
+        }
+        std::fs::copy(&source, into.join(name))?;
+    }
     Ok(())
 }
 
@@ -482,15 +471,6 @@ fn row(name: &'static str, id: &str) -> ElementId {
     (ElementId::from(name), id.to_string()).into()
 }
 
-/// The element id of a row in the agents column: `main` is 0, lane N is N (§7.3).
-fn agent_row(key: AgentKey) -> ElementId {
-    let index = match key {
-        AgentKey::Coordinator => 0,
-        AgentKey::Lane(n) => u64::from(n),
-    };
-    ElementId::NamedInteger("agent-row".into(), index)
-}
-
 fn click(
     cx: &mut HeadlessAppContext,
     window: AnyWindowHandle,
@@ -521,6 +501,37 @@ fn lane_busy(cx: &mut HeadlessAppContext, tab: &Entity<TabContent>, n: u32) -> b
                     .iter()
                     .any(|lane| lane.n == n && lane.is_busy())
             })
+            .unwrap_or(false)
+    })
+}
+
+/// Whether lane N is up and idle: what the coordinator's `delegate` hands work to.
+///
+/// A row says `idle` once that lane's own process has published its state, so this
+/// is the lane being ready rather than merely listed by the swarm.
+fn lane_idle(cx: &mut HeadlessAppContext, tab: &Entity<TabContent>, n: u32) -> bool {
+    cx.update(|cx| {
+        tab.read(cx)
+            .model()
+            .map(|model| {
+                model
+                    .lane_rows()
+                    .iter()
+                    .any(|lane| lane.n == n && lane.status == LaneStatus::Idle)
+            })
+            .unwrap_or(false)
+    })
+}
+
+/// Whether the coordinator is idle: not running a turn, and not held by its lanes.
+///
+/// What a prompt needs to be sent rather than queued behind a run — a queued card
+/// is not what the report picture is about.
+fn coordinator_idle(cx: &mut HeadlessAppContext, tab: &Entity<TabContent>) -> bool {
+    cx.update(|cx| {
+        tab.read(cx)
+            .model()
+            .map(|model| model.activity() == Status::Idle)
             .unwrap_or(false)
     })
 }
@@ -568,6 +579,8 @@ fn pump(cx: &mut HeadlessAppContext, how_long: Duration) {
     while Instant::now() < deadline {
         cx.run_until_parked();
         std::thread::sleep(Duration::from_millis(20));
+        cx.background_executor
+            .advance_clock(Duration::from_millis(20));
     }
 }
 

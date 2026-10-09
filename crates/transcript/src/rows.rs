@@ -36,7 +36,7 @@ use crate::imgcheck::{is_tiny, picture, MIN_PICTURE};
 use crate::ImageState;
 
 use crate::style::{mix, text_style, Palette, BLOCK_GAP, GROUP_GAP, TIGHT_GAP, TURN_GAP};
-use crate::{link, markdown, TranscriptData, TranscriptView};
+use crate::{link, TranscriptData, TranscriptView};
 use widgets::glyph;
 
 /// Fade window for text appended by a streaming delta (§2.8).
@@ -1572,7 +1572,7 @@ fn assistant_row(
                                 .style(text_style(cx))
                                 .motion(stream_motion())
                                 .on_link_click(link::on_click(data.open_link()))
-                                .markdown_extensions(markdown::extensions())
+                                .markdown_extensions(data.extensions.clone())
                                 .code_block_actions(move |code_block, _, _| {
                                     let block = code_block.span.map(|span| span.start).unwrap_or(0);
                                     copy_button(
@@ -2553,7 +2553,7 @@ fn report_row(
                 .style(report_text_style(cx))
                 .selectable(true)
                 .on_link_click(link::on_click(data.open_link()))
-                .markdown_extensions(markdown::extensions())
+                .markdown_extensions(data.extensions.clone())
                 .into_any_element(),
             None => div().child(value.to_string()).into_any_element(),
         };
