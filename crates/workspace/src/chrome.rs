@@ -56,17 +56,12 @@ pub const MIN_WINDOW_SIZE: Size<Pixels> = size(
 /// `None` until the panels have laid out once — before that there is no page to
 /// measure, and nothing to remember.
 fn panes_from_sizes(sizes: &[Pixels]) -> Option<Panes> {
-    match sizes {
-        [left, _, right] => Some(Panes {
-            left: left.as_f32(),
-            right: right.as_f32(),
-        }),
-        [left, _] => Some(Panes {
-            left: left.as_f32(),
-            right: 0.0,
-        }),
-        _ => None,
-    }
+    let [left, _] = sizes else {
+        return None;
+    };
+    Some(Panes {
+        left: left.as_f32(),
+    })
 }
 
 /// The key context the window's own shortcuts are bound in (§7.1).
@@ -1394,12 +1389,6 @@ impl WorkspaceView {
                 state.update(cx, |state, cx| {
                     state.resize_panel(0, px(store::app_state::LEFT_DEFAULT), window, cx)
                 });
-            }
-            TabContentEvent::PanesChanged(panes) => {
-                // The tab toggled its terminal pane: take its widths (which include
-                // the new right value) and propagate them the same way a drag does.
-                let panes = panes::fit(panes, window.bounds().size.width.into());
-                self.set_panes(panes, cx);
             }
             TabContentEvent::ScreenChanged => {
                 // The screen changed under the keyboard. GPUI resolves a keystroke

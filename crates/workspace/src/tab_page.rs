@@ -15,7 +15,7 @@
 use std::path::Path;
 use std::rc::Rc;
 
-use gpui_kit::base::{InteractiveElementExt as _, ResizeHandleRenderer};
+use gpui_kit::base::{resize_handle, InteractiveElementExt as _, ResizeHandleRenderer};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::spinner::Spinner;
@@ -25,8 +25,8 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    div, px, AnyElement, App, Context, ElementId, Entity, IntoElement, MouseButton, MouseDownEvent,
-    Pixels, SharedString, TestSupportExt as _, Window,
+    div, px, AnyElement, App, Context, DragMoveEvent, ElementId, Entity, IntoElement, MouseButton,
+    MouseDownEvent, Pixels, SharedString, TestSupportExt as _, Window,
 };
 use session::AgentKey;
 use settings::{ConfigEditor, ConfigScope};
@@ -54,6 +54,37 @@ const PROJECT_ROW_LABEL: &str = "Project settings";
 /// How many characters of the path that row shows before it is elided: about what
 /// fits under a 260 px column beside the gear.
 const PROJECT_ROW_CHARS: usize = 34;
+
+/// The terminal column, its band, and its divider, by name — for a probe script
+/// and the tests.
+const TERMINAL_COLUMN_ID: &str = "terminal-column";
+const TERMINAL_HEADER_ID: &str = "terminal-header";
+const TERMINAL_HANDLE_ID: &str = "terminal-handle";
+
+/// What a drag of the terminal's divider carries: nothing but which divider it is.
+#[derive(Clone)]
+struct TerminalSplit;
+
+/// The view a drag of that divider shows under the pointer: none — the divider
+/// itself is what moves.
+struct TerminalSplitDrag;
+
+impl gpui_kit::Render for TerminalSplitDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        gpui_kit::Empty
+    }
+}
+
+/// How wide an open terminal is drawn: the tab's own width, brought in so the
+/// conversation keeps its minimum beside the lane column — but never under the
+/// terminal's own minimum, since a terminal too narrow to type in is not one.
+fn terminal_shown_width(width: f32, panes: store::app_state::Panes, window_width: f32) -> f32 {
+    let room = window_width - panes.left - CENTER_MIN;
+    width.min(room).clamp(
+        store::app_state::TERMINAL_MIN,
+        store::app_state::TERMINAL_MAX,
+    )
+}
 
 impl TabContent {
     /// The content for the tab's current state.
@@ -368,26 +399,40 @@ impl TabContent {
             .into_any_element()
     }
 
-    /// The tab page: the swarm's lanes, and the selected agent's conversation
-    /// (§7.3).
+    /// The tab page: the swarm's lanes, the selected agent's conversation, and —
+    /// while it is open — the tab's terminal (§7.3).
     ///
-    /// Two columns with a draggable split between them, drawn by the kit's resizable
-    /// panels: the agent column takes the width the window remembers, the
-    /// conversation takes what is left. Every tab's page shares one
-    /// [`panes::Panes`](crate::panes) state — the two columns are the same two in
-    /// every tab, so a split dragged in one tab is dragged in all of them — and the
-    /// window hears where the drag ended so it can write it down.
+    /// The lanes and the conversation are the kit's resizable group: the agent
+    /// column takes the width the window remembers, the conversation takes what is
+    /// left, and every tab shares that one state. The terminal lives inside the
+    /// conversation's panel, at its right edge, on purpose: its width is this tab's
+    /// own, and the group rescales every panel whenever its own width or its panel
+    /// count changes — a terminal beside the group, or a third panel in it, made
+    /// the lane column jump each time the terminal was opened or put away.
     fn render_page(
         &self,
         folder: &Path,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let panes = crate::panes::fit(self.panes(), f32::from(window.bounds().size.width));
+        let window_width = f32::from(window.bounds().size.width);
+        let panes = crate::panes::fit(self.panes(), window_width);
+        let terminal = self
+            .terminal
+            .clone()
+            .filter(|_| self.terminal_open)
+            .map(|terminal| {
+                (
+                    terminal,
+                    terminal_shown_width(self.terminal_width, panes, window_width),
+                )
+            });
         div()
             .id("tab-page")
             .test_support()
             .size_full()
+            .flex()
+            .flex_row()
             // The design's `pointerdown` on the document, which folds an open drawer
             // on a press anywhere but the composer's box. This is the page's own
             // whole surface — the lanes, the band, the transcript, the space the box
@@ -402,31 +447,45 @@ impl TabContent {
                     });
                 }),
             )
-            .child(self.render_columns(folder, panes, window, cx))
+            // The terminal's divider, dragged: the terminal is as wide as from the
+            // pointer to the page's right edge, and never so wide that the
+            // conversation loses its minimum.
+            .on_drag_move(cx.listener(
+                move |this, event: &DragMoveEvent<Rc<TerminalSplit>>, window, cx| {
+                    let window_width = f32::from(window.bounds().size.width);
+                    let panes = crate::panes::fit(this.panes(), window_width);
+                    let wanted = f32::from(event.bounds.right() - event.event.position.x);
+                    let room = window_width - panes.left - CENTER_MIN;
+                    this.set_terminal_width(wanted.min(room), cx);
+                },
+            ))
+            .child(self.render_columns(folder, panes, terminal, window, cx))
             .into_any_element()
     }
 
-    /// The two columns themselves, in the group that lets the split between them be
-    /// dragged.
+    /// The lanes and the conversation, in the group that lets the split between
+    /// them be dragged.
     ///
     /// The agent column may be dragged out to `LEFT_MAX`, but never so far that the
     /// conversation is squeezed below `CENTER_MIN`: the design's own
-    /// `Math.min(LEFT_MAX, width - MAIN_MIN)`, which is what makes the split depend on
-    /// the window rather than on the file.
+    /// `Math.min(LEFT_MAX, width - MAIN_MIN)` — with an open terminal's width taken
+    /// out of the window first.
     fn render_columns(
         &self,
         folder: &Path,
         panes: store::app_state::Panes,
+        terminal: Option<(Entity<terminal::TerminalPane>, f32)>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let width = f32::from(window.bounds().size.width);
-        let widest = (width - panes.right - CENTER_MIN).clamp(LEFT_MIN, LEFT_MAX);
-        let mut columns = h_resizable("tab-columns")
+        let terminal_width = terminal.as_ref().map_or(0., |(_, width)| *width);
+        let widest = (width - terminal_width - CENTER_MIN).clamp(LEFT_MIN, LEFT_MAX);
+        h_resizable("tab-columns")
             .when_some(self.pane_state.clone(), |group, state| {
                 group.with_state(&state)
             })
-            .with_handle_appearance(self.pane_hands(cx))
+            .with_handle_appearance(self.pane_hands("pane-handle", cx))
             .child(
                 resizable_panel()
                     .size(px(panes.left))
@@ -436,43 +495,78 @@ impl TabContent {
             )
             .child(
                 resizable_panel()
-                    .size_range(px(CENTER_MIN)..Pixels::MAX)
-                    .child(self.render_conversation_column(folder, window, cx)),
-            );
-        // The terminal pane: a third column on the right, with its own divider,
-        // shown only when open. Its width is the tab's own `panes.right`.
-        if self.terminal_open {
-            if let Some(terminal) = &self.terminal {
-                let palette = design::palette(cx.theme().mode.is_dark());
-                columns = columns.child(
-                    resizable_panel()
-                        .size(px(panes.right))
-                        .size_range(
-                            px(store::app_state::RIGHT_MIN)..px(store::app_state::RIGHT_MAX),
-                        )
-                        .flex_none()
-                        .child(
-                            div()
-                                .id("terminal-column")
-                                .test_support()
-                                .w_full()
-                                .h_full()
-                                .bg(paint::color(palette.bg))
-                                .border_l_1()
-                                .border_color(paint::color(palette.border))
-                                .child(terminal.clone()),
-                        ),
-                );
-            }
-        }
-        columns
+                    .size_range(px(CENTER_MIN + terminal_width)..Pixels::MAX)
+                    .child(
+                        h_flex()
+                            .size_full()
+                            .child(self.render_conversation_column(folder, window, cx))
+                            .when_some(terminal, |row, (terminal, width)| {
+                                row.child(self.render_terminal_column(terminal, width, cx))
+                            }),
+                    ),
+            )
     }
 
-    /// The split between the two columns: the kit's own hairline and the pill it grows
-    /// on hover, on press and while it is dragged — the design's divider, which is that
-    /// same state machine — wrapped in the one gesture it has no room for: a
-    /// double-click that puts the column back to the width it starts at.
-    fn pane_hands(&self, cx: &Context<Self>) -> ResizeHandleRenderer {
+    /// The terminal: its band — the lane column's own, mirrored — the shell under
+    /// it, and the divider on its left edge, which drags the way the lane split
+    /// does and double-clicks back to the width a terminal opens at.
+    fn render_terminal_column(
+        &self,
+        terminal: Entity<terminal::TerminalPane>,
+        width: f32,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let palette = design::palette(cx.theme().mode.is_dark());
+        let handle = resize_handle::<TerminalSplit, TerminalSplitDrag>(
+            "terminal-split",
+            gpui_kit::Axis::Horizontal,
+        )
+        .with_appearance(self.pane_hands(TERMINAL_HANDLE_ID, cx))
+        .on_drag(TerminalSplit, |_, _, _, cx| {
+            cx.stop_propagation();
+            cx.new(|_| TerminalSplitDrag)
+        });
+        v_flex()
+            .id(TERMINAL_COLUMN_ID)
+            .test_support()
+            .relative()
+            .flex_none()
+            .w(px(width))
+            .h_full()
+            .bg(cx.theme().background)
+            .child(
+                // `.ws-head`, as the lane column wears it: the same height, surface,
+                // inset, rule and title type, so the bands line up across the page.
+                h_flex()
+                    .id(TERMINAL_HEADER_ID)
+                    .test_support()
+                    .h(px(design::HEADER_HEIGHT))
+                    .flex_none()
+                    .w_full()
+                    .items_center()
+                    .gap(px(8.))
+                    .px(px(design::INSET))
+                    .bg(paint::color(palette.sidebar))
+                    .border_b_1()
+                    .border_color(paint::color(palette.border))
+                    .child(
+                        div()
+                            .font_semibold()
+                            .text_size(px(13.))
+                            .text_color(paint::color(palette.fg))
+                            .child("Terminal"),
+                    ),
+            )
+            .child(div().flex_1().min_h_0().child(terminal))
+            .child(handle)
+    }
+
+    /// A split's divider: the kit's own hairline and the pill it grows on hover, on
+    /// press and while it is dragged — the design's divider, which is that same
+    /// state machine — wrapped in the one gesture it has no room for: a
+    /// double-click that puts the column back to the width it starts at. `id` says
+    /// which split, and so which column goes back.
+    fn pane_hands(&self, id: &'static str, cx: &Context<Self>) -> ResizeHandleRenderer {
         let kit = resize_handle_appearance();
         let tab = cx.entity().downgrade();
         Rc::new(move |handle, window, cx| {
@@ -492,16 +586,24 @@ impl TabContent {
                     // and the cursor while it is dragged is the band's own. The band is
                     // named so a script or a test can put a pointer on it, which is the
                     // only way to reach the kit's own handle.
-                    .id("pane-handle")
+                    .id(id)
                     .h_full()
                     .w(px(1.))
                     .cursor_col_resize()
                     .on_double_click(move |_, _, cx| {
-                        if let Some(tab) = tab.upgrade() {
-                            // The window owns the width (§7.3); a tab only says what was
-                            // asked of it.
-                            tab.update(cx, |_, cx| cx.emit(TabContentEvent::ResetPane));
-                        }
+                        let Some(tab) = tab.upgrade() else {
+                            return;
+                        };
+                        tab.update(cx, |tab, cx| {
+                            if id == TERMINAL_HANDLE_ID {
+                                // The terminal's width is the tab's own.
+                                tab.set_terminal_width(store::app_state::TERMINAL_DEFAULT, cx);
+                            } else {
+                                // The window owns the lane column's width (§7.3); a
+                                // tab only says what was asked of it.
+                                cx.emit(TabContentEvent::ResetPane);
+                            }
+                        });
                     })
                     .test_support()
                     .child(painted.unwrap_or_else(|| {

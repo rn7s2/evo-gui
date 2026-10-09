@@ -22,8 +22,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use gpui_kit::component::list::{ListEvent, ListState};
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    App, Context, Entity, EventEmitter, FocusHandle, IntoElement, Render, SharedString,
-    Subscription, Task, Window,
+    App, Context, Entity, EventEmitter, FocusHandle, Focusable as _, IntoElement, Render,
+    SharedString, Subscription, Task, Window,
 };
 
 use async_channel::Receiver;
@@ -278,8 +278,6 @@ pub enum TabContentEvent {
     /// conversation (§7.3): the column goes back to the width it starts at. The
     /// window owns the width, so the gesture is reported rather than acted on.
     ResetPane,
-    /// The tab's terminal pane was toggled, and its pane widths changed.
-    PanesChanged(store::app_state::Panes),
 }
 
 /// Which of the two screens a [`TabContent`] opens on (§7.1, §7.2): a New Swarm
@@ -369,12 +367,15 @@ pub struct TabContent {
     pub(crate) close_prompt: bool,
     /// Whether the terminal pane is open for this tab.
     pub(crate) terminal_open: bool,
-    /// The width the terminal was at before it was closed, so re-opening restores
-    /// the same width rather than the default. Zero until the first open.
-    pub(crate) terminal_last_width: f32,
-    /// The terminal pane entity, created on the first open and kept alive across
-    /// toggles so the shell session survives.
+    /// The terminal's width, this tab's own: where its divider was last left,
+    /// kept while the pane is closed so it opens again where it was.
+    pub(crate) terminal_width: f32,
+    /// The terminal pane, made on the first open and kept across a close so the
+    /// shell and what it printed survive; dropped when the shell exits.
     pub(crate) terminal: Option<Entity<terminal::TerminalPane>>,
+    /// The terminal's own subscription (its shell exiting), for as long as it
+    /// lives.
+    terminal_exit: Option<Subscription>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -638,8 +639,9 @@ impl TabContent {
             thinking_level: None,
             close_prompt: false,
             terminal_open: false,
-            terminal_last_width: 0.0,
+            terminal_width: store::app_state::TERMINAL_DEFAULT,
             terminal: None,
+            terminal_exit: None,
             _subscriptions: vec![
                 history_subscription,
                 composer_subscription,
@@ -702,42 +704,80 @@ impl TabContent {
         self.terminating
     }
 
-    /// Toggle the terminal pane open/closed.
+    /// Toggle the terminal pane open/closed (⌃`, or the header's control).
     ///
-    /// Opening: if the pane has never been opened, its width defaults to half the
-    /// conversation column's measure (capped to the range). The shell survives a
-    /// close, so re-opening brings back the same session.
+    /// Opening puts the keyboard in the terminal; the first open starts its shell
+    /// in the tab's folder. Closing keeps the shell, and hands the keyboard back
+    /// to the page if the terminal had it — a focus left on a pane that is no
+    /// longer drawn is a keyboard that answers nothing, not even ⌃`.
     pub fn toggle_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.terminal_open {
-            // Close: remember the current width, set right to 0.
-            self.terminal_last_width = self.panes.right;
-            self.panes.right = 0.0;
-            self.terminal_open = false;
+            self.close_terminal(window, cx);
         } else {
-            // Open: restore the last width, or use a default.
-            let width = if self.terminal_last_width > 0.0 {
-                self.terminal_last_width
-            } else {
-                // Default: half the conversation pane's measure width, clamped.
-                (store::design::MEASURE / 2.0)
-                    .clamp(store::app_state::RIGHT_MIN, store::app_state::RIGHT_MAX)
-            };
-            self.panes.right = width;
-            self.terminal_open = true;
-            // Create the terminal on first open; keep it across toggles.
-            if self.terminal.is_none() {
-                let folder = self.working_dir();
-                let font = store::app_state::AppState::load(&self.config.root).terminal_font;
-                let terminal =
-                    cx.new(|cx| terminal::TerminalPane::new(folder, window, cx));
-                if font != store::design::MONO_FONT {
-                    terminal.update(cx, |pane, cx| pane.set_font_family(&font, cx));
-                }
-                self.terminal = Some(terminal);
-            }
+            self.open_terminal(window, cx);
         }
-        cx.emit(TabContentEvent::PanesChanged(self.panes));
+    }
+
+    fn open_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Only a page has a terminal: an empty tab, a boot or a failure has no
+        // folder of its own to open one in.
+        if !matches!(self.state, TabState::Running { .. }) {
+            return;
+        }
+        let terminal = match self.terminal.clone() {
+            Some(terminal) => terminal,
+            None => {
+                let folder = self.working_dir();
+                let terminal = cx.new(|cx| terminal::TerminalPane::new(folder, window, cx));
+                self.terminal_exit = Some(cx.subscribe_in(
+                    &terminal,
+                    window,
+                    |this, _, event: &terminal::TerminalEvent, window, cx| match event {
+                        terminal::TerminalEvent::Exited => this.terminal_exited(window, cx),
+                    },
+                ));
+                self.terminal = Some(terminal.clone());
+                terminal
+            }
+        };
+        self.terminal_open = true;
+        window.focus(&terminal.focus_handle(cx), cx);
         cx.notify();
+    }
+
+    fn close_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let had_keyboard = self
+            .terminal
+            .as_ref()
+            .is_some_and(|terminal| terminal.focus_handle(cx).contains_focused(window, cx));
+        self.terminal_open = false;
+        if had_keyboard {
+            self.focus_primary(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// The shell ended (`exit`, ^D): the pane goes, and the next open starts a
+    /// new shell. The width stays — it is the tab's, not the shell's.
+    fn terminal_exited(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.terminal_open {
+            self.close_terminal(window, cx);
+        }
+        self.terminal = None;
+        self.terminal_exit = None;
+        cx.notify();
+    }
+
+    /// Where the terminal's divider was dragged to: this tab's width, in range.
+    pub(crate) fn set_terminal_width(&mut self, width: f32, cx: &mut Context<Self>) {
+        let width = width.clamp(
+            store::app_state::TERMINAL_MIN,
+            store::app_state::TERMINAL_MAX,
+        );
+        if (width - self.terminal_width).abs() > f32::EPSILON {
+            self.terminal_width = width;
+            cx.notify();
+        }
     }
 
     /// The working directory for the terminal: the folder the swarm runs in,

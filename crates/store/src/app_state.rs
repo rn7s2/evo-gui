@@ -90,8 +90,6 @@ pub struct Binaries {
 pub struct Panes {
     /// The agent list on the left.
     pub left: f32,
-    /// The terminal pane on the right (0.0 means collapsed/hidden).
-    pub right: f32,
 }
 
 /// Where the left column opens, and how far it may be dragged (§7.3).
@@ -99,10 +97,16 @@ pub const LEFT_DEFAULT: f32 = 260.0;
 pub const LEFT_MIN: f32 = 180.0;
 pub const LEFT_MAX: f32 = 480.0;
 
-/// The terminal pane on the right: collapsed by default, with a drag range.
-pub const RIGHT_DEFAULT: f32 = 0.0; // collapsed
-pub const RIGHT_MIN: f32 = 200.0;
-pub const RIGHT_MAX: f32 = 800.0;
+/// The terminal pane on the right of a tab's page: the width it opens at the
+/// first time, and how far its divider may be dragged. The width is each tab's
+/// own — a terminal belongs to the tab whose folder it runs in.
+pub const TERMINAL_DEFAULT: f32 = 500.0;
+pub const TERMINAL_MIN: f32 = 200.0;
+pub const TERMINAL_MAX: f32 = 900.0;
+
+/// The terminal's type size: what it opens at, and what Settings accepts.
+pub const TERMINAL_FONT_SIZE_MIN: f32 = 8.0;
+pub const TERMINAL_FONT_SIZE_MAX: f32 = 32.0;
 
 /// The conversation column never goes below this: the transcript is what the page
 /// is for, and a page that is mostly chrome is not a page (§7.3). Lowered from the
@@ -122,16 +126,13 @@ pub const ZOOM_MAX: f32 = 2.0;
 
 impl Default for Panes {
     fn default() -> Panes {
-        Panes {
-            left: LEFT_DEFAULT,
-            right: RIGHT_DEFAULT,
-        }
+        Panes { left: LEFT_DEFAULT }
     }
 }
 
 impl Panes {
-    pub fn new(left: f32, right: f32) -> Panes {
-        Panes { left, right }.sanitized()
+    pub fn new(left: f32) -> Panes {
+        Panes { left }.sanitized()
     }
 
     /// The same widths, dragged back into their ranges — and into something that
@@ -139,12 +140,6 @@ impl Panes {
     pub fn sanitized(self) -> Panes {
         Panes {
             left: ranged(self.left, LEFT_MIN, LEFT_MAX, LEFT_DEFAULT),
-            // right: 0 means collapsed; any positive value is clamped to its range
-            right: if self.right <= 0.0 {
-                0.0
-            } else {
-                ranged(self.right, RIGHT_MIN, RIGHT_MAX, RIGHT_DEFAULT)
-            },
         }
     }
 }
@@ -304,6 +299,9 @@ pub struct AppState {
     /// design's own monospace (`"Menlo"`).
     #[serde(default = "default_terminal_font")]
     pub terminal_font: String,
+    /// The terminal pane's type size, in points. Absent in older files, which
+    /// read as the design's monospace size.
+    pub terminal_font_size: f32,
 }
 
 /// The font a terminal pane draws with when `app.json` names none (§13): the
@@ -325,6 +323,7 @@ impl Default for AppState {
             panes: Panes::default(),
             zoom: ZOOM_DEFAULT,
             terminal_font: default_terminal_font(),
+            terminal_font_size: crate::design::FONT_MONO,
         }
     }
 }
@@ -360,6 +359,12 @@ impl AppState {
         self.binaries = self.binaries.sanitized();
         self.panes = self.panes.sanitized();
         self.zoom = ranged(self.zoom, ZOOM_MIN, ZOOM_MAX, ZOOM_DEFAULT);
+        self.terminal_font_size = ranged(
+            self.terminal_font_size,
+            TERMINAL_FONT_SIZE_MIN,
+            TERMINAL_FONT_SIZE_MAX,
+            crate::design::FONT_MONO,
+        );
 
         // A stored id is only kept if it is still safe as a single path segment.
         let mut seen = std::collections::HashSet::new();
@@ -584,46 +589,27 @@ mod tests {
     /// about them: a width outside its range, or one that is not a number at all,
     /// opens at the default instead.
     #[test]
-    fn the_pane_widths_are_remembered_and_dragged_back_into_range() {
+    fn the_pane_width_is_remembered_and_dragged_back_into_range() {
         let root = temp_root("panes");
         let mut state = sample();
-        state.panes = Panes::new(300.0, 420.0);
+        state.panes = Panes::new(300.0);
         state.save(&root).unwrap();
-        assert_eq!(
-            AppState::load(&root).panes,
-            Panes {
-                left: 300.0,
-                right: 420.0,
-            }
-        );
+        assert_eq!(AppState::load(&root).panes, Panes { left: 300.0 });
 
-        // A file from before there were any, and a hand-edited one: the width it
-        // names is simply not read.
+        // A file from before there was one, a hand-edited one, and one an earlier
+        // build wrote with a terminal width in it — that width is simply not read:
+        // a terminal's width is its tab's own.
         root.ensure().unwrap();
         fs::write(root.app_json(), r#"{"version":1}"#).unwrap();
         assert_eq!(AppState::load(&root).panes, Panes::default());
         fs::write(root.app_json(), r#"{"version":1,"panes":{"left":9999}}"#).unwrap();
         assert_eq!(AppState::load(&root).panes, Panes::default());
-
-        // The right pane is collapsed unless it names a width it can be drawn at:
-        // zero, a negative, one below its minimum and one above its maximum all
-        // read as collapsed.
-        for body in [
-            r#"{"version":1,"panes":{"left":200,"right":0}}"#,
-            r#"{"version":1,"panes":{"left":200,"right":-40}}"#,
-            r#"{"version":1,"panes":{"left":200,"right":100}}"#,
-            r#"{"version":1,"panes":{"left":200,"right":9000}}"#,
-        ] {
-            fs::write(root.app_json(), body).unwrap();
-            assert_eq!(
-                AppState::load(&root).panes,
-                Panes {
-                    left: 200.0,
-                    right: 0.0,
-                },
-                "{body} leaves the terminal collapsed"
-            );
-        }
+        fs::write(
+            root.app_json(),
+            r#"{"version":1,"panes":{"left":200,"right":640.5}}"#,
+        )
+        .unwrap();
+        assert_eq!(AppState::load(&root).panes, Panes { left: 200.0 });
         fs::remove_dir_all(root.path()).unwrap();
     }
 
@@ -679,6 +665,25 @@ mod tests {
             );
         }
         assert_eq!(AppState::default().terminal_font, "Menlo");
+
+        // The size: kept when it is one Settings would accept, the design's own
+        // otherwise.
+        let mut state = sample();
+        state.terminal_font_size = 15.0;
+        state.save(&root).unwrap();
+        assert_eq!(AppState::load(&root).terminal_font_size, 15.0);
+        for body in [
+            r#"{"version":1}"#,
+            r#"{"version":1,"terminal_font_size":2}"#,
+            r#"{"version":1,"terminal_font_size":400}"#,
+        ] {
+            fs::write(root.app_json(), body).unwrap();
+            assert_eq!(
+                AppState::load(&root).terminal_font_size,
+                crate::design::FONT_MONO,
+                "{body}"
+            );
+        }
         fs::remove_dir_all(root.path()).unwrap();
     }
 
@@ -693,8 +698,12 @@ mod tests {
     fn the_pane_ranges_hold_together() {
         const _: () = assert!(LEFT_MIN < LEFT_DEFAULT && LEFT_DEFAULT < LEFT_MAX);
         const _: () = assert!(
-            RIGHT_DEFAULT == 0.0 && RIGHT_DEFAULT < RIGHT_MIN && RIGHT_MIN < RIGHT_MAX,
-            "the terminal opens collapsed, and its range is a range"
+            TERMINAL_MIN < TERMINAL_DEFAULT && TERMINAL_DEFAULT < TERMINAL_MAX,
+            "the terminal opens inside its own range"
+        );
+        const _: () = assert!(
+            TERMINAL_FONT_SIZE_MIN < crate::design::FONT_MONO
+                && crate::design::FONT_MONO < TERMINAL_FONT_SIZE_MAX
         );
         const _: () = assert!(
             LEFT_MAX + CENTER_MIN <= MIN_SIZE.0,
