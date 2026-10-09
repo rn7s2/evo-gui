@@ -35,7 +35,7 @@ pub fn open(window: &mut Window, cx: &mut App) -> Entity<SettingsPanel> {
     let (values, log) = {
         let shell = cx.global::<Shell>();
         (
-            SettingsValues::from_state(&shell.binaries, shell.theme),
+            SettingsValues::from_state(&shell.binaries, shell.theme, shell.terminal_font.clone()),
             shell.log.clone(),
         )
     };
@@ -111,6 +111,7 @@ pub fn apply(values: &SettingsValues, cx: &mut App) {
     let mut state = AppState::load(&root);
     state.binaries = values.binaries();
     state.theme = values.theme;
+    state.terminal_font = values.terminal_font.clone();
     match state.save(&root) {
         Ok(()) => log.info(format!("settings: saved {}", opened(values))),
         Err(error) => log.error(format!(
@@ -123,6 +124,7 @@ pub fn apply(values: &SettingsValues, cx: &mut App) {
         let shell = cx.global_mut::<Shell>();
         shell.binaries = values.binaries();
         shell.theme = values.theme;
+        shell.terminal_font = values.terminal_font.clone();
     }
 
     // Read the new binaries' versions again: the About dialog's second line and the
@@ -144,13 +146,14 @@ pub fn apply(values: &SettingsValues, cx: &mut App) {
 /// The one line both halves log: what was chosen, in the app's own words.
 fn opened(values: &SettingsValues) -> String {
     format!(
-        "evo-swarm {}, evo-agent {}, theme {}",
+        "evo-swarm {}, evo-agent {}, theme {}, terminal font {}",
         values.evo_swarm.display(),
         values.evo_agent.display(),
         match values.theme {
             store::app_state::Theme::System => "system",
             store::app_state::Theme::Light => "light",
             store::app_state::Theme::Dark => "dark",
-        }
+        },
+        values.terminal_font,
     )
 }

@@ -300,6 +300,16 @@ pub struct AppState {
     /// leave behind. Absent in a file written before the View menu existed, which
     /// reads as the design's own size.
     pub zoom: f32,
+    /// The terminal pane's font family. Absent in older files, which read as the
+    /// design's own monospace (`"Menlo"`).
+    #[serde(default = "default_terminal_font")]
+    pub terminal_font: String,
+}
+
+/// The font a terminal pane draws with when `app.json` names none (§13): the
+/// design's own monospace.
+fn default_terminal_font() -> String {
+    crate::design::MONO_FONT.to_string()
 }
 
 impl Default for AppState {
@@ -314,6 +324,7 @@ impl Default for AppState {
             theme: Theme::System,
             panes: Panes::default(),
             zoom: ZOOM_DEFAULT,
+            terminal_font: default_terminal_font(),
         }
     }
 }
@@ -644,6 +655,30 @@ mod tests {
         }
         assert_eq!(ZOOM_DEFAULT, 1.0);
         const { assert!(ZOOM_MIN < ZOOM_DEFAULT && ZOOM_DEFAULT < ZOOM_MAX) };
+        fs::remove_dir_all(root.path()).unwrap();
+    }
+
+    /// §13: the terminal's font is remembered, and a file that does not name one —
+    /// from before the setting existed, or broken in the way that makes the app fall
+    /// back to its defaults — opens on the design's own monospace.
+    #[test]
+    fn the_terminal_font_is_remembered_and_reads_as_the_designs_monospace() {
+        let root = temp_root("terminal-font");
+        let mut state = sample();
+        state.terminal_font = "JetBrains Mono".to_owned();
+        state.save(&root).unwrap();
+        assert_eq!(AppState::load(&root).terminal_font, "JetBrains Mono");
+
+        for body in [r#"{"version":1}"#, r#"{"version":1,"terminal_font":42}"#] {
+            root.ensure().unwrap();
+            fs::write(root.app_json(), body).unwrap();
+            assert_eq!(
+                AppState::load(&root).terminal_font,
+                crate::design::MONO_FONT,
+                "{body} opens on the design's own monospace"
+            );
+        }
+        assert_eq!(AppState::default().terminal_font, "Menlo");
         fs::remove_dir_all(root.path()).unwrap();
     }
 

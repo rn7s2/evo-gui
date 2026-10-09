@@ -93,6 +93,9 @@ pub struct Shell {
     /// the [`transcript::TranscriptZoom`] global; this is what the menu reads when
     /// it steps from it, and what a test asserts against.
     pub zoom: f32,
+    /// The terminal pane's font family `app.json` held at launch (§13). What the
+    /// Settings panel opens on, and what Save puts back.
+    pub terminal_font: String,
     /// Set once the quit sequence has begun.
     pub quitting: bool,
     /// Subscriptions that must outlive the closure that made them.
@@ -113,6 +116,7 @@ impl Shell {
             binaries: state.binaries,
             recents: state.recents,
             zoom: state.zoom,
+            terminal_font: state.terminal_font,
             launcher: Launcher::new(cache),
             view: None,
             tracker: None,

@@ -20,7 +20,7 @@ use gpui_kit::{
 use session::LaunchPlan;
 use settings::{
     Check, SettingsPanel, AGENT_PATH_ID, PANEL_ID, SAVE_ID, SWARM_CHOOSE_ID, SWARM_PATH_ID,
-    THEME_ID,
+    TERMINAL_FONT_ID, THEME_ID,
 };
 use store::app_state::{AppState, Binaries, Theme};
 use store::model_cache::ModelCache;
@@ -31,6 +31,8 @@ use workspace::{LaunchEnv, TabContentEvent, TabState, WorkspaceView};
 /// says which binary it could not run — and an agent path that is not there either.
 const SAVED_SWARM: &str = "/nonexistent/evo-swarm-from-settings";
 const SAVED_AGENT: &str = "/nonexistent/evo-agent-from-settings";
+/// And the terminal's font family, which is a value like the paths (§13).
+const SAVED_FONT: &str = "JetBrains Mono";
 
 /// How long a boot that cannot succeed is given to say so.
 const WAIT: Duration = Duration::from_secs(60);
@@ -246,9 +248,10 @@ fn saving_settings_persists_them_and_the_next_tab_spawns_with_them(cx: &mut Test
         "the embedded panel takes the whole box the dialog gives it"
     );
 
-    // A person's edits: two paths typed over, and Dark clicked.
+    // A person's edits: two paths typed over, a font family, and Dark clicked.
     type_into(cx, window, SWARM_PATH_ID, SAVED_SWARM);
     type_into(cx, window, AGENT_PATH_ID, SAVED_AGENT);
+    type_into(cx, window, TERMINAL_FONT_ID, SAVED_FONT);
     choose_theme(cx, window, 5. / 6.);
 
     // What the panel will hand over, checked before Save: a gesture that missed —
@@ -263,6 +266,10 @@ fn saving_settings_persists_them_and_the_next_tab_spawns_with_them(cx: &mut Test
     );
     assert_eq!(typed.evo_agent, PathBuf::from(SAVED_AGENT));
     assert_eq!(typed.theme, Theme::Dark, "and the theme that was clicked");
+    assert_eq!(
+        typed.terminal_font, SAVED_FONT,
+        "and the terminal font that was typed"
+    );
 
     settle(cx, window, SAVE_ID);
     cx.update_window(window, |_, window, cx| {
@@ -287,14 +294,23 @@ fn saving_settings_persists_them_and_the_next_tab_spawns_with_them(cx: &mut Test
         "both paths were persisted"
     );
     assert_eq!(state.theme, Theme::Dark, "and the theme that was chosen");
+    assert_eq!(
+        state.terminal_font, SAVED_FONT,
+        "and the terminal's font: the panel's value is `app.json`'s"
+    );
     // ...and on the Shell, which is what a launch and the About dialog read.
-    let (binaries, theme) = cx.update(|cx| {
+    let (binaries, theme, font) = cx.update(|cx| {
         let shell = cx.global::<Shell>();
-        (shell.binaries.clone(), shell.theme)
+        (
+            shell.binaries.clone(),
+            shell.theme,
+            shell.terminal_font.clone(),
+        )
     });
     assert_eq!(binaries.evo_swarm, PathBuf::from(SAVED_SWARM));
     assert_eq!(binaries.evo_agent, PathBuf::from(SAVED_AGENT));
     assert_eq!(theme, Theme::Dark);
+    assert_eq!(font, SAVED_FONT, "and the Settings panel reopens on it");
 
     // The window's *next* tab spawns with them: the swarm binary it was started
     // with is the one Settings saved, and that is what its failure names.

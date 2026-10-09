@@ -1,5 +1,5 @@
 //! The Settings dialog on its own (§13): the two binary paths with their version checks, the
-//! theme, and Reset / Cancel / Save.
+//! theme, the terminal's font, and Reset / Cancel / Save.
 //!
 //! ```sh
 //! cargo run -p settings --example settings_demo                    # live window
@@ -70,10 +70,11 @@ impl Demo {
         let subscription = cx.subscribe(&panel, |_, _, event: &SettingsEvent, _| {
             let SettingsEvent::Saved(values) = event;
             println!(
-                "[demo] Save: evo-swarm={} evo-agent={} theme={}",
+                "[demo] Save: evo-swarm={} evo-agent={} theme={} font={}",
                 values.evo_swarm.display(),
                 values.evo_agent.display(),
-                values.theme.as_str()
+                values.theme.as_str(),
+                values.terminal_font
             );
         });
         if scripted {

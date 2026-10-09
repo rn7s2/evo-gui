@@ -48,7 +48,7 @@ use crate::probe::{probe, Check};
 /// The size the standalone panel draws itself at — the demo, a capture — and the height
 /// floor of a hosted one, which takes its host's width instead
 /// ([`SettingsPanel::embedded`]).
-pub const PANEL_SIZE: (f32, f32) = (560., 360.);
+pub const PANEL_SIZE: (f32, f32) = (560., 420.);
 
 /// The panel's own element id, and the ids of everything in it, so the app's tests (and
 /// this crate's captures) can find a control rather than a position.
@@ -61,6 +61,7 @@ pub const AGENT_CHOOSE_ID: &str = "settings-evo-agent-choose";
 pub const AGENT_STATUS_ID: &str = "settings-evo-agent-status";
 pub const THEME_ID: &str = "settings-theme";
 pub const THEME_CHOICES_ID: &str = "settings-theme-choices";
+pub const TERMINAL_FONT_ID: &str = "settings-terminal-font";
 pub const RESET_ID: &str = "settings-reset";
 pub const CANCEL_ID: &str = "settings-cancel";
 pub const SAVE_ID: &str = "settings-save";
@@ -91,8 +92,9 @@ const FIELD_RING_INK: f32 = 0.12;
 const TYPING_PAUSE: Duration = Duration::from_millis(250);
 
 const TITLE: &str = "Settings";
-const SUBTITLE: &str = "The two binaries the app spawns, and the app's theme.";
+const SUBTITLE: &str = "The two binaries the app spawns, the app's theme, and the terminal's font.";
 const THEME_LABEL: &str = "Theme";
+const TERMINAL_FONT_LABEL: &str = "Terminal Font";
 const CHOOSE_LABEL: &str = "Choose…";
 const RESET_LABEL: &str = "Reset to defaults";
 const CANCEL_LABEL: &str = "Cancel";
@@ -109,15 +111,22 @@ pub struct SettingsValues {
     pub evo_swarm: PathBuf,
     pub evo_agent: PathBuf,
     pub theme: StoredTheme,
+    /// The terminal pane's font family.
+    pub terminal_font: String,
 }
 
 impl SettingsValues {
     /// The app's current state, as the panel opens on it.
-    pub fn from_state(binaries: &Binaries, theme: StoredTheme) -> SettingsValues {
+    pub fn from_state(
+        binaries: &Binaries,
+        theme: StoredTheme,
+        terminal_font: String,
+    ) -> SettingsValues {
         SettingsValues {
             evo_swarm: binaries.evo_swarm.clone(),
             evo_agent: binaries.evo_agent.clone(),
             theme,
+            terminal_font,
         }
     }
 
@@ -132,7 +141,11 @@ impl SettingsValues {
 
 impl Default for SettingsValues {
     fn default() -> SettingsValues {
-        SettingsValues::from_state(&Binaries::default(), StoredTheme::System)
+        SettingsValues::from_state(
+            &Binaries::default(),
+            StoredTheme::System,
+            store::design::MONO_FONT.to_owned(),
+        )
     }
 }
 
@@ -212,7 +225,7 @@ enum Picker {
     Fixed(Option<PathBuf>),
 }
 
-/// The two binary paths and the theme, as a view (§13).
+/// The two binary paths, the theme and the terminal's font, as a view (§13).
 pub struct SettingsPanel {
     /// The two fields, in [`Binary`] order.
     fields: [Entity<InputState>; 2],
@@ -221,6 +234,9 @@ pub struct SettingsPanel {
     /// One counter per row: an answer is only taken if it is the answer to the newest
     /// question that row has asked.
     revisions: [u64; 2],
+    /// The terminal pane's font family. A draft like the paths: it takes effect when
+    /// the app saves it, not as it is typed.
+    terminal_font: Entity<InputState>,
     /// The choice being shown. Unlike the paths, it is applied as it is chosen.
     theme: StoredTheme,
     /// The mode in force when the panel opened — what Cancel puts back.
@@ -267,10 +283,20 @@ impl SettingsPanel {
             })
             .collect();
 
+        // The font is not a path: nothing is run for it and nothing is checked, so it
+        // has no subscription to keep.
+        let font = values.terminal_font.clone();
+        let terminal_font = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(font)
+                .placeholder("font family name")
+        });
+
         let mut panel = SettingsPanel {
             fields,
             checks: [Check::Checking, Check::Checking],
             revisions: [0, 0],
+            terminal_font,
             theme: values.theme,
             // Read now, before anything is previewed: this is what Cancel puts back.
             opened_mode: cx.theme().mode,
@@ -307,6 +333,7 @@ impl SettingsPanel {
             evo_swarm: self.path(Binary::Swarm, cx),
             evo_agent: self.path(Binary::Agent, cx),
             theme: self.theme,
+            terminal_font: self.terminal_font.read(cx).value().to_string(),
         }
     }
 
@@ -492,12 +519,17 @@ impl SettingsPanel {
         cx.emit(DismissEvent);
     }
 
-    /// The defaults, as §13 names them: `/usr/local/bin/evo-{swarm,agent}`, System.
+    /// The defaults, as §13 names them: `/usr/local/bin/evo-{swarm,agent}`, System, and
+    /// the design's own monospace.
     fn reset(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let binaries = Binaries::default();
         self.take_picked(Binary::Swarm, binaries.evo_swarm, window, cx);
         self.take_picked(Binary::Agent, binaries.evo_agent, window, cx);
         self.choose_theme(StoredTheme::System, window, cx);
+        self.terminal_font.update(cx, |field, cx| {
+            field.set_value(store::design::MONO_FONT, window, cx);
+        });
+        cx.notify();
     }
 
     /// Choose a theme — the one thing that takes effect before Save, because a theme is
@@ -698,6 +730,41 @@ impl SettingsPanel {
             )
     }
 
+    /// The terminal pane's font: a family name, typed. Nothing is run for it and
+    /// nothing is checked — the pane draws with it from the next save on — so the row
+    /// is the field and its label, where a path row is a field, a chooser and a
+    /// verdict.
+    fn terminal_font_row(&self, _window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let radius = cx.theme().radius;
+        let field_bg = cx.theme().input_background();
+        h_flex()
+            .items_center()
+            .gap(LABEL_GAP)
+            .child(row_label(TERMINAL_FONT_LABEL, Some(FIELD_HEIGHT)))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h(FIELD_HEIGHT)
+                    .flex()
+                    .items_center()
+                    .rounded(radius)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .bg(field_bg)
+                    .child(
+                        Input::new(&self.terminal_font)
+                            .id(TERMINAL_FONT_ID)
+                            .aria_label(TERMINAL_FONT_LABEL)
+                            .w_full()
+                            .cleanable(true)
+                            .appearance(false)
+                            .bordered(false)
+                            .focus_bordered(false),
+                    ),
+            )
+    }
+
     /// The note that says what a change does not do: a running tab keeps its own.
     fn note(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
@@ -797,6 +864,7 @@ impl Render for SettingsPanel {
             .child(self.binary_row(Binary::Swarm, window, cx))
             .child(self.binary_row(Binary::Agent, window, cx))
             .child(self.theme_row(window, cx))
+            .child(self.terminal_font_row(window, cx))
             // The buttons sit on the dialog's floor, however much room is left.
             .child(div().flex_1())
             .child(self.note(cx))
@@ -890,6 +958,24 @@ mod tests {
         /// wrote the value in directly would not be testing the panel.
         fn type_into(&self, cx: &mut TestAppContext, id: &'static str, text: &str) {
             self.write_into(cx, id, text, false)
+        }
+
+        /// Replace the terminal font field's whole value: select all, then type over it, the
+        /// way renaming a font does.
+        fn replace_font(&self, cx: &mut TestAppContext, text: &str) {
+            let field = cx.update(|cx| self.panel.read(cx).terminal_font.clone());
+            self.act(cx, |window, cx| {
+                let handle = field.read(cx).focus_handle(cx);
+                window.focus(&handle, cx);
+                window.press("cmd-a", cx);
+                if text.is_empty() {
+                    // Nothing to type: clearing the selection is what a person presses.
+                    window.press("backspace", cx);
+                } else {
+                    window.input(text, cx);
+                }
+                window.render_frame(cx);
+            });
         }
 
         /// Replace a field's whole value: select all, then type over it.
@@ -1186,6 +1272,7 @@ mod tests {
                 evo_swarm: PathBuf::from("/opt/evo/bin/evo-swarm"),
                 evo_agent: PathBuf::from("/usr/local/bin/evo-agent"),
                 theme: StoredTheme::Dark,
+                terminal_font: store::design::MONO_FONT.to_owned(),
             })]
         );
         // Save closes the dialog the same way Cancel does, so the app has one path out.
@@ -1195,6 +1282,9 @@ mod tests {
     #[gpui_kit::test]
     fn cancel_hands_over_nothing_and_puts_the_theme_back(cx: &mut TestAppContext) {
         let f = fixture(cx);
+        // A font typed, like a path: it is a draft on the same panel, so Cancel is the
+        // only way out that does not carry it.
+        f.replace_font(cx, "Fira Code");
         f.focus_theme_row(cx);
         f.press(cx, "right"); // System -> Light
         f.press(cx, "right"); // Light -> Dark
@@ -1298,11 +1388,58 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn the_terminal_font_opens_on_the_apps_own_and_is_saved_as_typed(cx: &mut TestAppContext) {
+        let f = open_with(
+            SettingsValues::from_state(
+                &Binaries::default(),
+                StoredTheme::Light,
+                "JetBrains Mono".to_owned(),
+            ),
+            Some(installed()),
+            cx,
+        );
+        // The field opens on what the app has, not on the default: the app hands the panel
+        // `app.json`'s font.
+        assert_eq!(f.values(cx).terminal_font, "JetBrains Mono");
+
+        f.replace_font(cx, "Fira Code");
+        assert_eq!(f.values(cx).terminal_font, "Fira Code");
+        f.click(cx, SAVE_ID);
+        let events = f.events();
+        let SettingsEvent::Saved(saved) = &events[0];
+        assert_eq!(saved.terminal_font, "Fira Code");
+        // A font is not a path: nothing is run for it, so the paths' own verdicts are the
+        // ones the panel opened with.
+        assert_eq!(
+            f.checks(cx),
+            [
+                Check::Ready("evo-swarm 0.1.0".to_owned()),
+                Check::Ready("evo-agent 0.1.0".to_owned())
+            ]
+        );
+    }
+
+    #[gpui_kit::test]
+    fn reset_puts_the_designs_monospace_back_in_the_font_row(cx: &mut TestAppContext) {
+        let f = fixture(cx);
+        f.replace_font(cx, "Fira Code");
+        assert_ne!(f.values(cx), SettingsValues::default());
+
+        f.click(cx, RESET_ID);
+        assert_eq!(f.values(cx).terminal_font, store::design::MONO_FONT);
+        assert_eq!(f.values(cx), SettingsValues::default());
+        // An emptied field is still a value: nothing is checked and nothing is refused.
+        f.replace_font(cx, "");
+        assert_eq!(f.values(cx).terminal_font, "");
+    }
+
+    #[gpui_kit::test]
     fn every_control_says_what_it_is(cx: &mut TestAppContext) {
         let f = fixture(cx);
         assert_eq!(f.label(cx, SWARM_PATH_ID), "evo-swarm path");
         assert_eq!(f.label(cx, AGENT_PATH_ID), "evo-agent path");
         assert_eq!(f.label(cx, THEME_ID), THEME_LABEL);
+        assert_eq!(f.label(cx, TERMINAL_FONT_ID), TERMINAL_FONT_LABEL);
         for (id, expected) in [
             (SWARM_CHOOSE_ID, CHOOSE_LABEL),
             (AGENT_CHOOSE_ID, CHOOSE_LABEL),
