@@ -278,6 +278,8 @@ pub enum TabContentEvent {
     /// conversation (§7.3): the column goes back to the width it starts at. The
     /// window owns the width, so the gesture is reported rather than acted on.
     ResetPane,
+    /// The tab's terminal pane was toggled, and its pane widths changed.
+    PanesChanged(store::app_state::Panes),
 }
 
 /// Which of the two screens a [`TabContent`] opens on (§7.1, §7.2): a New Swarm
@@ -367,6 +369,12 @@ pub struct TabContent {
     pub(crate) close_prompt: bool,
     /// Whether the terminal pane is open for this tab.
     pub(crate) terminal_open: bool,
+    /// The width the terminal was at before it was closed, so re-opening restores
+    /// the same width rather than the default. Zero until the first open.
+    pub(crate) terminal_last_width: f32,
+    /// The terminal pane entity, created on the first open and kept alive across
+    /// toggles so the shell session survives.
+    pub(crate) terminal: Option<Entity<terminal::TerminalPane>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -630,6 +638,8 @@ impl TabContent {
             thinking_level: None,
             close_prompt: false,
             terminal_open: false,
+            terminal_last_width: 0.0,
+            terminal: None,
             _subscriptions: vec![
                 history_subscription,
                 composer_subscription,
@@ -693,9 +703,47 @@ impl TabContent {
     }
 
     /// Toggle the terminal pane open/closed.
-    pub fn toggle_terminal(&mut self, cx: &mut Context<Self>) {
-        // TODO: implemented during terminal integration
+    ///
+    /// Opening: if the pane has never been opened, its width defaults to half the
+    /// conversation column's measure (capped to the range). The shell survives a
+    /// close, so re-opening brings back the same session.
+    pub fn toggle_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.terminal_open {
+            // Close: remember the current width, set right to 0.
+            self.terminal_last_width = self.panes.right;
+            self.panes.right = 0.0;
+            self.terminal_open = false;
+        } else {
+            // Open: restore the last width, or use a default.
+            let width = if self.terminal_last_width > 0.0 {
+                self.terminal_last_width
+            } else {
+                // Default: half the conversation pane's measure width, clamped.
+                (store::design::MEASURE / 2.0)
+                    .clamp(store::app_state::RIGHT_MIN, store::app_state::RIGHT_MAX)
+            };
+            self.panes.right = width;
+            self.terminal_open = true;
+            // Create the terminal on first open; keep it across toggles.
+            if self.terminal.is_none() {
+                let folder = self.working_dir();
+                self.terminal = Some(cx.new(|cx| terminal::TerminalPane::new(folder, window, cx)));
+            }
+        }
+        cx.emit(TabContentEvent::PanesChanged(self.panes));
         cx.notify();
+    }
+
+    /// The working directory for the terminal: the folder the swarm runs in,
+    /// or the user's home as a fallback.
+    fn working_dir(&self) -> std::path::PathBuf {
+        match &self.state {
+            TabState::Running { folder } | TabState::Booting { folder } => folder.clone(),
+            TabState::Failed { folder, .. } => folder.clone(),
+            _ => std::env::var("HOME")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| std::path::PathBuf::from("/")),
+        }
     }
 
     /// Close the tab's swarm and freeze the page until it has exited: the server is

@@ -56,15 +56,17 @@ pub const MIN_WINDOW_SIZE: Size<Pixels> = size(
 /// `None` until the panels have laid out once — before that there is no page to
 /// measure, and nothing to remember.
 fn panes_from_sizes(sizes: &[Pixels]) -> Option<Panes> {
-    let [left, _] = sizes else {
-        return None;
-    };
-    // The page has no third panel yet — the terminal is toggled by action, not
-    // by the resizable group — so `right` stays at whatever the window has.
-    Some(Panes {
-        left: left.as_f32(),
-        right: 0.0,
-    })
+    match sizes {
+        [left, _, right] => Some(Panes {
+            left: left.as_f32(),
+            right: right.as_f32(),
+        }),
+        [left, _] => Some(Panes {
+            left: left.as_f32(),
+            right: 0.0,
+        }),
+        _ => None,
+    }
 }
 
 /// The key context the window's own shortcuts are bound in (§7.1).
@@ -1086,11 +1088,11 @@ impl WorkspaceView {
     fn on_toggle_terminal(
         &mut self,
         _: &ToggleTerminal,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let tab = self.tabs[self.selected].clone();
-        tab.update(cx, |tab, cx| tab.toggle_terminal(cx));
+        tab.update(cx, |tab, cx| tab.toggle_terminal(window, cx));
     }
 
     /// One step along the strip, wrapping: with one tab open there is nowhere to
@@ -1392,6 +1394,12 @@ impl WorkspaceView {
                 state.update(cx, |state, cx| {
                     state.resize_panel(0, px(store::app_state::LEFT_DEFAULT), window, cx)
                 });
+            }
+            TabContentEvent::PanesChanged(panes) => {
+                // The tab toggled its terminal pane: take its widths (which include
+                // the new right value) and propagate them the same way a drag does.
+                let panes = panes::fit(panes, window.bounds().size.width.into());
+                self.set_panes(panes, cx);
             }
             TabContentEvent::ScreenChanged => {
                 // The screen changed under the keyboard. GPUI resolves a keystroke

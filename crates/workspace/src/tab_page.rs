@@ -421,8 +421,8 @@ impl TabContent {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let width = f32::from(window.bounds().size.width);
-        let widest = (width - CENTER_MIN).clamp(LEFT_MIN, LEFT_MAX);
-        h_resizable("tab-columns")
+        let widest = (width - panes.right - CENTER_MIN).clamp(LEFT_MIN, LEFT_MAX);
+        let mut columns = h_resizable("tab-columns")
             .when_some(self.pane_state.clone(), |group, state| {
                 group.with_state(&state)
             })
@@ -438,7 +438,34 @@ impl TabContent {
                 resizable_panel()
                     .size_range(px(CENTER_MIN)..Pixels::MAX)
                     .child(self.render_conversation_column(folder, window, cx)),
-            )
+            );
+        // The terminal pane: a third column on the right, with its own divider,
+        // shown only when open. Its width is the tab's own `panes.right`.
+        if self.terminal_open {
+            if let Some(terminal) = &self.terminal {
+                let palette = design::palette(cx.theme().mode.is_dark());
+                columns = columns.child(
+                    resizable_panel()
+                        .size(px(panes.right))
+                        .size_range(
+                            px(store::app_state::RIGHT_MIN)..px(store::app_state::RIGHT_MAX),
+                        )
+                        .flex_none()
+                        .child(
+                            div()
+                                .id("terminal-column")
+                                .test_support()
+                                .w_full()
+                                .h_full()
+                                .bg(paint::color(palette.bg))
+                                .border_l_1()
+                                .border_color(paint::color(palette.border))
+                                .child(terminal.clone()),
+                        ),
+                );
+            }
+        }
+        columns
     }
 
     /// The split between the two columns: the kit's own hairline and the pill it grows
@@ -704,7 +731,7 @@ impl TabContent {
             .text_size(px(12.))
             .text_color(paint::color(palette.muted_fg))
             .cursor_pointer()
-            .on_click(cx.listener(move |this, _, _window, cx| this.toggle_terminal(cx)))
+            .on_click(cx.listener(move |this, _, window, cx| this.toggle_terminal(window, cx)))
             .child(terminal_label(self.terminal_open))
             .into_any_element()
     }
