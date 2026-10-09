@@ -66,7 +66,7 @@ pub(crate) fn target(href: &str) -> Option<Target> {
         return Some(Target::Web(href.to_string()));
     }
     let path = PathBuf::from(href);
-    (path.is_absolute() && path.exists()).then_some(Target::Path(path))
+    (path.is_absolute() && path.parent().is_some() && path.exists()).then_some(Target::Path(path))
 }
 
 /// The file system a transcript looks at: the folder a relative path is measured from,
@@ -153,7 +153,7 @@ impl Paths {
     /// The look is remembered for [`TTL`]: the caller is a frame, and a frame that asks
     /// twice about the same token in the same breath must not ask the disk twice.
     pub(crate) fn resolve(&self, token: &str) -> Option<PathBuf> {
-        if token.is_empty() {
+        if token.trim_matches('/').is_empty() {
             return None;
         }
         let now = Instant::now();
@@ -711,6 +711,21 @@ mod tests {
             .into_iter()
             .map(|span| (text[span.start..span.end].to_string(), span.href))
             .collect()
+    }
+
+    #[test]
+    fn a_slash_separator_is_not_a_root_directory_link() {
+        let disk = Disk::new();
+        disk.has("/").has("//").has("///").has("/tmp");
+        for source in ["/", "a / b", "//", "///", "`/`", "`//`", "/, /."] {
+            assert!(links(source, &disk).is_empty(), "{source}");
+            assert_eq!(disk.paths.prose(source), source);
+        }
+        for root in ["/", "//", "///"] {
+            assert!(disk.paths.resolve(root).is_none());
+            assert!(target(root).is_none());
+        }
+        assert_eq!(links("See /tmp", &disk), [("/tmp".into(), "/tmp".into())]);
     }
 
     /// A path that is there is a link; one that is not stays text.
