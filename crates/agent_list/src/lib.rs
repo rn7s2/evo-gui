@@ -17,18 +17,21 @@
 //! set_coordinator_clock(Option<String>, cx)           the coordinator's absolute step start
 //! set_selected(AgentKey, cx)                          TabModel::selected
 //! set_down_reason(lane, Option<String>, cx)           TabModel::lane_down_reason
+//! set_add_lane_disabled(bool, cx)                     adding a lane is not on offer
 //! → AgentListEvent::Select(AgentKey)                  the owner calls TabModel::select
 //! → AgentListEvent::StopLane(u32)                     the owner sends run.interrupt{scope:lane}
+//! → AgentListEvent::AddLane                           the owner sends command.run{name:"lanes"}
 //! ```
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use gpui_kit::base::Button;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, StyledExt as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    div, px, Context, ElementId, EventEmitter, FocusHandle, FontFeatures, Hsla,
+    div, px, ClickEvent, Context, ElementId, EventEmitter, FocusHandle, FontFeatures, Hsla,
     InteractiveElement as _, IntoElement, KeyDownEvent, ParentElement as _, Pixels, Render, Role,
     SharedString, StatefulInteractiveElement as _, Styled as _, TestSupportExt as _, Window,
 };
@@ -131,6 +134,14 @@ const SUMMARY_ID: &str = "agent-list-summary";
 /// around them needs a name of its own.
 const LIST_LABEL: &str = "Agents";
 
+/// The row the list ends with while this is a swarm: the one way to grow one from the
+/// tab page. The design's reference draws no such row, so it borrows the lane rows' own
+/// geometry and hover.
+const ADD_LANE_LABEL: &str = "+ Add New Lane";
+
+/// That row's element id, the way a lane's row is addressed.
+const ADD_LANE_ID: &str = "agent-add-lane";
+
 /// What the list asks its owner to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AgentListEvent {
@@ -140,6 +151,10 @@ pub enum AgentListEvent {
     /// Stop one lane (`run.interrupt` with scope `lane`): the one human action on a lane
     /// besides typing to the coordinator (CONTRACT §7.4).
     StopLane(u32),
+    /// Grow the swarm by one lane (the owner sends `command.run` with the `lanes`
+    /// command): the last row of the list, and only a swarm's — one agent has no lanes
+    /// to add.
+    AddLane,
 }
 
 /// The tab page's agent list.
@@ -167,10 +182,18 @@ pub struct AgentList {
     /// The row the pointer is on, for the dot's `--row-surface`: the dot paints a colour
     /// fixed when the row was built, so the row says where the pointer is.
     hovered: Option<AgentKey>,
+    /// The add row's own focus handle. It is the caller's because the row has to be able
+    /// to take the keyboard itself: an ancestor's own focus transfer wins the mouse-down
+    /// that lands on it, exactly as the column's does for a click on a lane's row.
+    add_focus: FocusHandle,
     /// Whether this session is a swarm (§7.2): its first row is the swarm's
     /// *coordinator*, and one agent's is simply **Main** — there is nobody to
     /// coordinate — and the column counts lanes, which a single agent has none of.
     swarm: bool,
+    /// Whether adding a lane is off the table right now: a `command.run` for one is in
+    /// flight, or the swarm cannot take another (the coordinator is busy, the lane cap is
+    /// reached, there is no roster yet). The list's last row goes inert while it is.
+    add_lane_disabled: bool,
 }
 
 impl EventEmitter<AgentListEvent> for AgentList {}
@@ -190,6 +213,8 @@ impl AgentList {
             focus_handle: cx.focus_handle(),
             hovered: None,
             swarm: true,
+            add_lane_disabled: false,
+            add_focus: cx.focus_handle(),
         }
     }
 
@@ -207,6 +232,17 @@ impl AgentList {
     /// ([`AgentKey::name`], the one place those names are written).
     fn main_name(&self) -> String {
         AgentKey::Coordinator.name(self.swarm)
+    }
+
+    /// Whether the list's last row answers at all: `false` while adding a lane is on
+    /// offer, `true` while it is not — a request in flight, a busy coordinator, the
+    /// swarm's own cap, no roster yet. The owner is the only one who knows, so it is the
+    /// only one who sets it.
+    pub fn set_add_lane_disabled(&mut self, disabled: bool, cx: &mut Context<Self>) {
+        if self.add_lane_disabled != disabled {
+            self.add_lane_disabled = disabled;
+            cx.notify();
+        }
     }
 
     /// The moment lane clocks are counted to, stamped by the owner with its own
@@ -545,6 +581,52 @@ impl AgentList {
             .child("Stop")
     }
 
+    /// The list's last row while this is a swarm: one lane more ([`AgentListEvent::AddLane`]).
+    ///
+    /// A lane row's own shape — 32px, the list's inset, a 13px line — and the quietest
+    /// thing in the column: muted ink, the rows' own hover fill, and no dot, task or state
+    /// cell. The kit's button is what makes it a keyboard's (focus, Tab stop, Enter/Space)
+    /// and what makes `disabled` real. The owner disables it while adding a lane is not on
+    /// offer — a request in flight, a busy coordinator, a full swarm — and gpui has no
+    /// `aria-disabled` builder, so that is drawn, not named.
+    fn add_lane_row(&self, palette: &'static Palette, cx: &Context<Self>) -> impl IntoElement {
+        let disabled = self.add_lane_disabled;
+        let hover = row_hover_fill(palette);
+        Button::new(ADD_LANE_ID)
+            .track_focus(&self.add_focus)
+            .h(px(LANE_ROW))
+            .w_full()
+            .flex_none()
+            .px(px(LANE_PAD))
+            .justify_start()
+            .rounded(px(RADIUS))
+            .text_size(LANE_FONT)
+            .text_color(paint::color(palette.muted_fg))
+            .cursor_default()
+            .disabled(disabled)
+            .accessibility_label(ADD_LANE_LABEL)
+            .when(!disabled, |row| {
+                row.hover(move |row| {
+                    row.bg(paint::color(hover))
+                        .text_color(paint::color(palette.fg))
+                })
+            })
+            // The keyboard's own arrival wears what the pointer's does, as the tab page's
+            // history rows wear their own fill.
+            .focus_visible(move |row| {
+                row.bg(paint::color(hover))
+                    .text_color(paint::color(palette.fg))
+            })
+            .when(disabled, |row| row.opacity(0.45))
+            // The ancestor that holds the keyboard would otherwise take the press, as it
+            // does for a lane's row.
+            .on_click(cx.listener(|list, _: &ClickEvent, window, cx| {
+                list.add_focus.focus(window, cx);
+                cx.emit(AgentListEvent::AddLane);
+            }))
+            .child(ADD_LANE_LABEL)
+    }
+
     /// Draw one row: dot, name, the task it was given, and the state at the end.
     fn row(
         &self,
@@ -742,6 +824,10 @@ impl Render for AgentList {
         rows = rows.child(self.row(coordinator, palette, cx));
         for lane in lanes {
             rows = rows.child(self.row(lane, palette, cx));
+        }
+        // Grows the swarm, after the last lane — and only a swarm's (§7.2).
+        if self.swarm {
+            rows = rows.child(self.add_lane_row(palette, cx));
         }
 
         v_flex()
@@ -1166,6 +1252,171 @@ mod tests {
             f.events(),
             vec![AgentListEvent::StopLane(1)],
             "a click names the lane it stops"
+        );
+    }
+
+    /// The column's own last row is where a swarm grows (§7.3 has no such row; it is the
+    /// app's own). It is a lane row's own shape — 32px, the list's inset, the same width,
+    /// laid out after the last lane rather than over it — and it is a button: it names
+    /// itself to a screen reader, and one press is one lane.
+    #[gpui_kit::test]
+    fn the_swarm_grows_a_lane_after_its_last_one(cx: &mut TestAppContext) {
+        let f = open(
+            cx,
+            lanes(vec![
+                lane(1, LaneStatus::Working, Some("one")),
+                lane(2, LaneStatus::Idle, None),
+            ]),
+        );
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            let add = window.find(ADD_LANE_ID);
+            let last = window.find(row_id(AgentKey::Lane(2))).bounds();
+
+            assert_eq!(add.role(), Some(Role::Button), "it is a control, not a row");
+            assert_eq!(add.label(), Some(ADD_LANE_LABEL), "and says what it does");
+            assert_eq!(add.bounds().size.height, px(LANE_ROW), "a row's own height");
+            assert_eq!(add.bounds().origin.x, last.origin.x, "the list's own inset");
+            assert_eq!(
+                add.bounds().size.width,
+                last.size.width,
+                "and its own width"
+            );
+            assert!(
+                add.bounds().origin.y > last.origin.y,
+                "it comes after the last lane: {last:?} then {:?}",
+                add.bounds()
+            );
+
+            window.click(ADD_LANE_ID, cx);
+        });
+        assert_eq!(
+            f.events(),
+            vec![AgentListEvent::AddLane],
+            "one press is one lane"
+        );
+    }
+
+    /// It is the list's last row, not something laid over it: it lives inside the rows the
+    /// scroller wraps, under the last lane, and the list's own inset ends the content.
+    #[gpui_kit::test]
+    fn the_add_row_is_the_lists_last_row(cx: &mut TestAppContext) {
+        let rows: Vec<LaneRow> = (1..=30).map(|n| lane(n, LaneStatus::Idle, None)).collect();
+        let f = open(cx, lanes(rows));
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            let add = window.find(ADD_LANE_ID).bounds();
+            let content = window.find(rows_content_id()).bounds();
+            assert!(
+                add.origin.y > window.find(row_id(AgentKey::Lane(30))).bounds().origin.y,
+                "the last lane comes first: {add:?}"
+            );
+            assert!(
+                add.bottom() <= content.bottom(),
+                "it is inside the list's own content: {add:?} in {content:?}"
+            );
+            assert!(
+                add.bottom() + px(LIST_PAD) >= content.bottom(),
+                "and nothing follows it: {add:?} in {content:?}"
+            );
+        });
+    }
+
+    /// §7.2: one agent has no lanes, so it has nothing to add and no row that would.
+    #[gpui_kit::test]
+    fn a_single_agents_column_has_nothing_to_add(cx: &mut TestAppContext) {
+        let f = open(cx, lanes(vec![lane(1, LaneStatus::Idle, None)]));
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window.try_find(ADD_LANE_ID).is_some(),
+                "a swarm's column ends with the row"
+            );
+
+            f.list.update(cx, |list, cx| list.set_swarm(false, cx));
+            window.render_frame(cx);
+            assert!(
+                window.try_find(ADD_LANE_ID).is_none(),
+                "one agent has no lanes to add"
+            );
+        });
+        assert!(f.events().is_empty(), "and nothing was asked for");
+    }
+
+    /// One press is one lane: while adding one is not on offer — a request already in
+    /// flight, or a swarm that cannot take another — the row is inert.
+    #[gpui_kit::test]
+    fn the_add_row_is_inert_while_it_is_disabled(cx: &mut TestAppContext) {
+        let f = open(cx, lanes(vec![lane(1, LaneStatus::Idle, None)]));
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            f.list
+                .update(cx, |list, cx| list.set_add_lane_disabled(true, cx));
+            window.render_frame(cx);
+            window.click(ADD_LANE_ID, cx);
+        });
+        assert!(
+            f.events().is_empty(),
+            "a disabled row takes no press: {:?}",
+            f.events()
+        );
+
+        f.act(cx, |window, cx| {
+            f.list
+                .update(cx, |list, cx| list.set_add_lane_disabled(false, cx));
+            window.render_frame(cx);
+            window.click(ADD_LANE_ID, cx);
+        });
+        assert_eq!(
+            f.events(),
+            vec![AgentListEvent::AddLane],
+            "and once it is on offer the row answers again"
+        );
+    }
+
+    /// The row is a button, so the keyboard reaches it the way it reaches one: Tab from
+    /// the column lands on it, a press leaves the keyboard on it, and Enter and Space each
+    /// activate it once — the kit's own native button behaviour.
+    #[gpui_kit::test]
+    fn the_add_row_answers_the_keyboard(cx: &mut TestAppContext) {
+        let f = open(cx, lanes(vec![lane(1, LaneStatus::Idle, None)]));
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            // A press on a row takes the list's keyboard, as it always does; Tab from
+            // there walks the column's own tab stops, and the add row is one.
+            window.click(row_id(AgentKey::Coordinator), cx);
+            window.press("tab", cx);
+            window.render_frame(cx);
+            assert_eq!(
+                window.find(ADD_LANE_ID).focused(),
+                Some(true),
+                "Tab reaches the row"
+            );
+        });
+
+        let walked = f.events().len();
+        f.act(cx, |window, cx| {
+            window.press("enter", cx);
+            window.press("space", cx);
+        });
+        assert_eq!(
+            f.events()[walked..],
+            [AgentListEvent::AddLane, AgentListEvent::AddLane],
+            "Enter and Space are each one lane: {:?}",
+            f.events()
+        );
+
+        // A press on the row itself leaves the keyboard on it, the way a press on a lane
+        // row leaves it on the column.
+        f.act(cx, |window, cx| {
+            window.click(ADD_LANE_ID, cx);
+            window.render_frame(cx);
+            assert_eq!(window.find(ADD_LANE_ID).focused(), Some(true));
+        });
+        assert_eq!(
+            f.events().last(),
+            Some(&AgentListEvent::AddLane),
+            "and the press was one lane too"
         );
     }
 

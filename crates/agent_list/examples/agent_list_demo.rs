@@ -2,10 +2,11 @@
 //!
 //! Six lanes in every state the row has (working, compacting, idle, starting, down), a
 //! lane whose task is far too long for the column, a lane selected, the coordinator's own
-//! row with its step clock and the `reconnecting` badge, and the Stop button a busy lane
-//! grows. Everything is built from the new view model's own shapes: a lane row's clock
-//! counts from the absolute step start the swarm publishes (CONTRACT §4.3), and the row's
-//! activity line comes from the lane's own mirror.
+//! row with its step clock and the `reconnecting` badge, the Stop button a busy lane
+//! grows, and the `+ Add New Lane` row the list ends with. Everything is built from the
+//! new view model's own shapes: a lane row's clock counts from the absolute step start
+//! the swarm publishes (CONTRACT §4.3), and the row's activity line comes from the
+//! lane's own mirror.
 //!
 //! ```sh
 //! cargo run --example agent_list_demo
@@ -186,6 +187,9 @@ impl Demo {
                 AgentListEvent::StopLane(lane) => {
                     println!("run.interrupt scope=lane lane={lane}");
                 }
+                // The list's own last row: growing the swarm is the owner's to send, and
+                // this demo has no swarm behind it.
+                AgentListEvent::AddLane => println!("command.run name=lanes"),
             }
             cx.notify();
         })

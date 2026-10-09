@@ -79,6 +79,85 @@ fn wait_for_lanes(client: &Client, workers: usize) -> Value {
     }
 }
 
+/// The swarm's state once it counts `workers` lanes, every one of them a live
+/// process (a pid), else a panic.
+///
+/// Growth is asynchronous: `/lanes N` makes the expanded roster durable at
+/// once, and the lane processes come up a little later — a client sees the
+/// count move before the lane is ready.
+fn wait_for_workers(client: &Client, workers: usize) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        if let Ok(snapshot) = client.snapshot(&["swarm".to_owned()], Some(1)) {
+            if let Some(state) = snapshot.topic("swarm").map(|topic| topic["state"].clone()) {
+                let ready = state["workers"] == json!(workers)
+                    && state["lanes"]
+                        .as_array()
+                        .map(|lanes| {
+                            lanes.len() == workers
+                                && lanes
+                                    .iter()
+                                    .all(|lane| lane["pid"].as_u64().unwrap_or(0) > 0)
+                        })
+                        .unwrap_or(false);
+                if ready {
+                    return state;
+                }
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the swarm never counted {workers} live lanes"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// The `lane:N` topic once it has come up whole — a session of its own and its
+/// own items — read through the `lane:*` wildcard, which is how a client finds
+/// a lane it never asked for by name (CONTRACT §5.3/§6).
+fn wait_for_lane_topic(client: &Client, n: u32) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(90);
+    let name = format!("lane:{n}");
+    loop {
+        if let Ok(snapshot) = client.snapshot(&["lane:*".to_owned()], Some(5)) {
+            if let Some(topic) = snapshot.topic(&name) {
+                let whole = topic["state"]["session"]["id"].is_string()
+                    && !topic["items"]
+                        .as_array()
+                        .map(|items| items.is_empty())
+                        .unwrap_or(true);
+                if whole {
+                    return topic.clone();
+                }
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{name} never came up whole through lane:*"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// Wait until the coordinator is not running a turn: `/lanes N` grows the pool
+/// only while the coordinator itself is idle (the conflict guard), a lane being
+/// busy is not the guard.
+fn wait_for_coordinator_idle(client: &Client) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        if let Ok(snapshot) = client.snapshot(&["session".to_owned()], Some(1)) {
+            if let Some(state) = snapshot.topic("session").map(|topic| &topic["state"]) {
+                if state["status"] == json!("idle") {
+                    return;
+                }
+            }
+        }
+        assert!(Instant::now() < deadline, "the coordinator never went idle");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 /// The next op of a kind, or a panic naming what was being waited for.
 fn expect(stream: &EventStream, what: &str, wanted: impl Fn(&Value) -> bool) -> Value {
     let deadline = Instant::now() + Duration::from_secs(60);
@@ -338,4 +417,143 @@ fn a_coordinator_restart_keeps_the_port_and_counts_itself() {
         json!(1),
         "its lanes came back with it"
     );
+}
+
+#[test]
+fn a_lanes_command_grows_the_pool_and_a_held_stream_discovers_the_new_lane() {
+    let Some((_dir, server)) = swarm("swarm-lanes-grow", 2) else {
+        return;
+    };
+    let client = server.client().clone();
+    wait_for_lanes(&client, 2);
+
+    // §4.3/§5.5: `/lanes N` grows the pool at runtime, over the same
+    // `command.run` op a client already uses for any slash command — the swarm
+    // is not restarted to change its worker count (upstream c2fdf19).
+    //
+    // What the tab holds before the growth: the swarm topic, and `lane:*`
+    // expanded to the lanes that exist so far. A client must not have to name
+    // a lane to be told a lane it has never seen came up.
+    let before = client
+        .snapshot(
+            &[
+                "session".to_owned(),
+                "swarm".to_owned(),
+                "lane:*".to_owned(),
+            ],
+            Some(5),
+        )
+        .expect("a snapshot before the growth");
+    assert_eq!(
+        before.topic("swarm").unwrap()["state"]["workers"],
+        json!(2),
+        "the pool starts at the two lanes it was launched with"
+    );
+    let mut before_lane_names = before.topic_names();
+    before_lane_names.sort();
+    assert_eq!(
+        before_lane_names,
+        ["lane:1", "lane:2", "session", "swarm"],
+        "`lane:*` carries exactly the lanes that exist"
+    );
+    let before_state = before.topic("swarm").unwrap()["state"].clone();
+    let pids: Vec<u64> = (0..2)
+        .map(|index| before_state["lanes"][index]["pid"].as_u64().unwrap_or(0))
+        .collect();
+    assert!(pids.iter().all(|pid| *pid > 0), "{before_state}");
+    let sessions: Vec<String> = (1..=2)
+        .map(|n| {
+            before.topic(&format!("lane:{n}")).unwrap()["state"]["session"]["id"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+        })
+        .collect();
+    assert!(sessions.iter().all(|id| !id.is_empty()), "{before:?}");
+
+    // The subscription the tab already holds, from the cursor of that snapshot.
+    let stream = EventStream::start(
+        client.clone(),
+        StreamConfig::new([
+            "session".to_owned(),
+            "swarm".to_owned(),
+            "lane:*".to_owned(),
+        ])
+        .from(before.cursor()),
+    );
+
+    wait_for_coordinator_idle(&client);
+    let reply = client
+        .op("command.run", json!({"name": "lanes", "args": "3"}))
+        .expect("the swarm answers command.run");
+    assert!(reply.ok, "{reply:?}");
+    let notices: Vec<String> = reply.result["notices"]
+        .as_array()
+        .map(|notices| {
+            notices
+                .iter()
+                .filter_map(|notice| notice["text"].as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        notices
+            .iter()
+            .any(|text| text.contains('3') && text.contains("lane")),
+        "the command answers naming the count it grows to: {notices:?}"
+    );
+
+    // §5.3: the lane that appears later is announced on the subscription that
+    // was already open — `lane:*` is a pattern, not the list of lanes that
+    // existed when the stream connected. What makes the held topic whole is the
+    // re-snapshot the client takes on the reset.
+    let reset = expect(&stream, "topic.reset lane:3", |data| {
+        data["op"] == json!("topic.reset") && data["topic"] == json!("lane:3")
+    });
+    assert_eq!(reset["reason"], json!("lane_restarted"), "{reset}");
+
+    // §4.3: the swarm record counts the new lane, and its row is a live process.
+    let state = wait_for_workers(&client, 3);
+    assert_eq!(state["workers"], json!(3), "{state}");
+    assert_eq!(state["lanes"].as_array().map(Vec::len), Some(3), "{state}");
+
+    // Upstream c2fdf19's whole point: growth does not restart the lanes that
+    // were already there — same process, same session, only new ones added.
+    for (index, n) in [1u32, 2].into_iter().enumerate() {
+        let lane = &state["lanes"][index];
+        assert_eq!(lane["n"], json!(n));
+        assert_eq!(
+            lane["pid"].as_u64().unwrap_or(0),
+            pids[index],
+            "lane {n} kept its process through the growth"
+        );
+        assert_eq!(lane["restarts"], json!(0), "{lane}");
+    }
+
+    // §6/§4.3: the new lane's own topic is whole through the wildcard — a
+    // state, a session of its own, and its own items (its transcript's notices).
+    let new = wait_for_lane_topic(&client, 3);
+    assert_eq!(new["state"]["session"]["program"], json!("lane"), "{new}");
+    assert!(
+        new["state"]["session"]["id"].is_string(),
+        "the new lane has a session: {new}"
+    );
+    assert!(
+        !new["items"].as_array().unwrap().is_empty(),
+        "and its own items: {new}"
+    );
+
+    // The lanes already there still hold their sessions: growth added lanes, it
+    // did not rebuild the pool.
+    let after = client
+        .snapshot(&["lane:1".to_owned(), "lane:2".to_owned()], Some(5))
+        .expect("a snapshot after the growth");
+    for (index, n) in [1u32, 2].into_iter().enumerate() {
+        assert_eq!(
+            after.topic(&format!("lane:{n}")).unwrap()["state"]["session"]["id"],
+            json!(sessions[index]),
+            "lane {n} kept its session"
+        );
+    }
+    drop(stream);
 }

@@ -426,6 +426,7 @@ enum Pending {
     /// one line, one place — and what is read off the reply is `data.draft`, the text
     /// `/rewind` and `/tree` hand back for editing.
     Command,
+    AddLane(u64),
     /// The `complete` op behind one half-typed word, carried with the question it
     /// asked about: what the server says is only ever an answer about *that* text, at
     /// *that* caret.
@@ -476,6 +477,9 @@ struct Live {
     /// The ops a reply is still expected for, by the rid the engine minted, and what
     /// each was (§5.5). An op's refusal is shown whether or not it was the composer's.
     pending: BTreeMap<String, Pending>,
+    // A successful reply can arrive before the stream's expanded roster.
+    // Keep the button disabled until that roster supplies the next count.
+    added_lane_target: Option<u64>,
     /// The one stream's state, for the `reconnecting` badge (§5.3, §9.7).
     stream: StreamStatus,
     /// Whether this tab runs a swarm or one `evo-agent` (§7.2), taken from the launch
@@ -584,6 +588,7 @@ impl TabContent {
                 }
                 // The one human action on a lane: stop it (§7.4).
                 AgentListEvent::StopLane(lane) => this.on_stop_lane(*lane),
+                AgentListEvent::AddLane => this.on_add_lane(cx),
             },
         );
 
@@ -1247,6 +1252,7 @@ impl TabContent {
             _pump: pump,
             tab_dir: started.tab_dir,
             pending: BTreeMap::new(),
+            added_lane_target: None,
             stream: StreamStatus::Connected,
             swarm,
             recorded: false,
@@ -1808,7 +1814,26 @@ impl TabContent {
         // model's: a swarm's first row is its coordinator and one agent's is `Main`,
         // and only a swarm has lanes to count (§7.2).
         let swarm = self.swarm(cx);
-        self.agents.update(cx, |list, cx| list.set_swarm(swarm, cx));
+        let disabled = self.live.as_mut().is_none_or(|live| {
+            if live.added_lane_target.is_some_and(|target| {
+                live.model
+                    .swarm()
+                    .is_some_and(|swarm| swarm.workers >= target)
+            }) {
+                live.added_lane_target = None;
+            }
+            live.model.activity().is_busy()
+                || live.model.swarm().is_none_or(|swarm| swarm.workers >= 64)
+                || live.added_lane_target.is_some()
+                || live
+                    .pending
+                    .values()
+                    .any(|pending| matches!(pending, Pending::AddLane(_)))
+        });
+        self.agents.update(cx, |list, cx| {
+            list.set_swarm(swarm, cx);
+            list.set_add_lane_disabled(disabled || self.gone.is_some(), cx);
+        });
         let Some(snapshot) = self.agents_snapshot() else {
             return;
         };
@@ -2087,6 +2112,38 @@ impl TabContent {
         }
     }
 
+    fn on_add_lane(&mut self, cx: &mut Context<Self>) {
+        if !self.swarm(cx) || self.gone.is_some() {
+            return;
+        }
+        let Some(live) = self.live.as_mut() else {
+            return;
+        };
+        if live.model.activity().is_busy()
+            || live.added_lane_target.is_some()
+            || live
+                .pending
+                .values()
+                .any(|pending| matches!(pending, Pending::AddLane(_)))
+        {
+            return;
+        }
+        let Some(count) = live
+            .model
+            .swarm()
+            .filter(|swarm| swarm.workers < 64)
+            .map(|swarm| swarm.workers + 1)
+        else {
+            return;
+        };
+        let request = session::OpRequest::command_run("lanes", &count.to_string());
+        if let Some(rid) = live.engine.request(request) {
+            live.pending.insert(rid, Pending::AddLane(count));
+            self.agents
+                .update(cx, |list, cx| list.set_add_lane_disabled(true, cx));
+        }
+    }
+
     /// The bytes of one image, from `GET /media/<id>/<n>`: decoded once, on a thread of
     /// its own (a megabyte of PNG is not a frame's work), and handed to the row that asked
     /// for it.
@@ -2251,6 +2308,12 @@ impl TabContent {
                         Some(text) => composer.set_draft(text, window, cx),
                         None => composer.request_finished(reply.ok, window, cx),
                     });
+                }
+                Pending::AddLane(target) => {
+                    if reply.ok {
+                        self.live.as_mut().unwrap().added_lane_target = Some(target);
+                    }
+                    self.sync_agents(cx);
                 }
                 Pending::Complete(question) => {
                     // What the caret is on, and what could fill it, read off the op's
@@ -3141,6 +3204,208 @@ mod tests {
         })
         .expect("the tab's window");
         (window, tab, dir)
+    }
+
+    #[gpui_kit::test]
+    fn adding_a_lane_sends_one_command_and_waits_for_the_grown_roster(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (window, tab, dir) = live_tab(cx);
+        pump_until(cx, "the ready server", |_| {
+            dir.path().join("ready.json").exists()
+        });
+        let control = swarm_client::harness::Control::attach(dir.path()).unwrap();
+        pump_until(cx, "the stream", |_| {
+            !control.requests_on("/stream").is_empty()
+        });
+        cx.update_window(window, |_, window, cx| {
+            tab.update(cx, |tab, cx| {
+                tab.live.as_mut().unwrap().model.on_snapshot(
+                    "swarm",
+                    &serde_json::json!({
+                        "state": {"id": "sw", "workers": 2, "lanes": [
+                            {"n": 1, "state": "idle"}, {"n": 2, "state": "idle"}
+                        ]}
+                    }),
+                );
+                tab.sync_agents(cx);
+                tab.composer.update(cx, |composer, cx| {
+                    composer.set_draft("keep this draft", window, cx)
+                });
+                tab.on_add_lane(cx);
+                tab.on_add_lane(cx);
+                assert_eq!(
+                    tab.live
+                        .as_ref()
+                        .unwrap()
+                        .pending
+                        .values()
+                        .filter(|p| matches!(p, Pending::AddLane(_)))
+                        .count(),
+                    1
+                );
+            });
+        })
+        .unwrap();
+        let mut requests = Vec::new();
+        pump_until(cx, "the lane command reply", |cx| {
+            requests.extend(control.requests_on("/ops"));
+            cx.read(|cx| {
+                !tab.read(cx)
+                    .live
+                    .as_ref()
+                    .unwrap()
+                    .pending
+                    .values()
+                    .any(|p| matches!(p, Pending::AddLane(_)))
+            })
+        });
+        requests.extend(control.requests_on("/ops"));
+        let commands: Vec<_> = requests
+            .iter()
+            .filter(|r| r["body"]["op"] == "command.run")
+            .collect();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(
+            commands[0]["body"]["args"],
+            serde_json::json!({"name": "lanes", "args": "3"})
+        );
+        cx.update_window(window, |_, window, cx| {
+            tab.update(cx, |tab, cx| {
+                assert_eq!(tab.live.as_ref().unwrap().added_lane_target, Some(3));
+                tab.on_add_lane(cx);
+                assert!(tab.live.as_ref().unwrap().pending.is_empty(), "wait for the roster before accepting another click");
+                tab.live.as_mut().unwrap().model.on_snapshot("swarm", &serde_json::json!({
+                    "state": {"id": "sw", "workers": 3, "lanes": [
+                        {"n": 1, "state": "idle"}, {"n": 2, "state": "idle"}, {"n": 3, "state": "starting"}
+                    ]}
+                }));
+                tab.sync_agents(cx);
+                assert_eq!(tab.live.as_ref().unwrap().added_lane_target, None);
+            });
+            window.render_frame(cx);
+            assert!(window.try_find("composer").is_some());
+            assert!(window.try_find(agent_list::row_id(AgentKey::Lane(3))).is_some());
+        }).unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn adding_a_lane_requires_an_idle_coordinator_and_room_in_the_pool(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (_window, tab, dir) = live_tab(cx);
+        pump_until(cx, "the ready server", |_| {
+            dir.path().join("ready.json").exists()
+        });
+        let control = swarm_client::harness::Control::attach(dir.path()).unwrap();
+        pump_until(cx, "the stream", |_| {
+            !control.requests_on("/stream").is_empty()
+        });
+        cx.update(|cx| {
+            tab.update(cx, |tab, cx| {
+                for status in ["running", "compacting"] {
+                    tab.live
+                        .as_mut()
+                        .unwrap()
+                        .model
+                        .on_snapshot("session", &serde_json::json!({"state": {"status": status}}));
+                    tab.on_add_lane(cx);
+                    assert!(tab.live.as_ref().unwrap().pending.is_empty());
+                }
+                tab.live
+                    .as_mut()
+                    .unwrap()
+                    .model
+                    .on_snapshot("session", &serde_json::json!({"state": {"status": "idle"}}));
+                tab.live
+                    .as_mut()
+                    .unwrap()
+                    .model
+                    .on_snapshot("swarm", &serde_json::json!({"state": {"workers": 64}}));
+                tab.on_add_lane(cx);
+                assert!(tab.live.as_ref().unwrap().pending.is_empty());
+                // Busy workers do not prevent an idle coordinator from growing the pool.
+                tab.live.as_mut().unwrap().model.on_snapshot(
+                    "swarm",
+                    &serde_json::json!({"state": {
+                        "workers": 2, "status": {"busy": 1, "waiting_on_lanes": true},
+                        "lanes": [{"n": 1, "state": "working"}, {"n": 2, "state": "idle"}]
+                    }}),
+                );
+                tab.on_add_lane(cx);
+                assert!(tab
+                    .live
+                    .as_ref()
+                    .unwrap()
+                    .pending
+                    .values()
+                    .any(|p| matches!(p, Pending::AddLane(3))));
+            })
+        });
+    }
+
+    #[gpui_kit::test]
+    fn a_refused_add_lane_releases_the_row_and_shows_the_reason(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (window, tab, dir) = live_tab(cx);
+        pump_until(cx, "the ready server", |_| {
+            dir.path().join("ready.json").exists()
+        });
+        let control = swarm_client::harness::Control::attach(dir.path()).unwrap();
+        pump_until(cx, "the stream", |_| {
+            !control.requests_on("/stream").is_empty()
+        });
+        control
+            .reply_for(
+                "command.run",
+                serde_json::json!({"ok": false,
+            "error": {"code": "op_failed", "message": "cannot start lane"}}),
+            )
+            .unwrap();
+        cx.update(|cx| tab.update(cx, |tab, cx| tab.on_add_lane(cx)));
+        pump_until(cx, "the refusal", |cx| {
+            cx.read(|cx| tab.read(cx).notice_text().is_some())
+        });
+        cx.update_window(window, |_, _window, cx| {
+            tab.update(cx, |tab, cx| {
+                assert!(!tab
+                    .live
+                    .as_ref()
+                    .unwrap()
+                    .pending
+                    .values()
+                    .any(|p| matches!(p, Pending::AddLane(_))));
+                assert!(tab.notice_text().unwrap().contains("cannot start lane"));
+                tab.on_add_lane(cx);
+                assert!(tab
+                    .live
+                    .as_ref()
+                    .unwrap()
+                    .pending
+                    .values()
+                    .any(|p| matches!(p, Pending::AddLane(_))));
+            });
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn a_single_agent_never_sends_an_add_lane_command(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (_window, tab, dir) = live_tab_of(cx, false);
+        pump_until(cx, "the ready server", |_| {
+            dir.path().join("ready.json").exists()
+        });
+        cx.update(|cx| {
+            tab.update(cx, |tab, cx| {
+                tab.on_add_lane(cx);
+                assert!(!tab
+                    .live
+                    .as_ref()
+                    .unwrap()
+                    .pending
+                    .values()
+                    .any(|p| matches!(p, Pending::AddLane(_))));
+            })
+        });
     }
 
     /// Pump the UI thread until `done` holds, which is what a test waits with: the
