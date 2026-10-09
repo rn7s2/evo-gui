@@ -100,6 +100,8 @@ gpui_kit::actions!(
         SelectLastTab,
         /// ⌘Q, held: quit once the hold is complete (§9.8).
         HoldToQuit,
+        /// Toggle the terminal pane (⌃`).
+        ToggleTerminal,
     ]
 );
 
@@ -1071,6 +1073,18 @@ impl WorkspaceView {
         self.select_tab(action.0, window, cx);
     }
 
+    /// ⌃`: the selected tab's terminal pane, open or shut. What the pane *is*
+    /// belongs to the tab; the window only routes the key to it.
+    fn on_toggle_terminal(
+        &mut self,
+        _: &ToggleTerminal,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let tab = self.tabs[self.selected].clone();
+        tab.update(cx, |tab, cx| tab.toggle_terminal(cx));
+    }
+
     /// One step along the strip, wrapping: with one tab open there is nowhere to
     /// go, and the shortcut does nothing rather than reopening the same tab.
     fn step_tab(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
@@ -1497,6 +1511,9 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::on_select_previous_tab))
             .on_action(cx.listener(Self::on_select_last_tab))
             .on_action(cx.listener(Self::on_select_tab))
+            // ⌃` is the terminal pane's: the binding is app-wide (menus.rs), the
+            // handler is here, and the pane itself belongs to the shown tab.
+            .on_action(cx.listener(Self::on_toggle_terminal))
             // ⌘Q is the one action whose *release* matters (§9.8): the hold is
             // timed from the key-down the keymap sends here, and it is over the
             // moment either the key or the modifier comes up.

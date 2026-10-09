@@ -616,6 +616,7 @@ impl TabContent {
                     .child(task),
             )
             .when_some(self.thinking_toggle(cx), |this, toggle| this.child(toggle))
+            .child(self.terminal_toggle(cx))
             .into_any_element()
     }
 
@@ -683,13 +684,29 @@ impl TabContent {
                 .on_click(cx.listener(move |_this, _, _window, cx| {
                     view.update(cx, |view, cx| view.toggle_thinking(cx));
                 }))
-                .child(if showing {
-                    "Hide thinking"
-                } else {
-                    "Show thinking"
-                })
+                .child(thinking_label(showing))
                 .into_any_element(),
         )
+    }
+
+    /// The header's other control: the terminal pane, open or shut, with the key
+    /// that does the same thing.
+    ///
+    /// It is always drawn, unlike the thinking toggle: thinking is a transcript's
+    /// business and comes and goes with the agent, where the terminal belongs to
+    /// the page and is there whether or not anything is happening.
+    fn terminal_toggle(&self, cx: &mut Context<Self>) -> AnyElement {
+        let palette = design::palette(cx.theme().mode.is_dark());
+        div()
+            .id("transcript-terminal-toggle")
+            .test_support()
+            .flex_shrink_0()
+            .text_size(px(12.))
+            .text_color(paint::color(palette.muted_fg))
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _, _window, cx| this.toggle_terminal(cx)))
+            .child(terminal_label(self.terminal_open))
+            .into_any_element()
     }
 
     /// The conversation: the band, the transcript, and the composer's box at the foot
@@ -858,6 +875,30 @@ fn effort_thinks(level: Option<&str>) -> bool {
     match level.map(str::trim).filter(|level| !level.is_empty()) {
         None => false,
         Some(level) => !matches!(level, "off" | "low"),
+    }
+}
+
+/// What the header's thinking control reads, shortcut and all.
+///
+/// The modifier is spelled the way each platform writes it — `⌃T` on macOS, where
+/// the glyph is the one the keyboard carries, and `Ctrl+T` elsewhere — because the
+/// hint is for the hand that is about to press the keys.
+fn thinking_label(showing: bool) -> &'static str {
+    match (cfg!(target_os = "macos"), showing) {
+        (true, true) => "Hide Thinking (⌃T)",
+        (true, false) => "Show Thinking (⌃T)",
+        (false, true) => "Hide Thinking (Ctrl+T)",
+        (false, false) => "Show Thinking (Ctrl+T)",
+    }
+}
+
+/// The same, for the terminal pane: what the header says the button will do.
+fn terminal_label(is_open: bool) -> &'static str {
+    match (cfg!(target_os = "macos"), is_open) {
+        (true, true) => "Close Terminal (⌃`)",
+        (true, false) => "Open Terminal (⌃`)",
+        (false, true) => "Close Terminal (Ctrl+`)",
+        (false, false) => "Open Terminal (Ctrl+`)",
     }
 }
 
