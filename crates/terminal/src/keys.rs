@@ -86,6 +86,41 @@ pub(crate) fn bytes(keystroke: &Keystroke, mode: TermMode) -> Option<Vec<u8>> {
     Some(named.to_vec())
 }
 
+/// A key that moves the view through the scrollback rather than reaching the
+/// shell: Shift with Page Up/Down, Home and End, as terminals have always had.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ScrollKey {
+    PageUp,
+    PageDown,
+    Top,
+    Bottom,
+}
+
+/// The scrollback key a keystroke is, if it is one.
+pub(crate) fn scroll(keystroke: &Keystroke) -> Option<ScrollKey> {
+    let m = &keystroke.modifiers;
+    if !m.shift || m.control || m.alt || m.platform {
+        return None;
+    }
+    match keystroke.key.as_str() {
+        "pageup" => Some(ScrollKey::PageUp),
+        "pagedown" => Some(ScrollKey::PageDown),
+        "home" => Some(ScrollKey::Top),
+        "end" => Some(ScrollKey::Bottom),
+        _ => None,
+    }
+}
+
+/// The bytes the arrow key `up` (or down) sends in the current mode — what a
+/// wheel turns into on the alternate screen, where a pager or an editor scrolls
+/// itself.
+pub(crate) fn arrow_key(up: bool, mode: TermMode) -> &'static [u8] {
+    arrow(
+        mode.contains(TermMode::APP_CURSOR),
+        if up { b'A' } else { b'B' },
+    )
+}
+
 /// A cursor key in the encoding the current mode asks for.
 fn arrow(application: bool, key: u8) -> &'static [u8] {
     match (application, key) {
@@ -125,5 +160,39 @@ fn control(key: &str) -> Option<u8> {
         '^' => Some(30),
         '_' => Some(31),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(text: &str) -> Keystroke {
+        Keystroke::parse(text).expect("a keystroke")
+    }
+
+    /// Shift with the paging keys is the scrollback's; without Shift, or with
+    /// another modifier, the key is the shell's.
+    #[test]
+    fn shift_paging_keys_scroll_and_others_do_not() {
+        assert_eq!(scroll(&key("shift-pageup")), Some(ScrollKey::PageUp));
+        assert_eq!(scroll(&key("shift-pagedown")), Some(ScrollKey::PageDown));
+        assert_eq!(scroll(&key("shift-home")), Some(ScrollKey::Top));
+        assert_eq!(scroll(&key("shift-end")), Some(ScrollKey::Bottom));
+        assert_eq!(scroll(&key("pageup")), None);
+        assert_eq!(scroll(&key("ctrl-shift-pageup")), None);
+        assert_eq!(scroll(&key("shift-a")), None);
+        // Unshifted, they still reach the shell.
+        assert_eq!(
+            bytes(&key("pageup"), TermMode::empty()).unwrap(),
+            b"\x1b[5~"
+        );
+    }
+
+    /// The wheel's arrows follow the cursor-key mode the program asked for.
+    #[test]
+    fn wheel_arrows_follow_the_cursor_mode() {
+        assert_eq!(arrow_key(true, TermMode::empty()), b"\x1b[A");
+        assert_eq!(arrow_key(false, TermMode::APP_CURSOR), b"\x1bOB");
     }
 }

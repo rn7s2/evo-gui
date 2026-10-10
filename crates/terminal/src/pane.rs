@@ -17,32 +17,42 @@
 //! place the pty is resized, so a pane the caller sizes by hand and a pane that
 //! sizes itself go through the same door.
 //!
+//! ## The scrollback
+//!
+//! The grid keeps [`crate::SCROLLBACK`] lines behind the screen. A trackpad walks
+//! them to the pixel (a part-line is drawn under the top edge), a notched wheel
+//! and Shift with Page Up/Down, Home and End glide there over a few frames, and
+//! typing comes back to the live screen. A thumb at the right edge says where the
+//! view is while it is not the live screen (`crate::scroll`). On the alternate
+//! screen — a pager, an editor — the wheel is arrow keys for the program.
+//!
 //! ## What is not drawn yet
 //!
 //! The cursor is a block, the width of one cell, when the pane has the keyboard.
-//! Nothing scrolls the history, and the mouse is not reported to the shell: a
-//! full-screen program that asked for mouse reporting hears nothing. Both are
-//! the integration's next step, not a decision made here.
+//! The mouse is not reported to the shell, and text cannot be selected.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use alacritty_terminal::grid::Dimensions as _;
 use alacritty_terminal::index::{Column, Line as Row};
 use alacritty_terminal::term::cell::{Cell, Flags};
-use alacritty_terminal::term::{Config, Term, TermMode};
+use alacritty_terminal::term::{Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color, NamedColor};
 use gpui_kit::component::{ActiveTheme as _, Theme};
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    div, px, AbsoluteLength, App, Bounds, Div, EventEmitter, FocusHandle, Focusable, KeyDownEvent,
-    MouseButton, MouseDownEvent, Pixels, Render, SharedString, Task, Window,
+    div, px, relative, AbsoluteLength, App, Bounds, Div, EventEmitter, FocusHandle, Focusable,
+    KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Render, ScrollDelta, ScrollWheelEvent,
+    SharedString, Task, Window,
 };
 
-use crate::keys;
+use crate::keys::{self, ScrollKey};
 use crate::palette;
 use crate::pty::{default_shell, quiet, Cells, PtyEvents, SharedTerm, Shell, Writer};
+use crate::scroll::{self, Scrollback};
 use crate::{SendBackTab, SendInterrupt, SendTab, TerminalFont, KEY_CONTEXT};
 
 /// The size a terminal starts at before it has been laid out once: what a
@@ -85,6 +95,11 @@ pub struct TerminalPane {
     /// Keeps the wakeup task alive. Dropping it cancels the task, and the
     /// reader thread then finds the channel closed and stops.
     _wakeup: Task<()>,
+    /// Where in the scrollback the pane is looking, to the pixel.
+    scroll: Scrollback,
+    /// The height of one row as last drawn: what a wheel's pixels are counted
+    /// against between frames.
+    line: f32,
 }
 
 impl EventEmitter<TerminalEvent> for TerminalPane {}
@@ -108,12 +123,10 @@ impl TerminalPane {
             }
         };
 
-        // The parser's own configuration, its scrollback included: nothing shows
-        // the history yet, but a grid that kept none loses a line outright when the
-        // pane is made narrower — a re-wrapped line takes a row the screen no
-        // longer has, and a grid with nowhere to put it drops the row at the top.
+        // The parser's own configuration: its scrollback is the history the
+        // wheel and the paging keys walk back through (`crate::SCROLLBACK`).
         let term = Arc::new(Mutex::new(Term::new(
-            Config::default(),
+            scroll::config(),
             &size,
             PtyEvents::new(Arc::clone(&writer)),
         )));
@@ -153,6 +166,8 @@ impl TerminalPane {
             focus: cx.focus_handle(),
             failure,
             _wakeup,
+            scroll: Scrollback::default(),
+            line: 21.,
         }
     }
 
@@ -182,16 +197,20 @@ impl TerminalPane {
     }
 
     /// What the grid holds right now, copied out of the terminal under one lock.
+    ///
+    /// While the view sits part-way into a line, the line above the screen is
+    /// copied too: it is the row the part-line shows.
     fn screen(&self, window: &Window) -> Screen {
         let term = self.term.lock().unwrap_or_else(|gone| gone.into_inner());
         let grid = term.grid();
         let columns = grid.columns();
-        let top = -(grid.display_offset() as i32);
+        let extra = usize::from(self.scroll.frac() > 0.);
+        let top = -(grid.display_offset() as i32) - extra as i32;
         let cursor = (self.focus.is_focused(window) && term.mode().contains(TermMode::SHOW_CURSOR))
             .then_some(grid.cursor.point);
 
-        let mut lines = Vec::with_capacity(grid.screen_lines());
-        for row in 0..grid.screen_lines() {
+        let mut lines = Vec::with_capacity(grid.screen_lines() + extra);
+        for row in 0..grid.screen_lines() + extra {
             let line = Row(top + row as i32);
             let cells = &grid[line];
             let cursor_at = cursor
@@ -222,9 +241,19 @@ impl TerminalPane {
             .lock()
             .unwrap_or_else(|gone| gone.into_inner())
             .mode();
+        // The paging keys walk the history — except on the alternate screen,
+        // which has none, where they are the program's.
+        if !mode.contains(TermMode::ALT_SCREEN) {
+            if let Some(key) = keys::scroll(&event.keystroke) {
+                self.page(key, cx);
+                cx.stop_propagation();
+                return;
+            }
+        }
         let Some(bytes) = keys::bytes(&event.keystroke, mode) else {
             return;
         };
+        self.snap_to_bottom(cx);
         // A keystroke is a handful of bytes and a pty's input buffer is a good
         // deal larger, so typing does not wait on the shell reading it.
         if let Ok(mut writer) = self.writer.lock() {
@@ -239,10 +268,94 @@ impl TerminalPane {
     /// [`Self::key_down`] — Tab and Ctrl-C, which the window would otherwise
     /// spend on something else.
     fn send(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
+        self.snap_to_bottom(cx);
         if let Ok(mut writer) = self.writer.lock() {
             let _ = writer.write_all(bytes);
         }
         cx.stop_propagation();
+    }
+
+    /// Typing goes to the live screen: a pane scrolled back comes down to where
+    /// the text is going, the way every terminal does.
+    fn snap_to_bottom(&mut self, cx: &mut Context<Self>) {
+        let mut term = self.term.lock().unwrap_or_else(|gone| gone.into_inner());
+        if self.scroll.is_scrolled(&term) || self.scroll.is_animating() {
+            self.scroll.snap_to_bottom(&mut term);
+            cx.notify();
+        }
+    }
+
+    /// A paging key: a screenful (less a line, so a line is seen twice and the
+    /// eye keeps its place), or all the way to either end — eased, not jumped.
+    fn page(&mut self, key: ScrollKey, cx: &mut Context<Self>) {
+        let line = self.line;
+        let term = self.term.lock().unwrap_or_else(|gone| gone.into_inner());
+        let page = term.grid().screen_lines().saturating_sub(1).max(1) as f32 * line;
+        match key {
+            ScrollKey::PageUp => self.scroll.glide_by(&term, line, page),
+            ScrollKey::PageDown => self.scroll.glide_by(&term, line, -page),
+            ScrollKey::Top => self.scroll.glide_to(&term, line, f32::MAX),
+            ScrollKey::Bottom => self.scroll.glide_to(&term, line, 0.),
+        }
+        cx.notify();
+    }
+
+    /// The wheel and the trackpad. On the main screen they walk the history —
+    /// a trackpad's pixels as they come, a notched wheel's lines eased. On the
+    /// alternate screen, which has no history, they are arrow keys for the
+    /// program that took the screen, if it asked for them.
+    fn wheel(&mut self, event: &ScrollWheelEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        let line = self.line;
+        let mut term = self.term.lock().unwrap_or_else(|gone| gone.into_inner());
+        let mode = *term.mode();
+        if mode.contains(TermMode::ALT_SCREEN) {
+            drop(term);
+            if !mode.contains(TermMode::ALTERNATE_SCROLL) {
+                return;
+            }
+            let lines = event.delta.pixel_delta(px(line)).y / px(line);
+            let count = self.scroll.alternate_lines(lines);
+            if count != 0 {
+                let key = keys::arrow_key(count > 0, mode);
+                let bytes = key.repeat(count.unsigned_abs() as usize);
+                if let Ok(mut writer) = self.writer.lock() {
+                    let _ = writer.write_all(&bytes);
+                }
+            }
+            cx.stop_propagation();
+            return;
+        }
+        match event.delta {
+            ScrollDelta::Pixels(delta) => {
+                self.scroll.by_pixels(&mut term, line, f32::from(delta.y))
+            }
+            ScrollDelta::Lines(delta) => self.scroll.glide_by(&term, line, delta.y * line),
+        }
+        drop(term);
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    /// The position as this frame draws it: an animated scroll steps once, and
+    /// asks for the next frame while it is still travelling. Returns the
+    /// part-line, and the scrollbar's place if the pane is scrolled back.
+    fn scroll_frame(&mut self, window: &mut Window, line: f32) -> (f32, Option<Thumb>) {
+        let mut term = self.term.lock().unwrap_or_else(|gone| gone.into_inner());
+        self.scroll.settle(&term, line);
+        if self.scroll.step(&mut term, line, Instant::now()) {
+            window.request_animation_frame();
+        }
+        let thumb = self.scroll.is_scrolled(&term).then(|| {
+            let screen = term.grid().screen_lines() as f32 * line;
+            let history = Scrollback::limit(&term, line);
+            let total = (screen + history).max(1.);
+            let back = self.scroll.position(&term, line);
+            Thumb {
+                top: (history - back) / total,
+                height: screen / total,
+            }
+        });
+        (self.scroll.frac(), thumb)
     }
 
     /// A click puts the keyboard in the terminal, the way it does in a terminal
@@ -283,6 +396,9 @@ impl Render for TerminalPane {
             None => (theme.mono_font_family.clone(), theme.mono_font_size),
         };
         let metrics = metrics(window, family.clone(), font_size);
+        self.line = f32::from(metrics.line);
+        let (frac, thumb) = self.scroll_frame(window, self.line);
+        let theme = cx.theme();
         let body = self.body(window, theme, metrics);
 
         // The grid is as many cells as fit in the box the pane was given: the
@@ -324,19 +440,53 @@ impl Render for TerminalPane {
             .px(PAD_X)
             .py(PAD_Y)
             .on_mouse_down(MouseButton::Left, cx.listener(Self::clicked))
+            .on_scroll_wheel(cx.listener(Self::wheel))
             .child(
                 div()
                     .size_full()
-                    .flex()
-                    .flex_col()
+                    .relative()
                     .overflow_hidden()
                     .font_family(family)
                     .text_size(font_size)
                     .line_height(metrics.line)
                     .text_color(theme.foreground)
-                    .children(body),
+                    .child(
+                        // The rows, shifted by the part-line: with one extra row
+                        // above the screen, a view `frac` pixels into that row puts
+                        // it `line - frac` above the top edge.
+                        div()
+                            .absolute()
+                            .left_0()
+                            .right_0()
+                            .top(px(if frac > 0. { frac - self.line } else { 0. }))
+                            .flex()
+                            .flex_col()
+                            .children(body),
+                    )
+                    .when_some(thumb, |pane, thumb| {
+                        // Where the screen sits in the whole history, while the
+                        // pane is looking back: the live screen has no bar.
+                        pane.child(
+                            div()
+                                .absolute()
+                                .right_0()
+                                .w(px(4.))
+                                .top(relative(thumb.top))
+                                .h(relative(thumb.height))
+                                .min_h(px(16.))
+                                .rounded(px(2.))
+                                .bg(theme.muted_foreground.opacity(0.45)),
+                        )
+                    }),
             )
     }
+}
+
+/// The scrollbar's thumb, as fractions of the pane's height.
+#[derive(Clone, Copy, Debug)]
+struct Thumb {
+    top: f32,
+    height: f32,
 }
 
 /// What the grid holds, as much of it as the pane draws.

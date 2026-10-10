@@ -54,10 +54,15 @@ mod keys;
 mod palette;
 mod pane;
 mod pty;
+mod scroll;
 
 use gpui_kit::{App, Global, KeyBinding, SharedString};
 
 pub use pane::{TerminalEvent, TerminalPane};
+
+/// How many lines of history a terminal keeps behind its screen. Older lines
+/// are dropped as new ones arrive.
+pub const SCROLLBACK: usize = 65_535;
 
 /// The key context every pane carries.
 pub const KEY_CONTEXT: &str = "Terminal";
