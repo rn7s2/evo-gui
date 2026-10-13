@@ -519,6 +519,10 @@ struct Live {
     /// A config file this session reads was saved, and the session has not been told
     /// yet: `/reload` needs an idle agent, so it waits for the run to end (§13).
     reload_wanted: bool,
+    /// The box's drawer and popup are fed from this session's own `/catalog`: what it
+    /// has registered — the project's config and any `/reload` included — rather than
+    /// the app's read of the home, which then no longer overwrites them.
+    own_catalog: bool,
 }
 
 impl TabContent {
@@ -1206,7 +1210,11 @@ impl TabContent {
     ) {
         if let Some(catalog) = &data.catalog {
             self.set_catalog(catalog, window, cx);
-            self.set_composer_catalog(catalog, cx);
+            // A running session that answered for itself keeps its own list: the app's
+            // read is the home's, and this session may have more (or fewer) models.
+            if !self.live.as_ref().is_some_and(|live| live.own_catalog) {
+                self.set_composer_catalog(catalog, cx);
+            }
         }
         self.set_catalog_error(data.catalog_error.clone(), cx);
         self.set_history_loading(data.history_loading, cx);
@@ -1374,6 +1382,7 @@ impl TabContent {
             store_id: started.store_id,
             ticker: None,
             reload_wanted: false,
+            own_catalog: false,
         });
         // The coordinator's rows can page back, fetch one item whole and take a queued
         // input back from the moment the tab has a server to ask (§5.4, §5.5).
@@ -1502,6 +1511,8 @@ impl TabContent {
             Update::Ready { pid, session, .. } => {
                 if let Some(live) = self.live.as_mut() {
                     live.pid = Some(pid);
+                    // The models this session can switch to are its own: ask it.
+                    live.engine.catalog();
                 }
                 // The session the swarm is writing to is what history resumes (§2).
                 self.session = Some(PathBuf::from(&session.path));
@@ -1583,6 +1594,14 @@ impl TabContent {
             // One item, whole: a tool row's untruncated output (§5.4). The view
             // holding that row takes it.
             Update::Item { topic, body } => self.on_full_item(&topic, &body, cx),
+            // The session's own registrations: the drawer's models and levels, and the
+            // popup's commands, as this server has them now (§5.6, §13).
+            Update::Catalog { body } => {
+                if let (Some(body), Some(live)) = (body, self.live.as_mut()) {
+                    live.own_catalog = true;
+                    self.set_composer_catalog(&body, cx);
+                }
+            }
             // Image bytes, decoded once on a thread of its own and handed to the row
             // that asked for them (§5.4).
             Update::Media {
@@ -2513,6 +2532,13 @@ impl TabContent {
                         }
                         self.reload_if_idle(cx);
                         return;
+                    }
+                    // Reloaded: the session's models are whatever the saved file
+                    // registers now, and the drawer is told.
+                    if reply.ok {
+                        if let Some(live) = self.live.as_ref() {
+                            live.engine.catalog();
+                        }
                     }
                 }
                 Pending::AddLane(target) => {
@@ -3594,6 +3620,78 @@ mod tests {
                 );
                 assert_eq!(reloads(tab), 1);
             })
+        });
+    }
+
+    /// §5.6, §13: a running tab's drawer lists the models *its session* has registered —
+    /// its own `GET /catalog`, asked for when the server is up and again after a
+    /// `/reload` — and the app's read of the home no longer overwrites that list.
+    #[gpui_kit::test]
+    fn a_running_tab_lists_its_own_sessions_models(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (window, tab, dir) = live_tab(cx);
+        pump_until(cx, "the ready server", |cx| {
+            cx.read(|cx| {
+                tab.read(cx)
+                    .live
+                    .as_ref()
+                    .is_some_and(|live| live.own_catalog)
+            })
+        });
+        let control = swarm_client::harness::Control::attach(dir.path()).unwrap();
+        // The harness hands each request over once: count what has been seen.
+        let seen = std::cell::Cell::new(0);
+        let catalogs = || {
+            seen.set(seen.get() + control.requests_on("/catalog").len());
+            seen.get()
+        };
+        assert_eq!(catalogs(), 1, "asked once the server was up");
+
+        let drawer = |cx: &mut TestAppContext| {
+            cx.update_window(window, |_, window, cx| {
+                let composer = tab.read(cx).composer.clone();
+                composer.update(cx, |composer, cx| {
+                    composer.set_agent(&model_state(), "Coordinator", true, cx)
+                });
+                window.render_frame(cx);
+                if window.try_find("drawer-model-fake-model-fake").is_none() {
+                    window.click("composer-chip-model", cx);
+                    window.render_frame(cx);
+                }
+                (
+                    window.try_find("drawer-model-fake-model-fake").is_some(),
+                    window.try_find("drawer-model-stub-a-openai").is_some(),
+                )
+            })
+            .unwrap()
+        };
+        assert_eq!(drawer(cx), (true, false), "the session's own registration");
+
+        // The app's read of the home arrives later: the session's list stands.
+        cx.update_window(window, |_, window, cx| {
+            let data = LauncherData {
+                catalog: Some(catalog_body()),
+                ..LauncherData::default()
+            };
+            tab.update(cx, |tab, cx| tab.set_launcher_data(&data, window, cx));
+        })
+        .unwrap();
+        assert_eq!(drawer(cx), (true, false), "not overwritten by the home's");
+
+        // A saved config file reloads the session, and its list is asked for again.
+        cx.update(|cx| {
+            tab.update(cx, |tab, cx| {
+                tab.apply_config(
+                    &ConfigSaved {
+                        scope: ConfigScope::Global,
+                        file: store::ConfigFile::Init,
+                    },
+                    cx,
+                )
+            })
+        });
+        pump_until(cx, "the catalog asked for after the reload", |_| {
+            catalogs() == 2
         });
     }
 

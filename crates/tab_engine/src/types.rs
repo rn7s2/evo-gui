@@ -58,6 +58,12 @@ pub enum Update {
         topic: String,
         body: serde_json::Value,
     },
+    /// The running server's own catalog (`GET /catalog`, §5.6): its models, levels
+    /// and commands as *this* session has them registered — the project's own config
+    /// and a `/reload` included — which is what the box's drawer and popup offer.
+    /// `None` when it could not be read: the app's own catalog then stands, and
+    /// nothing is said — the tab is no worse off than before it asked.
+    Catalog { body: Option<serde_json::Value> },
     /// One item, whole (`GET /items/<id>`) — what a tool row expands to, thinking
     /// and untruncated tool output included. The body is `{item: {…}}`.
     Item {

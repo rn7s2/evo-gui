@@ -156,6 +156,15 @@ fn a_saved_init_file_reads_the_catalog_again(cx: &mut TestAppContext) {
     waited(cx, "the catalog read again", |cx| {
         cached_models(cx) == ["after".to_string()]
     });
+    // And the New tab's model list is the new one: the field shows the new default.
+    waited(cx, "the New tab's model field", |cx| {
+        cx.read(|cx| {
+            view.read(cx).tabs()[0]
+                .read(cx)
+                .coordinator_model(cx)
+                .contains("after")
+        })
+    });
     let log = std::fs::read_to_string(root.path().join(LOG_NAME)).unwrap_or_default();
     assert!(
         log.contains("config: init.lisp saved, reading the catalog again"),

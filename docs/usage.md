@@ -573,7 +573,9 @@ right away, without restarting the app: the catalog and every empty tab's `check
 are read again (so the choosers and effort sliders follow a new model or
 `thinking` setting), and every running session the file concerns — all of them for
 the home, the ones in that folder for a project — is sent `/reload`, at once if its
-agent is idle, else when its run ends. Memory and lore are read by each new session.
+agent is idle, else when its run ends — and once it has reloaded, the model drawer
+in its box lists what the session now registers (a running tab's drawer is always
+fed from its own server's `/catalog`). Memory and lore are read by each new session.
 
 **About Evo Desktop** (App menu, first item) shows the app's version, each
 binary's own `--version` line, and the two paths worth knowing: where the app

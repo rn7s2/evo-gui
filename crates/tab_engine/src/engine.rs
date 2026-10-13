@@ -106,6 +106,8 @@ enum Fetch {
     Item { topic: String, id: String },
     /// `GET /media/<id>/<n>?topic=` — image bytes.
     Media { topic: String, id: String, n: u32 },
+    /// `GET /catalog` — the session's own registrations, as they stand now.
+    Catalog,
 }
 
 impl Fetch {
@@ -120,6 +122,7 @@ impl Fetch {
             Fetch::Page { topic, .. } => format!("items in {topic}"),
             Fetch::Item { topic, id } => format!("item {id} in {topic}"),
             Fetch::Media { topic, id, n } => format!("media {n} of {id} in {topic}"),
+            Fetch::Catalog => "the catalog".to_owned(),
         }
     }
 
@@ -157,6 +160,9 @@ impl Fetch {
                     bytes,
                 })
             }
+            Fetch::Catalog => Ok(Update::Catalog {
+                body: client.catalog().ok(),
+            }),
         }
     }
 }
@@ -276,6 +282,12 @@ impl EngineHandle {
             id: id.to_owned(),
             n,
         }))
+    }
+
+    /// `GET /catalog`: what this session has registered now — after a `/reload`, the
+    /// models the saved config file added. The answer arrives as [`Update::Catalog`].
+    pub fn catalog(&self) -> bool {
+        self.send(Inbound::Fetch(Fetch::Catalog))
     }
 
     /// Hand the engine one inbound message.
@@ -848,6 +860,7 @@ fn what(update: &Update) -> &'static str {
         Update::OpReply { .. } => "reply",
         Update::ItemsBefore { .. } => "page of older items",
         Update::Item { .. } => "item",
+        Update::Catalog { .. } => "catalog",
         Update::Media { .. } => "image",
         Update::FetchFailed { .. } => "failed read",
         Update::ServerGone => "server gone",
