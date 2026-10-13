@@ -564,7 +564,10 @@ impl Choosers {
 
     /// What the controls add up to (§7.2, §1).
     pub(crate) fn plan(&self, cx: &App) -> LaunchPlan {
-        self.state.read(cx).launcher.plan()
+        // The launch pins what evo resolved, so a later resume keeps these models
+        // even after the init files' defaults change; a check is still asked with
+        // by-hand flags alone (see `EmptyTabState::run_check`).
+        self.state.read(cx).launcher.launch_plan()
     }
 
     /// Put the keyboard where the empty tab begins: the coordinator card's model field —
@@ -3294,9 +3297,9 @@ mod tests {
                 "drawn where the person reads it"
             );
             assert_eq!(
-                tab.read(cx).launch_plan(cx).thinking,
-                None,
-                "shown, not passed: evo resolves the level itself"
+                tab.read(cx).launch_plan(cx).thinking.as_deref(),
+                Some("max"),
+                "the catalog's own level is pinned at launch, so a resume keeps it                  even after the init default changes; a check still asks with no flag"
             );
         });
 

@@ -656,6 +656,119 @@ fn a_catalog_without_per_model_levels_offers_the_sessions_ladder() {
     assert_eq!(launcher.level(Role::Lanes), Some("low"));
 }
 
+/// A launch — but not a check — pins what evo itself resolved: the models, levels and
+/// count `check` reported (or the catalog's defaults for one agent), so the flags are
+/// journaled and a later resume keeps the model the session started with. The app's own
+/// fallbacks (the first usable model, the middle rung, six workers) are pinned nowhere.
+#[test]
+fn a_launch_pins_what_evo_resolved_so_resume_keeps_it() {
+    let mut launcher = Launcher::new();
+    // Nothing answered: app fallbacks only, and both plans stay bare.
+    assert!(launcher.plan().is_default());
+    assert!(launcher.launch_plan().is_default());
+
+    launcher.set_catalog(&fixture("catalog.json"));
+    // The catalog's own defaults are evo's answer even before a check: the launch
+    // pins them (the model; its level is none — that model takes no effort).
+    let catalogs_own = launcher.launch_plan();
+    assert_eq!(
+        catalogs_own.model,
+        Some(("deepseek-v4.1-flash".to_string(), "acme".to_string()))
+    );
+    assert_eq!(catalogs_own.thinking, None);
+    assert_eq!(
+        catalogs_own.workers, None,
+        "no check yet: the count stays unpinned"
+    );
+    launcher.set_check(&json!({
+        "ok": true,
+        "model": {"id": "claude-opus-5", "provider": "anthropic", "ok": true},
+        "lane_model": {"id": "deepseek-v4.1-flash", "provider": "acme", "ok": true},
+        "thinking": "high",
+        "lane_thinking": "medium",
+        "workers": 9,
+        "problems": []
+    }));
+    // The check is still asked with bare hands...
+    assert!(launcher.plan().is_default(), "shown, not passed to check");
+    // ...but the launch pins evo's answer, every field of it.
+    let launch = launcher.launch_plan();
+    assert_eq!(
+        launch.model,
+        Some(("claude-opus-5".to_string(), "anthropic".to_string()))
+    );
+    assert_eq!(launch.thinking.as_deref(), Some("high"));
+    assert_eq!(
+        launch.lanes_model,
+        Some(("deepseek-v4.1-flash".to_string(), "acme".to_string()))
+    );
+    // The lane's model takes no effort: nothing is pinned for its level.
+    assert_eq!(launch.lane_thinking, None);
+    assert_eq!(launch.workers, Some(9));
+
+    // What a person set wins over what evo resolved.
+    launcher.choose(Role::Lanes, "claude-opus-5@anthropic");
+    launcher.set_effort(Role::Lanes, 4);
+    let launch = launcher.launch_plan();
+    assert_eq!(
+        launch.lanes_model,
+        Some(("claude-opus-5".to_string(), "anthropic".to_string()))
+    );
+    assert_eq!(launch.lane_thinking.as_deref(), Some("max"));
+
+    // One agent: the catalog's own defaults are pinned, and no swarm-only field is.
+    let mut agent = Launcher::new();
+    agent.set_swarm(false);
+    agent.set_catalog(&json!({
+        "models": [{"id": "m", "provider": "p", "ready": true}],
+        "default_model": {"id": "m", "provider": "p"},
+        "thinking_levels": ["low", "medium", "high", "xhigh", "max"],
+        "default_thinking": "max"
+    }));
+    let launch = agent.launch_plan();
+    assert_eq!(launch.model, Some(("m".to_string(), "p".to_string())));
+    assert_eq!(launch.thinking.as_deref(), Some("max"));
+    assert_eq!(launch.workers, None);
+    assert_eq!(launch.lanes_model, None);
+
+    // A check that failed resolves nothing: the first usable model and the fallback
+    // count are this app's guess, and neither plan pins them.
+    let mut bare = Launcher::new();
+    bare.set_catalog(&fixture("catalog.json"));
+    bare.set_check(&json!({"ok": false, "problems": [
+        {"code": "model_unresolved", "message": "no model"}]}));
+    assert!(bare.plan().is_default());
+    let launch = bare.launch_plan();
+    assert_eq!(
+        launch.model,
+        Some(("deepseek-v4.1-flash".to_string(), "acme".to_string())),
+        "the catalog's own default still pins; the check resolved none itself"
+    );
+    assert_eq!(launch.thinking, None, "the middle rung is not pinned");
+    assert_eq!(launch.workers, None, "six workers are not pinned");
+}
+
+/// With no check and a catalog that names no default, only a person's pick is pinned:
+/// the first usable model is this app's guess, and a launch leaves it to evo.
+#[test]
+fn a_first_usable_fallback_is_not_pinned() {
+    let mut launcher = Launcher::new();
+    launcher.set_catalog(&json!({
+        "models": [
+            {"id": "a", "provider": "p", "ready": true},
+            {"id": "b", "provider": "p", "ready": true}
+        ],
+        "thinking_levels": ["low", "medium", "high"]
+    }));
+    assert_eq!(launcher.chosen_key(Role::Coordinator), Some("a@p"));
+    assert!(launcher.launch_plan().is_default(), "shown, not pinned");
+    assert!(launcher.choose(Role::Coordinator, "b@p"));
+    assert_eq!(
+        launcher.launch_plan().model,
+        Some(("b".to_string(), "p".to_string()))
+    );
+}
+
 /// A control the person moved is theirs: a later check leaves it where they put it, while
 /// the one beside it follows.
 #[test]

@@ -138,7 +138,12 @@ a model is a launch that runs it:
   chain, journal and the `thinking` setting included — clamped the way evo clamps
   it onto the model: the strongest rung it takes at or below that level (`xhigh` on
   `low, high, max` opens on `high`). Click, drag or use the arrows, and the level's
-  name is beside the label.
+  name is beside the label. What the launch *passes* is not only what you
+  changed: the values evo itself resolved (`check`'s answer, or the catalog's
+  default) are pinned on the command line too, so a later resume keeps the model
+  and effort the session started with even after the init files' defaults
+  change. The app's own fallbacks while evo has not answered — the first usable
+  model, the middle rung, six workers — are never pinned.
 - **Workers — Use swarm** is a switch, not a flag: on, the launch is
   `evo-swarm serve` — a coordinator and its pool of lanes; off, it is
   `evo-agent serve`, one agent, addressed as `Main` on the page that opens, and

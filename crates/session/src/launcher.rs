@@ -151,6 +151,11 @@ struct Field {
     /// The person picked this one, so the next document that resolves another leaves it
     /// be, and a launch passes it.
     by_hand: bool,
+    /// The key is evo's own answer — `check`'s resolved model or the catalog's
+    /// `default_model` — rather than the first registration this app could find. A
+    /// launch passes that too, so it is journaled and a later resume keeps it even
+    /// when the default in the init files has since changed.
+    resolved: bool,
 }
 
 /// One registration in the catalog, as a model field offers it.
@@ -440,9 +445,12 @@ fn effort_levels(model: &Value) -> Vec<String> {
 /// newer than the catalog, and the catalog newer than nothing — while a control the person
 /// set themselves stays where they put it.
 ///
-/// What a control *shows* and what a launch *passes* are two different things: only the
-/// controls the person set are flags ([`Launcher::plan`]), and the ones the launcher
-/// resolved are left to evo.
+/// What a control *shows* and what a launch *passes* are two different things. A
+/// `check` is asked with only the controls the person set ([`Launcher::plan`]), so its
+/// answer is evo's own. The launch itself ([`Launcher::launch_plan`]) also pins what evo
+/// resolved — its answer, or the catalog's default — so a later resume keeps the model
+/// the session started with; the app's own fallbacks (the first usable model, the middle
+/// rung, six workers) are passed nowhere.
 #[derive(Clone, Debug, Default)]
 pub struct Launcher {
     /// Whether this launch is a swarm (`evo-swarm`) or one agent (`evo-agent`): the New
@@ -717,6 +725,85 @@ impl Launcher {
         }
     }
 
+    /// What an actual **launch** passes — as opposed to what `check` is asked
+    /// ([`Launcher::plan`]): a control the person set, or the value evo itself resolved
+    /// (`check`'s answer or the catalog's default). The app's own fallbacks (the first
+    /// usable model, the middle rung, six workers) stay out of it.
+    ///
+    /// Pinning evo's answer is what keeps a resumed session on the model it started
+    /// with: the launch flags are journaled, and resume reads them back; without them,
+    /// a session that never changed model by hand has no model in its journal, so a
+    /// resume runs on whatever the current init files default to.
+    pub fn launch_plan(&self) -> LaunchPlan {
+        let plan = self.plan();
+        let mut launch = LaunchPlan {
+            model: plan
+                .model
+                .or_else(|| self.resolved_model(Role::Coordinator)),
+            thinking: plan
+                .thinking
+                .or_else(|| self.resolved_level(Role::Coordinator)),
+            workers: plan.workers.or_else(|| self.resolved_workers()),
+            lanes_model: plan
+                .lanes_model
+                .or_else(|| self.resolved_model(Role::Lanes)),
+            lane_thinking: plan
+                .lane_thinking
+                .or_else(|| self.resolved_level(Role::Lanes)),
+            ..plan
+        };
+        // A single agent's plan carries nothing of the lanes, resolved or set.
+        if !self.swarm {
+            launch.workers = None;
+            launch.lanes_model = None;
+            launch.lane_thinking = None;
+        }
+        launch
+    }
+
+    /// The model one card is on, when that position is evo's own answer rather than the
+    /// app's first-usable fallback.
+    fn resolved_model(&self, role: Role) -> Option<(String, String)> {
+        let field = &self.fields[role.slot()];
+        (!field.by_hand && field.resolved)
+            .then(|| self.chosen(role).map(pair))
+            .flatten()
+    }
+
+    /// The level evo resolved for one card — `check`'s own word, or the catalog's
+    /// `default_thinking` for the coordinator — on the ladder this card's model
+    /// offers, clamped the way evo clamps it. A level for a model that takes no effort
+    /// at all pins nothing, so the flag is not passed where evo would ignore it.
+    fn resolved_level(&self, role: Role) -> Option<String> {
+        let resolved = if role == Role::Coordinator {
+            self.check
+                .as_ref()
+                .and_then(|check| string(check, "thinking"))
+                .or_else(|| self.default_thinking.clone())
+        } else {
+            self.check
+                .as_ref()
+                .and_then(|check| string(check, "lane_thinking"))
+        };
+        // The middle rung is the *display's* fallback when evo named nothing, and
+        // never a flag: without a resolution there is nothing to pin.
+        resolved.and_then(|level| self.clamp(role, Some(level.as_str())))
+    }
+
+    /// The worker count `check` resolved — a swarm's answer, and the only resolved
+    /// count there is.
+    fn resolved_workers(&self) -> Option<u16> {
+        self.check
+            .as_ref()
+            .and_then(|check| check.get("workers"))
+            .and_then(Value::as_u64)
+            .map(|count| {
+                u16::try_from(count)
+                    .unwrap_or(WORKERS_MAX)
+                    .clamp(WORKERS_MIN, WORKERS_MAX)
+            })
+    }
+
     /// The `ID@PROVIDER` pair one card contributes to a plan: its own choice, or nothing
     /// at all when the launcher resolved it.
     fn by_hand_model(&self, role: Role) -> Option<(String, String)> {
@@ -748,9 +835,11 @@ impl Launcher {
             if stands {
                 continue;
             }
+            let (key, evos_own) = self.resolved(role);
             self.fields[role.slot()] = Field {
-                key: self.resolved(role),
+                key,
                 by_hand: false,
+                resolved: evos_own,
             };
         }
         // The sliders last: which levels a card offers is its model's business.
@@ -851,7 +940,7 @@ impl Launcher {
     }
 
     /// What evo resolves one card's model to, in the order §7.2 reads it.
-    fn resolved(&self, role: Role) -> Option<String> {
+    fn resolved(&self, role: Role) -> (Option<String>, bool) {
         // What `check` resolved: its answer is the launch's own, `ok` or not — a model
         // it judged unusable is still the model it resolved, and the check's own line
         // under the cards says why.
@@ -861,7 +950,7 @@ impl Launcher {
             .and_then(|check| checked_model(check, role))
         {
             if self.model(&key).is_some() {
-                return Some(key);
+                return (Some(key), true);
             }
         }
         // Then evo's own default registration, when this card can run it.
@@ -872,13 +961,18 @@ impl Launcher {
         if let Some(key) =
             default.filter(|key| self.model(key).is_some_and(|model| model.usable(role)))
         {
-            return Some(key);
+            return (Some(key), true);
         }
-        // Then the first registration this card can run at all.
-        self.models
-            .iter()
-            .find(|model| model.usable(role))
-            .map(|model| model.key.clone())
+        // Then the first registration this card can run at all — this app's own
+        // fallback, which a launch does not pin: evo may resolve something else in
+        // the project's own init file.
+        (
+            self.models
+                .iter()
+                .find(|model| model.usable(role))
+                .map(|model| model.key.clone()),
+            false,
+        )
     }
 
     /// Everything the empty tab renders. The history is not in it: it has its own entry
