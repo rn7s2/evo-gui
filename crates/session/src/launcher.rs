@@ -67,8 +67,16 @@
 //! retired (`+effort-levels+` is `low medium high xhigh max`, and both `--thinking` and
 //! `/thinking` refuse anything else), and the catalog no longer lists it — but a body
 //! out of the app's disk cache can predate that, and a launch flag cannot carry it
-//! (`--thinking off` is a usage error), so the ladder the slider offers is whatever the
-//! catalog listed without that rung.
+//! (`--thinking off` is a usage error), so the session's ladder is whatever the catalog
+//! listed without that rung.
+//!
+//! Each card's slider offers less: the levels **its model** takes
+//! (`/catalog.models[].effort_levels`, [`Launcher::ladder`]), so a model whose ladder is
+//! `low, high, max` offers those three and a model with no effort parameter offers none
+//! (and passes no flag). It opens on the configured level — `check`'s `thinking`, evo's
+//! own chain over the `thinking` setting — clamped as evo clamps what a model is handed:
+//! the strongest rung that model takes at or below it. A catalog that predates the
+//! per-model list offers the session's ladder for every model.
 //!
 //! # History (§2)
 //!
@@ -159,6 +167,10 @@ pub struct ModelOption {
     /// The levels this registration takes, in the catalog's own order, empty when it
     /// takes no effort setting at all — the ladder a chooser offers for *this* model.
     pub effort_levels: Vec<String>,
+    /// Whether the catalog said which levels it takes at all. A body written before evo
+    /// published `effort_levels` names none for every model, and that is not the same
+    /// as a model that takes no effort: the session's own ladder is offered for it.
+    pub effort_listed: bool,
     /// Whether evo can reach it now (`/catalog.models[].ready`).
     pub ready: bool,
     /// Why not, in evo's own words.
@@ -298,6 +310,7 @@ pub fn model_options(catalog: &Value) -> Vec<ModelOption> {
                 key: format!("{id}@{provider}"),
                 detail: model_detail(model),
                 effort_levels: effort_levels(model),
+                effort_listed: model.get("effort_levels").is_some_and(Value::is_array),
                 id,
                 provider,
                 ready,
@@ -451,10 +464,18 @@ pub struct Launcher {
     levels: Vec<String>,
     /// The two cards' model fields, the coordinator's first.
     fields: [Field; 2],
-    /// Where each slider sits, as an index into [`Launcher::levels`], and whether a person
-    /// moved it there — a moved slider is not re-resolved.
-    efforts: [usize; 2],
+    /// The levels each card's slider offers: the levels the card's model takes, as the
+    /// catalog lists them for that registration (§5.6), and only those a launch flag may
+    /// carry. A model that takes no effort at all offers none.
+    ladders: [Vec<String>; 2],
+    /// The level each slider sits on — always a rung of its card's ladder, `None` while
+    /// that ladder is empty — and whether a person moved it there: a moved slider is not
+    /// re-resolved, only kept on the ladder when the model under it changes.
+    efforts: [Option<String>; 2],
     effort_by_hand: [bool; 2],
+    /// The rung a person moved each slider to, as they chose it: what a slider they set
+    /// goes back to when a model that takes it is chosen again.
+    efforts_chosen: [Option<String>; 2],
     /// The worker count, and whether a person typed it.
     workers: u16,
     count_by_hand: bool,
@@ -466,9 +487,11 @@ impl Launcher {
     /// run yet — no catalog has arrived.
     pub fn new() -> Launcher {
         let levels = thinking_levels(&Value::Null);
+        let start = levels.get(middle(&levels)).cloned();
         Launcher {
             swarm: true,
-            efforts: [middle(&levels); 2],
+            ladders: [levels.clone(), levels.clone()],
+            efforts: [start.clone(), start],
             levels,
             workers: DEFAULT_WORKERS,
             ..Launcher::default()
@@ -512,12 +535,8 @@ impl Launcher {
             .get("default_model")
             .and_then(|default| Some((string(default, "id")?, string(default, "provider")?)))
             .map(|(id, provider)| (id, provider.to_lowercase()));
-        // A ladder that got shorter (or a first one that arrived) moves the sliders onto
-        // it; a rung that is still on it is left where it is.
-        let end = self.levels.len().saturating_sub(1);
-        for effort in &mut self.efforts {
-            *effort = (*effort).min(end);
-        }
+        // A ladder that changed (or a first one that arrived) moves the sliders onto it;
+        // a rung that is still on it is left where it is.
         self.resolve();
         self.differs(&before)
     }
@@ -570,9 +589,17 @@ impl Launcher {
         self.models.iter().find(|model| model.key == key)
     }
 
-    /// The levels the effort sliders offer, weakest first.
+    /// The levels a session takes (`/catalog.thinking_levels`), weakest first: the ladder
+    /// every model's own levels are a subset of.
     pub fn levels(&self) -> &[String] {
         &self.levels
+    }
+
+    /// The levels one card's slider offers, weakest first: what the card's model takes
+    /// (`/catalog.models[].effort_levels`), so a slider never offers a rung the model
+    /// would clamp away. Empty for a model that takes no effort setting at all.
+    pub fn ladder(&self, role: Role) -> &[String] {
+        &self.ladders[role.slot()]
     }
 
     /// The registration one card is on, if it resolved to one.
@@ -620,29 +647,36 @@ impl Launcher {
         let changed = !(field.by_hand && field.key.as_deref() == Some(key));
         field.key = Some(key.to_string());
         field.by_hand = true;
-        changed
+        // Another model is another ladder: the slider moves onto it.
+        let efforts = self.efforts.clone();
+        self.resolve_efforts();
+        changed || self.efforts != efforts
     }
 
-    /// Where one card's effort slider sits.
+    /// Where one card's effort slider sits, as an index into [`Launcher::ladder`].
     pub fn effort(&self, role: Role) -> usize {
-        self.efforts[role.slot()]
+        self.level(role)
+            .and_then(|level| self.ladder(role).iter().position(|rung| rung == level))
+            .unwrap_or(0)
     }
 
-    /// The level one card's slider names.
+    /// The level one card's slider names, `None` when its model takes no effort.
     pub fn level(&self, role: Role) -> Option<&str> {
-        self.levels.get(self.effort(role)).map(String::as_str)
+        self.efforts[role.slot()].as_deref()
     }
 
     /// Move one card's slider. An index past the ladder is clamped to it: the ladder can
     /// get shorter between one catalog and the next. Returns whether it moved.
     pub fn set_effort(&mut self, role: Role, index: usize) -> bool {
-        if self.levels.is_empty() {
+        let ladder = &self.ladders[role.slot()];
+        if ladder.is_empty() {
             return false;
         }
-        let index = index.min(self.levels.len() - 1);
+        let level = ladder[index.min(ladder.len() - 1)].clone();
         let effort = &mut self.efforts[role.slot()];
-        let moved = *effort != index;
-        *effort = index;
+        let moved = effort.as_deref() != Some(level.as_str());
+        *effort = Some(level.clone());
+        self.efforts_chosen[role.slot()] = Some(level);
         // A person's own rung, which a later check leaves alone.
         self.effort_by_hand[role.slot()] = true;
         moved
@@ -702,7 +736,6 @@ impl Launcher {
     /// Fill in every control from what evo resolved — and leave a person's own pick alone:
     /// only a control the launcher set itself is re-resolved.
     fn resolve(&mut self) {
-        self.resolve_efforts();
         self.resolve_workers();
         for role in Role::ALL {
             let field = &self.fields[role.slot()];
@@ -720,13 +753,37 @@ impl Launcher {
                 by_hand: false,
             };
         }
+        // The sliders last: which levels a card offers is its model's business.
+        self.resolve_efforts();
     }
 
-    /// Where the two sliders sit: the effort `check` resolved for each card, or the middle
-    /// rung while it has not answered.
+    /// The levels a card's model takes, and only those a launch flag may carry, in the
+    /// session ladder's order. A card with no model yet — or a catalog that predates the
+    /// per-model list — offers the session's whole ladder.
+    fn ladder_for(&self, role: Role) -> Vec<String> {
+        match self.chosen(role) {
+            Some(model) if model.effort_listed => self
+                .levels
+                .iter()
+                .filter(|level| model.effort_levels.contains(level))
+                .cloned()
+                .collect(),
+            _ => self.levels.clone(),
+        }
+    }
+
+    /// Where the two sliders sit, on the ladder each card's model offers: the effort
+    /// `check` resolved for the card (the configured `thinking`, by evo's own chain) or the
+    /// middle rung while it has not answered — clamped the way evo clamps what a model is
+    /// handed, onto the strongest rung that model takes at or below it. A slider a person
+    /// moved keeps their rung, clamped the same way when the model under it changed.
     fn resolve_efforts(&mut self) {
         for role in Role::ALL {
+            let ladder = self.ladder_for(role);
+            self.ladders[role.slot()] = ladder;
             if self.effort_by_hand[role.slot()] {
+                let chosen = self.efforts_chosen[role.slot()].clone();
+                self.efforts[role.slot()] = self.clamp(role, chosen.as_deref());
                 continue;
             }
             // The coordinator's level is a session's own, so it comes from the
@@ -747,10 +804,34 @@ impl Launcher {
                     .as_ref()
                     .and_then(|check| string(check, "lane_thinking")),
             };
-            self.efforts[role.slot()] = resolved
-                .and_then(|level| self.levels.iter().position(|rung| *rung == level))
-                .unwrap_or_else(|| middle(&self.levels));
+            self.efforts[role.slot()] = self.clamp(role, resolved.as_deref());
         }
+    }
+
+    /// The rung of one card's ladder a level lands on: itself when the model takes it,
+    /// else evo's own clamp (`clamp-effort`) — the strongest rung at or below it, or the
+    /// weakest when the model offers nothing that low. A level no session takes (or none
+    /// at all) opens on the ladder's middle, and an empty ladder has no rung.
+    fn clamp(&self, role: Role, level: Option<&str>) -> Option<String> {
+        let ladder = &self.ladders[role.slot()];
+        if ladder.is_empty() {
+            return None;
+        }
+        let order = |level: &str| {
+            self.levels
+                .iter()
+                .position(|rung| rung == level)
+                .or_else(|| LADDER.iter().position(|rung| *rung == level))
+        };
+        let Some(want) = level.and_then(order) else {
+            return Some(ladder[middle(ladder)].clone());
+        };
+        ladder
+            .iter()
+            .rev()
+            .find(|rung| order(rung).is_some_and(|at| at <= want))
+            .or_else(|| ladder.first())
+            .cloned()
     }
 
     /// The count `check` resolved, or evo's own until it answers. A count off the wire is
@@ -808,6 +889,7 @@ impl Launcher {
             || self.levels != before.levels
             || self.fields != before.fields
             || self.efforts != before.efforts
+            || self.ladders != before.ladders
             || self.workers != before.workers
             || self.check != before.check
             || self.default_model != before.default_model

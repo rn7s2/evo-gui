@@ -54,9 +54,37 @@ pub const CONFIG_DISCARD_ID: &str = "config-discard";
 /// The surface the editor is drawn on.
 pub const CONFIG_SURFACE_ID: &str = "config-surface";
 
-/// Always on the page: a save here is picked up by the next launch, not by the
-/// session running now.
-pub const REMINDER_TEXT: &str = "Changes take effect after restarting Evo Desktop.";
+/// Always on the page: what a save does, so nobody restarts the app to find out.
+///
+/// A saved Lisp file is applied at once — the app reads evo's catalog and checks
+/// again, and every running session it reaches reloads its init files (`/reload`)
+/// the moment it is idle ([`ConfigSaved`]). Memory and lore are read by each new
+/// session, which is the same thing a restart would have given them.
+pub const REMINDER_TEXT: &str =
+    "Saved changes take effect right away: running sessions reload them when idle.";
+
+/// A document was written: the host applies it — re-reads what evo resolves, and
+/// asks the sessions that read this scope to reload — rather than waiting for the
+/// next launch of the app.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfigSaved {
+    /// The scope the file belongs to: every session for the global home, the
+    /// sessions running in that folder for a project's.
+    pub scope: ConfigScope,
+    pub file: ConfigFile,
+}
+
+impl ConfigSaved {
+    /// Whether a running session has to reload to see this file. The three Lisp
+    /// files are evaluated at boot and on `/reload`; memory and lore are read when
+    /// a session starts or a turn is built, so a reload would change nothing.
+    pub fn needs_reload(&self) -> bool {
+        matches!(
+            self.file,
+            ConfigFile::Init | ConfigFile::PostInit | ConfigFile::Swarm
+        )
+    }
+}
 
 const SMALL_TEXT: gpui_kit::Pixels = px(12.);
 const TAB_PAD: gpui_kit::Pixels = px(8.);
@@ -129,6 +157,8 @@ enum Status {
 
 /// The one page that edits evo's raw config files (§13).
 pub struct ConfigEditor {
+    /// The home or the project these documents are read from.
+    scope: ConfigScope,
     buffers: [Buffer; ConfigFile::ALL.len()],
     selected: ConfigFile,
     /// The document whose save is in flight, while one is.
@@ -177,6 +207,7 @@ impl ConfigEditor {
             Err(_) => unreachable!("one buffer per document"),
         };
         let mut page = ConfigEditor {
+            scope: scope.clone(),
             buffers,
             selected: ConfigFile::Init,
             saving: None,
@@ -186,6 +217,11 @@ impl ConfigEditor {
             page.load(file, window, cx);
         }
         page
+    }
+
+    /// The scope these documents belong to.
+    pub fn scope(&self) -> &ConfigScope {
+        &self.scope
     }
 
     /// Which document is being shown.
@@ -430,6 +466,11 @@ impl ConfigEditor {
                 buffer.read_error = None;
                 // The confirmation a person gets that the write landed.
                 buffer.status = Status::Saved;
+                // And the host applies it now, not at the next launch.
+                cx.emit(ConfigSaved {
+                    scope: self.scope.clone(),
+                    file,
+                });
             }
             Err(message) => self.buffers[ix].status = Status::Refused(message),
         }
@@ -542,6 +583,8 @@ impl ConfigEditor {
         }
     }
 }
+
+impl gpui_kit::EventEmitter<ConfigSaved> for ConfigEditor {}
 
 impl Render for ConfigEditor {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1330,15 +1373,61 @@ mod tests {
         assert!(!f.is_dirty(cx));
     }
 
-    /// The restart reminder is on the page, in exactly these words.
+    /// The reminder says a save is applied now — no restart of the app is asked for.
     #[gpui_kit::test]
-    fn the_restart_reminder_is_always_shown(cx: &mut TestAppContext) {
+    fn the_reminder_says_a_save_takes_effect_now(cx: &mut TestAppContext) {
         let f = page(cx, "reminder");
         assert_eq!(f.label(cx, CONFIG_REMINDER_ID), REMINDER_TEXT);
         assert_eq!(
             REMINDER_TEXT,
-            "Changes take effect after restarting Evo Desktop."
+            "Saved changes take effect right away: running sessions reload them when idle."
         );
+        assert!(!REMINDER_TEXT.contains("restart"));
+    }
+
+    /// A write that landed is announced with its scope and file, which is what the
+    /// host applies it from; a refused save announces nothing.
+    #[gpui_kit::test]
+    fn a_save_that_lands_is_announced(cx: &mut TestAppContext) {
+        let _guard = sbcl_env();
+        if !require_sbcl() {
+            return;
+        }
+        let mut f = page(cx, "announce");
+        let heard: Rc<std::cell::RefCell<Vec<ConfigSaved>>> = Rc::default();
+        let sink = heard.clone();
+        let subscription = cx.update(|cx| {
+            cx.subscribe(&f.page, move |_, event: &ConfigSaved, _| {
+                sink.borrow_mut().push(event.clone())
+            })
+        });
+        f._subscriptions.push(subscription);
+
+        // Text that does not read is refused, and nothing is announced.
+        f.type_into(cx, ConfigFile::Init, ")\n");
+        f.click(cx, CONFIG_SAVE_ID);
+        assert!(heard.borrow().is_empty(), "a refusal applies nothing");
+
+        f.replace_into(cx, ConfigFile::Init, "(a)\n");
+        f.click(cx, CONFIG_SAVE_ID);
+        f.type_into(cx, ConfigFile::Lore, "(b)\n");
+        f.click(cx, CONFIG_SAVE_ID);
+        let heard = heard.borrow();
+        assert_eq!(
+            *heard,
+            vec![
+                ConfigSaved {
+                    scope: f.scratch.scope(),
+                    file: ConfigFile::Init
+                },
+                ConfigSaved {
+                    scope: f.scratch.scope(),
+                    file: ConfigFile::Lore
+                },
+            ]
+        );
+        assert!(heard[0].needs_reload(), "a Lisp file is reloaded");
+        assert!(!heard[1].needs_reload(), "lore is read per session");
     }
 
     /// The resolved path is shown, so a person knows which of the two files it is.

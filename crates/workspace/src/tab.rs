@@ -31,7 +31,7 @@ use composer::{Candidate, Composer, ComposerEvent, ModelRow};
 use session::{
     AgentKey, Changes, ItemChange, LaunchPlan, Op, Queue, Status, StreamStatus, TabModel,
 };
-use settings::ConfigEditor;
+use settings::{ConfigEditor, ConfigSaved};
 use store::ConfigScope;
 use swarm_client::{ErrorCode, OpError, OpReply};
 use tab_engine::{EngineHandle, Update};
@@ -278,6 +278,10 @@ pub enum TabContentEvent {
     /// conversation (§7.3): the column goes back to the width it starts at. The
     /// window owns the width, so the gesture is reported rather than acted on.
     ResetPane,
+    /// One of this tab's config editors wrote a file. The window applies it to every
+    /// tab it concerns and the app re-reads evo's catalog — a save takes effect now,
+    /// not at the next launch of the app (§13).
+    ConfigSaved(ConfigSaved),
 }
 
 /// Which of the two screens a [`TabContent`] opens on (§7.1, §7.2): a New Swarm
@@ -438,6 +442,9 @@ enum Pending {
     /// `/rewind` and `/tree` hand back for editing.
     Command,
     AddLane(u64),
+    /// `command.run` with `reload`, which the app sent itself after a config file this
+    /// session reads was saved (§13).
+    Reload,
     /// The `complete` op behind one half-typed word, carried with the question it
     /// asked about: what the server says is only ever an answer about *that* text, at
     /// *that* caret.
@@ -509,6 +516,9 @@ struct Live {
     /// The one-second re-render that keeps the coordinator's step clock moving
     /// while a turn runs; `None` when nothing is running.
     ticker: Option<Task<()>>,
+    /// A config file this session reads was saved, and the session has not been told
+    /// yet: `/reload` needs an idle agent, so it waits for the run to end (§13).
+    reload_wanted: bool,
 }
 
 impl TabContent {
@@ -628,12 +638,7 @@ impl TabContent {
             agents,
             // The global editor is the Settings tab's whole reason to exist; a swarm
             // tab has none until its folder row is pressed.
-            settings: match kind {
-                Kind::Swarm => None,
-                Kind::Settings => {
-                    Some(cx.new(|cx| ConfigEditor::new(ConfigScope::Global, window, cx)))
-                }
-            },
+            settings: None,
             project_editor: None,
             project_settings: false,
             thinking_level: None,
@@ -648,6 +653,12 @@ impl TabContent {
                 agents_subscription,
             ],
         };
+        // The global editor is the Settings tab's whole reason to exist; a swarm
+        // tab has none until its folder row is pressed.
+        if kind == Kind::Settings {
+            let editor = tab.new_config_editor(ConfigScope::Global, window, cx);
+            tab.settings = Some(editor);
+        }
         // The empty tab's check runs the binary this app would spawn, and says so
         // when it cannot: the app's own path, not the installed default (§9, §13).
         // A Settings tab starts no swarm and checks nothing.
@@ -1090,8 +1101,7 @@ impl TabContent {
         let editor = match self.project_editor.clone() {
             Some(editor) => editor,
             None => {
-                let editor =
-                    cx.new(|cx| ConfigEditor::new(ConfigScope::Project(folder), window, cx));
+                let editor = self.new_config_editor(ConfigScope::Project(folder), window, cx);
                 self.project_editor = Some(editor.clone());
                 editor
             }
@@ -1363,6 +1373,7 @@ impl TabContent {
             pid: None,
             store_id: started.store_id,
             ticker: None,
+            reload_wanted: false,
         });
         // The coordinator's rows can page back, fetch one item whole and take a queued
         // input back from the moment the tab has a server to ask (§5.4, §5.5).
@@ -1611,6 +1622,81 @@ impl TabContent {
         // strip decides (§7.1).
         if was_running && !self.is_running() {
             cx.emit(TabContentEvent::RunFinished);
+        }
+        // A config save that arrived while the agent was working is applied the moment
+        // it is idle — this update may be the one that made it so, or the one that said
+        // the server is up.
+        self.reload_if_idle(cx);
+    }
+
+    /// A config editor for this tab, watched: a file it writes is this tab's event, which
+    /// the window applies to every tab it concerns (§13).
+    pub(crate) fn new_config_editor(
+        &mut self,
+        scope: ConfigScope,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<ConfigEditor> {
+        let editor = cx.new(|cx| ConfigEditor::new(scope, window, cx));
+        self._subscriptions.push(cx.subscribe(
+            &editor,
+            |_this, _editor, saved: &ConfigSaved, cx| {
+                cx.emit(TabContentEvent::ConfigSaved(saved.clone()))
+            },
+        ));
+        editor
+    }
+
+    /// A config file was saved, here or in another tab: make it take effect on this tab
+    /// now rather than at the app's next launch (§13).
+    ///
+    /// * An empty tab asks its launch about itself again, so the choosers open on what
+    ///   evo resolves under the new file (the app re-reads the catalog beside this).
+    /// * A running session reads its init files at boot, so it is told to `/reload` —
+    ///   at once if its agent is idle, else when the run ends. A project's file concerns
+    ///   only the sessions running in that folder; memory and lore are read per session
+    ///   and need no reload.
+    pub fn apply_config(&mut self, saved: &ConfigSaved, cx: &mut Context<Self>) {
+        if self.state == TabState::Empty {
+            self.recheck(cx);
+        }
+        if !saved.needs_reload() {
+            return;
+        }
+        if let ConfigScope::Project(folder) = &saved.scope {
+            if !self.folder().is_some_and(|mine| same_folder(mine, folder)) {
+                return;
+            }
+        }
+        let Some(live) = self.live.as_mut() else {
+            return;
+        };
+        live.reload_wanted = true;
+        self.reload_if_idle(cx);
+    }
+
+    /// Send the `/reload` a saved config file asked for, if the session can take it now:
+    /// the server is up, the agent is idle, and none is already on its way.
+    fn reload_if_idle(&mut self, _cx: &mut Context<Self>) {
+        if self.gone.is_some() || self.is_running() {
+            return;
+        }
+        let Some(live) = self.live.as_mut() else {
+            return;
+        };
+        if !live.reload_wanted
+            || live.pid.is_none()
+            || live
+                .pending
+                .values()
+                .any(|pending| matches!(pending, Pending::Reload))
+        {
+            return;
+        }
+        live.reload_wanted = false;
+        let request = session::OpRequest::command_run("reload", "");
+        if let Some(rid) = live.engine.request(request) {
+            live.pending.insert(rid, Pending::Reload);
         }
     }
 
@@ -2412,6 +2498,23 @@ impl TabContent {
                         None => composer.request_finished(reply.ok, window, cx),
                     });
                 }
+                Pending::Reload => {
+                    // A run that started between the ask and the answer refuses it:
+                    // the reload waits for that run to end, like the first one did.
+                    let busy = matches!(
+                        reply.code(),
+                        Some(swarm_client::ErrorCode::Busy | swarm_client::ErrorCode::NotQuiescent)
+                    ) || reply
+                        .error()
+                        .is_some_and(|error| error.message.contains("idle"));
+                    if busy {
+                        if let Some(live) = self.live.as_mut() {
+                            live.reload_wanted = true;
+                        }
+                        self.reload_if_idle(cx);
+                        return;
+                    }
+                }
                 Pending::AddLane(target) => {
                     if reply.ok {
                         self.live.as_mut().unwrap().added_lane_target = Some(target);
@@ -2660,6 +2763,15 @@ fn now_millis() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|since| since.as_millis() as u64)
         .unwrap_or_default()
+}
+
+/// Whether two spellings name the same folder: as written, or once both resolve.
+fn same_folder(a: &Path, b: &Path) -> bool {
+    a == b
+        || match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        }
 }
 
 #[cfg(test)]
@@ -3389,6 +3501,100 @@ mod tests {
             assert!(window.try_find("composer").is_some());
             assert!(window.try_find(agent_list::row_id(AgentKey::Lane(3))).is_some());
         }).unwrap();
+    }
+
+    /// §13: a saved Lisp file takes effect on a running session without restarting the
+    /// app — the tab sends `/reload`, waiting for an idle agent when one is working. A
+    /// project's file is only that folder's business, and memory or lore need no reload.
+    #[gpui_kit::test]
+    fn a_saved_config_file_reloads_the_session_when_it_is_idle(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (_window, tab, dir) = live_tab(cx);
+        pump_until(cx, "the ready server", |cx| {
+            cx.read(|cx| {
+                tab.read(cx)
+                    .live
+                    .as_ref()
+                    .is_some_and(|live| live.pid.is_some())
+            })
+        });
+        let control = swarm_client::harness::Control::attach(dir.path()).unwrap();
+        let reloads = |tab: &TabContent| {
+            tab.live
+                .as_ref()
+                .unwrap()
+                .pending
+                .values()
+                .filter(|p| matches!(p, Pending::Reload))
+                .count()
+        };
+        let saved = |scope: ConfigScope, file: store::ConfigFile| ConfigSaved { scope, file };
+        cx.update(|cx| {
+            tab.update(cx, |tab, cx| {
+                let set = |tab: &mut TabContent, status: &str| {
+                    tab.live
+                        .as_mut()
+                        .unwrap()
+                        .model
+                        .on_snapshot("session", &serde_json::json!({"state": {"status": status}}));
+                };
+                // Lore and memory are read per session: nothing to reload.
+                tab.apply_config(&saved(ConfigScope::Global, store::ConfigFile::Lore), cx);
+                assert_eq!(reloads(tab), 0);
+                // Another project's file is that project's sessions' business.
+                tab.apply_config(
+                    &saved(
+                        ConfigScope::Project(PathBuf::from("/nowhere/else")),
+                        store::ConfigFile::Init,
+                    ),
+                    cx,
+                );
+                assert_eq!(reloads(tab), 0);
+                assert!(!tab.live.as_ref().unwrap().reload_wanted);
+
+                // A working agent cannot reload: the save waits for the run to end.
+                set(tab, "running");
+                tab.apply_config(&saved(ConfigScope::Global, store::ConfigFile::Init), cx);
+                assert_eq!(reloads(tab), 0, "not while a run is in flight");
+                assert!(tab.live.as_ref().unwrap().reload_wanted);
+
+                // The run is over: the next update sends it, once.
+                set(tab, "idle");
+                tab.reload_if_idle(cx);
+                tab.reload_if_idle(cx);
+                assert_eq!(reloads(tab), 1);
+                assert!(!tab.live.as_ref().unwrap().reload_wanted);
+            })
+        });
+        let mut requests = Vec::new();
+        pump_until(cx, "the reload reply", |cx| {
+            requests.extend(control.requests_on("/ops"));
+            cx.read(|cx| reloads(tab.read(cx)) == 0)
+        });
+        requests.extend(control.requests_on("/ops"));
+        let commands: Vec<_> = requests
+            .iter()
+            .filter(|r| r["body"]["op"] == "command.run")
+            .collect();
+        assert_eq!(commands.len(), 1, "{requests:?}");
+        assert_eq!(
+            commands[0]["body"]["args"],
+            serde_json::json!({"name": "reload", "args": ""})
+        );
+
+        // This tab's own project file reloads it too.
+        let folder = cx
+            .read(|cx| tab.read(cx).folder().map(Path::to_path_buf))
+            .expect("a running tab has a folder");
+        cx.update(|cx| {
+            tab.update(cx, |tab, cx| {
+                tab.apply_config(
+                    &saved(ConfigScope::Project(folder), store::ConfigFile::Swarm),
+                    cx,
+                );
+                assert_eq!(reloads(tab), 1);
+            })
+        });
     }
 
     #[gpui_kit::test]

@@ -29,7 +29,7 @@ use gpui_kit::{
     MouseDownEvent, Pixels, SharedString, TestSupportExt as _, Window,
 };
 use session::AgentKey;
-use settings::{ConfigEditor, ConfigScope};
+use settings::ConfigScope;
 
 use crate::tab::{Notice, NoticeTone, TabContent, TabContentEvent, TabState};
 use store::app_state::{CENTER_MIN, LEFT_MAX, LEFT_MIN};
@@ -141,7 +141,7 @@ impl TabContent {
         let editor = match self.settings_editor().cloned() {
             Some(editor) => editor,
             None => {
-                let editor = cx.new(|cx| ConfigEditor::new(ConfigScope::Global, window, cx));
+                let editor = self.new_config_editor(ConfigScope::Global, window, cx);
                 self.settings = Some(editor.clone());
                 editor
             }

@@ -353,12 +353,15 @@ pub fn run() {
                     startup::load_history(cx, bin.clone());
                 })
             };
+            // A config file was saved: evo's catalog is read again (§13).
+            let config_refresh = watch_config_saves(cx, &view);
             let closing = cx.on_window_closed(|cx: &mut App, _id| quit::begin(cx));
             cx.update_global::<Shell, _>(|shell, _| {
                 shell.view = Some(view.downgrade());
                 shell.subscriptions.push(closing);
                 shell.subscriptions.push(held);
                 shell.subscriptions.push(history_refresh);
+                shell.subscriptions.push(config_refresh);
             });
 
             // A launch while we are already running does nothing but raise this.
@@ -422,6 +425,24 @@ fn spawn_activation_watcher(
     if let Err(error) = spawned {
         log.error(format!("could not start the activation watcher: {error}"));
     }
+}
+
+/// Apply a saved config file app-wide, the restart it used to take (§13): the window has
+/// already told its tabs ([`workspace::ConfigChanged`]), and this reads evo's catalog
+/// again so every chooser and drawer shows what the new file resolves. A project's file
+/// is that folder's sessions' business — the catalog the app reads is the home's — and
+/// memory and lore change nothing in it.
+pub fn watch_config_saves(cx: &mut App, view: &Entity<WorkspaceView>) -> gpui_kit::Subscription {
+    cx.subscribe(view, |_, changed: &workspace::ConfigChanged, cx| {
+        let saved = &changed.0;
+        if saved.needs_reload() && matches!(saved.scope, store::ConfigScope::Global) {
+            cx.global::<Shell>().log.info(format!(
+                "config: {} saved, reading the catalog again",
+                saved.file.file_name()
+            ));
+            startup::refresh_catalog(cx);
+        }
+    })
 }
 
 #[cfg(test)]

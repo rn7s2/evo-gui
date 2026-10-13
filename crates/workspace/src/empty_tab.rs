@@ -1522,10 +1522,12 @@ impl EmptyTabState {
             .child(self.effort_slider(role, window, cx))
     }
 
-    /// The slider itself: the shared widget, with this page's levels and palette.
+    /// The slider itself: the shared widget, with this card's levels and palette.
     ///
-    /// `--thinking` / `--lane-thinking` take the levels the catalog lists, so the slider
-    /// offers exactly those — the caller owns the label, the widget the rail.
+    /// The levels are the ones the card's model takes (`/catalog.models[].effort_levels`,
+    /// [`session::Launcher::ladder`]): a model whose ladder is `low, high, max` offers
+    /// those three, and a model that takes no effort at all offers none — its slider is
+    /// drawn inert, and the label says `—`. The caller owns the label, the widget the rail.
     ///
     /// A slider the workers card's switch turned off is drawn where it is and hands the
     /// widget nothing: no arrow, no drag, no click, and no tab stop.
@@ -1534,10 +1536,10 @@ impl EmptyTabState {
             Card::Coordinator => COORDINATOR_EFFORT_ID,
             Card::Lanes => WORKERS_EFFORT_ID,
         };
-        let off = self.card_off(role);
+        let off = self.card_off(role) || self.launcher.ladder(role).is_empty();
         let levels: Vec<SharedString> = self
             .launcher
-            .levels()
+            .ladder(role)
             .iter()
             .map(|level| SharedString::from(level.clone()))
             .collect();
@@ -2344,6 +2346,16 @@ impl TabContent {
         cx.notify();
     }
 
+    /// Ask the launch about itself again — `check --json` with the switch on, the agent's
+    /// own catalog with it off — because what evo resolves has changed under it: a
+    /// config file was saved (§13). A control the person set stays theirs; everything
+    /// the launcher resolved follows the new answer.
+    pub fn recheck(&mut self, cx: &mut Context<Self>) {
+        let state = self.choosers.state.clone();
+        state.update(cx, |state, cx| state.run_check(cx));
+        cx.notify();
+    }
+
     /// The `evo-swarm` this app would spawn, which is the binary a check runs (§9, §13).
     pub fn set_swarm_bin(&mut self, bin: PathBuf, cx: &mut Context<Self>) {
         let state = self.choosers.state.clone();
@@ -2567,6 +2579,7 @@ mod tests {
         point, size, AnyWindowHandle, Background, Bounds, Quad, ScaledPixels, TestAppContext,
         Window, WindowBounds, WindowOptions,
     };
+    use settings::ConfigSaved;
     use std::cell::RefCell;
     use std::rc::Rc;
     use std::sync::Arc;
@@ -2903,6 +2916,104 @@ mod tests {
                 "claude-opus-4.5@anthropic"
             );
             assert_eq!(tab.read(cx).workers(cx).as_ref(), "6");
+        });
+    }
+
+    /// §7.2: each effort slider offers the levels its card's model takes, and opens on the
+    /// configured level clamped onto them — a model with no effort parameter has an inert
+    /// slider and no level at all.
+    #[gpui_kit::test]
+    fn each_effort_slider_offers_only_its_models_levels(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.set_catalog(cx, &catalog_body());
+        f.set_check(
+            cx,
+            CheckReport {
+                thinking: Some("xhigh".to_string()),
+                lane_thinking: Some("high".to_string()),
+                ..check(
+                    ("claude-sonnet-5", "proxy"),
+                    ("deepseek-v4.1-flash", "acme"),
+                    Vec::new(),
+                )
+            },
+        );
+        f.render(cx);
+        let state = f.state(cx);
+        f.act(cx, |window, cx| {
+            {
+                let launcher = &state.read(cx).launcher;
+                assert_eq!(launcher.ladder(Card::Coordinator), ["low", "high", "max"]);
+                assert_eq!(
+                    launcher.level(Card::Coordinator),
+                    Some("high"),
+                    "`xhigh` is not a rung this model has: evo's clamp puts it on `high`"
+                );
+                assert!(launcher.ladder(Card::Lanes).is_empty());
+                assert_eq!(launcher.level(Card::Lanes), None);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(160));
+            window.render_frame(cx);
+            window.render_frame(cx);
+            let rail = window.find("coordinator-effort-rail").bounds();
+            let thumb = window.find("coordinator-effort-thumb").bounds();
+            let travelled: f32 = (thumb.origin.x - rail.origin.x).into();
+            let span: f32 = rail.size.width.into();
+            assert!(
+                (travelled / span - 0.5).abs() < 0.05,
+                "`high` is the middle of the model's three rungs, not the fourth of five"
+            );
+        });
+    }
+
+    /// §13: a saved config file is applied to the page now — the launch is asked about
+    /// itself again, and the sliders nobody moved follow the new `thinking`.
+    #[gpui_kit::test]
+    fn a_saved_config_file_rechecks_the_empty_tab(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.set_catalog(cx, &catalog_body());
+        let models = || {
+            check(
+                ("claude-opus-4.5", "anthropic"),
+                ("claude-opus-4.5", "anthropic"),
+                Vec::new(),
+            )
+        };
+        f.set_check(cx, models());
+        let state = f.state(cx);
+        cx.update(|cx| {
+            assert_eq!(
+                state.read(cx).launcher.level(Card::Coordinator),
+                Some("medium")
+            );
+        });
+        // The home's `thinking` setting is now `max`: what `check` answers from here on.
+        cx.update(|cx| {
+            state.update(cx, |state, _| {
+                state.check_probe = CheckProbe::Fixed(Box::new(CheckReport {
+                    thinking: Some("max".to_string()),
+                    lane_thinking: Some("max".to_string()),
+                    ..models()
+                }))
+            })
+        });
+        let tab = f.tab.clone();
+        f.act(cx, |_, cx| {
+            tab.update(cx, |tab, cx| {
+                tab.apply_config(
+                    &ConfigSaved {
+                        scope: settings::ConfigScope::Global,
+                        file: store::ConfigFile::Init,
+                    },
+                    cx,
+                )
+            })
+        });
+        cx.update(|cx| {
+            let launcher = &state.read(cx).launcher;
+            assert_eq!(launcher.level(Card::Coordinator), Some("max"));
+            assert_eq!(launcher.level(Card::Lanes), Some("max"));
+            assert!(launcher.plan().is_default(), "still evo's, not a flag");
         });
     }
 

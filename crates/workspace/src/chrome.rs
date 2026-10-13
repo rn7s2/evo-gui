@@ -124,6 +124,12 @@ pub struct QuitHeld;
 #[derive(Clone, Debug)]
 pub struct HistoryStale;
 
+/// A config file was saved in one of the window's editors, and the window has applied
+/// it to its tabs. The app answers by reading evo's catalog again, so the choosers and
+/// drawers show what the new file resolves — the restart this used to need (§13).
+#[derive(Clone, Debug)]
+pub struct ConfigChanged(pub settings::ConfigSaved);
+
 /// Show the tab at this index (0-based) — what ⌘1…⌘8 are.
 ///
 /// A number rather than eight near-identical actions: the eight bindings differ
@@ -1381,6 +1387,16 @@ impl WorkspaceView {
                     cx.notify();
                 }
             }
+            TabContentEvent::ConfigSaved(saved) => {
+                // A save takes effect now (§13): every tab it concerns is told — an
+                // empty page asks its launch about itself again, a running session
+                // reloads its init files when idle — and the app re-reads evo's catalog,
+                // which every tab's choosers and drawers are fed from.
+                for tab in self.tabs.clone() {
+                    tab.update(cx, |content, cx| content.apply_config(&saved, cx));
+                }
+                cx.emit(ConfigChanged(saved));
+            }
             TabContentEvent::ResetPane => {
                 // A double-clicked split goes back to the width it starts at
                 // (§7.3). The panel is what moves; the window hears it and writes
@@ -1456,6 +1472,7 @@ impl WorkspaceView {
 
 impl EventEmitter<QuitHeld> for WorkspaceView {}
 impl EventEmitter<HistoryStale> for WorkspaceView {}
+impl EventEmitter<ConfigChanged> for WorkspaceView {}
 
 impl Render for WorkspaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {

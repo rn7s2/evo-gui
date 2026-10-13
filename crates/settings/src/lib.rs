@@ -19,8 +19,11 @@
 //! DismissEvent                           → the dialog closes (Save and Cancel both)
 //!
 //! ConfigEditor::new(ConfigScope::Global | Project(folder), window, cx)
-//!     ↓  each document read on the background executor; it emits nothing —
-//!     ↓  a host reads is_dirty / is_saving / saving_file when it needs them
+//!     ↓  each document read on the background executor; a host reads
+//!     ↓  is_dirty / is_saving / saving_file when it needs them
+//! ConfigSaved { scope, file }            → the host applies the write now: evo's
+//!                                          catalog and checks re-read, running
+//!                                          sessions `/reload` when idle
 //! ```
 //!
 //! ```text
@@ -39,9 +42,9 @@ mod probe;
 
 pub use appearance::mode_for;
 pub use config_editor::{
-    ConfigEditor, CONFIG_DISCARD_ID, CONFIG_EDITOR_ID, CONFIG_PATH_ID, CONFIG_RELOAD_ID,
-    CONFIG_REMINDER_ID, CONFIG_SAVE_ID, CONFIG_STATUS_ID, CONFIG_SURFACE_ID, CONFIG_TABS_ID,
-    REMINDER_TEXT,
+    ConfigEditor, ConfigSaved, CONFIG_DISCARD_ID, CONFIG_EDITOR_ID, CONFIG_PATH_ID,
+    CONFIG_RELOAD_ID, CONFIG_REMINDER_ID, CONFIG_SAVE_ID, CONFIG_STATUS_ID, CONFIG_SURFACE_ID,
+    CONFIG_TABS_ID, REMINDER_TEXT,
 };
 pub use panel::{
     SettingsEvent, SettingsPanel, SettingsValues, AGENT_CHOOSE_ID, AGENT_PATH_ID, AGENT_STATUS_ID,

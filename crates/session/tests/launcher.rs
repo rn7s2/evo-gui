@@ -94,6 +94,14 @@ fn every_registration_is_an_option_named_by_id_and_provider() {
     assert_eq!(keys_of(&bare), vec!["n@p"]);
 }
 
+/// `catalog.json` with evo's default on a model that takes every level, for the tests
+/// whose point is a slider rather than a model: the capture's own default takes none.
+fn opus_catalog() -> serde_json::Value {
+    let mut catalog = fixture("catalog.json");
+    catalog["default_model"] = json!({"id": "claude-opus-5", "provider": "anthropic"});
+    catalog
+}
+
 fn keys_of(options: &[session::ModelOption]) -> Vec<&str> {
     options.iter().map(|m| m.key.as_str()).collect()
 }
@@ -396,11 +404,11 @@ fn the_plan_carries_the_program_the_switch_picked() {
 #[test]
 fn a_check_opens_the_sliders_and_the_count_on_what_it_resolved() {
     let mut launcher = Launcher::new();
-    launcher.set_catalog(&fixture("catalog.json"));
+    launcher.set_catalog(&opus_catalog());
     launcher.set_check(&json!({
         "ok": true,
-        "model": {"id": "deepseek-v4.1-flash", "provider": "acme", "ok": true},
-        "lane_model": {"id": "deepseek-v4.1-flash", "provider": "acme", "ok": true},
+        "model": {"id": "claude-opus-5", "provider": "anthropic", "ok": true},
+        "lane_model": {"id": "claude-opus-5", "provider": "anthropic", "ok": true},
         "thinking": "xhigh",
         "lane_thinking": "low",
         "workers": 12,
@@ -566,12 +574,94 @@ fn a_slider_the_person_moved_survives_the_switch_and_the_catalog() {
     assert_eq!(launcher.plan().thinking.as_deref(), Some("high"));
 }
 
+/// The effort sliders offer what each card's model takes (`/catalog.models[].effort_levels`)
+/// and nothing else, and open on the configured level — `check`'s `thinking`, evo's own
+/// chain over the `thinking` setting — clamped the way evo clamps it onto that model.
+#[test]
+fn each_slider_offers_only_the_levels_its_model_takes() {
+    let mut launcher = Launcher::new();
+    launcher.set_catalog(&fixture("catalog.json"));
+    launcher.set_check(&json!({
+        "ok": true,
+        "model": {"id": "claude-sonnet-5", "provider": "proxy", "ok": true},
+        "lane_model": {"id": "claude-opus-5", "provider": "anthropic", "ok": true},
+        "thinking": "xhigh",
+        "lane_thinking": "xhigh",
+        "problems": []
+    }));
+    assert_eq!(launcher.ladder(Role::Coordinator), ["low", "high", "max"]);
+    assert_eq!(
+        launcher.ladder(Role::Lanes),
+        ["low", "medium", "high", "xhigh", "max"]
+    );
+    assert_eq!(
+        launcher.level(Role::Coordinator),
+        Some("high"),
+        "xhigh on a model whose ladder skips it is the strongest rung below: evo's clamp"
+    );
+    assert_eq!(
+        launcher.effort(Role::Coordinator),
+        1,
+        "an index into its own ladder"
+    );
+    assert_eq!(launcher.level(Role::Lanes), Some("xhigh"));
+    assert!(launcher.plan().is_default(), "shown, not passed");
+
+    // A slider moves only over its own rungs.
+    assert!(launcher.set_effort(Role::Coordinator, 9));
+    assert_eq!(launcher.level(Role::Coordinator), Some("max"));
+    assert_eq!(launcher.plan().thinking.as_deref(), Some("max"));
+
+    // Another model is another ladder: a model that takes no effort offers none and
+    // passes none, and the person's rung comes back with a model that takes it.
+    assert!(launcher.choose(Role::Coordinator, "deepseek-v4.1-flash@acme"));
+    assert!(launcher.ladder(Role::Coordinator).is_empty());
+    assert_eq!(launcher.level(Role::Coordinator), None);
+    assert_eq!(launcher.plan().thinking, None);
+    assert!(
+        !launcher.set_effort(Role::Coordinator, 0),
+        "nothing to move"
+    );
+    assert!(launcher.choose(Role::Coordinator, "claude-opus-5@anthropic"));
+    assert_eq!(launcher.level(Role::Coordinator), Some("max"));
+    assert_eq!(launcher.plan().thinking.as_deref(), Some("max"));
+
+    // A level nobody set follows the model too: the lanes on the three-rung model.
+    assert!(launcher.choose(Role::Lanes, "claude-sonnet-5@proxy"));
+    assert_eq!(launcher.level(Role::Lanes), Some("high"));
+    assert_eq!(
+        launcher.plan().lane_thinking,
+        None,
+        "a resolved level is evo's, never a flag"
+    );
+}
+
+/// A catalog written before evo listed each model's levels names none for every model;
+/// that is not a model without effort, and the session's ladder stands for it.
+#[test]
+fn a_catalog_without_per_model_levels_offers_the_sessions_ladder() {
+    let mut launcher = Launcher::new();
+    launcher.set_catalog(&json!({
+        "models": [{"id": "m", "provider": "p", "ready": true}],
+        "default_model": {"id": "m", "provider": "p"},
+        "thinking_levels": ["low", "medium", "high", "xhigh", "max"],
+        "default_thinking": "high"
+    }));
+    assert_eq!(
+        launcher.ladder(Role::Coordinator),
+        ["low", "medium", "high", "xhigh", "max"]
+    );
+    launcher.set_check(&json!({"ok": true, "thinking": "high", "lane_thinking": "low"}));
+    assert_eq!(launcher.level(Role::Coordinator), Some("high"));
+    assert_eq!(launcher.level(Role::Lanes), Some("low"));
+}
+
 /// A control the person moved is theirs: a later check leaves it where they put it, while
 /// the one beside it follows.
 #[test]
 fn a_control_the_person_moved_is_not_re_resolved() {
     let mut launcher = Launcher::new();
-    launcher.set_catalog(&fixture("catalog.json"));
+    launcher.set_catalog(&opus_catalog());
     launcher
         .set_check(&json!({"ok": true, "thinking": "low", "lane_thinking": "low", "workers": 3}));
     assert_eq!(launcher.level(Role::Lanes), Some("low"));
@@ -601,7 +691,7 @@ fn a_control_the_person_moved_is_not_re_resolved() {
 #[test]
 fn a_check_without_resolved_values_leaves_evos_own() {
     let mut launcher = Launcher::new();
-    launcher.set_catalog(&fixture("catalog.json"));
+    launcher.set_catalog(&opus_catalog());
     launcher.set_check(&json!({
         "ok": true,
         "model": {"id": "claude-opus-5", "provider": "anthropic", "ok": true},
@@ -728,7 +818,7 @@ fn the_plan_carries_only_what_a_person_set() {
     launcher.set_check(&json!({
         "ok": true,
         "model": {"id": "claude-opus-5", "provider": "anthropic", "ok": true},
-        "lane_model": {"id": "deepseek-v4.1-flash", "provider": "acme", "ok": true},
+        "lane_model": {"id": "claude-opus-5", "provider": "anthropic", "ok": true},
         "thinking": "low",
         "lane_thinking": "medium",
         "workers": 9,
@@ -810,7 +900,10 @@ fn the_plan_carries_only_what_a_person_set() {
     );
     assert_eq!(plan.thinking.as_deref(), Some("high"));
     assert_eq!(plan.workers, Some(4));
-    assert_eq!(plan.lane_thinking.as_deref(), Some("max"));
+    assert_eq!(
+        plan.lane_thinking, None,
+        "the lanes' model takes no effort, so the rung moved for the last one is not a flag"
+    );
 }
 
 /// A check that failed resolves nothing, so the controls show evo's own last fallback —
@@ -818,7 +911,7 @@ fn the_plan_carries_only_what_a_person_set() {
 #[test]
 fn a_failed_check_leaves_the_shown_fallbacks_out_of_the_plan() {
     let mut launcher = Launcher::new();
-    launcher.set_catalog(&fixture("catalog.json"));
+    launcher.set_catalog(&opus_catalog());
     launcher.set_check(&json!({
         "ok": null,
         "model": {"id": null, "provider": null, "reason": "no model is configured"},

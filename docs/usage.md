@@ -129,13 +129,16 @@ a model is a launch that runs it:
   the line at `vision`. A registration evo cannot reach is greyed with evo's own
   reason.
 - **Coordinator — Effort** is `--thinking`, and **Workers — Effort** is
-  `--lane-thinking`: the rungs `/catalog.thinking_levels` lists (the session's
-  ladder; the drawer inside the box offers the chosen **model's** own, from its
-  `effort_levels`, and says `not offered by this model` for one that takes no
-  effort setting at all). Each opens on
-  the effort `check` resolved — evo's own chain, journal and settings included,
-  so a resumed swarm opens on the level it was running at; click, drag or use the
-  arrows, and the level's name is beside the label.
+  `--lane-thinking`: the rungs the card's **model** takes, from its
+  `effort_levels` — a model whose ladder is `low, high, max` offers those three,
+  and a model with no effort parameter has an inert slider, `—` beside the label,
+  and passes no flag (a catalog that predates the per-model list offers the
+  session's `/catalog.thinking_levels`). Picking another model moves the slider
+  onto that model's ladder. Each opens on the effort `check` resolved — evo's own
+  chain, journal and the `thinking` setting included — clamped the way evo clamps
+  it onto the model: the strongest rung it takes at or below that level (`xhigh` on
+  `low, high, max` opens on `high`). Click, drag or use the arrows, and the level's
+  name is beside the label.
 - **Workers — Use swarm** is a switch, not a flag: on, the launch is
   `evo-swarm serve` — a coordinator and its pool of lanes; off, it is
   `evo-agent serve`, one agent, addressed as `Main` on the page that opens, and
@@ -562,6 +565,15 @@ window, and closing it is the only way it does anything: **Save** writes, and
 - New tabs use the paths you saved, and the catalog is read again with them; a
   tab that is already running keeps the binaries it started with, as the panel's
   note says.
+
+The **Settings tab** (the gear at the end of the strip) and a tab's own folder row
+edit evo's config files as text — `init.lisp`, `post-init.lisp`, `swarm.lisp`,
+`memory.sexp`, `lore.sexp` — for the home or that project. A save takes effect
+right away, without restarting the app: the catalog and every empty tab's `check`
+are read again (so the choosers and effort sliders follow a new model or
+`thinking` setting), and every running session the file concerns — all of them for
+the home, the ones in that folder for a project — is sent `/reload`, at once if its
+agent is idle, else when its run ends. Memory and lore are read by each new session.
 
 **About Evo Desktop** (App menu, first item) shows the app's version, each
 binary's own `--version` line, and the two paths worth knowing: where the app

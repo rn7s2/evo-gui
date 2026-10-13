@@ -1382,6 +1382,13 @@ fn hermetic_evo_home() {
     });
 }
 
+/// The tests that write a file into that shared home hold this for their whole run:
+/// a write from one would otherwise be the other's on-disk conflict.
+fn home_writes() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// §7.1: the gear at the far right of the strip opens the app's Settings, there is
 /// only ever one of it, and it is the strip's last tab — a tab opened later goes
 /// *before* it, which is what keeps the strip and the stored tab set the same order.
@@ -1641,6 +1648,7 @@ fn the_settings_tab_takes_the_strip_keys(cx: &mut TestAppContext) {
 /// says `Saving…`, which is the feedback a press that did nothing would not give.
 #[gpui_kit::test]
 fn a_settings_tab_that_is_writing_is_not_closed_under_the_write(cx: &mut TestAppContext) {
+    let _home = home_writes();
     hermetic_evo_home();
     let (handle, view) = open_workspace(cx);
     let window = handle.into();
@@ -1758,4 +1766,70 @@ fn a_window_holding_only_settings_still_maps_its_records(cx: &mut TestAppContext
         );
     })
     .unwrap();
+}
+
+/// §13: a file saved in the Settings tab takes effect without restarting the app — the
+/// window hears the write and says so (`ConfigChanged`), which is what the app reads
+/// evo's catalog again on, and every tab is told to apply it.
+#[gpui_kit::test]
+fn a_saved_settings_file_is_announced_to_the_app(cx: &mut TestAppContext) {
+    let usable = store::Checker::discover()
+        .map(|checker| checker.check("(a)\n").is_ok())
+        .unwrap_or(false);
+    if !usable {
+        eprintln!("skipping: no usable SBCL to check config text with");
+        return;
+    }
+    let _home = home_writes();
+    hermetic_evo_home();
+    let (handle, view) = open_workspace(cx);
+    let window = handle.into();
+    let heard: Rc<std::cell::RefCell<Vec<settings::ConfigSaved>>> = Rc::default();
+    let _subscription = cx.update(|cx| {
+        let heard = heard.clone();
+        cx.subscribe(&view, move |_, changed: &workspace::ConfigChanged, _| {
+            heard.borrow_mut().push(changed.0.clone())
+        })
+    });
+    let editor = |cx: &App| {
+        view.read(cx)
+            .selected_tab()
+            .read(cx)
+            .settings_editor()
+            .cloned()
+            .expect("the settings tab has its editors")
+    };
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("tab-settings", cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    // Whatever an earlier test left in the shared home, this write is a new text.
+    let text = format!("(setq *stamp* {})\n", std::process::id());
+    cx.update_window(window, |_, window, cx| {
+        let page = editor(cx);
+        let state = page.read(cx).selected();
+        assert_eq!(state, settings::ConfigFile::Init);
+        window.press("cmd-a", cx);
+        window.input(&text, cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        let page = editor(cx);
+        page.update(cx, |page, cx| page.save_selected(window, cx));
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert_eq!(
+        *heard.borrow(),
+        vec![settings::ConfigSaved {
+            scope: settings::ConfigScope::Global,
+            file: settings::ConfigFile::Init,
+        }],
+        "one save, one announcement, naming the home's init.lisp"
+    );
 }
