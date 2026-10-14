@@ -2235,7 +2235,7 @@ impl TabContent {
                     // The drawer's two settings are the session's (CONTRACT §5): the
                     // composer only offers them for the coordinator.
                     ComposerEvent::ModelSet { id, provider } => (
-                        session::OpRequest::model_set(&id, Some(&provider)),
+                        session::OpRequest::model_set(&id, &provider),
                         Pending::Settings,
                     ),
                     ComposerEvent::ThinkingSet(level) => {
