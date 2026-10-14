@@ -71,7 +71,7 @@ fn t07_catalog_choosers() {
 
     // --- a model nothing registered is refused, with evo's own words -------------
     let mut unknown = fixture.spec(Program::Swarm, 2);
-    unknown.model = Some(ModelRef::new("t07-not-a-model", Option::<String>::None));
+    unknown.model = Some(ModelRef::new("t07-not-a-model", Some("stub")));
     let report = check(&fixture, &unknown);
     assert!(
         !report.ok,

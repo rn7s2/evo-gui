@@ -288,7 +288,7 @@ impl Fixture {
             "(evo:register-provider :stub :base-url \"{}\" :api-key \"{STUB_SECRET}\")\n\
              (evo:register-model \"{STUB_MODEL}\" :provider :stub :context-window 200000 \
              :max-output 8000 :effort t)\n\
-             (evo:set-setting :model \"{STUB_MODEL}\")\n",
+             (evo:set-setting :model '(\"{STUB_MODEL}\" :stub))\n",
             self.stub_url()
         );
         fs::write(self.home.join(".evo").join("init.lisp"), lisp)
