@@ -172,13 +172,9 @@ impl OpRequest {
         OpRequest::new("goal.clear", json!({}))
     }
 
-    /// `model.set`.
-    pub fn model_set(id: &str, provider: Option<&str>) -> OpRequest {
-        let mut args = json!({ "id": id });
-        if let Some(provider) = provider {
-            args["provider"] = Value::String(provider.to_string());
-        }
-        OpRequest::new("model.set", args)
+    /// `model.set`. The model is one `id@provider` identity (CONTRACT §5).
+    pub fn model_set(id: &str, provider: &str) -> OpRequest {
+        OpRequest::new("model.set", json!({ "model": format!("{id}@{provider}") }))
     }
 
     /// `thinking.set`.
@@ -336,4 +332,16 @@ fn string(data: &Value, key: &str) -> String {
 
 fn u64_field(data: &Value, key: &str) -> u64 {
     data.get(key).and_then(Value::as_u64).unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_set_sends_one_qualified_identity() {
+        let request = OpRequest::model_set("same-id", "proxy");
+        assert_eq!(request.op, "model.set");
+        assert_eq!(request.args, json!({ "model": "same-id@proxy" }));
+    }
 }
