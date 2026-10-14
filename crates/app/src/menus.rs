@@ -5,8 +5,8 @@
 //!
 //! * the ones the app does itself — Quit, the File menu, Minimize/Zoom, About,
 //!   Hide — which declare an action, bind it, and handle it globally;
-//! * the editing items, which must reach the focused text field instead of the
-//!   app. Those use the action types the composer's `Textarea` already handles,
+//! * the editing items, which must reach the focused text field or terminal
+//!   instead of the app. Those use the shared input action types both handle,
 //!   and [`MenuItem::os_action`] so macOS runs its own cut/copy/paste;
 //!   `gpui_base` already binds ⌘C/⌘V/⌘X/⌘A/⌘Z to them, so nothing here has to.
 //!
@@ -232,8 +232,8 @@ pub fn menus() -> Vec<Menu> {
             MenuItem::action("New Tab", NewTab),
             MenuItem::action("Close Tab", CloseTab),
         ]),
-        // The editing items are the actions the composer's text field handles;
-        // `os_action` is what makes macOS run its own cut/copy/paste for them.
+        // The editing items are the actions the focused text field or terminal
+        // handles; `os_action` gives macOS their native menu equivalents.
         Menu::new("Edit").items([
             MenuItem::os_action("Undo", input::Undo, OsAction::Undo),
             MenuItem::os_action("Redo", input::Redo, OsAction::Redo),

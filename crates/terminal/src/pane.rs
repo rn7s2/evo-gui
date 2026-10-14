@@ -26,10 +26,13 @@
 //! view is while it is not the live screen (`crate::scroll`). On the alternate
 //! screen — a pager, an editor — the wheel is arrow keys for the program.
 //!
-//! ## What is not drawn yet
+//! ## Selection and the clipboard
 //!
-//! The cursor is a block, the width of one cell, when the pane has the keyboard.
-//! The mouse is not reported to the shell, and text cannot be selected.
+//! A left-button drag selects the terminal's own cells, including scrollback;
+//! double- and triple-clicks expand to a word and a line. Copy asks the terminal
+//! for that selection, so wrapped lines and wide cells follow terminal semantics.
+//! Paste writes to the pty, using bracketed paste when the running program asks
+//! for it. The mouse is not otherwise reported to the shell.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -37,16 +40,18 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use alacritty_terminal::grid::Dimensions as _;
-use alacritty_terminal::index::{Column, Line as Row};
+use alacritty_terminal::index::{Column, Line as Row, Point as GridPoint, Side};
+use alacritty_terminal::selection::{Selection, SelectionRange, SelectionType};
 use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::term::{Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color, NamedColor};
+use gpui_kit::base::input::{Copy, Paste, SelectAll};
 use gpui_kit::component::{ActiveTheme as _, Theme};
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    div, px, relative, AbsoluteLength, App, Bounds, Div, EventEmitter, FocusHandle, Focusable,
-    KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Render, ScrollDelta, ScrollWheelEvent,
-    SharedString, Task, Window,
+    div, px, relative, AbsoluteLength, App, Bounds, ClipboardItem, Div, EventEmitter, FocusHandle,
+    Focusable, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
+    Point, Render, ScrollDelta, ScrollWheelEvent, SharedString, Task, Window,
 };
 
 use crate::keys::{self, ScrollKey};
@@ -97,9 +102,15 @@ pub struct TerminalPane {
     _wakeup: Task<()>,
     /// Where in the scrollback the pane is looking, to the pixel.
     scroll: Scrollback,
-    /// The height of one row as last drawn: what a wheel's pixels are counted
-    /// against between frames.
+    /// The width and height of one cell as last drawn: pointer positions and
+    /// wheel pixels are counted against these between frames.
+    advance: f32,
     line: f32,
+    /// The grid's box in window coordinates, recorded during prepaint so mouse
+    /// events can be mapped back to terminal cells.
+    grid_bounds: Option<Bounds<Pixels>>,
+    /// A left-button drag is extending the terminal's selection.
+    selecting: bool,
 }
 
 impl EventEmitter<TerminalEvent> for TerminalPane {}
@@ -167,7 +178,10 @@ impl TerminalPane {
             failure,
             _wakeup,
             scroll: Scrollback::default(),
+            advance: 8.,
             line: 21.,
+            grid_bounds: None,
+            selecting: false,
         }
     }
 
@@ -202,6 +216,10 @@ impl TerminalPane {
     /// copied too: it is the row the part-line shows.
     fn screen(&self, window: &Window) -> Screen {
         let term = self.term.lock().unwrap_or_else(|gone| gone.into_inner());
+        let selection = term
+            .selection
+            .as_ref()
+            .and_then(|selection| selection.to_range(&term));
         let grid = term.grid();
         let columns = grid.columns();
         let extra = usize::from(self.scroll.frac() > 0.);
@@ -223,14 +241,152 @@ impl TerminalPane {
             // a blank cell — that is where a shell with an empty line puts it.
             let mut end = 0;
             for column in 0..columns {
-                if cursor_at == Some(column) || !blank(&cells[Column(column)]) {
+                let point = GridPoint::new(line, Column(column));
+                if cursor_at == Some(column)
+                    || selection.is_some_and(|range| range.contains(point))
+                    || !blank(&cells[Column(column)])
+                {
                     end = column + 1;
                 }
             }
 
-            lines.push(Line::of(cells, end, cursor_at));
+            lines.push(Line::of(cells, line, end, cursor_at, selection));
         }
         Screen { lines }
+    }
+
+    /// The cell and half-cell under a window position, using the geometry from
+    /// the last frame and the grid's current scrollback position.
+    fn point_at(
+        &self,
+        term: &Term<PtyEvents>,
+        position: Point<Pixels>,
+    ) -> Option<(GridPoint, Side)> {
+        let bounds = self.grid_bounds?;
+        Some(point_at(
+            position,
+            bounds,
+            self.advance,
+            self.line,
+            self.scroll.frac(),
+            term.grid().display_offset(),
+            term.grid().columns(),
+            term.grid().screen_lines(),
+        ))
+    }
+
+    /// Start a simple, semantic (double-click), or whole-line (triple-click)
+    /// terminal selection. Shift-click extends the selection already present.
+    fn mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus, cx);
+        let mut term = self.term.lock().unwrap_or_else(|gone| gone.into_inner());
+        let Some((point, side)) = self.point_at(&term, event.position) else {
+            return;
+        };
+        if event.modifiers.shift {
+            match term.selection.as_mut() {
+                Some(selection) => selection.update(point, side),
+                None => term.selection = Some(Selection::new(SelectionType::Simple, point, side)),
+            }
+        } else {
+            let kind = match event.click_count {
+                1 => SelectionType::Simple,
+                2 => SelectionType::Semantic,
+                _ => SelectionType::Lines,
+            };
+            term.selection = Some(Selection::new(kind, point, side));
+        }
+        drop(term);
+        self.selecting = true;
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    /// Extend a selection while the left button is down.
+    fn mouse_move(&mut self, event: &MouseMoveEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if !self.selecting || event.pressed_button != Some(MouseButton::Left) {
+            return;
+        }
+        let mut term = self.term.lock().unwrap_or_else(|gone| gone.into_inner());
+        let Some((point, side)) = self.point_at(&term, event.position) else {
+            return;
+        };
+        if let Some(selection) = term.selection.as_mut() {
+            selection.update(point, side);
+        }
+        drop(term);
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    /// Finish a drag, including one released just outside the pane.
+    fn mouse_up(&mut self, event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if !self.selecting {
+            return;
+        }
+        let mut term = self.term.lock().unwrap_or_else(|gone| gone.into_inner());
+        if let Some((point, side)) = self.point_at(&term, event.position) {
+            if let Some(selection) = term.selection.as_mut() {
+                selection.update(point, side);
+            }
+        }
+        drop(term);
+        self.selecting = false;
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    /// Copy the terminal's own selection without trimming it: leading/trailing
+    /// spaces and line breaks are part of what was selected.
+    fn copy_selection(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
+        let text = self
+            .term
+            .lock()
+            .unwrap_or_else(|gone| gone.into_inner())
+            .selection_to_string();
+        if let Some(text) = text.filter(|text| !text.is_empty()) {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
+        cx.stop_propagation();
+    }
+
+    /// Paste clipboard text into the pty, honoring the mode requested by the
+    /// foreground program.
+    fn paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+            cx.stop_propagation();
+            return;
+        };
+        let bracketed = self
+            .term
+            .lock()
+            .unwrap_or_else(|gone| gone.into_inner())
+            .mode()
+            .contains(TermMode::BRACKETED_PASTE);
+        self.send(&paste_bytes(&text, bracketed), cx);
+    }
+
+    /// Select the whole retained grid: scrollback and the live screen.
+    fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
+        let mut term = self.term.lock().unwrap_or_else(|gone| gone.into_inner());
+        let grid = term.grid();
+        let start = GridPoint::new(grid.topmost_line(), Column(0));
+        let end = GridPoint::new(grid.bottommost_line(), grid.last_column());
+        let mut selection = Selection::new(SelectionType::Lines, start, Side::Left);
+        selection.update(end, Side::Right);
+        term.selection = Some(selection);
+        drop(term);
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    /// Clear a visible selection when input returns to the shell.
+    fn clear_selection(&mut self, cx: &mut Context<Self>) {
+        let mut term = self.term.lock().unwrap_or_else(|gone| gone.into_inner());
+        if term.selection.take().is_some() {
+            drop(term);
+            cx.notify();
+        }
     }
 
     /// The keyboard is the shell's: what was typed goes to the pty in the shape
@@ -253,6 +409,7 @@ impl TerminalPane {
         let Some(bytes) = keys::bytes(&event.keystroke, mode) else {
             return;
         };
+        self.clear_selection(cx);
         self.snap_to_bottom(cx);
         // A keystroke is a handful of bytes and a pty's input buffer is a good
         // deal larger, so typing does not wait on the shell reading it.
@@ -268,6 +425,7 @@ impl TerminalPane {
     /// [`Self::key_down`] — Tab and Ctrl-C, which the window would otherwise
     /// spend on something else.
     fn send(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
+        self.clear_selection(cx);
         self.snap_to_bottom(cx);
         if let Ok(mut writer) = self.writer.lock() {
             let _ = writer.write_all(bytes);
@@ -358,12 +516,6 @@ impl TerminalPane {
         (self.scroll.frac(), thumb)
     }
 
-    /// A click puts the keyboard in the terminal, the way it does in a terminal
-    /// window: the click is the request, and there is nowhere else to put it.
-    fn clicked(&mut self, _: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        window.focus(&self.focus, cx);
-    }
-
     /// The rows of the grid, or why there are none.
     fn body(&self, window: &Window, theme: &Theme, metrics: Metrics) -> Vec<Div> {
         let Some(reason) = &self.failure else {
@@ -396,6 +548,7 @@ impl Render for TerminalPane {
             None => (theme.mono_font_family.clone(), theme.mono_font_size),
         };
         let metrics = metrics(window, family.clone(), font_size);
+        self.advance = f32::from(metrics.advance);
         self.line = f32::from(metrics.line);
         let (frac, thumb) = self.scroll_frame(window, self.line);
         let theme = cx.theme();
@@ -414,7 +567,10 @@ impl Render for TerminalPane {
                 // The pane is borrowed rather than updated in place: this runs
                 // during a frame's prepaint, and the pane owns the grid the
                 // frame is being drawn from.
-                let _ = pane.update(cx, |pane, cx| pane.set_size(cols, rows, cx));
+                let _ = pane.update(cx, |pane, cx| {
+                    pane.grid_bounds = Some(*bounds);
+                    pane.set_size(cols, rows, cx);
+                });
             }
         };
 
@@ -437,9 +593,15 @@ impl Render for TerminalPane {
             .on_action(cx.listener(|pane, _: &SendTab, _, cx| pane.send(b"\t", cx)))
             .on_action(cx.listener(|pane, _: &SendBackTab, _, cx| pane.send(b"\x1b[Z", cx)))
             .on_action(cx.listener(|pane, _: &SendInterrupt, _, cx| pane.send(b"\x03", cx)))
+            .on_action(cx.listener(Self::copy_selection))
+            .on_action(cx.listener(Self::paste))
+            .on_action(cx.listener(Self::select_all))
             .px(PAD_X)
             .py(PAD_Y)
-            .on_mouse_down(MouseButton::Left, cx.listener(Self::clicked))
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
+            .on_mouse_move(cx.listener(Self::mouse_move))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::mouse_up))
             .on_scroll_wheel(cx.listener(Self::wheel))
             .child(
                 div()
@@ -482,6 +644,63 @@ impl Render for TerminalPane {
     }
 }
 
+/// Map a pointer position to a terminal cell and the nearest side of that cell.
+/// Positions in the pane's padding are clamped to the nearest grid edge.
+#[allow(clippy::too_many_arguments)]
+fn point_at(
+    position: Point<Pixels>,
+    bounds: Bounds<Pixels>,
+    advance: f32,
+    line_height: f32,
+    fractional_scroll: f32,
+    display_offset: usize,
+    columns: usize,
+    screen_lines: usize,
+) -> (GridPoint, Side) {
+    let advance = advance.max(f32::EPSILON);
+    let line_height = line_height.max(f32::EPSILON);
+    let columns = columns.max(1);
+    let screen_lines = screen_lines.max(1);
+
+    let x = f32::from(position.x - bounds.origin.x);
+    let column = (x / advance).floor().max(0.) as usize;
+    let column = column.min(columns - 1);
+    let side = if x <= 0. {
+        Side::Left
+    } else if x >= columns as f32 * advance || x - column as f32 * advance >= advance / 2. {
+        Side::Right
+    } else {
+        Side::Left
+    };
+
+    let extra = i32::from(fractional_scroll > 0.);
+    let row_top = if extra == 1 {
+        fractional_scroll - line_height
+    } else {
+        0.
+    };
+    let y = f32::from(position.y - bounds.origin.y) - row_top;
+    let row = (y / line_height).floor().max(0.) as usize;
+    let row = row.min(screen_lines + extra as usize - 1);
+    let top = -(display_offset as i32) - extra;
+
+    (GridPoint::new(Row(top + row as i32), Column(column)), side)
+}
+
+/// Turn clipboard text into exactly what a terminal writes to its pty.
+fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
+    if bracketed {
+        let text = text.replace('\x1b', "");
+        let mut bytes = Vec::with_capacity(text.len() + 12);
+        bytes.extend_from_slice(b"\x1b[200~");
+        bytes.extend_from_slice(text.as_bytes());
+        bytes.extend_from_slice(b"\x1b[201~");
+        bytes
+    } else {
+        text.replace("\r\n", "\r").replace('\n', "\r").into_bytes()
+    }
+}
+
 /// The scrollbar's thumb, as fractions of the pane's height.
 #[derive(Clone, Copy, Debug)]
 struct Thumb {
@@ -502,7 +721,13 @@ struct Line {
 impl Line {
     /// The row `cells[..end]` is drawn from, with the block cursor swapped in
     /// where `cursor` says, if it is on this row.
-    fn of(cells: &alacritty_terminal::grid::Row<Cell>, end: usize, cursor: Option<usize>) -> Line {
+    fn of(
+        cells: &alacritty_terminal::grid::Row<Cell>,
+        line: Row,
+        end: usize,
+        cursor: Option<usize>,
+        selection: Option<SelectionRange>,
+    ) -> Line {
         let mut runs: Vec<Run> = Vec::new();
         for column in 0..end {
             let cell = &cells[Column(column)];
@@ -518,6 +743,12 @@ impl Line {
             if cursor == Some(column) {
                 ink.reverse();
             }
+            ink.selected = selection.is_some_and(|range| {
+                let point = GridPoint::new(line, Column(column));
+                range.contains(point)
+                    || (cell.flags.contains(Flags::WIDE_CHAR)
+                        && range.contains(GridPoint::new(line, Column(column + 1))))
+            });
             let mut text = String::new();
             text.push(if cell.flags.contains(Flags::HIDDEN) {
                 ' '
@@ -552,6 +783,7 @@ struct Ink {
     /// [`crate::palette`]).
     bold: bool,
     underline: bool,
+    selected: bool,
 }
 
 impl Ink {
@@ -565,6 +797,7 @@ impl Ink {
             bg,
             bold: cell.flags.intersects(Flags::BOLD | Flags::DIM_BOLD),
             underline: cell.flags.intersects(Flags::ALL_UNDERLINES),
+            selected: false,
         }
     }
 
@@ -641,10 +874,102 @@ fn row(line: &Line, theme: &Theme, metrics: Metrics) -> Div {
                 .flex_none()
                 .whitespace_nowrap()
                 .text_color(ink)
-                .when(run.ink.papered(), |text| text.bg(paper))
+                .when(run.ink.selected, |text| text.bg(theme.selection))
+                .when(run.ink.papered() && !run.ink.selected, |text| {
+                    text.bg(paper)
+                })
                 .when(run.ink.underline, |text| text.underline())
                 .child(run.text.clone()),
         );
     }
     row
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pty::{quiet, Cells};
+    use alacritty_terminal::grid::Row as GridRow;
+    use alacritty_terminal::vte::ansi::Processor;
+    use gpui_kit::{point, size};
+
+    fn bounds() -> Bounds<Pixels> {
+        Bounds::new(point(px(10.), px(20.)), size(px(640.), px(480.)))
+    }
+
+    #[test]
+    fn pointer_positions_map_to_cells_and_sides() {
+        let (cell, side) = point_at(point(px(27.), px(61.)), bounds(), 8., 20., 0., 3, 80, 24);
+        assert_eq!(cell, GridPoint::new(Row(-1), Column(2)));
+        assert_eq!(side, Side::Left);
+
+        let (cell, side) = point_at(point(px(33.), px(61.)), bounds(), 8., 20., 0., 3, 80, 24);
+        assert_eq!(cell, GridPoint::new(Row(-1), Column(2)));
+        assert_eq!(side, Side::Right);
+    }
+
+    #[test]
+    fn fractional_scrollback_includes_the_partly_visible_row() {
+        let (part, _) = point_at(point(px(10.), px(20.)), bounds(), 8., 20., 5., 3, 80, 24);
+        let (whole, _) = point_at(point(px(10.), px(25.)), bounds(), 8., 20., 5., 3, 80, 24);
+        assert_eq!(part.line, Row(-4));
+        assert_eq!(whole.line, Row(-3));
+    }
+
+    #[test]
+    fn pointer_positions_outside_the_grid_clamp_to_its_edges() {
+        let (top_left, left) = point_at(point(px(0.), px(0.)), bounds(), 8., 20., 0., 0, 80, 24);
+        let (bottom_right, right) =
+            point_at(point(px(900.), px(900.)), bounds(), 8., 20., 0., 0, 80, 24);
+        assert_eq!(top_left, GridPoint::new(Row(0), Column(0)));
+        assert_eq!(left, Side::Left);
+        assert_eq!(bottom_right, GridPoint::new(Row(23), Column(79)));
+        assert_eq!(right, Side::Right);
+    }
+
+    #[test]
+    fn plain_paste_turns_line_feeds_into_terminal_returns() {
+        assert_eq!(paste_bytes("one\ntwo\r\nthree", false), b"one\rtwo\rthree");
+    }
+
+    #[test]
+    fn bracketed_paste_wraps_text_and_cannot_inject_an_escape_sequence() {
+        assert_eq!(
+            paste_bytes("one\n\x1b[201~two", true),
+            b"\x1b[200~one\n[201~two\x1b[201~"
+        );
+    }
+
+    #[test]
+    fn selection_paints_blank_cells_and_the_wide_character_they_belong_to() {
+        let mut cells = GridRow::<Cell>::new(4);
+        cells[Column(0)].c = '界';
+        cells[Column(0)].flags.insert(Flags::WIDE_CHAR);
+        cells[Column(1)].flags.insert(Flags::WIDE_CHAR_SPACER);
+        let selection = SelectionRange::new(
+            GridPoint::new(Row(0), Column(1)),
+            GridPoint::new(Row(0), Column(3)),
+            false,
+        );
+
+        let line = Line::of(&cells, Row(0), 4, None, Some(selection));
+        assert!(line.runs[0].ink.selected);
+        assert_eq!(line.runs[0].text, "界  ");
+    }
+
+    #[test]
+    fn copied_terminal_selection_joins_wrapped_rows() {
+        let mut term = Term::new(scroll::config(), &Cells::new(5, 3), PtyEvents::new(quiet()));
+        let mut processor: Processor = Processor::new();
+        processor.advance(&mut term, b"abcdef");
+        let mut selection = Selection::new(
+            SelectionType::Simple,
+            GridPoint::new(Row(0), Column(0)),
+            Side::Left,
+        );
+        selection.update(GridPoint::new(Row(1), Column(0)), Side::Right);
+        term.selection = Some(selection);
+
+        assert_eq!(term.selection_to_string().as_deref(), Some("abcdef"));
+    }
 }

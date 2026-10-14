@@ -56,6 +56,7 @@ mod pane;
 mod pty;
 mod scroll;
 
+use gpui_kit::base::input::{Copy, Paste, SelectAll};
 use gpui_kit::{App, Global, KeyBinding, SharedString};
 
 pub use pane::{TerminalEvent, TerminalPane};
@@ -108,7 +109,8 @@ struct KeysBound;
 impl Global for KeysBound {}
 
 /// Bind the keys a terminal must keep from the window: Tab and Shift-Tab, which
-/// the kit's root otherwise spends on moving the focus, and Ctrl-C. Bound in the
+/// the kit's root otherwise spends on moving the focus, Ctrl-C for the shell,
+/// and the platform's terminal copy/paste/select-all chords. Bound in the
 /// terminal's own context, which is deeper than the root's, so these win only
 /// while a terminal has the keyboard. Idempotent.
 pub fn bind_keys(cx: &mut App) {
@@ -116,9 +118,23 @@ pub fn bind_keys(cx: &mut App) {
         return;
     }
     cx.set_global(KeysBound);
-    cx.bind_keys([
+    let mut bindings = vec![
         KeyBinding::new("tab", SendTab, Some(KEY_CONTEXT)),
         KeyBinding::new("shift-tab", SendBackTab, Some(KEY_CONTEXT)),
         KeyBinding::new("ctrl-c", SendInterrupt, Some(KEY_CONTEXT)),
-    ]);
+    ];
+    if cfg!(target_os = "macos") {
+        bindings.extend([
+            KeyBinding::new("cmd-c", Copy, Some(KEY_CONTEXT)),
+            KeyBinding::new("cmd-v", Paste, Some(KEY_CONTEXT)),
+            KeyBinding::new("cmd-a", SelectAll, Some(KEY_CONTEXT)),
+        ]);
+    } else {
+        bindings.extend([
+            KeyBinding::new("ctrl-shift-c", Copy, Some(KEY_CONTEXT)),
+            KeyBinding::new("ctrl-shift-v", Paste, Some(KEY_CONTEXT)),
+            KeyBinding::new("ctrl-shift-a", SelectAll, Some(KEY_CONTEXT)),
+        ]);
+    }
+    cx.bind_keys(bindings);
 }
