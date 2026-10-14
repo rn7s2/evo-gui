@@ -101,7 +101,7 @@ fn t15_launch_flags_pin_model_for_resume() {
         &init_path,
         format!(
             "{base}(evo:register-model \"stub-b\" :provider :stub :context-window 200000 \
-             :max-output 8000 :effort t)\n(evo:set-setting :model \"stub-b\")\n"
+             :max-output 8000 :effort t)\n(evo:set-setting :model '(\"stub-b\" :stub))\n"
         ),
     )
     .expect("the default is now stub-b");

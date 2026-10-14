@@ -66,7 +66,7 @@ fn t14_config_reload() {
     text.push_str(
         "(evo:register-model \"stub-b\" :provider :stub :context-window 100000 \
          :max-output 8000 :effort '(:low :high))\n\
-         (evo:set-setting :model \"stub-b\")\n\
+         (evo:set-setting :model '(\"stub-b\" :stub))\n\
          (evo:set-setting :thinking :xhigh)\n",
     );
     fs::write(&init, text).expect("the edited init.lisp");

@@ -117,7 +117,7 @@ start_home() {
     cat >"$home/.evo/init.lisp" <<LISP
 (evo:register-provider :stub :base-url "http://127.0.0.1:$port" :api-key "$STUB_SECRET")
 (evo:register-model "$STUB_MODEL" :provider :stub :context-window 200000 :max-output 8000 :effort t)
-(evo:set-setting :model "$STUB_MODEL")
+(evo:set-setting :model '("$STUB_MODEL" :stub))
 LISP
     cat >"$home/.stub-home" <<META
 pid=$pid
