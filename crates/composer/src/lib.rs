@@ -14,10 +14,12 @@
 //! The effort ladder is the server's too (`catalog`'s `thinking_levels`, §5.6): a
 //! client never writes the rungs down.
 //!
-//! Two of the design's controls are the coordinator's alone. `model.set` and
-//! `thinking.set` act on the session (CONTRACT §5), and a lane's model is the swarm's,
-//! fixed when it starts — so a lane's drawer states what that lane runs and says that
-//! this box is not what changes it. Nothing is offered that the server would refuse.
+//! Two of the design's controls are the drawer's alone: `model.set` and `thinking.set`
+//! act on the **selected agent's** session (CONTRACT §5), so who may change them is the
+//! owner's answer, handed in with the agent as `settable` (true where the session
+//! accepts the ops for that agent, and the coordinator either way). Where they are not
+//! this box's to send, the drawer still states the model and the effort the agent runs —
+//! it just offers no press that would be refused.
 //!
 //! The inline completion the caret's word raises is the third thing evo owns: the
 //! candidates are the commands `GET /catalog` lists, and — inside `/eval` — the
@@ -340,10 +342,10 @@ pub enum ComposerEvent {
     /// Stop the whole swarm — `run.interrupt` with scope `swarm`: every lane, and the
     /// coordinator with it (CONTRACT §7.5).
     StopSwarm,
-    /// Change the coordinator's model (`model.set`, CONTRACT §5). A lane's model is
-    /// the swarm's, so this is emitted for the coordinator alone.
+    /// Change the selected agent's model (`model.set`, CONTRACT §5), when the owner
+    /// handed this agent in as settable.
     ModelSet { id: String, provider: String },
-    /// Change the coordinator's effort (`thinking.set`).
+    /// Change the selected agent's effort (`thinking.set`).
     ThinkingSet(String),
     /// Run this message as the slash command it is (`command.run`, §5.5): a
     /// message that is one command from its start is the command's, not the
@@ -664,7 +666,9 @@ pub struct Composer {
     /// The agent's name, as the drawer's title says it (`Coordinator`, `lane 3`).
     name: SharedString,
     /// Whether this box may change the model and the effort: `model.set` and
-    /// `thinking.set` act on the session, so only the coordinator's are its to send.
+    /// `thinking.set` act on the **selected agent's** session, so this is the owner's
+    /// answer for the agent it handed in — the coordinator's either way, and a lane's
+    /// wherever the session takes both ops for that lane.
     settable: bool,
     /// The ladder `thinking.set` accepts, in the server's order (`catalog`'s
     /// `thinking_levels`, CONTRACT §5.6).
@@ -953,8 +957,9 @@ impl Composer {
     /// state, so one call is the whole update (CONTRACT §4.2).
     ///
     /// `name` is what the drawer's title calls the agent, and `settable` is whether
-    /// the model and the effort may be changed from here — true for the coordinator,
-    /// whose session is what `model.set` and `thinking.set` act on.
+    /// the model and the effort may be changed from here — the owner's answer for this
+    /// agent's session, true wherever `model.set` and `thinking.set` are accepted for
+    /// it (the coordinator's, and any lane the session takes them for).
     pub fn set_agent(
         &mut self,
         state: &TopicState,
@@ -2649,9 +2654,10 @@ impl Composer {
 
     /// The model drawer: the catalog's models, and the effort ladder under them.
     ///
-    /// For a lane the list states what that lane runs and nothing here clicks: a
-    /// lane's model is the swarm's, fixed when the swarm starts, so the row says so
-    /// rather than offering a change the server would refuse.
+    /// Whether the rows are presses is [`Composer::settable`], which is the owner's
+    /// answer for the agent shown: where the session takes `model.set` for it the list
+    /// chooses, and where it does not the same list states what the agent runs — the
+    /// tick is still the fact, and there is nothing to press.
     fn model_body(
         &self,
         palette: &'static Palette,
@@ -2668,7 +2674,7 @@ impl Composer {
                     .text_size(DETAIL_FONT)
                     .text_color(paint::color(palette.muted_fg))
                     .child(SharedString::from(format!(
-                        "{} runs the swarm's lane model: evo fixes it when the swarm starts.",
+                        "{}'s model cannot be changed",
                         self.name
                     ))),
             );
@@ -2878,7 +2884,8 @@ impl Composer {
             return row.into_any_element();
         }
         if !self.settable {
-            // A lane's effort belongs to the swarm, as its model does.
+            // The model is not this box's to set: the row states the level and offers
+            // no rail — the model row above says why nothing is on offer.
             return row.into_any_element();
         }
         let index = levels
@@ -4961,10 +4968,13 @@ mod tests {
         }
     }
 
-    /// A lane's drawer states what that lane runs and offers no change: `model.set`
-    /// and `thinking.set` act on the session, and a lane's model is the swarm's.
+    /// An agent whose settings are not this box's to send — an agent the owner handed
+    /// in with `settable` false — has a drawer that states what it runs and offers no
+    /// change: nothing presses, and the rail is not drawn.
     #[gpui_kit::test]
-    fn a_lanes_drawer_states_what_it_runs_and_changes_nothing(cx: &mut TestAppContext) {
+    fn an_unsettable_agents_drawer_states_what_it_runs_and_changes_nothing(
+        cx: &mut TestAppContext,
+    ) {
         let f = open(cx);
         f.act(cx, |window, cx| {
             f.set_catalog(cx);
@@ -4988,16 +4998,124 @@ mod tests {
         assert_eq!(
             f.events(),
             vec![],
-            "a lane's model is not this box's to set"
+            "a model this box may not set is not set by a press on its row"
         );
-        f.act(cx, |window, _| {
+        f.act(cx, |window, cx| {
             assert!(
                 window.find("drawer-effort").visible(),
-                "the effort the lane runs is stated"
+                "the effort the agent runs is stated"
             );
             assert!(
                 window.try_find("composer-effort").is_none(),
                 "and there is no rail to change it with"
+            );
+            // The setting a press could not make is stated in the drawer's own words,
+            // and the swarm's lane model is not among them: this box says what *this*
+            // agent's settings are, not what a swarm started with (§7.3).
+            let row = window.find("drawer-row");
+            let label = row.label().unwrap_or_default();
+            assert!(
+                !label.contains("swarm") && !label.contains("lane model"),
+                "the drawer names no swarm-wide lane model: {label:?}"
+            );
+            window.click("drawer-model-stub-b-openai", cx);
+        });
+        assert_eq!(
+            f.events(),
+            vec![],
+            "and the rail's own press is not a setting either"
+        );
+    }
+
+    /// A **settable** lane — the workspace passes true for a lane whose session takes
+    /// `model.set` and `thinking.set` — picks from the same drawer the coordinator does:
+    /// a row press is a `ModelSet` naming the catalog's registration, and the rail is
+    /// drawn from the **chosen model's** own rungs (`/catalog.models[].effort_levels`)
+    /// and emits `ThinkingSet` for the rung under the pointer.
+    ///
+    /// The drawer is the catalogue's, not a table of the client's: the row that is
+    /// pressed and the rung the press lands on are both read back from the catalog this
+    /// box was handed.
+    #[gpui_kit::test]
+    fn a_settable_lane_sets_its_model_and_effort_from_the_catalog(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.act(cx, |window, cx| {
+            f.set_catalog(cx);
+            // A lane on the ladder's first rung, so a press along the rail is a rung it
+            // is not already on.
+            let state = state_with_level(&["model", "thinking"], "low");
+            f.composer.update(cx, |composer, cx| {
+                composer.set_agent(&state, "Lane 2", true, cx)
+            });
+            window.render_frame(cx);
+            window.click(chip_id("model"), cx);
+            window.render_frame(cx);
+        });
+
+        // Every row the child's catalogue lists is offered, and each is a press.
+        f.act(cx, |window, _| {
+            for model in catalog_models() {
+                let row = format!("drawer-model-{}-{}", model.id, model.provider);
+                assert!(
+                    window.find(row.clone()).visible(),
+                    "Lane 2's drawer offers the catalog's {row}"
+                );
+            }
+        });
+        f.act(cx, |window, cx| {
+            window.click("drawer-model-stub-b-openai", cx)
+        });
+        assert_eq!(
+            f.events(),
+            vec![ComposerEvent::ModelSet {
+                id: "stub-b".to_string(),
+                provider: "openai".to_string(),
+            }],
+            "the row is the catalogue's registration, sent as `model.set`"
+        );
+
+        // The reply lands, as the tab reports it, and the agent's state is updated to
+        // what it now runs. The rail is pressed: the rung under the pointer is `stub-b`'s
+        // own — its provider offers two rungs, so the same press that is `xhigh` on
+        // `stub-a`'s five-rung ladder is `max` here.
+        f.act(cx, |window, cx| {
+            f.composer.update(cx, |composer, cx| {
+                composer.request_finished(false, window, cx)
+            });
+            f.set_agent(&state_running("stub-b"), cx);
+            window.render_frame(cx);
+        });
+        let press = |f: &Fixture, cx: &mut TestAppContext| {
+            f.act(cx, |window, cx| {
+                let at = three_quarters_of_the_rail(window);
+                window.click_at("composer-effort", at, cx);
+            })
+        };
+        press(&f, cx);
+        assert_eq!(
+            f.events().last(),
+            Some(&ComposerEvent::ThinkingSet("max".to_string())),
+            "the chosen model's own ladder: {:?}",
+            f.events()
+        );
+
+        // A model whose catalogue entry takes no effort setting: the row keeps its place
+        // and says so, and no rail is drawn for a model that would clamp it.
+        f.act(cx, |window, cx| {
+            window.click("drawer-model-stub-c-openai", cx);
+            f.composer.update(cx, |composer, cx| {
+                composer.request_finished(false, window, cx)
+            });
+            f.set_agent(&state_running("stub-c"), cx);
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("drawer-effort").label(),
+                Some(format!("Effort {NO_EFFORT}").as_str()),
+                "the row states it"
+            );
+            assert!(
+                window.try_find("composer-effort").is_none(),
+                "and offers no rail"
             );
         });
     }

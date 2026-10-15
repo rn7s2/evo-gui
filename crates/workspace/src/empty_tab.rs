@@ -2467,9 +2467,9 @@ impl TabContent {
         self.choosers.plan(cx)
     }
 
-    /// A folder is chosen: hand the window the launch it asked for — the models, the
-    /// efforts and the worker count are fixed when the swarm starts (§7.2). The window
-    /// starts the swarm; this only reports the intent.
+    /// A folder is chosen: hand the window the launch it asked for — the models and
+    /// efforts are the agents' initial settings, and the worker count shapes the swarm
+    /// it starts (§7.2). The window starts the swarm; this only reports the intent.
     pub(crate) fn emit_launch(
         &mut self,
         folder: PathBuf,
