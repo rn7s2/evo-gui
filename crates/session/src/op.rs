@@ -172,14 +172,23 @@ impl OpRequest {
         OpRequest::new("goal.clear", json!({}))
     }
 
-    /// `model.set`. The model is one `id@provider` identity (CONTRACT §5).
-    pub fn model_set(id: &str, provider: &str) -> OpRequest {
-        OpRequest::new("model.set", json!({ "model": format!("{id}@{provider}") }))
+    /// `model.set`. The model is one `id@provider` identity (CONTRACT §5); a lane
+    /// number asks a swarm coordinator to apply it to that lane instead.
+    pub fn model_set(id: &str, provider: &str, lane: Option<u32>) -> OpRequest {
+        let mut args = json!({ "model": format!("{id}@{provider}") });
+        if let Some(lane) = lane {
+            args["lane"] = json!(lane);
+        }
+        OpRequest::new("model.set", args)
     }
 
-    /// `thinking.set`.
-    pub fn thinking_set(level: &str) -> OpRequest {
-        OpRequest::new("thinking.set", json!({ "level": level }))
+    /// `thinking.set`, optionally for one lane of a swarm.
+    pub fn thinking_set(level: &str, lane: Option<u32>) -> OpRequest {
+        let mut args = json!({ "level": level });
+        if let Some(lane) = lane {
+            args["lane"] = json!(lane);
+        }
+        OpRequest::new("thinking.set", args)
     }
 
     /// `language.set`.
@@ -340,8 +349,20 @@ mod tests {
 
     #[test]
     fn model_set_sends_one_qualified_identity() {
-        let request = OpRequest::model_set("same-id", "proxy");
+        let request = OpRequest::model_set("same-id", "proxy", None);
         assert_eq!(request.op, "model.set");
         assert_eq!(request.args, json!({ "model": "same-id@proxy" }));
+    }
+
+    #[test]
+    fn lane_settings_name_the_lane() {
+        assert_eq!(
+            OpRequest::model_set("same-id", "proxy", Some(2)).args,
+            json!({ "model": "same-id@proxy", "lane": 2 })
+        );
+        assert_eq!(
+            OpRequest::thinking_set("high", Some(2)).args,
+            json!({ "level": "high", "lane": 2 })
+        );
     }
 }

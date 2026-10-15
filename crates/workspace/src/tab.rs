@@ -1944,11 +1944,10 @@ impl TabContent {
 
     /// Feed the composer from the model: the selected agent's own topic state — the
     /// chips, the todos, the model and the goal it draws (CONTRACT §4.2) — and whether
-    /// this box may change the model and the effort.
+    /// this box can reach that agent to change its model and effort.
     ///
-    /// `model.set` and `thinking.set` act on the session (CONTRACT §5), and a lane's
-    /// model is the swarm's, fixed when it starts. So the coordinator's drawer is live
-    /// and a lane's states what it runs (§7.3).
+    /// The coordinator takes unscoped `model.set` and `thinking.set`; a live lane takes
+    /// the same ops through the swarm coordinator with its lane number.
     fn sync_composer(&mut self, cx: &mut Context<Self>) {
         let Some(live) = self.live.as_ref() else {
             return;
@@ -1961,7 +1960,22 @@ impl TabContent {
         // agent is not (§7.2). `AgentKey::name` writes that name once, for the drawer,
         // the band above the transcript and the lane column's own rows.
         let name = selected.name(live.swarm);
-        let settable = selected == AgentKey::Coordinator;
+        let settable = match selected {
+            AgentKey::Coordinator => true,
+            AgentKey::Lane(n) => live
+                .model
+                .lane_rows()
+                .iter()
+                .find(|lane| lane.n == n)
+                .is_some_and(|lane| {
+                    matches!(
+                        lane.status,
+                        session::LaneStatus::Idle
+                            | session::LaneStatus::Working
+                            | session::LaneStatus::Compacting
+                    )
+                }),
+        };
         // The same reading the header takes for its reveal: the level this agent is
         // set to, kept where the page can reach it (the drawer's own copy is the
         // composer's).
@@ -2207,6 +2221,7 @@ impl TabContent {
         let mut unanswered: Option<Completing> = None;
         let sent = match self.live.as_mut() {
             Some(live) => {
+                let lane = live.model.selected().lane();
                 let (request, pending) = match event {
                     ComposerEvent::Send(outgoing) => {
                         // What the reader attached, as the wire takes it (§5.5): an
@@ -2232,15 +2247,16 @@ impl TabContent {
                     ComposerEvent::Interrupt => {
                         (live.model.interrupt_session(), Pending::Interrupt)
                     }
-                    // The drawer's two settings are the session's (CONTRACT §5): the
-                    // composer only offers them for the coordinator.
+                    // Model and effort belong to whichever agent's drawer emitted the
+                    // event. The coordinator is unscoped; a lane is named explicitly.
                     ComposerEvent::ModelSet { id, provider } => (
-                        session::OpRequest::model_set(&id, &provider),
+                        session::OpRequest::model_set(&id, &provider, lane),
                         Pending::Settings,
                     ),
-                    ComposerEvent::ThinkingSet(level) => {
-                        (session::OpRequest::thinking_set(&level), Pending::Settings)
-                    }
+                    ComposerEvent::ThinkingSet(level) => (
+                        session::OpRequest::thinking_set(&level, lane),
+                        Pending::Settings,
+                    ),
                     // A message that is one slash command is the command layer's: the
                     // server dispatches it exactly as the TUI does, extension commands
                     // and all, and says `not_found` for a word it does not know.
@@ -3527,6 +3543,58 @@ mod tests {
             assert!(window.try_find("composer").is_some());
             assert!(window.try_find(agent_list::row_id(AgentKey::Lane(3))).is_some());
         }).unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn a_lane_model_choice_names_that_lane_on_the_wire(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (window, tab, dir) = live_tab(cx);
+        pump_until(cx, "the ready server", |_| {
+            dir.path().join("ready.json").exists()
+        });
+        let control = swarm_client::harness::Control::attach(dir.path()).unwrap();
+        pump_until(cx, "the stream", |_| {
+            !control.requests_on("/stream").is_empty()
+        });
+
+        cx.update_window(window, |_, window, cx| {
+            tab.update(cx, |tab, cx| {
+                tab.live.as_mut().unwrap().model.on_snapshot(
+                    "swarm",
+                    &serde_json::json!({
+                        "state": {"id": "sw", "workers": 2, "lanes": [
+                            {"n": 1, "state": "idle"}, {"n": 2, "state": "idle"}
+                        ]}
+                    }),
+                );
+                tab.live.as_mut().unwrap().model.select(AgentKey::Lane(2));
+                tab.on_composer_event(
+                    ComposerEvent::ModelSet {
+                        id: "stub-b".to_string(),
+                        provider: "openai".to_string(),
+                    },
+                    window,
+                    cx,
+                );
+            });
+        })
+        .unwrap();
+
+        let mut requests = Vec::new();
+        pump_until(cx, "the lane model setting", |_| {
+            requests.extend(control.requests_on("/ops"));
+            requests
+                .iter()
+                .any(|request| request["body"]["op"] == "model.set")
+        });
+        let request = requests
+            .iter()
+            .find(|request| request["body"]["op"] == "model.set")
+            .unwrap();
+        assert_eq!(
+            request["body"]["args"],
+            serde_json::json!({"model": "stub-b@openai", "lane": 2})
+        );
     }
 
     /// §13: a saved Lisp file takes effect on a running session without restarting the
