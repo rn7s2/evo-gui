@@ -42,9 +42,10 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    div, px, AbsoluteLength, AnyElement, App, BoxShadow, Context, ElementId, Entity, FocusHandle,
-    Focusable as _, Hsla, IntoElement, MouseButton, Pixels, ScrollHandle, SharedString,
-    Subscription, TestSupportExt as _, TextAlign, WeakEntity, Window,
+    div, px, uniform_list, AbsoluteLength, AnyElement, App, BoxShadow, Context, ElementId, Entity,
+    FocusHandle, Focusable as _, Hsla, IntoElement, ListSizingBehavior, MouseButton, Pixels,
+    SharedString, Subscription, TestSupportExt as _, TextAlign,
+    UniformListScrollHandle, WeakEntity, Window,
 };
 use serde_json::Value;
 use session::{HistoryEntry, LaunchPlan, Launcher, ModelOption, Role as Card};
@@ -693,7 +694,7 @@ struct EmptyTabState {
     history_error: Option<String>,
     /// The history list's own scroll position. The kit's thumb is driven by a handle, and
     /// a handle made fresh each frame would reset the list to the top on the next one.
-    history_scroll: ScrollHandle,
+    history_scroll: UniformListScrollHandle,
     /// The folder card's own focus handle, so keyboard traversal and its focus ring have
     /// somewhere to land.
     folder_focus: FocusHandle,
@@ -768,7 +769,7 @@ impl EmptyTabState {
             picker: FolderPicker::Dialog,
             history_loading: false,
             history_error: None,
-            history_scroll: ScrollHandle::default(),
+            history_scroll: UniformListScrollHandle::new(),
             folder_focus: cx.focus_handle(),
             effort_focus: [cx.focus_handle(), cx.focus_handle()],
             effort_motion: [
@@ -1902,11 +1903,26 @@ impl EmptyTabState {
         }
         let theme = cx.theme();
         let count = rows.len();
-        let rows: Vec<AnyElement> = rows
-            .iter()
-            .enumerate()
-            .map(|(ix, row)| self.history_row(ix, count, row, cx).into_any_element())
-            .collect();
+        // Only the rows in view are built: every row is a button with a tooltip, a hover
+        // group and its own strings, and a home with hundreds of sessions made every
+        // render of the page (a keystroke in the count box, a hover) build them all.
+        // Every row is the same height (`ROW_MIN_H`, one line each for the title and the
+        // path), which is what lets `uniform_list` lay them out from the first one.
+        let list = uniform_list(
+            (ElementId::from(HISTORY_LIST_ID), "content"),
+            count,
+            cx.processor(move |this, range: std::ops::Range<usize>, _window, cx| {
+                let rows = this.launcher.history();
+                let count = rows.len();
+                range
+                    .filter_map(|ix| rows.get(ix).map(|row| (ix, row)))
+                    .map(|(ix, row)| this.history_row(ix, count, row, cx).into_any_element())
+                    .collect::<Vec<_>>()
+            }),
+        )
+        // The rows' own height sets the list's, until the page runs out.
+        .with_sizing_behavior(ListSizingBehavior::Infer)
+        .track_scroll(&self.history_scroll);
         v_flex()
             .id(HISTORY_LIST_ID)
             .test_support()
@@ -1932,17 +1948,9 @@ impl EmptyTabState {
                 // (grow to fill, floor at zero), while the rows' own height is what sets
                 // the frame's — `flex_basis: auto` — so the list goes on hugging them
                 // until the page runs out.
-                div()
-                    // The box that scrolls, named the way the kit's own scrollable
-                    // names the box inside its wrapper.
-                    .id((ElementId::from(HISTORY_LIST_ID), "content"))
-                    .w_full()
-                    .flex_grow_1()
-                    .flex_shrink_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.history_scroll)
-                    .children(rows),
+                // The box that scrolls is named the way the kit's own scrollable names
+                // the box inside its wrapper.
+                list.w_full().flex_grow_1().flex_shrink_1().min_h_0(),
             )
             // The kit's own thumb over that overflow, in the app's mode and colours
             // (`crate::app::theme`, `ScrollbarMode::Hover`): a thin overlay with no track
@@ -1992,7 +2000,9 @@ impl EmptyTabState {
             .bg(theme.transparent)
             .text_color(theme.foreground)
             .w_full()
-            .min_h(ROW_MIN_H)
+            // Exactly the design's minimum: the list lays every row out at the first
+            // one's height, so no row may grow past it.
+            .h(ROW_MIN_H)
             .flex_none()
             .px(ROW_PAD_X)
             .py(ROW_PAD_Y)
@@ -2418,18 +2428,23 @@ impl TabContent {
         let state = self.choosers.state.clone();
         let home = home.map(str::to_string);
         let rows = state.update(cx, |state, cx| {
-            state
+            let changed = state
                 .launcher
                 .set_history(entries, now, offset_seconds, home.as_deref());
             if home.is_some() {
                 state.home = home;
             }
-            cx.notify();
-            rows_from_session(state.launcher.history())
+            // The same list again (every data push reaches every tab) costs nothing.
+            changed.then(|| {
+                cx.notify();
+                rows_from_session(state.launcher.history())
+            })
         });
-        self.history
-            .update(cx, |list, cx| list.delegate_mut().set_rows(rows, cx));
-        cx.notify();
+        if let Some(rows) = rows {
+            self.history
+                .update(cx, |list, cx| list.delegate_mut().set_rows(rows, cx));
+            cx.notify();
+        }
     }
 
     /// The session index is still being fetched (§2): the list says so instead of claiming
@@ -3906,6 +3921,54 @@ mod tests {
                 swarm: true,
             }]
         );
+    }
+
+    /// A long history builds only the rows in view, every row is the design's height, and
+    /// a short one still hugs its rows.
+    #[gpui_kit::test]
+    fn a_long_history_builds_only_the_rows_in_view(cx: &mut TestAppContext) {
+        let f = open(cx);
+        f.history(
+            cx,
+            &[
+                entry("/j/1.sexp", "/Users/you/coding/foo", false),
+                entry("/j/2.sexp", "/Users/you/coding/bar", false),
+            ],
+            "/Users/you",
+        );
+        f.render(cx);
+        f.act(cx, |window, _cx| {
+            let frame = window.find(HISTORY_LIST_ID).bounds();
+            // Two rows and the frame's two hairlines: the list is as tall as its rows.
+            assert_eq!(frame.size.height, ROW_MIN_H * 2. + px(2.));
+        });
+
+        let entries: Vec<HistoryEntry> = (0..500)
+            .map(|ix| entry(&format!("/j/{ix}.sexp"), &format!("/Users/you/p{ix}"), false))
+            .collect();
+        f.history(cx, &entries, "/Users/you");
+        f.render(cx);
+        f.act(cx, |window, cx| {
+            let frame = window.find(HISTORY_LIST_ID).bounds();
+            assert!(frame.size.height < px(WINDOW.1), "the list scrolls in the page");
+            for ix in [0, 1] {
+                let row = window.find(history_row_id(ix)).bounds();
+                assert_eq!(row.size.height, ROW_MIN_H, "row {ix}");
+            }
+            assert!(
+                window.try_find(history_row_id(499)).is_none(),
+                "a row far out of view is not built"
+            );
+            // The wheel over the first row scrolls the list it sits in.
+            window.scroll(
+                history_row_id(0),
+                gpui_kit::ScrollDelta::Pixels(point(px(0.), -ROW_MIN_H * 100.)),
+                cx,
+            );
+            window.render_frame(cx);
+            assert!(window.try_find(history_row_id(0)).is_none());
+            assert!(window.find(history_row_id(100)).visible());
+        });
     }
 
     /// §2: the two kinds are told apart by the glyph a row leads with, chosen from the

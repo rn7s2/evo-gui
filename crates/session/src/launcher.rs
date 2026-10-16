@@ -1174,12 +1174,13 @@ pub fn history_rows(
     // One row per session: the index and the app's recents can both name it, and the app
     // is the only side that knows the models it ran with.
     let mut merged: Vec<HistoryEntry> = Vec::with_capacity(ordered.len());
+    // Where each session's row already is, so the merge stays linear in a long history.
+    let mut seen: std::collections::HashMap<&str, usize> =
+        std::collections::HashMap::with_capacity(ordered.len());
     for entry in ordered {
-        match merged
-            .iter_mut()
-            .find(|row| row.session_path == entry.session_path)
-        {
-            Some(base) => {
+        match seen.get(entry.session_path.as_str()) {
+            Some(&at) => {
+                let base = &mut merged[at];
                 base.lanes = base.lanes.or(entry.lanes);
                 if base.coordinator_model.is_none() {
                     base.coordinator_model = entry.coordinator_model.clone();
@@ -1189,7 +1190,10 @@ pub fn history_rows(
                 }
                 base.open_at_quit |= entry.open_at_quit;
             }
-            None => merged.push(entry.clone()),
+            None => {
+                seen.insert(entry.session_path.as_str(), merged.len());
+                merged.push(entry.clone());
+            }
         }
     }
     merged
