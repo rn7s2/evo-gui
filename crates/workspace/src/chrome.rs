@@ -105,6 +105,8 @@ gpui_kit::actions!(
         SelectLastTab,
         /// ⌘Q, held: quit once the hold is complete (§9.8).
         HoldToQuit,
+        /// Toggle transcript search for the selected lane (⌃F).
+        ToggleTranscriptSearch,
         /// Toggle the terminal pane (⌃`).
         ToggleTerminal,
     ]
@@ -170,6 +172,7 @@ pub fn bind_tab_keys(cx: &mut App) {
         KeyBinding::new("cmd-shift-]", SelectNextTab, None),
         KeyBinding::new("cmd-shift-[", SelectPreviousTab, None),
         KeyBinding::new("cmd-9", SelectLastTab, None),
+        KeyBinding::new("ctrl-f", ToggleTranscriptSearch, None),
     ];
     // ⌘1…⌘8 is the tab with that number; with fewer tabs than the number, the
     // shortcut does nothing rather than wrapping (§7.1).
@@ -1084,6 +1087,17 @@ impl WorkspaceView {
         self.select_tab(action.0, window, cx);
     }
 
+    /// ⌃F: the selected lane's transcript search, open or shut.
+    fn on_toggle_transcript_search(
+        &mut self,
+        _: &ToggleTranscriptSearch,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let tab = self.tabs[self.selected].clone();
+        tab.update(cx, |tab, cx| tab.toggle_transcript_search(window, cx));
+    }
+
     /// ⌃`: the selected tab's terminal pane, open or shut. What the pane *is*
     /// belongs to the tab; the window only routes the key to it.
     fn on_toggle_terminal(
@@ -1533,6 +1547,7 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::on_select_previous_tab))
             .on_action(cx.listener(Self::on_select_last_tab))
             .on_action(cx.listener(Self::on_select_tab))
+            .on_action(cx.listener(Self::on_toggle_transcript_search))
             // ⌃` is the terminal pane's: the binding is app-wide (menus.rs), the
             // handler is here, and the pane itself belongs to the shown tab.
             .on_action(cx.listener(Self::on_toggle_terminal))
@@ -1637,9 +1652,10 @@ mod tests {
     use super::*;
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{
-        ElementId, InputEvent as _, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
-        MouseUpEvent, Point, TestAppContext, VisualTestContext,
+        ElementId, InputEvent as _, Keystroke, Modifiers, MouseButton, MouseDownEvent,
+        MouseMoveEvent, MouseUpEvent, Point, TestAppContext, VisualTestContext,
     };
+    use transcript::TranscriptView;
 
     /// The traffic lights' 14pt buttons sit with equal room above and below
     /// inside the strip, the same room to their left, and clear of the tabs.
@@ -1739,6 +1755,41 @@ mod tests {
         });
         cx.update(|window, cx| window.render_frame(cx));
         (view, cx)
+    }
+
+    /// The app-wide ⌃F binding reaches the shown tab and opens its transcript search.
+    #[gpui_kit::test]
+    fn control_f_toggles_the_selected_transcript_search(cx: &mut TestAppContext) {
+        let (view, cx) = page_window(cx, test_root("transcript-search-key"), (1280., 800.));
+        let tab = cx.update(|_, cx| view.read(cx).selected_tab().clone());
+        let transcript = cx.update(|_, cx| cx.new(TranscriptView::new));
+        tab.update(cx, |tab, _| {
+            tab.transcripts
+                .insert(session::AgentKey::Coordinator, transcript);
+        });
+        cx.update(|window, cx| {
+            let root_focus = view.read(cx).root_focus.clone();
+            root_focus.focus(window, cx);
+            window.render_frame(cx);
+            window.dispatch_keystroke(Keystroke::parse("ctrl-f").expect("⌃F"), cx);
+            window.render_frame(cx);
+            assert!(
+                window.try_find("transcript-search-bar").is_some(),
+                "the shortcut opens the selected transcript's search"
+            );
+            window.dispatch_keystroke(Keystroke::parse("ctrl-f").expect("⌃F"), cx);
+            window.render_frame(cx);
+            assert!(
+                window.try_find("transcript-search-bar").is_none(),
+                "the same shortcut closes search while its input is focused"
+            );
+        });
+        assert!(
+            !cx.update(|_, cx| {
+                tab.read(cx).transcript_searches[&session::AgentKey::Coordinator].open
+            }),
+            "the shortcut follows the same retained state as the button"
+        );
     }
 
     /// The tab at `index` (`ids[index]` is the tab's own id) — its box and the

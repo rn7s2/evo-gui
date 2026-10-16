@@ -7,6 +7,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use gpui_kit::base::TextViewState;
+use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
     div, px, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
@@ -18,7 +19,7 @@ use session::{Item, ItemKind};
 use crate::rows::{
     cap_fields, cap_text, json_fields, row_id, take_chars, thinking_tail, Cap, FieldValue,
     CONTEXT_BLOCK_LINES, RESULT_LIMIT, TC_BODY_INDENT, THINKING_TAIL_CHARS, TOOL_ROW_HEIGHT,
-    TURN_LABEL_OVERHANG, USER_LINE, VALUE_LIMIT,
+    TURN_LABEL_OVERHANG, USER_LINE, USER_TEXT, VALUE_LIMIT,
 };
 use crate::TranscriptView;
 
@@ -215,6 +216,137 @@ macro_rules! open {
         view.update(cx, |view, cx| view.replace($items, cx));
         (view, cx)
     }};
+}
+
+#[test]
+fn transcript_search_is_literal_case_insensitive_and_uses_byte_ranges() {
+    assert_eq!(
+        crate::search_ranges("Needle + needle + needles", "needle"),
+        [0..6, 9..15, 18..24]
+    );
+    assert_eq!(crate::search_ranges("héllo héllo", "héllo"), [0..6, 7..13]);
+    assert!(crate::search_ranges("needle", "").is_empty());
+}
+
+/// Search works on the same rendered documents the reader sees: user words,
+/// assistant prose, tables, and fenced code. Thinking is a separate renderer and is
+/// deliberately absent even when its text contains the query.
+#[gpui_kit::test]
+fn transcript_search_highlights_rendered_text_but_not_thinking(cx: &mut TestAppContext) {
+    let user_id = "u_search".to_string();
+    let assistant_id = "a_search".to_string();
+    let (view, cx) = open!(
+        cx,
+        vec![
+            user(&user_id, "A Needle in the prompt"),
+            assistant_with_thinking(
+                &assistant_id,
+                "Needle in prose.\n\n| place |\n| --- |\n| needle in a table |\n\n```text\nneedle in code\n```",
+                "private-needle exists only in thinking",
+            ),
+        ]
+    );
+
+    // Build the retained documents exactly as their rows do. Markdown parsing lands
+    // asynchronously, and each document's search observer follows that revision.
+    let data = cx.read(|cx| view.read(cx).data.clone());
+    data.update(cx, |data, cx| {
+        data.sync_plain_documents(0, cx);
+        data.sync_document(1, cx);
+    });
+    cx.run_until_parked();
+    view.update(cx, |view, cx| view.set_search("needle", cx));
+    cx.run_until_parked();
+
+    cx.read(|cx| {
+        let (user_matches, user_color) = view
+            .read(cx)
+            .search_matches(&user_id, Some(USER_TEXT), cx)
+            .expect("the user prompt's retained text");
+        assert_eq!(
+            user_matches.len(),
+            1,
+            "the prompt is searched case-insensitively"
+        );
+        let (assistant_matches, assistant_color) = view
+            .read(cx)
+            .search_matches(&assistant_id, None, cx)
+            .expect("the assistant's retained markdown");
+        assert_eq!(
+            assistant_matches.len(),
+            3,
+            "prose, a table cell, and fenced code are all rendered searchable text"
+        );
+        assert_eq!(user_color, cx.theme().selection);
+        assert_eq!(assistant_color, cx.theme().selection);
+    });
+
+    view.update(cx, |view, cx| view.set_search("private-needle", cx));
+    cx.read(|cx| {
+        let (matches, _) = view
+            .read(cx)
+            .search_matches(&assistant_id, None, cx)
+            .expect("the assistant document remains retained");
+        assert!(
+            matches.is_empty(),
+            "thinking does not share the assistant output document and is not searched"
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn transcript_search_follows_streamed_document_revisions(cx: &mut TestAppContext) {
+    let id = "a_stream".to_string();
+    let (view, cx) = open!(cx, vec![assistant(&id, "before", "streaming")]);
+    let data = cx.read(|cx| view.read(cx).data.clone());
+    data.update(cx, |data, cx| data.sync_document(0, cx));
+    cx.run_until_parked();
+    view.update(cx, |view, cx| view.set_search("needle", cx));
+
+    view.update(cx, |view, cx| {
+        view.upsert(assistant(&id, "before needle after", "streaming"), cx);
+    });
+    data.update(cx, |data, cx| data.sync_document(0, cx));
+    cx.update(|window, cx| window.render_frame(cx));
+    cx.run_until_parked();
+    cx.update(|window, cx| window.render_frame(cx));
+
+    let (matches, rendered, stamp_text, stamp_query) = cx.read(|cx| {
+        let document = document(&view, cx, &id);
+        let data = view.read(cx).data.read(cx);
+        let stamp = data.search_highlights.get(&document.entity_id()).unwrap();
+        (
+            view.read(cx).search_matches(&id, None, cx).unwrap().0,
+            document.read(cx).rendered_text().as_str().to_string(),
+            stamp.text.as_str().to_string(),
+            stamp.query.clone(),
+        )
+    });
+    assert_eq!(
+        matches,
+        [7..13],
+        "the active query is reapplied when a streamed parse lands; rendered={rendered:?}, stamp={stamp_text:?}, query={stamp_query:?}"
+    );
+}
+
+#[gpui_kit::test]
+fn clearing_transcript_search_removes_matches_but_keeps_documents(cx: &mut TestAppContext) {
+    let id = "a_search".to_string();
+    let (view, cx) = open!(cx, vec![assistant(&id, "needle", "final")]);
+    let data = cx.read(|cx| view.read(cx).data.clone());
+    data.update(cx, |data, cx| data.sync_document(0, cx));
+    cx.run_until_parked();
+
+    view.update(cx, |view, cx| view.set_search("needle", cx));
+    assert_eq!(
+        cx.read(|cx| view.read(cx).search_matches(&id, None, cx).unwrap().0),
+        [0..6]
+    );
+    view.update(cx, |view, cx| view.set_search("", cx));
+    assert!(cx
+        .read(|cx| view.read(cx).search_matches(&id, None, cx).unwrap().0)
+        .is_empty());
+    assert!(cx.read(|cx| view.read(cx).data.read(cx).documents.contains_key(&id)));
 }
 
 #[gpui_kit::test]
@@ -3126,6 +3258,34 @@ fn jump_to_latest_lands_on_the_tail(cx: &mut TestAppContext) {
     assert!(
         !cx.update(|window, _| window.find("transcript-jump").visible()),
         "and the pill is away again"
+    );
+}
+
+/// Search highlights use the selection wash supplied by each active theme rather than
+/// a fixed color, so the same match remains visible in light and dark variants.
+#[gpui_kit::test]
+fn transcript_search_highlight_tracks_light_and_dark_theme_variants(cx: &mut TestAppContext) {
+    use gpui_kit::component::{Theme as ComponentTheme, ThemeMode};
+
+    cx.update(gpui_kit::init);
+    let mut colors = Vec::new();
+    for mode in [ThemeMode::Light, ThemeMode::Dark] {
+        cx.update(|cx| ComponentTheme::change(mode, None, cx));
+        let (search, selection) = cx.update(|cx| {
+            (
+                crate::style::Palette::from_app(cx).search_match,
+                cx.theme().selection,
+            )
+        });
+        assert_eq!(
+            search, selection,
+            "{mode:?} uses that variant's selection wash"
+        );
+        colors.push(search);
+    }
+    assert_ne!(
+        colors[0], colors[1],
+        "the two variants supply different washes"
     );
 }
 
