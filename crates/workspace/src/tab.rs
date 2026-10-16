@@ -297,6 +297,7 @@ enum Kind {
 /// visibility preserves both the query and editing state while the reader changes lanes.
 pub(crate) struct TranscriptSearch {
     pub(crate) open: bool,
+    pub(crate) case_sensitive: bool,
     pub(crate) input: Entity<InputState>,
     pub(crate) _subscription: Subscription,
 }
@@ -3018,6 +3019,14 @@ mod tests {
                 header.bottom(),
                 "the search bar is directly below the header"
             );
+            assert!(window
+                .try_find("transcript-search-case-sensitive")
+                .is_some());
+            assert!(window.try_find("transcript-search-previous").is_some());
+            assert!(window.try_find("transcript-search-next").is_some());
+            assert!(window.try_find("transcript-search-close").is_some());
+            assert_eq!(window.find("transcript-search-count").label(), Some("0/0"));
+            window.click("transcript-search-case-sensitive", cx);
         })
         .expect("the transcript header");
 
@@ -3072,12 +3081,20 @@ mod tests {
                     .value(),
                 "lane needle"
             );
+            assert!(
+                tab.transcript_searches[&AgentKey::Coordinator].case_sensitive,
+                "Aa is retained for the coordinator"
+            );
+            assert!(
+                !tab.transcript_searches[&AgentKey::Lane(1)].case_sensitive,
+                "Aa does not leak into the lane"
+            );
             assert_eq!(lane.read(cx).search_query(cx), "lane needle");
         });
 
         // Closing clears only active highlights; reopening restores the retained query.
         cx.update_window(window, |_, window, cx| {
-            window.click("transcript-search-toggle", cx);
+            window.click("transcript-search-close", cx);
             window.render_frame(cx);
             assert!(window.try_find("transcript-search-bar").is_none());
         })

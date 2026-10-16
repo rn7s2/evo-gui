@@ -30,12 +30,15 @@
 use std::path::PathBuf;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::{Editor, EditorState, InputEvent};
-use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, Disableable as _};
+use gpui_kit::component::input::{Editor, EditorState, Input, InputEvent, InputState, Search};
+use gpui_kit::component::{
+    h_flex, v_flex, ActiveTheme as _, Disableable as _, IconName, Selectable as _, Sizable as _,
+};
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    div, px, relative, App, Context, Entity, Focusable as _, Hsla, IntoElement, KeyDownEvent,
-    Render, Rgba, SharedString, Subscription, TestSupportExt as _, WeakEntity, Window,
+    div, px, relative, App, Context, Entity, Focusable as _, Half as _, Hsla, IntoElement,
+    KeyDownEvent, Render, Rgba, SharedString, Subscription, TestSupportExt as _, WeakEntity,
+    Window,
 };
 use store::config_file::{self, ConfigError};
 use store::design;
@@ -53,6 +56,10 @@ pub const CONFIG_RELOAD_ID: &str = "config-reload";
 pub const CONFIG_DISCARD_ID: &str = "config-discard";
 /// The surface the editor is drawn on.
 pub const CONFIG_SURFACE_ID: &str = "config-surface";
+pub const CONFIG_SEARCH_BAR_ID: &str = "config-search-bar";
+pub const CONFIG_SEARCH_COUNT_ID: &str = "config-search-count";
+pub const CONFIG_SEARCH_CASE_ID: &str = "config-search-case-sensitive";
+pub const CONFIG_SEARCH_CLOSE_ID: &str = "config-search-close";
 
 /// Always on the page: what a save does, so nobody restarts the app to find out.
 ///
@@ -106,6 +113,11 @@ struct Buffer {
     /// The editor the person types in; retained, so its draft is kept while another
     /// tab is shown.
     editor: Entity<EditorState>,
+    /// Retained custom search controls. The editor's presentation-independent search
+    /// engine still owns matching, selection, scrolling, and replacement.
+    search_input: Entity<InputState>,
+    replace_input: Entity<InputState>,
+    search_replace_mode: bool,
     /// The resolved path, fixed for the life of the page.
     path: PathBuf,
     /// What [`config_file::read`] found: `Some(text)` when the file was there,
@@ -175,12 +187,17 @@ impl ConfigEditor {
         for file in ConfigFile::ALL {
             let editor = cx.new(|cx| {
                 EditorState::new(window, cx)
+                    // This page supplies the search presentation so its active case
+                    // toggle can use the application's strong selected treatment.
+                    .searchable(false)
                     // No line-number gutter: the kit paints it with the *syntax*
                     // theme's background, which evo does not set, so under the dark
                     // theme it is a white strip down the editor's left edge.
                     .line_number(false)
                     .placeholder(SharedString::from("write it here"))
             });
+            let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Find"));
+            let replace_input = cx.new(|cx| InputState::new(window, cx).placeholder("Replace"));
             subscriptions.push(cx.subscribe(
                 &editor,
                 move |this: &mut ConfigEditor, _state, event: &InputEvent, cx| {
@@ -191,8 +208,31 @@ impl ConfigEditor {
                     }
                 },
             ));
+            subscriptions.push(cx.subscribe_in(
+                &search_input,
+                window,
+                move |this, _input, event: &InputEvent, _window, cx| match event {
+                    InputEvent::Change => this.apply_config_search(file, cx),
+                    InputEvent::PressEnter { shift, .. } => {
+                        this.move_config_search(file, !shift, cx)
+                    }
+                    _ => {}
+                },
+            ));
+            subscriptions.push(cx.subscribe_in(
+                &replace_input,
+                window,
+                move |this, _input, event: &InputEvent, window, cx| {
+                    if matches!(event, InputEvent::PressEnter { .. }) {
+                        this.replace_config_search(file, false, window, cx);
+                    }
+                },
+            ));
             buffers.push(Buffer {
                 editor,
+                search_input,
+                replace_input,
+                search_replace_mode: false,
                 path: config_file::path(&scope, file),
                 base: None,
                 baseline: String::new(),
@@ -574,12 +614,253 @@ impl ConfigEditor {
             .child(SharedString::from(text))
     }
 
-    /// The keyboard's one extra key: ⌘S saves the document being shown.
+    fn apply_config_search(&mut self, file: ConfigFile, cx: &mut Context<Self>) {
+        let buffer = &self.buffers[slot(file)];
+        let query = buffer.search_input.read(cx).value().to_string();
+        let case_insensitive = buffer.editor.read(cx).search_session().case_insensitive;
+        buffer.editor.update(cx, |editor, cx| {
+            editor.set_search_query(query, case_insensitive, cx)
+        });
+        cx.notify();
+    }
+
+    fn open_config_search(&mut self, _: &Search, window: &mut Window, cx: &mut Context<Self>) {
+        let file = self.selected;
+        self.apply_config_search(file, cx);
+        self.buffers[slot(file)]
+            .search_input
+            .update(cx, |input, cx| {
+                input.focus(window, cx);
+                input.select_all(window, cx);
+            });
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    fn close_config_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let buffer = &self.buffers[slot(self.selected)];
+        buffer
+            .editor
+            .update(cx, |editor, cx| editor.close_search(cx));
+        buffer
+            .editor
+            .update(cx, |editor, cx| editor.focus(window, cx));
+        cx.notify();
+    }
+
+    fn toggle_config_search_case(&mut self, cx: &mut Context<Self>) {
+        let file = self.selected;
+        let buffer = &self.buffers[slot(file)];
+        let query = buffer.search_input.read(cx).value().to_string();
+        let case_insensitive = !buffer.editor.read(cx).search_session().case_insensitive;
+        buffer.editor.update(cx, |editor, cx| {
+            editor.set_search_query(query, case_insensitive, cx)
+        });
+        cx.notify();
+    }
+
+    fn move_config_search(&mut self, file: ConfigFile, forward: bool, cx: &mut Context<Self>) {
+        self.buffers[slot(file)].editor.update(cx, |editor, cx| {
+            if forward {
+                editor.next_search_match(cx);
+            } else {
+                editor.previous_search_match(cx);
+            }
+        });
+        cx.notify();
+    }
+
+    fn toggle_config_replace_mode(&mut self, cx: &mut Context<Self>) {
+        let buffer = &mut self.buffers[slot(self.selected)];
+        buffer.search_replace_mode = !buffer.search_replace_mode;
+        cx.notify();
+    }
+
+    fn replace_config_search(
+        &mut self,
+        file: ConfigFile,
+        all: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let buffer = &self.buffers[slot(file)];
+        let replacement = buffer.replace_input.read(cx).value().to_string();
+        buffer.editor.update(cx, |editor, cx| {
+            if all {
+                editor.replace_all_search_matches(&replacement, window, cx);
+            } else {
+                editor.replace_current_search_match(&replacement, window, cx);
+            }
+        });
+        cx.notify();
+    }
+
+    fn search_bar(&self, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
+        let buffer = &self.buffers[slot(self.selected)];
+        let session = buffer.editor.read(cx).search_session();
+        if !session.is_active() {
+            return None;
+        }
+        let has_matches = !session.matcher.is_empty();
+        let label = session.matcher.label();
+        let case_sensitive = !session.case_insensitive;
+        let replace_mode = buffer.search_replace_mode;
+        let saving = self.saving.is_some();
+        let palette = design::palette(cx.theme().mode.is_dark());
+
+        Some(
+            v_flex()
+                .id(CONFIG_SEARCH_BAR_ID)
+                .test_support()
+                .items_center()
+                .py_2()
+                .px_3()
+                .w_full()
+                .gap_1()
+                .bg(cx.theme().tokens.popover)
+                .border_b_1()
+                .rounded(cx.theme().radius.half())
+                .border_color(cx.theme().border)
+                .child(
+                    h_flex()
+                        .w_full()
+                        .gap_2()
+                        .child(
+                            div().flex().flex_1().gap_1().child(
+                                Input::new(&buffer.search_input)
+                                    .focus_bordered(false)
+                                    .suffix(
+                                        Button::new(CONFIG_SEARCH_CASE_ID)
+                                            .selected(case_sensitive)
+                                            .toggled(case_sensitive)
+                                            .xsmall()
+                                            .compact()
+                                            .text()
+                                            .icon(IconName::CaseSensitive)
+                                            .when(case_sensitive, |button| {
+                                                button
+                                                    .bg(ink(palette.primary))
+                                                    .text_color(ink(palette.primary_fg))
+                                            })
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.toggle_config_search_case(cx);
+                                            })),
+                                    )
+                                    .small()
+                                    .w_full()
+                                    .shadow_none(),
+                            ),
+                        )
+                        .child(
+                            Button::new("config-search-replace-mode")
+                                .xsmall()
+                                .ghost()
+                                .icon(IconName::Replace)
+                                .selected(replace_mode)
+                                .toggled(replace_mode)
+                                .disabled(saving)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.toggle_config_replace_mode(cx);
+                                })),
+                        )
+                        .child(
+                            Button::new("config-search-previous")
+                                .xsmall()
+                                .ghost()
+                                .icon(IconName::ChevronLeft)
+                                .disabled(!has_matches)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.move_config_search(this.selected, false, cx);
+                                })),
+                        )
+                        .child(
+                            Button::new("config-search-next")
+                                .xsmall()
+                                .ghost()
+                                .icon(IconName::ChevronRight)
+                                .disabled(!has_matches)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.move_config_search(this.selected, true, cx);
+                                })),
+                        )
+                        .child(
+                            div()
+                                .id(CONFIG_SEARCH_COUNT_ID)
+                                .test_support()
+                                .min_w_16()
+                                .aria_label(label.clone())
+                                .when(!has_matches, |label| {
+                                    label.text_color(cx.theme().muted_foreground)
+                                })
+                                .child(label),
+                        )
+                        .child(div().w_7())
+                        .child(
+                            Button::new(CONFIG_SEARCH_CLOSE_ID)
+                                .xsmall()
+                                .ghost()
+                                .icon(IconName::Close)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.close_config_search(window, cx);
+                                })),
+                        ),
+                )
+                .when(replace_mode, |panel| {
+                    panel.child(
+                        h_flex()
+                            .w_full()
+                            .gap_2()
+                            .child(
+                                Input::new(&buffer.replace_input)
+                                    .focus_bordered(false)
+                                    .small()
+                                    .flex_1()
+                                    .shadow_none(),
+                            )
+                            .child(
+                                Button::new("config-search-replace-one")
+                                    .small()
+                                    .label("Replace")
+                                    .disabled(!has_matches || saving)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.replace_config_search(
+                                            this.selected,
+                                            false,
+                                            window,
+                                            cx,
+                                        );
+                                    })),
+                            )
+                            .child(
+                                Button::new("config-search-replace-all")
+                                    .small()
+                                    .label("Replace All")
+                                    .disabled(!has_matches || saving)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.replace_config_search(this.selected, true, window, cx);
+                                    })),
+                            ),
+                    )
+                })
+                .into_any_element(),
+        )
+    }
+
+    /// The keyboard's page shortcuts: save, find, and dismissal of custom find.
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let keystroke = &event.keystroke;
         if keystroke.key.eq_ignore_ascii_case("s") && keystroke.modifiers.platform {
             cx.stop_propagation();
             self.save_selected(window, cx);
+        } else if keystroke.key.eq_ignore_ascii_case("escape")
+            && self.buffers[slot(self.selected)]
+                .editor
+                .read(cx)
+                .search_session()
+                .is_active()
+        {
+            cx.stop_propagation();
+            self.close_config_search(window, cx);
         }
     }
 }
@@ -598,6 +879,7 @@ impl Render for ConfigEditor {
         let reload_enabled = !saving && !self.buffers[slot(self.selected)].is_dirty(cx);
         let discard_enabled = !saving && dirty;
         let save_enabled = self.can_save(cx);
+        let search_bar = self.search_bar(cx);
         v_flex()
             .id(CONFIG_EDITOR_ID)
             .test_support()
@@ -609,6 +891,7 @@ impl Render for ConfigEditor {
             .p(px(design::INSET))
             .text_color(cx.theme().foreground)
             .on_key_down(cx.listener(Self::key_down))
+            .on_action(cx.listener(Self::open_config_search))
             .child(self.file_tabs(cx))
             .child(self.path_line(cx))
             .child(
@@ -630,11 +913,13 @@ impl Render for ConfigEditor {
                     // Read-only while a save is in flight, so the text cannot move
                     // under the write.
                     .child(
-                        Editor::new(&editor)
-                            .appearance(false)
-                            .bordered(false)
-                            .readonly(saving)
-                            .h(relative(1.)),
+                        v_flex().size_full().children(search_bar).child(
+                            Editor::new(&editor)
+                                .appearance(false)
+                                .bordered(false)
+                                .readonly(saving)
+                                .h(relative(1.)),
+                        ),
                     ),
             )
             .child(self.status_line(cx))
@@ -1465,6 +1750,69 @@ mod tests {
         );
         cx.run_until_parked();
         assert_eq!(f.disk(ConfigFile::Init).as_deref(), Some("(a)\n"));
+    }
+
+    /// Settings uses the editor search engine through its custom panel: matching and
+    /// replacement behavior stay intact, while the selected Aa control gets a solid
+    /// application-primary fill instead of the text variant's nearly identical state.
+    #[gpui_kit::test]
+    fn config_search_case_toggle_is_obvious_and_retained(cx: &mut TestAppContext) {
+        let f = page(cx, "search-case");
+        f.replace_into(cx, ConfigFile::Init, "Needle needle");
+        f.press(cx, "cmd-f");
+        f.act(cx, |window, cx| {
+            assert!(window.try_find(CONFIG_SEARCH_BAR_ID).is_some());
+            window.input("needle", cx);
+        });
+        cx.run_until_parked();
+        f.act(cx, |window, cx| {
+            window.render_frame(cx);
+            assert_eq!(window.find(CONFIG_SEARCH_COUNT_ID).label(), Some("1/2"));
+            window.click(CONFIG_SEARCH_CASE_ID, cx);
+            window.render_frame(cx);
+            assert_eq!(window.find(CONFIG_SEARCH_COUNT_ID).label(), Some("1/1"));
+
+            let at = window.find(CONFIG_SEARCH_CASE_ID).bounds().center();
+            let at = at.scale(window.scale_factor());
+            let painted = window.painted_quads();
+            let primary = ink(design::palette(cx.theme().mode.is_dark()).primary);
+            assert!(
+                painted.iter().any(|quad| {
+                    quad.bounds.contains(&at)
+                        && quad
+                            .background
+                            .as_solid()
+                            .is_some_and(|colour| same_colour(colour, primary))
+                }),
+                "active Aa has the solid primary selected fill"
+            );
+        });
+        let state = f.state(cx, ConfigFile::Init);
+        assert!(
+            !cx.update(|cx| state.read(cx).search_session().case_insensitive),
+            "case-sensitive state is retained in the editor search session"
+        );
+
+        f.click(cx, CONFIG_SEARCH_CLOSE_ID);
+        assert!(!cx.update(|cx| state.read(cx).search_session().is_active()));
+        f.press(cx, "cmd-f");
+        assert_eq!(f.label(cx, CONFIG_SEARCH_COUNT_ID), "1/1");
+
+        f.click(cx, "config-search-replace-mode");
+        let replace_input = cx.update(|cx| {
+            f.page.read(cx).buffers[slot(ConfigFile::Init)]
+                .replace_input
+                .clone()
+        });
+        f.act(cx, |window, cx| {
+            replace_input.update(cx, |input, cx| input.set_value("found", window, cx));
+        });
+        f.click(cx, "config-search-replace-all");
+        assert_eq!(
+            f.text(cx, ConfigFile::Init),
+            "Needle found",
+            "the custom presentation keeps the settings editor's replace controls"
+        );
     }
 
     /// The opaque solid colours painted at several points across the editor
