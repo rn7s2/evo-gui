@@ -2836,8 +2836,8 @@ mod tests {
     use super::*;
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{
-        div, point, px, size, AnyWindowHandle, Bounds, Entity, TestAppContext, WindowBounds,
-        WindowOptions,
+        div, point, px, size, AnyWindowHandle, Bounds, Entity, Keystroke, TestAppContext,
+        WindowBounds, WindowOptions,
     };
     use session::Item;
     use std::cell::RefCell;
@@ -3002,7 +3002,12 @@ mod tests {
         cx.update_window(window, |_, window, cx| {
             window.render_frame(cx);
             let search_element = window.find("transcript-search-toggle");
-            assert_eq!(search_element.label(), Some("Search (^F)"));
+            let expected_search_label = if cfg!(target_os = "macos") {
+                "Search (⌃F)"
+            } else {
+                "Search (Ctrl+F)"
+            };
+            assert_eq!(search_element.label(), Some(expected_search_label));
             let search = search_element.bounds();
             let thinking = window.find("transcript-thinking").bounds();
             assert!(
@@ -3116,6 +3121,24 @@ mod tests {
             cx.read(|cx| coordinator.read(cx).search_query(cx)),
             "coordinator needle"
         );
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.dispatch_keystroke(Keystroke::parse("escape").expect("Escape"), cx);
+            window.render_frame(cx);
+            assert!(
+                window.try_find("transcript-search-bar").is_some(),
+                "the first Escape clears a non-empty query without closing"
+            );
+            assert_eq!(coordinator_input.read(cx).value(), "");
+            window.dispatch_keystroke(Keystroke::parse("escape").expect("Escape"), cx);
+            window.render_frame(cx);
+            assert!(
+                window.try_find("transcript-search-bar").is_none(),
+                "Escape closes search once the query is empty"
+            );
+        })
+        .expect("two-stage Escape");
     }
 
     #[gpui_kit::test]

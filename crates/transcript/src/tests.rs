@@ -281,6 +281,99 @@ fn transcript_search_counts_and_wraps_navigation_in_transcript_order(cx: &mut Te
     );
 }
 
+#[gpui_kit::test]
+fn transcript_search_typing_selects_and_reveals_the_nearest_match_to_the_viewport(
+    cx: &mut TestAppContext,
+) {
+    let mut items = Vec::new();
+    for index in 0..40 {
+        let id = format!("a_{index}");
+        let text = match index {
+            0 => format!(
+                "needle needle before the viewport\n\n{}",
+                "tall row\n\n".repeat(6)
+            ),
+            19 => format!(
+                "needle just before the viewport\n\n{}",
+                "tall row\n\n".repeat(6)
+            ),
+            30 => format!("needle after the viewport\n\n{}", "tall row\n\n".repeat(6)),
+            35 => format!(
+                "edited-query after the selected match\n\n{}",
+                "tall row\n\n".repeat(6)
+            ),
+            _ => format!(
+                "ordinary transcript row {index}\n\n{}",
+                "tall row\n\n".repeat(6)
+            ),
+        };
+        items.push(assistant(&id, &text, "final"));
+    }
+    let (view, cx) = open!(cx, items);
+    let data = cx.read(|cx| view.read(cx).data.clone());
+    data.update(cx, |data, cx| {
+        for index in 0..40 {
+            data.sync_document(index, cx);
+        }
+    });
+    cx.run_until_parked();
+    for _ in 0..3 {
+        cx.update(|window, cx| window.render_frame(cx));
+    }
+
+    view.update(cx, |view, _cx| {
+        view.touched();
+        view.reaches_the_foot.set(false);
+        view.list.scroll_to(gpui_kit::ListOffset {
+            item_ix: view.slots.at(20),
+            offset_in_item: px(0.),
+        });
+    });
+    for _ in 0..2 {
+        cx.update(|window, cx| window.render_frame(cx));
+    }
+    view.update(cx, |view, cx| view.set_search("needle", false, cx));
+    for _ in 0..2 {
+        cx.update(|window, cx| window.render_frame(cx));
+    }
+
+    cx.read(|cx| {
+        assert_eq!(
+            view.read(cx).search_status(cx),
+            crate::TranscriptSearchStatus {
+                current: Some(2),
+                total: 4,
+            },
+            "the match closest to the viewport is selected"
+        );
+        assert_eq!(
+            view.read(cx).list.logical_scroll_top().item_ix,
+            view.read(cx).slots.at(19),
+            "typing the query immediately reveals that selected match"
+        );
+    });
+
+    view.update(cx, |view, cx| view.set_search("edited-query", false, cx));
+    for _ in 0..2 {
+        cx.update(|window, cx| window.render_frame(cx));
+    }
+    cx.read(|cx| {
+        assert_eq!(
+            view.read(cx).search_status(cx),
+            crate::TranscriptSearchStatus {
+                current: Some(0),
+                total: 1,
+            },
+            "every query edit recomputes a nearby current match"
+        );
+        assert_eq!(
+            view.read(cx).list.logical_scroll_top().item_ix,
+            view.read(cx).slots.at(35),
+            "editing the query again immediately reveals its new match"
+        );
+    });
+}
+
 /// Search works on the same rendered documents the reader sees: user words,
 /// assistant prose, tables, and fenced code. Thinking is a separate renderer and is
 /// deliberately absent even when its text contains the query.

@@ -17,7 +17,7 @@ use std::rc::Rc;
 
 use gpui_kit::base::{resize_handle, InteractiveElementExt as _, ResizeHandleRenderer};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{
@@ -791,11 +791,7 @@ impl TabContent {
         if self.transcript_searches.contains_key(&agent) {
             return;
         }
-        let input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("Search transcript")
-                .clean_on_escape()
-        });
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Search transcript"));
         let subscription = cx.subscribe(&input, move |this, _input, event: &InputEvent, cx| {
             if !matches!(event, InputEvent::Change) {
                 return;
@@ -836,16 +832,17 @@ impl TabContent {
     /// available, while thinking is conditional on the selected agent.
     fn transcript_search_toggle(&self, cx: &mut Context<Self>) -> AnyElement {
         let palette = design::palette(cx.theme().mode.is_dark());
+        let label = search_label();
         div()
             .id("transcript-search-toggle")
-            .aria_label("Search (^F)")
+            .aria_label(label)
             .test_support()
             .flex_shrink_0()
             .text_size(px(12.))
             .text_color(paint::color(palette.muted_fg))
             .cursor_pointer()
             .on_click(cx.listener(|this, _, window, cx| this.toggle_transcript_search(window, cx)))
-            .child("Search (^F)")
+            .child(label)
             .into_any_element()
     }
 
@@ -920,6 +917,26 @@ impl TabContent {
         cx.notify();
     }
 
+    fn on_transcript_search_escape(
+        &mut self,
+        _: &Escape,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let agent = self.selected_agent();
+        let Some(search) = self.transcript_searches.get(&agent) else {
+            return;
+        };
+        if search.input.read(cx).value().is_empty() {
+            self.set_transcript_search_open(false, window, cx);
+        } else {
+            let input = search.input.clone();
+            input.update(cx, |input, cx| input.clean(window, cx));
+            self.apply_transcript_search(agent, cx);
+        }
+        cx.stop_propagation();
+    }
+
     fn transcript_search_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let agent = self.selected_agent();
         let search = self.transcript_searches.get(&agent)?;
@@ -939,6 +956,7 @@ impl TabContent {
             v_flex()
                 .id("transcript-search-bar")
                 .test_support()
+                .on_action(cx.listener(Self::on_transcript_search_escape))
                 .w_full()
                 .flex_none()
                 .items_center()
@@ -1270,6 +1288,15 @@ fn thinking_label(showing: bool) -> &'static str {
         "Hide Thinking"
     } else {
         "Show Thinking"
+    }
+}
+
+/// The transcript search shortcut uses the same platform notation as the terminal.
+fn search_label() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Search (⌃F)"
+    } else {
+        "Search (Ctrl+F)"
     }
 }
 
