@@ -13,6 +13,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
+use gpui_kit::component::input::Search;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, Sizable as _, TitleBar};
 use gpui_kit::component::{ResizablePanelEvent, ResizableState};
@@ -105,8 +106,6 @@ gpui_kit::actions!(
         SelectLastTab,
         /// ⌘Q, held: quit once the hold is complete (§9.8).
         HoldToQuit,
-        /// Toggle transcript search for the selected lane (⌃F).
-        ToggleTranscriptSearch,
         /// Toggle the terminal pane (⌃`).
         ToggleTerminal,
     ]
@@ -172,7 +171,7 @@ pub fn bind_tab_keys(cx: &mut App) {
         KeyBinding::new("cmd-shift-]", SelectNextTab, None),
         KeyBinding::new("cmd-shift-[", SelectPreviousTab, None),
         KeyBinding::new("cmd-9", SelectLastTab, None),
-        KeyBinding::new("ctrl-f", ToggleTranscriptSearch, None),
+        KeyBinding::new("ctrl-f", Search, None),
     ];
     // ⌘1…⌘8 is the tab with that number; with fewer tabs than the number, the
     // shortcut does nothing rather than wrapping (§7.1).
@@ -1087,10 +1086,12 @@ impl WorkspaceView {
         self.select_tab(action.0, window, cx);
     }
 
-    /// ⌃F: the selected lane's transcript search, open or shut.
+    /// ⌃F: the selected lane's transcript search, open or shut. Text inputs bind the
+    /// same `Search` action in their own context; non-searchable inputs propagate it
+    /// here, while the settings editor consumes it for its own search panel.
     fn on_toggle_transcript_search(
         &mut self,
-        _: &ToggleTranscriptSearch,
+        _: &Search,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1783,6 +1784,19 @@ mod tests {
                 window.try_find("transcript-search-bar").is_none(),
                 "the same shortcut closes search while its input is focused"
             );
+
+            let composer = tab.read(cx).composer.clone();
+            composer.update(cx, |composer, cx| composer.focus_input(window, cx));
+            window.render_frame(cx);
+            window.dispatch_keystroke(Keystroke::parse("ctrl-f").expect("⌃F"), cx);
+            window.render_frame(cx);
+            assert!(
+                window.try_find("transcript-search-bar").is_some(),
+                "the input Search action propagates from the focused composer"
+            );
+            window.dispatch_keystroke(Keystroke::parse("ctrl-f").expect("⌃F"), cx);
+            window.render_frame(cx);
+            assert!(window.try_find("transcript-search-bar").is_none());
         });
         assert!(
             !cx.update(|_, cx| {

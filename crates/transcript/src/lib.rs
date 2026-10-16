@@ -468,12 +468,12 @@ impl TranscriptData {
         query: &str,
         case_sensitive: bool,
         color: Hsla,
+        anchor_item: usize,
         cx: &mut Context<Self>,
     ) {
-        if self.search_query == query
-            && self.search_case_sensitive == case_sensitive
-            && self.search_color == color
-        {
+        let search_changed =
+            self.search_query != query || self.search_case_sensitive != case_sensitive;
+        if !search_changed && self.search_color == color {
             return;
         }
         self.search_query.clear();
@@ -482,7 +482,18 @@ impl TranscriptData {
         self.search_color = color;
         self.sync_search_documents(cx);
         self.refresh_search_documents(cx);
-        self.search_cursor = (!self.ordered_search_matches().is_empty()).then_some(0);
+        let matches = self.ordered_search_matches();
+        self.search_cursor = if matches.is_empty() {
+            None
+        } else if search_changed {
+            matches
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, matched)| matched.item_index.abs_diff(anchor_item))
+                .map(|(index, _)| index)
+        } else {
+            Some(self.search_cursor.unwrap_or(0).min(matches.len() - 1))
+        };
     }
 
     /// Bring `items[index]`'s document up to date, creating it the first time the row is on
@@ -1508,14 +1519,40 @@ impl TranscriptView {
     /// and case mode per lane; this view owns applying them to retained text documents.
     pub fn set_search(&mut self, query: &str, case_sensitive: bool, cx: &mut Context<Self>) {
         let color = Palette::from_app(cx).search_match;
-        self.data.update(cx, |data, cx| {
-            data.set_search(query, case_sensitive, color, cx)
+        let anchor_item = self
+            .slots
+            .record(self.list.logical_scroll_top().item_ix)
+            .unwrap_or(0);
+        let selected = self.data.update(cx, |data, cx| {
+            data.set_search(query, case_sensitive, color, anchor_item, cx);
+            let matches = data.ordered_search_matches();
+            data.search_cursor
+                .and_then(|cursor| matches.get(cursor).cloned())
         });
-        cx.notify();
+        if let Some(selected) = selected {
+            self.reveal_search_match(selected, cx);
+        } else {
+            cx.notify();
+        }
     }
 
     pub fn search_status(&self, cx: &App) -> TranscriptSearchStatus {
         self.data.read(cx).search_status()
+    }
+
+    fn reveal_search_match(&mut self, selected: TranscriptSearchMatch, cx: &mut Context<Self>) {
+        self.touched();
+        self.reaches_the_foot.set(false);
+        self.list.scroll_to(gpui_kit::ListOffset {
+            item_ix: self.slots.at(selected.item_index),
+            offset_in_item: px(0.),
+        });
+        selected.document.update(cx, |document, cx| {
+            document
+                .reveal_range(selected.range.clone(), cx)
+                .expect("a selected search range belongs to its transcript document");
+        });
+        cx.notify();
     }
 
     fn move_search_match(&mut self, forward: bool, cx: &mut Context<Self>) {
@@ -1538,19 +1575,7 @@ impl TranscriptView {
             cx.notify();
             return;
         };
-
-        self.touched();
-        self.reaches_the_foot.set(false);
-        self.list.scroll_to(gpui_kit::ListOffset {
-            item_ix: self.slots.at(selected.item_index),
-            offset_in_item: px(0.),
-        });
-        selected.document.update(cx, |document, cx| {
-            document
-                .reveal_range(selected.range.clone(), cx)
-                .expect("a selected search range belongs to its transcript document");
-        });
-        cx.notify();
+        self.reveal_search_match(selected, cx);
     }
 
     pub fn next_search_match(&mut self, cx: &mut Context<Self>) {
@@ -2010,8 +2035,18 @@ impl Render for TranscriptView {
             let data = self.data.read(cx);
             (data.search_query.clone(), data.search_case_sensitive)
         };
+        let anchor_item = self
+            .slots
+            .record(self.list.logical_scroll_top().item_ix)
+            .unwrap_or(0);
         self.data.update(cx, |data, cx| {
-            data.set_search(&query, case_sensitive, palette.search_match, cx)
+            data.set_search(
+                &query,
+                case_sensitive,
+                palette.search_match,
+                anchor_item,
+                cx,
+            )
         });
 
         if self.data.read(cx).items.is_empty() {
