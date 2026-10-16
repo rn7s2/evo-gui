@@ -17,6 +17,7 @@ use std::rc::Rc;
 
 use gpui_kit::base::{resize_handle, InteractiveElementExt as _, ResizeHandleRenderer};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{
@@ -93,11 +94,16 @@ impl TabContent {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let running = match &self.state {
+            TabState::Running { folder } => Some(folder.clone()),
+            _ => None,
+        }
+        .map(|folder| self.render_page(&folder, window, cx));
         let content = match &self.state {
             TabState::Empty => self.render_empty(cx),
             TabState::Settings => self.render_settings(window, cx),
             TabState::Booting { folder } => self.render_booting(folder, cx),
-            TabState::Running { folder } => self.render_page(folder, window, cx),
+            TabState::Running { .. } => running.expect("the running page was rendered above"),
             TabState::Failed {
                 folder,
                 message,
@@ -410,7 +416,7 @@ impl TabContent {
     /// count changes — a terminal beside the group, or a third panel in it, made
     /// the lane column jump each time the terminal was opened or put away.
     fn render_page(
-        &self,
+        &mut self,
         folder: &Path,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -471,7 +477,7 @@ impl TabContent {
     /// `Math.min(LEFT_MAX, width - MAIN_MIN)` — with an open terminal's width taken
     /// out of the window first.
     fn render_columns(
-        &self,
+        &mut self,
         folder: &Path,
         panes: store::app_state::Panes,
         terminal: Option<(Entity<terminal::TerminalPane>, f32)>,
@@ -701,9 +707,10 @@ impl TabContent {
     ///
     /// It is the lane column's band, at the same height and on the same surface, so the
     /// rule under the two runs straight across the page.
-    fn render_agent_header(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_agent_header(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let palette = design::palette(cx.theme().mode.is_dark());
         let agent = self.selected_agent();
+        self.ensure_transcript_search(agent, window, cx);
         // What the band calls the agent it is over: a swarm's coordinator, or the one
         // agent a single-agent session has — there is nobody to coordinate (§7.2).
         // `AgentKey::name` is where those names are written once, for this band, the
@@ -744,6 +751,7 @@ impl TabContent {
                     .text_color(paint::color(palette.muted_fg))
                     .child(task),
             )
+            .child(self.transcript_search_toggle(cx))
             .when_some(self.thinking_toggle(cx), |this, toggle| this.child(toggle))
             .child(self.terminal_toggle(cx))
             .into_any_element()
@@ -770,6 +778,126 @@ impl TabContent {
             // Nothing has been read about this lane yet: silence rather than a guess.
             None => SharedString::from(""),
         }
+    }
+
+    /// Lazily retain one input per transcript. The subscription is tied to the tab,
+    /// and its captured key means editing one lane can never change another lane's query.
+    pub(crate) fn ensure_transcript_search(
+        &mut self,
+        agent: AgentKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.transcript_searches.contains_key(&agent) {
+            return;
+        }
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Search transcript")
+                .clean_on_escape()
+        });
+        let subscription = cx.subscribe(&input, move |this, _input, event: &InputEvent, cx| {
+            if !matches!(event, InputEvent::Change) {
+                return;
+            }
+            this.apply_transcript_search(agent, cx);
+        });
+        self.transcript_searches.insert(
+            agent,
+            crate::tab::TranscriptSearch {
+                open: false,
+                input,
+                _subscription: subscription,
+            },
+        );
+    }
+
+    pub(crate) fn apply_transcript_search(&mut self, agent: AgentKey, cx: &mut Context<Self>) {
+        let Some(search) = self.transcript_searches.get(&agent) else {
+            return;
+        };
+        let query = if search.open {
+            search.input.read(cx).value().to_string()
+        } else {
+            String::new()
+        };
+        if let Some(transcript) = self.transcripts.get(&agent) {
+            transcript.update(cx, |transcript, cx| transcript.set_search(&query, cx));
+        }
+    }
+
+    /// The header control comes before Show Thinking: transcript search is always
+    /// available, while thinking is conditional on the selected agent.
+    fn transcript_search_toggle(&self, cx: &mut Context<Self>) -> AnyElement {
+        let palette = design::palette(cx.theme().mode.is_dark());
+        div()
+            .id("transcript-search-toggle")
+            .aria_label("Search (^F)")
+            .test_support()
+            .flex_shrink_0()
+            .text_size(px(12.))
+            .text_color(paint::color(palette.muted_fg))
+            .cursor_pointer()
+            .on_click(cx.listener(|this, _, window, cx| this.toggle_transcript_search(window, cx)))
+            .child("Search (^F)")
+            .into_any_element()
+    }
+
+    /// Toggle the selected lane's search, applying or clearing highlights without
+    /// discarding that lane's query. Both the button and the workspace shortcut use
+    /// this one path.
+    pub(crate) fn toggle_transcript_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !matches!(self.state, TabState::Running { .. }) || self.project_settings {
+            return;
+        }
+        let agent = self.selected_agent();
+        let Some(transcript) = self.transcripts.get(&agent).cloned() else {
+            return;
+        };
+        self.ensure_transcript_search(agent, window, cx);
+        let search = self
+            .transcript_searches
+            .get_mut(&agent)
+            .expect("search was retained above");
+        search.open = !search.open;
+        let query = if search.open {
+            search.input.read(cx).value().to_string()
+        } else {
+            String::new()
+        };
+        transcript.update(cx, |transcript, cx| transcript.set_search(&query, cx));
+        if search.open {
+            search.input.update(cx, |input, cx| input.focus(window, cx));
+        }
+        cx.notify();
+    }
+
+    fn transcript_search_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let search = self.transcript_searches.get(&self.selected_agent())?;
+        if !search.open {
+            return None;
+        }
+        let palette = design::palette(cx.theme().mode.is_dark());
+        Some(
+            h_flex()
+                .id("transcript-search-bar")
+                .test_support()
+                .w_full()
+                .flex_none()
+                .px(px(design::INSET))
+                .py(px(8.))
+                .bg(paint::color(palette.sidebar))
+                .border_b_1()
+                .border_color(paint::color(palette.border))
+                .child(
+                    div()
+                        .id("transcript-search-input")
+                        .test_support()
+                        .w_full()
+                        .child(Input::new(&search.input).small()),
+                )
+                .into_any_element(),
+        )
     }
 
     /// The quiet control the header carries while the shown agent has thinking to
@@ -847,7 +975,7 @@ impl TabContent {
     /// drawers a chip folds out, the input and the chips — and the page hands it the
     /// height of the pane it has to live in.
     fn render_conversation_column(
-        &self,
+        &mut self,
         folder: &Path,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -867,6 +995,8 @@ impl TabContent {
         let pane = px(f32::from(window.bounds().size.height) - design::STRIP_HEIGHT);
         self.composer
             .update(cx, |composer, cx| composer.set_pane_height(pane, cx));
+        let header = self.render_agent_header(window, cx);
+        let search_bar = self.transcript_search_bar(cx);
         v_flex()
             .id("conversation-column")
             .test_support()
@@ -874,7 +1004,8 @@ impl TabContent {
             .min_w_0()
             .h_full()
             .bg(paint::color(palette.bg))
-            .child(self.render_agent_header(cx))
+            .child(header)
+            .when_some(search_bar, |this, search_bar| this.child(search_bar))
             .when(self.is_reconnecting(), |this| {
                 this.child(reconnect_badge(cx))
             })
