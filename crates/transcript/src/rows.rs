@@ -232,6 +232,22 @@ pub(crate) fn plain_texts(item: &Item, expanded: bool) -> Vec<(&'static str, Str
     texts
 }
 
+/// The plain-text documents that are actually drawn by a row, in display order.
+/// A user message that carries files keeps the full transport text for copying, but
+/// only its words are visible and therefore searchable.
+pub(crate) fn searchable_plain_texts(item: &Item, expanded: bool) -> Vec<(&'static str, String)> {
+    if let ItemKind::User(user) = &item.kind {
+        return match sent(&user.text) {
+            Some(sent) if !sent.words.is_empty() => {
+                vec![(USER_WORDS, sent.words.to_string())]
+            }
+            Some(_) => Vec::new(),
+            None => vec![(USER_TEXT, user.text.clone())],
+        };
+    }
+    plain_texts(item, expanded)
+}
+
 /// What a provider retry says, without the row: the row draws it, and so does the text
 /// the row reads for the links in it.
 fn retry_line(retry: &session::ProviderRetry) -> String {

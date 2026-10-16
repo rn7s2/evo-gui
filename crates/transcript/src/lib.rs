@@ -157,8 +157,32 @@ pub(crate) enum ImageState {
 struct SearchHighlightStamp {
     text: RenderedText,
     query: String,
+    case_sensitive: bool,
     color: Hsla,
     ranges: Vec<std::ops::Range<usize>>,
+}
+
+#[derive(Clone)]
+struct TranscriptSearchMatch {
+    item_index: usize,
+    document: Entity<TextViewState>,
+    range: std::ops::Range<usize>,
+}
+
+/// Where transcript search is within the matches it found.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TranscriptSearchStatus {
+    pub current: Option<usize>,
+    pub total: usize,
+}
+
+impl TranscriptSearchStatus {
+    pub fn label(self) -> String {
+        match self.current {
+            Some(current) => format!("{}/{}", current + 1, self.total),
+            None => "0/0".into(),
+        }
+    }
 }
 
 /// The data the row renderer reads.
@@ -189,6 +213,10 @@ pub(crate) struct TranscriptData {
     /// The active transcript query. An empty value means the bar is closed or has
     /// no keywords, and therefore no transcript highlights are painted.
     search_query: String,
+    /// Whether matching distinguishes ASCII uppercase from lowercase.
+    search_case_sensitive: bool,
+    /// The selected occurrence in transcript order, retained while this view is shown.
+    search_cursor: Option<usize>,
     /// The theme's selection wash, used behind every match. It is different in the
     /// light and dark variants and settles over prose, tables, and code surfaces.
     search_color: Hsla,
@@ -299,10 +327,15 @@ impl TranscriptData {
         cx: &mut Context<Self>,
     ) {
         let text = document.read(cx).rendered_text();
-        let ranges = search_ranges(text.as_str(), &self.search_query);
+        let ranges = search_ranges(
+            text.as_str(),
+            &self.search_query,
+            self.search_case_sensitive,
+        );
         let stamp = SearchHighlightStamp {
             text: text.clone(),
             query: self.search_query.clone(),
+            case_sensitive: self.search_case_sensitive,
             color: self.search_color,
             ranges: ranges.clone(),
         };
@@ -341,14 +374,115 @@ impl TranscriptData {
         }
     }
 
-    fn set_search(&mut self, query: &str, color: Hsla, cx: &mut Context<Self>) {
-        if self.search_query == query && self.search_color == color {
+    /// Search counts the whole held transcript, not just the rows the virtual list has
+    /// happened to lay out. Materialize the same retained documents those rows draw.
+    fn sync_search_documents(&mut self, cx: &mut Context<Self>) {
+        for index in 0..self.items.len() {
+            let assistant = matches!(self.items[index].kind, ItemKind::Assistant(_));
+            let report_fields = match &self.items[index].kind {
+                ItemKind::LaneReport(report) => rows::report_fields(report)
+                    .into_iter()
+                    .filter(|(_, text)| !text.is_empty())
+                    .map(|(label, _)| label)
+                    .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            };
+            let plain_texts = rows::searchable_plain_texts(
+                &self.items[index],
+                self.expanded.contains(&self.items[index].id),
+            );
+
+            if assistant {
+                self.sync_document(index, cx);
+            }
+            for label in report_fields {
+                self.sync_field_document(index, label, cx);
+            }
+            for (key, text) in plain_texts {
+                self.sync_plain_document(index, key, &text, cx);
+            }
+        }
+    }
+
+    fn ordered_search_matches(&self) -> Vec<TranscriptSearchMatch> {
+        let mut matches = Vec::new();
+        for (item_index, item) in self.items.iter().enumerate() {
+            let mut documents = Vec::new();
+            match &item.kind {
+                ItemKind::Assistant(_) => {
+                    if let Some(document) = self.documents.get(&item.id) {
+                        documents.push(document.clone());
+                    }
+                }
+                ItemKind::LaneReport(report) => {
+                    for (label, text) in rows::report_fields(report) {
+                        if text.is_empty() {
+                            continue;
+                        }
+                        if let Some(document) = self.field_documents.get(&(item.id.clone(), label))
+                        {
+                            documents.push(document.clone());
+                        }
+                    }
+                }
+                _ => {
+                    for (key, _) in
+                        rows::searchable_plain_texts(item, self.expanded.contains(&item.id))
+                    {
+                        if let Some(document) = self.field_documents.get(&(item.id.clone(), key)) {
+                            documents.push(document.clone());
+                        }
+                    }
+                }
+            }
+            for document in documents {
+                let Some(stamp) = self.search_highlights.get(&document.entity_id()) else {
+                    continue;
+                };
+                matches.extend(
+                    stamp
+                        .ranges
+                        .iter()
+                        .cloned()
+                        .map(|range| TranscriptSearchMatch {
+                            item_index,
+                            document: document.clone(),
+                            range,
+                        }),
+                );
+            }
+        }
+        matches
+    }
+
+    fn search_status(&self) -> TranscriptSearchStatus {
+        let total = self.ordered_search_matches().len();
+        TranscriptSearchStatus {
+            current: (total > 0).then(|| self.search_cursor.unwrap_or(0).min(total - 1)),
+            total,
+        }
+    }
+
+    fn set_search(
+        &mut self,
+        query: &str,
+        case_sensitive: bool,
+        color: Hsla,
+        cx: &mut Context<Self>,
+    ) {
+        if self.search_query == query
+            && self.search_case_sensitive == case_sensitive
+            && self.search_color == color
+        {
             return;
         }
         self.search_query.clear();
         self.search_query.push_str(query);
+        self.search_case_sensitive = case_sensitive;
         self.search_color = color;
+        self.sync_search_documents(cx);
         self.refresh_search_documents(cx);
+        self.search_cursor = (!self.ordered_search_matches().is_empty()).then_some(0);
     }
 
     /// Bring `items[index]`'s document up to date, creating it the first time the row is on
@@ -492,14 +626,14 @@ impl TranscriptData {
     }
 }
 
-/// Case-insensitive occurrences in exactly the byte coordinates TextView uses. This is
-/// the same matcher the settings editor uses, including its ASCII case folding.
-fn search_ranges(text: &str, query: &str) -> Vec<std::ops::Range<usize>> {
+/// Literal occurrences in exactly the byte coordinates TextView uses. This is the same
+/// matcher the settings editor uses, including optional ASCII case folding.
+fn search_ranges(text: &str, query: &str, case_sensitive: bool) -> Vec<std::ops::Range<usize>> {
     if query.is_empty() {
         return Vec::new();
     }
     let mut matcher = SearchMatcher::new();
-    matcher.update_query(query, true);
+    matcher.update_query(query, !case_sensitive);
     let text = Rope::from(text);
     matcher.update(&text);
     matcher.matched_ranges().as_ref().clone()
@@ -616,6 +750,8 @@ impl TranscriptView {
                 documents: HashMap::new(),
                 field_documents: HashMap::new(),
                 search_query: String::new(),
+                search_case_sensitive: false,
+                search_cursor: None,
                 search_color: Hsla::transparent_black(),
                 search_highlights: HashMap::new(),
                 expanded: HashSet::new(),
@@ -1369,11 +1505,60 @@ impl TranscriptView {
     }
 
     /// Search the rendered, non-thinking transcript text. The workspace owns the query
-    /// per lane; this view owns applying it to its retained text documents.
-    pub fn set_search(&mut self, query: &str, cx: &mut Context<Self>) {
+    /// and case mode per lane; this view owns applying them to retained text documents.
+    pub fn set_search(&mut self, query: &str, case_sensitive: bool, cx: &mut Context<Self>) {
         let color = Palette::from_app(cx).search_match;
-        self.data
-            .update(cx, |data, cx| data.set_search(query, color, cx));
+        self.data.update(cx, |data, cx| {
+            data.set_search(query, case_sensitive, color, cx)
+        });
+        cx.notify();
+    }
+
+    pub fn search_status(&self, cx: &App) -> TranscriptSearchStatus {
+        self.data.read(cx).search_status()
+    }
+
+    fn move_search_match(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let selected = self.data.update(cx, |data, _| {
+            let matches = data.ordered_search_matches();
+            if matches.is_empty() {
+                data.search_cursor = None;
+                return None;
+            }
+            let current = data.search_cursor.unwrap_or(0).min(matches.len() - 1);
+            let next = if forward {
+                (current + 1) % matches.len()
+            } else {
+                current.checked_sub(1).unwrap_or(matches.len() - 1)
+            };
+            data.search_cursor = Some(next);
+            Some(matches[next].clone())
+        });
+        let Some(selected) = selected else {
+            cx.notify();
+            return;
+        };
+
+        self.touched();
+        self.reaches_the_foot.set(false);
+        self.list.scroll_to(gpui_kit::ListOffset {
+            item_ix: self.slots.at(selected.item_index),
+            offset_in_item: px(0.),
+        });
+        selected.document.update(cx, |document, cx| {
+            document
+                .reveal_range(selected.range.clone(), cx)
+                .expect("a selected search range belongs to its transcript document");
+        });
+        cx.notify();
+    }
+
+    pub fn next_search_match(&mut self, cx: &mut Context<Self>) {
+        self.move_search_match(true, cx);
+    }
+
+    pub fn previous_search_match(&mut self, cx: &mut Context<Self>) {
+        self.move_search_match(false, cx);
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -1821,9 +2006,12 @@ impl Render for TranscriptView {
         }
         let theme = cx.theme().clone();
         let palette = Palette::from_app(cx);
-        let query = self.data.read(cx).search_query.clone();
+        let (query, case_sensitive) = {
+            let data = self.data.read(cx);
+            (data.search_query.clone(), data.search_case_sensitive)
+        };
         self.data.update(cx, |data, cx| {
-            data.set_search(&query, palette.search_match, cx)
+            data.set_search(&query, case_sensitive, palette.search_match, cx)
         });
 
         if self.data.read(cx).items.is_empty() {
