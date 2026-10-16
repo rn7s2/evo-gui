@@ -221,11 +221,64 @@ macro_rules! open {
 #[test]
 fn transcript_search_is_literal_case_insensitive_and_uses_byte_ranges() {
     assert_eq!(
-        crate::search_ranges("Needle + needle + needles", "needle"),
+        crate::search_ranges("Needle + needle + needles", "needle", false),
         [0..6, 9..15, 18..24]
     );
-    assert_eq!(crate::search_ranges("héllo héllo", "héllo"), [0..6, 7..13]);
-    assert!(crate::search_ranges("needle", "").is_empty());
+    assert_eq!(
+        crate::search_ranges("héllo héllo", "héllo", false),
+        [0..6, 7..13]
+    );
+    assert_eq!(
+        crate::search_ranges("Needle + needle + NEEDLE", "needle", true),
+        [9..15]
+    );
+    assert!(crate::search_ranges("needle", "", false).is_empty());
+}
+
+#[gpui_kit::test]
+fn transcript_search_counts_and_wraps_navigation_in_transcript_order(cx: &mut TestAppContext) {
+    let (view, cx) = open!(
+        cx,
+        vec![
+            assistant("a_first", "Needle needle", "final"),
+            assistant("a_second", "NEEDLE", "final"),
+        ]
+    );
+    view.update(cx, |view, cx| view.set_search("needle", false, cx));
+    cx.run_until_parked();
+    let data = cx.read(|cx| view.read(cx).data.clone());
+    data.update(cx, |data, cx| data.refresh_search_documents(cx));
+
+    assert_eq!(
+        cx.read(|cx| view.read(cx).search_status(cx)),
+        crate::TranscriptSearchStatus {
+            current: Some(0),
+            total: 3,
+        }
+    );
+    for expected in [1, 2, 0] {
+        view.update(cx, |view, cx| view.next_search_match(cx));
+        assert_eq!(
+            cx.read(|cx| view.read(cx).search_status(cx).current),
+            Some(expected)
+        );
+    }
+    view.update(cx, |view, cx| view.previous_search_match(cx));
+    assert_eq!(
+        cx.read(|cx| view.read(cx).search_status(cx).current),
+        Some(2),
+        "previous wraps from the first match to the last"
+    );
+
+    view.update(cx, |view, cx| view.set_search("needle", true, cx));
+    assert_eq!(
+        cx.read(|cx| view.read(cx).search_status(cx)),
+        crate::TranscriptSearchStatus {
+            current: Some(0),
+            total: 1,
+        },
+        "case-sensitive matching keeps only the exact lowercase occurrence"
+    );
 }
 
 /// Search works on the same rendered documents the reader sees: user words,
@@ -255,7 +308,7 @@ fn transcript_search_highlights_rendered_text_but_not_thinking(cx: &mut TestAppC
         data.sync_document(1, cx);
     });
     cx.run_until_parked();
-    view.update(cx, |view, cx| view.set_search("needle", cx));
+    view.update(cx, |view, cx| view.set_search("needle", false, cx));
     cx.run_until_parked();
 
     cx.read(|cx| {
@@ -281,7 +334,7 @@ fn transcript_search_highlights_rendered_text_but_not_thinking(cx: &mut TestAppC
         assert_eq!(assistant_color, cx.theme().selection);
     });
 
-    view.update(cx, |view, cx| view.set_search("private-needle", cx));
+    view.update(cx, |view, cx| view.set_search("private-needle", false, cx));
     cx.read(|cx| {
         let (matches, _) = view
             .read(cx)
@@ -301,7 +354,7 @@ fn transcript_search_follows_streamed_document_revisions(cx: &mut TestAppContext
     let data = cx.read(|cx| view.read(cx).data.clone());
     data.update(cx, |data, cx| data.sync_document(0, cx));
     cx.run_until_parked();
-    view.update(cx, |view, cx| view.set_search("needle", cx));
+    view.update(cx, |view, cx| view.set_search("needle", false, cx));
 
     view.update(cx, |view, cx| {
         view.upsert(assistant(&id, "before needle after", "streaming"), cx);
@@ -337,12 +390,12 @@ fn clearing_transcript_search_removes_matches_but_keeps_documents(cx: &mut TestA
     data.update(cx, |data, cx| data.sync_document(0, cx));
     cx.run_until_parked();
 
-    view.update(cx, |view, cx| view.set_search("needle", cx));
+    view.update(cx, |view, cx| view.set_search("needle", false, cx));
     assert_eq!(
         cx.read(|cx| view.read(cx).search_matches(&id, None, cx).unwrap().0),
         [0..6]
     );
-    view.update(cx, |view, cx| view.set_search("", cx));
+    view.update(cx, |view, cx| view.set_search("", false, cx));
     assert!(cx
         .read(|cx| view.read(cx).search_matches(&id, None, cx).unwrap().0)
         .is_empty());

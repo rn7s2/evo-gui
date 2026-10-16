@@ -22,12 +22,12 @@ use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{
     h_flex, h_resizable, resizable_panel, resize_handle_appearance, v_flex, ActiveTheme as _,
-    IconName, Sizable as _, StyledExt as _,
+    Disableable as _, IconName, Selectable as _, Sizable as _, StyledExt as _,
 };
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    div, px, AnyElement, App, Context, DragMoveEvent, ElementId, Entity, IntoElement, MouseButton,
-    MouseDownEvent, Pixels, SharedString, TestSupportExt as _, Window,
+    div, px, AnyElement, App, Context, DragMoveEvent, ElementId, Entity, Half as _, IntoElement,
+    MouseButton, MouseDownEvent, Pixels, SharedString, TestSupportExt as _, Window,
 };
 use session::AgentKey;
 use settings::ConfigScope;
@@ -806,6 +806,7 @@ impl TabContent {
             agent,
             crate::tab::TranscriptSearch {
                 open: false,
+                case_sensitive: false,
                 input,
                 _subscription: subscription,
             },
@@ -816,13 +817,18 @@ impl TabContent {
         let Some(search) = self.transcript_searches.get(&agent) else {
             return;
         };
-        let query = if search.open {
-            search.input.read(cx).value().to_string()
+        let (query, case_sensitive) = if search.open {
+            (
+                search.input.read(cx).value().to_string(),
+                search.case_sensitive,
+            )
         } else {
-            String::new()
+            (String::new(), search.case_sensitive)
         };
         if let Some(transcript) = self.transcripts.get(&agent) {
-            transcript.update(cx, |transcript, cx| transcript.set_search(&query, cx));
+            transcript.update(cx, |transcript, cx| {
+                transcript.set_search(&query, case_sensitive, cx)
+            });
         }
     }
 
@@ -846,7 +852,12 @@ impl TabContent {
     /// Toggle the selected lane's search, applying or clearing highlights without
     /// discarding that lane's query. Both the button and the workspace shortcut use
     /// this one path.
-    pub(crate) fn toggle_transcript_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn set_transcript_search_open(
+        &mut self,
+        open: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if !matches!(self.state, TabState::Running { .. }) || self.project_settings {
             return;
         }
@@ -859,42 +870,156 @@ impl TabContent {
             .transcript_searches
             .get_mut(&agent)
             .expect("search was retained above");
-        search.open = !search.open;
+        search.open = open;
         let query = if search.open {
             search.input.read(cx).value().to_string()
         } else {
             String::new()
         };
-        transcript.update(cx, |transcript, cx| transcript.set_search(&query, cx));
+        let case_sensitive = search.case_sensitive;
+        transcript.update(cx, |transcript, cx| {
+            transcript.set_search(&query, case_sensitive, cx)
+        });
         if search.open {
             search.input.update(cx, |input, cx| input.focus(window, cx));
         }
         cx.notify();
     }
 
+    pub(crate) fn toggle_transcript_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let agent = self.selected_agent();
+        let open = !self
+            .transcript_searches
+            .get(&agent)
+            .is_some_and(|search| search.open);
+        self.set_transcript_search_open(open, window, cx);
+    }
+
+    fn toggle_transcript_search_case(&mut self, cx: &mut Context<Self>) {
+        let agent = self.selected_agent();
+        let Some(search) = self.transcript_searches.get_mut(&agent) else {
+            return;
+        };
+        search.case_sensitive = !search.case_sensitive;
+        self.apply_transcript_search(agent, cx);
+        cx.notify();
+    }
+
+    fn move_transcript_search(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let agent = self.selected_agent();
+        let Some(transcript) = self.transcripts.get(&agent) else {
+            return;
+        };
+        transcript.update(cx, |transcript, cx| {
+            if forward {
+                transcript.next_search_match(cx);
+            } else {
+                transcript.previous_search_match(cx);
+            }
+        });
+        cx.notify();
+    }
+
     fn transcript_search_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let search = self.transcript_searches.get(&self.selected_agent())?;
+        let agent = self.selected_agent();
+        let search = self.transcript_searches.get(&agent)?;
         if !search.open {
             return None;
         }
+        let status = self
+            .transcripts
+            .get(&agent)
+            .map(|transcript| transcript.read(cx).search_status(cx))
+            .unwrap_or_default();
+        let has_matches = status.total > 0;
+        let status_label = status.label();
         let palette = design::palette(cx.theme().mode.is_dark());
+        let case_sensitive = search.case_sensitive;
         Some(
-            h_flex()
+            v_flex()
                 .id("transcript-search-bar")
                 .test_support()
                 .w_full()
                 .flex_none()
-                .px(px(design::INSET))
-                .py(px(8.))
-                .bg(paint::color(palette.sidebar))
+                .items_center()
+                .py_2()
+                .px_3()
+                .gap_1()
+                .bg(cx.theme().tokens.popover)
                 .border_b_1()
-                .border_color(paint::color(palette.border))
+                .rounded(cx.theme().radius.half())
+                .border_color(cx.theme().border)
                 .child(
-                    div()
-                        .id("transcript-search-input")
-                        .test_support()
+                    h_flex()
                         .w_full()
-                        .child(Input::new(&search.input).small()),
+                        .gap_2()
+                        .child(
+                            div().flex().flex_1().gap_1().child(
+                                Input::new(&search.input)
+                                    .focus_bordered(false)
+                                    .suffix(
+                                        Button::new("transcript-search-case-sensitive")
+                                            .selected(case_sensitive)
+                                            .toggled(case_sensitive)
+                                            .xsmall()
+                                            .compact()
+                                            .text()
+                                            .icon(IconName::CaseSensitive)
+                                            .when(case_sensitive, |button| {
+                                                button
+                                                    .bg(paint::color(palette.primary))
+                                                    .text_color(paint::color(palette.primary_fg))
+                                            })
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.toggle_transcript_search_case(cx);
+                                            })),
+                                    )
+                                    .small()
+                                    .w_full()
+                                    .shadow_none(),
+                            ),
+                        )
+                        .child(
+                            Button::new("transcript-search-previous")
+                                .xsmall()
+                                .ghost()
+                                .icon(IconName::ChevronLeft)
+                                .disabled(!has_matches)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.move_transcript_search(false, cx);
+                                })),
+                        )
+                        .child(
+                            Button::new("transcript-search-next")
+                                .xsmall()
+                                .ghost()
+                                .icon(IconName::ChevronRight)
+                                .disabled(!has_matches)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.move_transcript_search(true, cx);
+                                })),
+                        )
+                        .child(
+                            div()
+                                .id("transcript-search-count")
+                                .test_support()
+                                .min_w_16()
+                                .aria_label(status_label.clone())
+                                .when(!has_matches, |label| {
+                                    label.text_color(cx.theme().muted_foreground)
+                                })
+                                .child(status_label),
+                        )
+                        .child(div().w_7())
+                        .child(
+                            Button::new("transcript-search-close")
+                                .xsmall()
+                                .ghost()
+                                .icon(IconName::Close)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.set_transcript_search_open(false, window, cx);
+                                })),
+                        ),
                 )
                 .into_any_element(),
         )
