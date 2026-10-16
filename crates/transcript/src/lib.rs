@@ -66,15 +66,16 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use gpui_kit::base::TextViewState;
+use gpui_kit::base::input::{Rope, SearchMatcher};
+use gpui_kit::base::{RangeHighlight, RenderedText, TextViewState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::text::MarkdownExtensions;
 use gpui_kit::component::{v_flex, ActiveTheme as _, Icon, IconName};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     div, linear_color_stop, linear_gradient, list, px, Animation, AnimationExt as _, AnyElement,
-    App, AppContext as _, AsyncApp, Bounds, BoxShadow, Context, Entity, FocusHandle, Hsla,
-    InteractiveElement as _, IntoElement, ListAlignment, ListState, MouseButton,
+    App, AppContext as _, AsyncApp, Bounds, BoxShadow, Context, Entity, EntityId, FocusHandle,
+    Hsla, InteractiveElement as _, IntoElement, ListAlignment, ListState, MouseButton,
     ParentElement as _, Pixels, Render, StatefulInteractiveElement as _, Styled as _, Task,
     TestSupportExt as _, WeakEntity, Window,
 };
@@ -149,6 +150,17 @@ pub(crate) enum ImageState {
     Failed,
 }
 
+/// One document revision to which the current transcript search has already been
+/// applied. Remembering the rendered revision makes rechecking visible documents
+/// cheap while still picking up a newly parsed streaming update.
+#[derive(Clone, PartialEq)]
+struct SearchHighlightStamp {
+    text: RenderedText,
+    query: String,
+    color: Hsla,
+    ranges: Vec<std::ops::Range<usize>>,
+}
+
 /// The data the row renderer reads.
 ///
 /// It lives in an entity of its own so the virtual list can read rows while the view that
@@ -174,6 +186,15 @@ pub(crate) struct TranscriptData {
     /// Retained markdown documents of a lane report's own fields, keyed by the
     /// item and the field's label: `.rp-row`'s body is markdown in the design.
     pub(crate) field_documents: HashMap<(ItemId, &'static str), Entity<TextViewState>>,
+    /// The active transcript query. An empty value means the bar is closed or has
+    /// no keywords, and therefore no transcript highlights are painted.
+    search_query: String,
+    /// The theme's selection wash, used behind every match. It is different in the
+    /// light and dark variants and settles over prose, tables, and code surfaces.
+    search_color: Hsla,
+    /// What each retained document was last searched at. Row synchronization checks
+    /// this after asynchronous Markdown revisions without repeating unchanged work.
+    search_highlights: HashMap<EntityId, SearchHighlightStamp>,
     /// Items the reader has opened.
     pub(crate) expanded: HashSet<ItemId>,
     /// The ids of items the topic holds and this view is not the place for — the
@@ -269,6 +290,67 @@ impl TranscriptData {
         self.thinking += usize::from(carries_thinking(&item.kind));
     }
 
+    /// Apply the active query to one retained Markdown document. Search addresses the
+    /// rendered text rather than Markdown source, so table cells and fenced-code text
+    /// are included while syntax markers are not.
+    fn refresh_search_document(
+        &mut self,
+        document: &Entity<TextViewState>,
+        cx: &mut Context<Self>,
+    ) {
+        let text = document.read(cx).rendered_text();
+        let ranges = search_ranges(text.as_str(), &self.search_query);
+        let stamp = SearchHighlightStamp {
+            text: text.clone(),
+            query: self.search_query.clone(),
+            color: self.search_color,
+            ranges: ranges.clone(),
+        };
+        if self.search_highlights.get(&document.entity_id()) == Some(&stamp) {
+            return;
+        }
+        // Record before updating the document: setting highlights notifies the view,
+        // and another row synchronization should recognize this revision as complete.
+        self.search_highlights.insert(document.entity_id(), stamp);
+        let color = self.search_color;
+        document.update(cx, |state, cx| {
+            if ranges.is_empty() {
+                state.clear_range_highlights(cx);
+            } else {
+                let highlights = ranges
+                    .into_iter()
+                    .map(|range| RangeHighlight::new(range, color));
+                // Every range came from this exact RenderedText, so rejection would
+                // mean the text-view range contract was broken rather than bad input.
+                state
+                    .set_range_highlights(highlights, cx)
+                    .expect("search ranges belong to the rendered transcript text");
+            }
+        });
+    }
+
+    fn refresh_search_documents(&mut self, cx: &mut Context<Self>) {
+        let documents: Vec<_> = self
+            .documents
+            .values()
+            .chain(self.field_documents.values())
+            .cloned()
+            .collect();
+        for document in documents {
+            self.refresh_search_document(&document, cx);
+        }
+    }
+
+    fn set_search(&mut self, query: &str, color: Hsla, cx: &mut Context<Self>) {
+        if self.search_query == query && self.search_color == color {
+            return;
+        }
+        self.search_query.clear();
+        self.search_query.push_str(query);
+        self.search_color = color;
+        self.refresh_search_documents(cx);
+    }
+
     /// Bring `items[index]`'s document up to date, creating it the first time the row is on
     /// screen.
     pub(crate) fn sync_document(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -285,11 +367,15 @@ impl TranscriptData {
         // A path in the message that is really there is a link the reader can press.
         let text = self.paths.prose(&text);
         match self.documents.get(&id).cloned() {
-            Some(document) => document.update(cx, |state, cx| state.set_text(&text, cx)),
+            Some(document) => {
+                document.update(cx, |state, cx| state.set_text(&text, cx));
+                self.refresh_search_document(&document, cx);
+            }
             None => {
                 let document =
                     cx.new(|cx| TextViewState::markdown(&text, cx).motion(rows::stream_motion()));
-                self.documents.insert(id, document);
+                self.documents.insert(id, document.clone());
+                self.refresh_search_document(&document, cx);
             }
         }
     }
@@ -302,6 +388,14 @@ impl TranscriptData {
         self.documents.retain(|id, _| held.contains(id.as_str()));
         self.field_documents
             .retain(|(id, _), _| held.contains(id.as_str()));
+        let live_documents: HashSet<_> = self
+            .documents
+            .values()
+            .chain(self.field_documents.values())
+            .map(|document| document.entity_id())
+            .collect();
+        self.search_highlights
+            .retain(|document, _| live_documents.contains(document));
         self.images.retain(|(id, _), _| held.contains(id.as_str()));
         self.full_images
             .retain(|(id, _)| held.contains(id.as_str()));
@@ -336,10 +430,14 @@ impl TranscriptData {
         let source = paths.literal(text);
         let key = (id, key);
         match self.field_documents.get(&key).cloned() {
-            Some(document) => document.update(cx, |state, cx| state.set_text(&source, cx)),
+            Some(document) => {
+                document.update(cx, |state, cx| state.set_text(&source, cx));
+                self.refresh_search_document(&document, cx);
+            }
             None => {
                 let document = cx.new(|cx| TextViewState::markdown(&source, cx));
-                self.field_documents.insert(key, document);
+                self.field_documents.insert(key, document.clone());
+                self.refresh_search_document(&document, cx);
             }
         }
     }
@@ -381,13 +479,30 @@ impl TranscriptData {
         let text = normalize_math::normalize(text);
         let text = self.paths.prose(&text);
         match self.field_documents.get(&key).cloned() {
-            Some(document) => document.update(cx, |state, cx| state.set_text(&text, cx)),
+            Some(document) => {
+                document.update(cx, |state, cx| state.set_text(&text, cx));
+                self.refresh_search_document(&document, cx);
+            }
             None => {
                 let document = cx.new(|cx| TextViewState::markdown(&text, cx));
-                self.field_documents.insert(key, document);
+                self.field_documents.insert(key, document.clone());
+                self.refresh_search_document(&document, cx);
             }
         }
     }
+}
+
+/// Case-insensitive occurrences in exactly the byte coordinates TextView uses. This is
+/// the same matcher the settings editor uses, including its ASCII case folding.
+fn search_ranges(text: &str, query: &str) -> Vec<std::ops::Range<usize>> {
+    if query.is_empty() {
+        return Vec::new();
+    }
+    let mut matcher = SearchMatcher::new();
+    matcher.update_query(query, true);
+    let text = Rope::from(text);
+    matcher.update(&text);
+    matcher.matched_ranges().as_ref().clone()
 }
 
 /// The list's own shape: what the virtual list is holding, in its own indices — the
@@ -500,6 +615,9 @@ impl TranscriptView {
                 thinking: 0,
                 documents: HashMap::new(),
                 field_documents: HashMap::new(),
+                search_query: String::new(),
+                search_color: Hsla::transparent_black(),
+                search_highlights: HashMap::new(),
                 expanded: HashSet::new(),
                 declined: HashSet::new(),
                 full_results: HashMap::new(),
@@ -1250,6 +1368,36 @@ impl TranscriptView {
         self.set_show_thinking(show, cx);
     }
 
+    /// Search the rendered, non-thinking transcript text. The workspace owns the query
+    /// per lane; this view owns applying it to its retained text documents.
+    pub fn set_search(&mut self, query: &str, cx: &mut Context<Self>) {
+        let color = Palette::from_app(cx).search_match;
+        self.data
+            .update(cx, |data, cx| data.set_search(query, color, cx));
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn search_query(&self, cx: &App) -> String {
+        self.data.read(cx).search_query.clone()
+    }
+
+    /// The applied match ranges and color for a retained row document.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn search_matches(
+        &self,
+        id: &ItemId,
+        field: Option<&'static str>,
+        cx: &App,
+    ) -> Option<(Vec<std::ops::Range<usize>>, Hsla)> {
+        let data = self.data.read(cx);
+        let document = match field {
+            Some(field) => data.field_documents.get(&(id.clone(), field)),
+            None => data.documents.get(id),
+        }?;
+        let stamp = data.search_highlights.get(&document.entity_id())?;
+        Some((stamp.ranges.clone(), stamp.color))
+    }
+
     /// Show or hide one row's body. Opening a tool call whose result the server shortened
     /// asks the owner for the whole of it, once.
     pub fn set_expanded(&mut self, id: &str, expanded: bool, cx: &mut Context<Self>) {
@@ -1673,6 +1821,10 @@ impl Render for TranscriptView {
         }
         let theme = cx.theme().clone();
         let palette = Palette::from_app(cx);
+        let query = self.data.read(cx).search_query.clone();
+        self.data.update(cx, |data, cx| {
+            data.set_search(&query, palette.search_match, cx)
+        });
 
         if self.data.read(cx).items.is_empty() {
             let swarm = self.data.read(cx).swarm;

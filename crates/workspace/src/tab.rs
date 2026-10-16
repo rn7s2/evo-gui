@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use gpui_kit::component::input::InputState;
 use gpui_kit::component::list::{ListEvent, ListState};
 use gpui_kit::prelude::*;
 use gpui_kit::{
@@ -292,6 +293,14 @@ enum Kind {
     Settings,
 }
 
+/// One lane transcript's retained search panel. Keeping the input entity beside its
+/// visibility preserves both the query and editing state while the reader changes lanes.
+pub(crate) struct TranscriptSearch {
+    pub(crate) open: bool,
+    pub(crate) input: Entity<InputState>,
+    pub(crate) _subscription: Subscription,
+}
+
 /// The retained view behind one tab.
 ///
 /// A tab holds both of its screens at once: the empty tab's choosers and history,
@@ -309,6 +318,9 @@ pub struct TabContent {
     /// transcript's own state is per agent, so switching columns cannot leak one
     /// agent's scroll position, documents or todos into another's.
     pub(crate) transcripts: BTreeMap<AgentKey, Entity<TranscriptView>>,
+    /// Search visibility and input are scoped exactly like transcripts: one retained
+    /// pair for the coordinator and each lane, switched with the selected lane.
+    pub(crate) transcript_searches: BTreeMap<AgentKey, TranscriptSearch>,
     pub(crate) composer: Entity<Composer>,
     /// The failure screen's log box scroll position: the kit's thumb is driven by
     /// a handle, and one made fresh each frame would put the box back at the top.
@@ -626,6 +638,7 @@ impl TabContent {
             choosers: Choosers::new(window, cx),
             history,
             transcripts: BTreeMap::new(),
+            transcript_searches: BTreeMap::new(),
             composer,
             log_scroll: gpui_kit::ScrollHandle::default(),
             config,
@@ -1355,6 +1368,7 @@ impl TabContent {
     ) {
         let pump = self.spawn_pump(started.updates, window, cx);
         self.transcripts.clear();
+        self.transcript_searches.clear();
         // The coordinator is what a fresh tab page shows (§7.3).
         let coordinator = cx.new(TranscriptView::new);
         coordinator.update(cx, |view, cx| view.set_agent(AgentKey::Coordinator, cx));
@@ -2959,6 +2973,132 @@ mod tests {
         cx.update(|cx| {
             assert_eq!(label(cx), "proj", "the tab is where it is running");
         });
+    }
+
+    /// Transcript search is the first optional header control, toggles a bar beneath
+    /// the header, and retains a separate input/query for every lane.
+    #[gpui_kit::test]
+    fn transcript_search_is_retained_per_agent(cx: &mut TestAppContext) {
+        let (window, tab) = running_tab(cx);
+        let coordinator = cx.update(|cx| cx.new(TranscriptView::new));
+        let lane = cx.update(|cx| {
+            cx.new(|cx| {
+                let mut view = TranscriptView::new(cx);
+                view.set_agent(AgentKey::Lane(1), cx);
+                view
+            })
+        });
+        cx.update(|cx| {
+            tab.update(cx, |tab, _| {
+                tab.transcripts
+                    .insert(AgentKey::Coordinator, coordinator.clone());
+                tab.transcripts.insert(AgentKey::Lane(1), lane.clone());
+                // Makes Show Thinking visible so its position can be compared with Search.
+                tab.thinking_level = Some("medium".to_string());
+            });
+        });
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            let search_element = window.find("transcript-search-toggle");
+            assert_eq!(search_element.label(), Some("Search (^F)"));
+            let search = search_element.bounds();
+            let thinking = window.find("transcript-thinking").bounds();
+            assert!(
+                search.left() < thinking.left(),
+                "Search precedes Show Thinking"
+            );
+            assert!(window.try_find("transcript-search-bar").is_none());
+            window.click("transcript-search-toggle", cx);
+            window.render_frame(cx);
+            let header = window.find("transcript-header").bounds();
+            let bar = window.find("transcript-search-bar").bounds();
+            assert_eq!(
+                bar.top(),
+                header.bottom(),
+                "the search bar is directly below the header"
+            );
+        })
+        .expect("the transcript header");
+
+        let coordinator_input = cx.read(|cx| {
+            tab.read(cx).transcript_searches[&AgentKey::Coordinator]
+                .input
+                .clone()
+        });
+        cx.simulate_input(window, "coordinator needle");
+        assert_eq!(
+            cx.read(|cx| coordinator.read(cx).search_query(cx)),
+            "coordinator needle"
+        );
+
+        // Set up the lane exactly as rendering it would, then type a different query.
+        let lane_input = cx
+            .update_window(window, |_, window, cx| {
+                tab.update(cx, |tab, cx| {
+                    tab.ensure_transcript_search(AgentKey::Lane(1), window, cx);
+                    let search = tab
+                        .transcript_searches
+                        .get_mut(&AgentKey::Lane(1))
+                        .expect("the lane search");
+                    search.open = true;
+                    search.input.clone()
+                })
+            })
+            .expect("the lane query");
+        cx.update_window(window, |_, window, cx| {
+            lane_input.update(cx, |input, cx| {
+                input.set_value("lane needle", window, cx);
+            });
+            tab.update(cx, |tab, cx| {
+                tab.apply_transcript_search(AgentKey::Lane(1), cx)
+            });
+        })
+        .expect("typing in the lane query");
+
+        cx.read(|cx| {
+            let tab = tab.read(cx);
+            assert_eq!(
+                tab.transcript_searches[&AgentKey::Coordinator]
+                    .input
+                    .read(cx)
+                    .value(),
+                "coordinator needle"
+            );
+            assert_eq!(
+                tab.transcript_searches[&AgentKey::Lane(1)]
+                    .input
+                    .read(cx)
+                    .value(),
+                "lane needle"
+            );
+            assert_eq!(lane.read(cx).search_query(cx), "lane needle");
+        });
+
+        // Closing clears only active highlights; reopening restores the retained query.
+        cx.update_window(window, |_, window, cx| {
+            window.click("transcript-search-toggle", cx);
+            window.render_frame(cx);
+            assert!(window.try_find("transcript-search-bar").is_none());
+        })
+        .expect("closing search");
+        assert_eq!(cx.read(|cx| coordinator.read(cx).search_query(cx)), "");
+        assert!(
+            cx.read(|cx| tab.read(cx).transcript_searches[&AgentKey::Lane(1)].open),
+            "closing the coordinator's search does not close the lane's"
+        );
+        assert_eq!(
+            cx.read(|cx| coordinator_input.read(cx).value()),
+            "coordinator needle"
+        );
+        cx.update_window(window, |_, window, cx| {
+            window.click("transcript-search-toggle", cx);
+        })
+        .expect("reopening search");
+        assert_eq!(
+            cx.read(|cx| coordinator.read(cx).search_query(cx)),
+            "coordinator needle"
+        );
     }
 
     #[gpui_kit::test]

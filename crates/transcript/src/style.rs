@@ -117,6 +117,8 @@ pub(crate) struct Palette {
     pub(crate) input: Hsla,
     pub(crate) warning: Hsla,
     pub(crate) info: Hsla,
+    /// The theme's selection wash, shared with editor search and adapted per variant.
+    pub(crate) search_match: Hsla,
     pub(crate) mono: SharedString,
     /// The reader's font zoom, in force for this render (§7.2). Every size below
     /// is already scaled by it; [`Palette::scaled`] is what the transcript's own
@@ -225,6 +227,7 @@ impl Palette {
             success: theme.success,
             warning: theme.warning,
             info: theme.info,
+            search_match: theme.selection,
             mono: theme.mono_font_family.clone(),
             zoom,
             font_size: px(f32::from(theme.font_size) * zoom),
