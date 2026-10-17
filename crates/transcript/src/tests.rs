@@ -256,6 +256,22 @@ fn transcript_search_counts_and_wraps_navigation_in_transcript_order(cx: &mut Te
             total: 3,
         }
     );
+    cx.read(|cx| {
+        let palette = crate::style::Palette::from_app(cx);
+        assert_eq!(
+            view.read(cx)
+                .search_match_colors(&"a_first".to_string(), None, cx)
+                .unwrap(),
+            [palette.warning, palette.search_match],
+            "only the current match is yellow"
+        );
+        assert_eq!(
+            view.read(cx)
+                .search_match_colors(&"a_second".to_string(), None, cx)
+                .unwrap(),
+            [palette.search_match]
+        );
+    });
     for expected in [1, 2, 0] {
         view.update(cx, |view, cx| view.next_search_match(cx));
         assert_eq!(
@@ -269,6 +285,22 @@ fn transcript_search_counts_and_wraps_navigation_in_transcript_order(cx: &mut Te
         Some(2),
         "previous wraps from the first match to the last"
     );
+    cx.read(|cx| {
+        let palette = crate::style::Palette::from_app(cx);
+        assert_eq!(
+            view.read(cx)
+                .search_match_colors(&"a_first".to_string(), None, cx)
+                .unwrap(),
+            [palette.search_match, palette.search_match]
+        );
+        assert_eq!(
+            view.read(cx)
+                .search_match_colors(&"a_second".to_string(), None, cx)
+                .unwrap(),
+            [palette.warning],
+            "navigation moves the yellow highlight to the active match"
+        );
+    });
 
     view.update(cx, |view, cx| view.set_search("needle", true, cx));
     assert_eq!(

@@ -171,7 +171,15 @@ pub fn bind_tab_keys(cx: &mut App) {
         KeyBinding::new("cmd-shift-]", SelectNextTab, None),
         KeyBinding::new("cmd-shift-[", SelectPreviousTab, None),
         KeyBinding::new("cmd-9", SelectLastTab, None),
-        KeyBinding::new("ctrl-f", Search, None),
+        KeyBinding::new(
+            if cfg!(target_os = "macos") {
+                "cmd-f"
+            } else {
+                "ctrl-f"
+            },
+            Search,
+            None,
+        ),
     ];
     // ⌘1…⌘8 is the tab with that number; with fewer tabs than the number, the
     // shortcut does nothing rather than wrapping (§7.1).
@@ -1086,7 +1094,8 @@ impl WorkspaceView {
         self.select_tab(action.0, window, cx);
     }
 
-    /// ⌃F: the selected lane's transcript search, open or shut. Text inputs bind the
+    /// The platform search shortcut toggles the selected lane's transcript search.
+    /// Text inputs bind the
     /// same `Search` action in their own context; non-searchable inputs propagate it
     /// here, while the settings editor consumes it for its own search panel.
     fn on_toggle_transcript_search(
@@ -1758,43 +1767,61 @@ mod tests {
         (view, cx)
     }
 
-    /// The app-wide ⌃F binding reaches the shown tab and opens its transcript search.
+    /// The platform search binding reaches the shown tab from transcript and input focus.
     #[gpui_kit::test]
-    fn control_f_toggles_the_selected_transcript_search(cx: &mut TestAppContext) {
+    fn search_shortcut_repeatedly_toggles_the_selected_transcript_search(cx: &mut TestAppContext) {
         let (view, cx) = page_window(cx, test_root("transcript-search-key"), (1280., 800.));
         let tab = cx.update(|_, cx| view.read(cx).selected_tab().clone());
         let transcript = cx.update(|_, cx| cx.new(TranscriptView::new));
         tab.update(cx, |tab, _| {
             tab.transcripts
-                .insert(session::AgentKey::Coordinator, transcript);
+                .insert(session::AgentKey::Coordinator, transcript.clone());
         });
         cx.update(|window, cx| {
+            let shortcut = if cfg!(target_os = "macos") {
+                "cmd-f"
+            } else {
+                "ctrl-f"
+            };
             let root_focus = view.read(cx).root_focus.clone();
             root_focus.focus(window, cx);
             window.render_frame(cx);
-            window.dispatch_keystroke(Keystroke::parse("ctrl-f").expect("⌃F"), cx);
+            window.dispatch_keystroke(Keystroke::parse(shortcut).expect("search shortcut"), cx);
             window.render_frame(cx);
             assert!(
                 window.try_find("transcript-search-bar").is_some(),
                 "the shortcut opens the selected transcript's search"
             );
-            window.dispatch_keystroke(Keystroke::parse("ctrl-f").expect("⌃F"), cx);
+            window.dispatch_keystroke(Keystroke::parse(shortcut).expect("search shortcut"), cx);
             window.render_frame(cx);
             assert!(
                 window.try_find("transcript-search-bar").is_none(),
                 "the same shortcut closes search while its input is focused"
             );
+            assert!(
+                tab.read(cx).transcript_focus.is_focused(window),
+                "closing search restores conversation focus"
+            );
+            window.dispatch_keystroke(Keystroke::parse(shortcut).expect("search shortcut"), cx);
+            window.render_frame(cx);
+            assert!(
+                window.try_find("transcript-search-bar").is_some(),
+                "closing restores transcript focus so the shortcut can open it again"
+            );
+            window.dispatch_keystroke(Keystroke::parse(shortcut).expect("search shortcut"), cx);
+            window.render_frame(cx);
+            assert!(window.try_find("transcript-search-bar").is_none());
 
             let composer = tab.read(cx).composer.clone();
             composer.update(cx, |composer, cx| composer.focus_input(window, cx));
             window.render_frame(cx);
-            window.dispatch_keystroke(Keystroke::parse("ctrl-f").expect("⌃F"), cx);
+            window.dispatch_keystroke(Keystroke::parse(shortcut).expect("search shortcut"), cx);
             window.render_frame(cx);
             assert!(
                 window.try_find("transcript-search-bar").is_some(),
                 "the input Search action propagates from the focused composer"
             );
-            window.dispatch_keystroke(Keystroke::parse("ctrl-f").expect("⌃F"), cx);
+            window.dispatch_keystroke(Keystroke::parse(shortcut).expect("search shortcut"), cx);
             window.render_frame(cx);
             assert!(window.try_find("transcript-search-bar").is_none());
         });
