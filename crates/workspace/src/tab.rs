@@ -322,6 +322,8 @@ pub struct TabContent {
     /// Search visibility and input are scoped exactly like transcripts: one retained
     /// pair for the coordinator and each lane, switched with the selected lane.
     pub(crate) transcript_searches: BTreeMap<AgentKey, TranscriptSearch>,
+    /// The conversation surface regains keyboard focus when its search bar closes.
+    pub(crate) transcript_focus: FocusHandle,
     pub(crate) composer: Entity<Composer>,
     /// The failure screen's log box scroll position: the kit's thumb is driven by
     /// a handle, and one made fresh each frame would put the box back at the top.
@@ -640,6 +642,7 @@ impl TabContent {
             history,
             transcripts: BTreeMap::new(),
             transcript_searches: BTreeMap::new(),
+            transcript_focus: cx.focus_handle(),
             composer,
             log_scroll: gpui_kit::ScrollHandle::default(),
             config,
@@ -3003,7 +3006,7 @@ mod tests {
             window.render_frame(cx);
             let search_element = window.find("transcript-search-toggle");
             let expected_search_label = if cfg!(target_os = "macos") {
-                "Search (⌃F)"
+                "Search (⌘F)"
             } else {
                 "Search (Ctrl+F)"
             };

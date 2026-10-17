@@ -879,6 +879,8 @@ impl TabContent {
         });
         if search.open {
             search.input.update(cx, |input, cx| input.focus(window, cx));
+        } else {
+            self.transcript_focus.focus(window, cx);
         }
         cx.notify();
     }
@@ -1171,13 +1173,20 @@ impl TabContent {
             // re-renders and re-lays out the whole list; with it the transcript is
             // rendered only when it or the data it reads is itself notified, or when the
             // box it lives in changes shape.
-            .child(div().flex_1().min_h_0().children(view.map(|view| {
-                // A cached view is laid out from this style alone, never measured
-                // from its rows, so it must fill the box outright: `flex_1` would
-                // mean nothing in this block box and leave the transcript 0px tall.
-                gpui_kit::AnyView::from(view)
-                    .cached(gpui_kit::StyleRefinement::default().size_full())
-            })))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .track_focus(&self.transcript_focus)
+                    .tab_stop(false)
+                    .children(view.map(|view| {
+                        // A cached view is laid out from this style alone, never measured
+                        // from its rows, so it must fill the box outright: `flex_1` would
+                        // mean nothing in this block box and leave the transcript 0px tall.
+                        gpui_kit::AnyView::from(view)
+                            .cached(gpui_kit::StyleRefinement::default().size_full())
+                    })),
+            )
             .child(self.composer.clone())
             .into_any_element()
     }
@@ -1294,7 +1303,7 @@ fn thinking_label(showing: bool) -> &'static str {
 /// The transcript search shortcut uses the same platform notation as the terminal.
 fn search_label() -> &'static str {
     if cfg!(target_os = "macos") {
-        "Search (⌃F)"
+        "Search (⌘F)"
     } else {
         "Search (Ctrl+F)"
     }
