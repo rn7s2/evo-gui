@@ -217,9 +217,12 @@ pub(crate) struct TranscriptData {
     search_case_sensitive: bool,
     /// The selected occurrence in transcript order, retained while this view is shown.
     search_cursor: Option<usize>,
-    /// The theme's selection wash, used behind every match. It is different in the
-    /// light and dark variants and settles over prose, tables, and code surfaces.
+    /// The theme's selection wash, used behind every non-current match.
     search_color: Hsla,
+    /// The theme's yellow warning wash, used behind the current match.
+    search_active_color: Hsla,
+    /// The occurrence currently painted with `search_active_color`.
+    search_painted: Option<TranscriptSearchMatch>,
     /// What each retained document was last searched at. Row synchronization checks
     /// this after asynchronous Markdown revisions without repeating unchanged work.
     search_highlights: HashMap<EntityId, SearchHighlightStamp>,
@@ -360,6 +363,7 @@ impl TranscriptData {
                     .expect("search ranges belong to the rendered transcript text");
             }
         });
+        self.refresh_active_search_highlight(cx);
     }
 
     fn refresh_search_documents(&mut self, cx: &mut Context<Self>) {
@@ -455,6 +459,58 @@ impl TranscriptData {
         matches
     }
 
+    fn paint_search_document(
+        &self,
+        document: &Entity<TextViewState>,
+        active: Option<&TranscriptSearchMatch>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(stamp) = self.search_highlights.get(&document.entity_id()).cloned() else {
+            return;
+        };
+        let active_range = active
+            .filter(|matched| matched.document.entity_id() == document.entity_id())
+            .map(|matched| matched.range.clone());
+        let active_color = self.search_active_color;
+        document.update(cx, |state, cx| {
+            if stamp.ranges.is_empty() {
+                state.clear_range_highlights(cx);
+            } else {
+                let highlights = stamp.ranges.into_iter().map(|range| {
+                    let color = if active_range.as_ref() == Some(&range) {
+                        active_color
+                    } else {
+                        stamp.color
+                    };
+                    RangeHighlight::new(range, color)
+                });
+                state
+                    .set_range_highlights(highlights, cx)
+                    .expect("search ranges belong to the rendered transcript text");
+            }
+        });
+    }
+
+    fn refresh_active_search_highlight(&mut self, cx: &mut Context<Self>) {
+        let matches = self.ordered_search_matches();
+        let active = self
+            .search_cursor
+            .and_then(|cursor| matches.get(cursor).cloned());
+        let previous = self.search_painted.take();
+        let mut documents = Vec::new();
+        for matched in [previous.as_ref(), active.as_ref()].into_iter().flatten() {
+            if !documents.iter().any(|document: &Entity<TextViewState>| {
+                document.entity_id() == matched.document.entity_id()
+            }) {
+                documents.push(matched.document.clone());
+            }
+        }
+        for document in documents {
+            self.paint_search_document(&document, active.as_ref(), cx);
+        }
+        self.search_painted = active;
+    }
+
     fn search_status(&self) -> TranscriptSearchStatus {
         let total = self.ordered_search_matches().len();
         TranscriptSearchStatus {
@@ -468,18 +524,21 @@ impl TranscriptData {
         query: &str,
         case_sensitive: bool,
         color: Hsla,
+        active_color: Hsla,
         anchor_item: usize,
         cx: &mut Context<Self>,
     ) {
         let search_changed =
             self.search_query != query || self.search_case_sensitive != case_sensitive;
-        if !search_changed && self.search_color == color {
+        if !search_changed && self.search_color == color && self.search_active_color == active_color
+        {
             return;
         }
         self.search_query.clear();
         self.search_query.push_str(query);
         self.search_case_sensitive = case_sensitive;
         self.search_color = color;
+        self.search_active_color = active_color;
         self.sync_search_documents(cx);
         self.refresh_search_documents(cx);
         let matches = self.ordered_search_matches();
@@ -494,6 +553,7 @@ impl TranscriptData {
         } else {
             Some(self.search_cursor.unwrap_or(0).min(matches.len() - 1))
         };
+        self.refresh_active_search_highlight(cx);
     }
 
     /// Bring `items[index]`'s document up to date, creating it the first time the row is on
@@ -541,6 +601,13 @@ impl TranscriptData {
             .collect();
         self.search_highlights
             .retain(|document, _| live_documents.contains(document));
+        if self
+            .search_painted
+            .as_ref()
+            .is_some_and(|matched| !live_documents.contains(&matched.document.entity_id()))
+        {
+            self.search_painted = None;
+        }
         self.images.retain(|(id, _), _| held.contains(id.as_str()));
         self.full_images
             .retain(|(id, _)| held.contains(id.as_str()));
@@ -764,6 +831,8 @@ impl TranscriptView {
                 search_case_sensitive: false,
                 search_cursor: None,
                 search_color: Hsla::transparent_black(),
+                search_active_color: Hsla::transparent_black(),
+                search_painted: None,
                 search_highlights: HashMap::new(),
                 expanded: HashSet::new(),
                 declined: HashSet::new(),
@@ -1518,13 +1587,15 @@ impl TranscriptView {
     /// Search the rendered, non-thinking transcript text. The workspace owns the query
     /// and case mode per lane; this view owns applying them to retained text documents.
     pub fn set_search(&mut self, query: &str, case_sensitive: bool, cx: &mut Context<Self>) {
-        let color = Palette::from_app(cx).search_match;
+        let palette = Palette::from_app(cx);
+        let color = palette.search_match;
+        let active_color = palette.warning;
         let anchor_item = self
             .slots
             .record(self.list.logical_scroll_top().item_ix)
             .unwrap_or(0);
         let selected = self.data.update(cx, |data, cx| {
-            data.set_search(query, case_sensitive, color, anchor_item, cx);
+            data.set_search(query, case_sensitive, color, active_color, anchor_item, cx);
             let matches = data.ordered_search_matches();
             data.search_cursor
                 .and_then(|cursor| matches.get(cursor).cloned())
@@ -1556,7 +1627,7 @@ impl TranscriptView {
     }
 
     fn move_search_match(&mut self, forward: bool, cx: &mut Context<Self>) {
-        let selected = self.data.update(cx, |data, _| {
+        let selected = self.data.update(cx, |data, cx| {
             let matches = data.ordered_search_matches();
             if matches.is_empty() {
                 data.search_cursor = None;
@@ -1569,7 +1640,9 @@ impl TranscriptView {
                 current.checked_sub(1).unwrap_or(matches.len() - 1)
             };
             data.search_cursor = Some(next);
-            Some(matches[next].clone())
+            let selected = matches[next].clone();
+            data.refresh_active_search_highlight(cx);
+            Some(selected)
         });
         let Some(selected) = selected else {
             cx.notify();
@@ -1606,6 +1679,40 @@ impl TranscriptView {
         }?;
         let stamp = data.search_highlights.get(&document.entity_id())?;
         Some((stamp.ranges.clone(), stamp.color))
+    }
+
+    /// The colors actually assigned to this document's matches, in text order.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn search_match_colors(
+        &self,
+        id: &ItemId,
+        field: Option<&'static str>,
+        cx: &App,
+    ) -> Option<Vec<Hsla>> {
+        let data = self.data.read(cx);
+        let document = match field {
+            Some(field) => data.field_documents.get(&(id.clone(), field)),
+            None => data.documents.get(id),
+        }?;
+        let stamp = data.search_highlights.get(&document.entity_id())?;
+        let active_range = data
+            .search_painted
+            .as_ref()
+            .filter(|matched| matched.document.entity_id() == document.entity_id())
+            .map(|matched| &matched.range);
+        Some(
+            stamp
+                .ranges
+                .iter()
+                .map(|range| {
+                    if active_range == Some(range) {
+                        data.search_active_color
+                    } else {
+                        stamp.color
+                    }
+                })
+                .collect(),
+        )
     }
 
     /// Show or hide one row's body. Opening a tool call whose result the server shortened
@@ -2044,6 +2151,7 @@ impl Render for TranscriptView {
                 &query,
                 case_sensitive,
                 palette.search_match,
+                palette.warning,
                 anchor_item,
                 cx,
             )
