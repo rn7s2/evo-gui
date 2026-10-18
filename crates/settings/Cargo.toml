@@ -6,6 +6,13 @@ edition.workspace = true
 [dependencies]
 gpui-kit = { workspace = true }
 store = { path = "../store" }
+
+# The system file dialog behind `dialog.rs`, and a desktop's alone: `rfd`'s web
+# backend cannot pick a folder (its `pick_folder` does not exist for `wasm32`) and
+# its `FileHandle` has no `path`, so the wasm build of that seam answers with no
+# file rather than reaching for a crate that cannot do the job here. Gating the
+# dependency keeps a browser from compiling the native backends at all.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
 rfd = "0.17"
 
 [dev-dependencies]

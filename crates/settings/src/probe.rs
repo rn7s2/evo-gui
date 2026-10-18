@@ -74,11 +74,33 @@ impl Check {
 ///
 /// Blocking, and deliberately so: it is a process, so the caller runs it off the thread that
 /// draws. `name` is the binary the row expects — `evo-swarm` or `evo-agent`.
+#[cfg(not(target_family = "wasm"))]
 pub fn probe(path: &Path, name: &str) -> Check {
     probe_within(path, name, cli::VERSION_TIMEOUT)
 }
 
+/// [`probe`] where there is no process to run: a browser.
+///
+/// The row asks whether *this machine* can run the binary at that path, and a page
+/// has no machine to ask — the binaries belong to the server that served it. The
+/// answer is the one a path nothing can run gets, and it must not be reached
+/// through `store::cli`: that spawns a child and two reader threads, and
+/// `std::thread::spawn` **panics** on `wasm32-unknown-unknown` (`std`'s
+/// `sys::thread::unsupported::Thread::new` returns `UNSUPPORTED_PLATFORM`), which
+/// would take the Settings page down with it.
+#[cfg(target_family = "wasm")]
+pub fn probe(path: &Path, name: &str) -> Check {
+    let _ = (path, name);
+    Check::Missing
+}
+
 /// [`probe`], giving the binary `limit` before it is stopped.
+///
+/// Native only: this is the half that runs a child, and `probe`'s wasm arm does
+/// not reach it. Gating it here is what keeps `store::cli` — and therefore its two
+/// reader threads — out of the browser build entirely, rather than merely out of
+/// the browser's call path.
+#[cfg(not(target_family = "wasm"))]
 fn probe_within(path: &Path, name: &str, limit: Duration) -> Check {
     let output = match cli::version_within(path, limit) {
         Ok(output) => output,
