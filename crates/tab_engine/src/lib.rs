@@ -27,7 +27,14 @@ pub use types::{tab_topics, StreamStatus, Update};
 
 // Re-exported so the UI can read what an [`Update`] carries without depending on
 // `swarm_client` directly.
+//
+// The launch half is native only: `ServerConfig` describes a process to spawn,
+// `StdinClose` is a pipe to hold, and `ShutdownOutcome` is how a process went —
+// a browser has none of the three, because the server a page reads is not this
+// page's child. The protocol half stays on both targets.
 pub use swarm_client::{
-    Cursor, ErrorCode, OpError, OpReply, ServerConfig, SessionRef, ShutdownOutcome, Snapshot,
-    StdinClose, StreamFrame, StreamResetReason, TopicResetReason,
+    Cursor, ErrorCode, OpError, OpReply, SessionRef, Snapshot, StreamFrame, StreamResetReason,
+    TopicResetReason,
 };
+#[cfg(not(target_family = "wasm"))]
+pub use swarm_client::{ServerConfig, ShutdownOutcome, StdinClose};
