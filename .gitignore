@@ -4,3 +4,7 @@ target/
 crates/*/screenshots/
 .evo/
 dist/
+# The fake serve's script is Python, and importing it beside its own tests leaves
+# bytecode behind — a build artifact, never a source file.
+__pycache__/
+*.pyc
