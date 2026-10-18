@@ -8,11 +8,26 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const SECS_PER_DAY: u64 = 86_400;
 
 /// Seconds since the Unix epoch, UTC.
+///
+/// Split by target, and this one is not cosmetic: `std::time::SystemTime::now()`
+/// is **unimplemented on `wasm32-unknown-unknown` and panics** (`time not
+/// implemented on this platform`) rather than returning an error. A browser
+/// reaches this — [`crate::paths::fill_random`] falls back to it when
+/// `/dev/urandom` cannot be opened, which is every page — so leaving it ungated
+/// panicked the launch path before a session could be shown. A page has its own
+/// clock: `Date.now()`, milliseconds since the epoch, which this divides down.
+#[cfg(not(target_family = "wasm"))]
 pub fn now_epoch() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// [`now_epoch`] from the page's own clock.
+#[cfg(target_family = "wasm")]
+pub fn now_epoch() -> u64 {
+    (js_sys::Date::now() / 1000.0) as u64
 }
 
 /// `2026-09-29T09:09:56Z` — the shape evo itself writes in journal headers.

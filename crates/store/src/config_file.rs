@@ -346,6 +346,7 @@ fn open_regular(path: &Path) -> Result<Option<fs::File>, ConfigError> {
 }
 
 /// Whether an open failed because `O_NOFOLLOW` refused a symbolic link.
+#[cfg(unix)]
 fn is_symlink_refusal(path: &Path, error: &io::Error) -> bool {
     if error.raw_os_error() != Some(loop_errno()) {
         return false;
@@ -360,11 +361,6 @@ fn is_symlink_refusal(path: &Path, error: &io::Error) -> bool {
 #[cfg(unix)]
 fn loop_errno() -> i32 {
     libc::ELOOP
-}
-
-#[cfg(not(unix))]
-fn loop_errno() -> i32 {
-    0
 }
 
 /// Is `text` readable Lisp? A real SBCL reads it and never evaluates it

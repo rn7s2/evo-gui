@@ -13,11 +13,25 @@
 //! releases them.
 
 use std::process::ExitCode;
+
+#[cfg(unix)]
 use std::time::Duration;
 
+#[cfg(unix)]
 use store::paths::Root;
+#[cfg(unix)]
 use store::single::SingleInstance;
 
+/// Off Unix there is no lock to hold and no socket to knock on — the same reason
+/// [`store::single`]'s coordination is Unix-only — so the helper has nothing to
+/// exercise and says so rather than reporting a lock it never took.
+#[cfg(not(unix))]
+fn main() -> ExitCode {
+    eprintln!("store-lock-probe: the single-instance lock is Unix only");
+    ExitCode::from(2)
+}
+
+#[cfg(unix)]
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     let (Some(root), Some(mode)) = (args.get(1), args.get(2)) else {
