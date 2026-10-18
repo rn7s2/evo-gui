@@ -44,8 +44,8 @@ use gpui_kit::prelude::*;
 use gpui_kit::{
     div, px, uniform_list, AbsoluteLength, AnyElement, App, BoxShadow, Context, ElementId, Entity,
     FocusHandle, Focusable as _, Hsla, IntoElement, ListSizingBehavior, MouseButton, Pixels,
-    SharedString, Subscription, TestSupportExt as _, TextAlign,
-    UniformListScrollHandle, WeakEntity, Window,
+    SharedString, Subscription, TestSupportExt as _, TextAlign, UniformListScrollHandle,
+    WeakEntity, Window,
 };
 use serde_json::Value;
 use session::{HistoryEntry, LaunchPlan, Launcher, ModelOption, Role as Card};
@@ -179,6 +179,7 @@ const FOLDER_ID: &str = "select-folder";
 /// The browser's folder field, its commit button, and the card's own heading there.
 const FOLDER_INPUT_ID: &str = "folder-input";
 const FOLDER_GO_ID: &str = "folder-go";
+const FOLDER_BROWSE_ID: &str = "folder-browse";
 const COORDINATOR_CARD_ID: &str = "config-group-coordinator";
 const WORKERS_CARD_ID: &str = "config-group-workers";
 
@@ -253,9 +254,12 @@ const COUNT_LABEL: &str = "Count";
 const USE_SWARM_LABEL: &str = "Use swarm";
 #[cfg_attr(target_family = "wasm", allow(dead_code))]
 const FOLDER_LABEL: &str = "Select folder…";
-/// What the browser's folder card says instead of a click's invitation: it is asking for
-/// a path, and the path is the serving machine's.
-const FOLDER_TYPE_LABEL: &str = "Folder to run in";
+/// What the browser's folder card says instead of a click's invitation — the
+/// desktop's own words, because it is now the desktop's own gesture: pressing it
+/// opens the browser's folder picker ([`EmptyTabState::browse_folder`]), which walks
+/// the serving machine's directories. The field under it is the fallback for a path
+/// that is easier to type than to walk to.
+const FOLDER_TYPE_LABEL: &str = "Select folder…";
 const FOLDER_INPUT_LABEL: &str = "Folder path on the serving machine";
 const FOLDER_GO_LABEL: &str = "Open session";
 /// The field's own height, and the card's: the design's input row.
@@ -1015,13 +1019,18 @@ impl EmptyTabState {
         let bin = self.agent_bin.clone();
         let argv = crate::launch::agent_catalog_argv();
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            // The run is `crate::host`'s: on a host it is a real child off the thread
+            // that draws, and in a browser it is the same read asked of the server
+            // that has the binary (`GET /api/cli`). A page's `fetch` is already
+            // async, so the wasm half awaits the future directly — there is no
+            // executor hop to make, and `background_executor` would only add one.
+            #[cfg(not(target_family = "wasm"))]
             let answer = cx
                 .background_executor()
-                // The run is `crate::host`'s: in a browser there is no process,
-                // and the answer is the one a binary that could not be started
-                // gives — rendered as the same line under the cards.
                 .spawn(async move { crate::host::run_json(&bin, &argv) })
                 .await;
+            #[cfg(target_family = "wasm")]
+            let answer = crate::host::run_json(&bin, &argv).await;
             let _ = this.update(cx, move |state, cx| {
                 state.settle_single_agent(answer, revision, cx)
             });
@@ -1119,22 +1128,20 @@ impl EmptyTabState {
         let bin = self.swarm_bin.clone();
         let argv = spec.check_argv();
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
-            // A process, but not on the thread that draws: the app's own executor runs it.
+            // `check` exits 1 when it found problems and prints them anyway (§2),
+            // so the document is read on that exit too: those problems are exactly
+            // what these lines are. The run is `crate::host`'s (see
+            // `probe_single_agent`) — a process off the thread that draws on a host,
+            // and the same read asked of the server in a browser, where the
+            // non-zero exit is the server's to honour (it answers 200 with the
+            // document) and nothing here has to know about it.
+            #[cfg(not(target_family = "wasm"))]
             let outcome = cx
                 .background_executor()
-                .spawn(async move {
-                    // `check` exits 1 when it found problems and prints them anyway (§2),
-                    // so the document is read on that exit too: those problems are exactly
-                    // what these lines are. The run is `crate::host`'s (see `probe_single_agent`).
-                    match crate::host::run_json_reporting(&bin, &argv) {
-                        Ok(body) => CheckReport::from_json(&body),
-                        Err(error) => CheckReport {
-                            problems: vec![check_failed(&error)],
-                            ..CheckReport::default()
-                        },
-                    }
-                })
+                .spawn(async move { check_outcome(&bin, &argv).await })
                 .await;
+            #[cfg(target_family = "wasm")]
+            let outcome = check_outcome(&bin, &argv).await;
             let report = check_body(&outcome);
             let problems = outcome.problems;
             let _ = this.update(cx, move |state, cx| {
@@ -1275,6 +1282,34 @@ impl EmptyTabState {
                 .tab
                 .update(cx, |tab, cx| tab.emit_launch(folder, plan, cx));
         }
+    }
+
+    /// Open the browser's folder picker and launch in whatever it answers.
+    ///
+    /// The desktop's [`Self::pick_folder`] cannot exist here — `rfd`'s folder dialog
+    /// is not built for wasm — so the browser's answer is [`crate::host::pick_folder`],
+    /// which walks the serving machine's directories through `GET /api/fs`. The folder
+    /// it hands back is on *that* machine, which is the machine the session runs on.
+    ///
+    /// A picker that was put away launches nothing, exactly as a cancelled dialog does.
+    #[cfg(target_family = "wasm")]
+    fn browse_folder(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let starting_folder = self.home.clone().map(PathBuf::from);
+        // The tab, not this page: a picker answers outside this update — exactly as the
+        // desktop's dialog does — and the plan is read where a dialog's answer is read.
+        let tab = self.tab.clone();
+        cx.spawn(async move |_this: WeakEntity<Self>, cx| {
+            let Some(folder) = crate::host::pick_folder(
+                "Choose the folder this session runs in".to_owned(),
+                starting_folder,
+            )
+            .await
+            else {
+                return;
+            };
+            let _ = tab.update(cx, |tab, cx| tab.request_launch(folder, cx));
+        })
+        .detach();
     }
 
     // --- the pieces the page is made of ---------------------------------------------
@@ -1842,12 +1877,24 @@ impl EmptyTabState {
             shape!(div().id(FOLDER_ID))
                 .child(icon())
                 .child(
-                    div()
+                    // The label *is* the picker. Pressing it opens the browser's
+                    // folder picker — the request that produced this card's wording
+                    // — and the field under it stays the fallback for a path that is
+                    // easier to type than to walk to. Drawn at the label's own size
+                    // and line height, with no padding of its own, so the card is
+                    // exactly as tall as it was.
+                    Button::new(FOLDER_BROWSE_ID)
                         .w_full()
+                        .flex_none()
+                        .p(px(0.))
+                        .bg(theme.transparent)
                         .text_size(px(design::FONT_BASE - 3.))
                         .line_height(BODY_LINE)
                         .text_color(theme.muted_foreground)
-                        .child(FOLDER_TYPE_LABEL),
+                        .child(FOLDER_TYPE_LABEL)
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.browse_folder(window, cx)),
+                        ),
                 )
                 .child(
                     div()
@@ -2543,6 +2590,33 @@ fn check_failed(error: &CliError) -> Problem {
     }
 }
 
+/// One check, as the report these lines are drawn from.
+///
+/// `async` on both targets, and the whole of the target difference is one `await`:
+/// a host's `run_json_reporting` blocks on a child, and a browser's asks the server.
+/// Both answer a `Result<Value, CliError>`, and a failure is the one line
+/// [`check_failed`] builds — so the two halves of this function are the same code
+/// with one word of difference, rather than two.
+async fn check_outcome(bin: &std::path::Path, argv: &[String]) -> CheckReport {
+    let body = {
+        #[cfg(not(target_family = "wasm"))]
+        {
+            crate::host::run_json_reporting(bin, argv)
+        }
+        #[cfg(target_family = "wasm")]
+        {
+            crate::host::run_json_reporting(bin, argv).await
+        }
+    };
+    match body {
+        Ok(body) => CheckReport::from_json(&body),
+        Err(error) => CheckReport {
+            problems: vec![check_failed(&error)],
+            ..CheckReport::default()
+        },
+    }
+}
+
 /// A check report as the JSON body `session::Launcher::set_check` reads: the same document
 /// `evo-swarm check --json` prints, rebuilt from the report a run produced.
 fn check_body(report: &CheckReport) -> Value {
@@ -2723,12 +2797,10 @@ impl TabContent {
     /// [`TabContent::emit_launch`] with the plan read from the controls, for a caller that
     /// is not inside this tab's own update.
     ///
-    /// The folder dialog's helper: it answers on the foreground executor, where the plan
-    /// cannot be read from the state in hand. A browser's folder card is a text field and
-    /// reads the plan where it stands ([`EmptyTabState::enter_folder`]), so this has no
-    /// caller there — and a browser is not a place to keep a function for a dialog that
-    /// does not exist.
-    #[cfg(not(target_family = "wasm"))]
+    /// The helper both folder dialogs answer through: a native `rfd` dialog and a
+    /// browser's picker are each a task that finishes outside this tab's update, where
+    /// the plan cannot be read from the state in hand — so the plan is read here, from
+    /// the tab, when the answer arrives.
     pub(crate) fn request_launch(&mut self, folder: PathBuf, cx: &mut Context<Self>) {
         let plan = self.launch_plan(cx);
         self.emit_launch(folder, plan, cx);
@@ -4177,13 +4249,22 @@ mod tests {
         });
 
         let entries: Vec<HistoryEntry> = (0..500)
-            .map(|ix| entry(&format!("/j/{ix}.sexp"), &format!("/Users/you/p{ix}"), false))
+            .map(|ix| {
+                entry(
+                    &format!("/j/{ix}.sexp"),
+                    &format!("/Users/you/p{ix}"),
+                    false,
+                )
+            })
             .collect();
         f.history(cx, &entries, "/Users/you");
         f.render(cx);
         f.act(cx, |window, cx| {
             let frame = window.find(HISTORY_LIST_ID).bounds();
-            assert!(frame.size.height < px(WINDOW.1), "the list scrolls in the page");
+            assert!(
+                frame.size.height < px(WINDOW.1),
+                "the list scrolls in the page"
+            );
             for ix in [0, 1] {
                 let row = window.find(history_row_id(ix)).bounds();
                 assert_eq!(row.size.height, ROW_MIN_H, "row {ix}");

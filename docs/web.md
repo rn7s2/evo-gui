@@ -159,6 +159,28 @@ this is the same list.
 | `GET /api/tabs/<id>/catalog` | the running session's own registry | yes — by hand: the tab's registry, commands and models |
 | `GET /api/catalog` | the machine's registry (offline CLI read) | yes — by hand: the machine's registry |
 | `GET /api/sessions` | the machine's session history (offline read) | yes — by hand: the session that had just run |
+| `GET /api/config` | a config file's text, by `scope` (`global`/`project`), `folder` and `file` (`init`, `post-init`, `swarm`, `memory`, `lore`) | yes — by hand: the file's own text, and `base` for a safe save |
+| `POST /api/config` | save one, refusing a write whose `base` is not what the file holds now | yes — by hand: a stale `base` is a 409, not a silent overwrite |
+| `GET /api/fs` | the serving machine's **directories** under `path` (no files, no dotfiles, no symlinks) | yes — by hand: a listing, and a refusal for anything that is not a directory |
+| `GET /api/probe` | whether the serving machine can run `evo-swarm`/`evo-agent` at `path` — the Settings rows' own question | yes — by hand: a real binary answers `ready` with its `--version` line |
+| `GET /api/cli` | one **offline CLI read** on the serving machine: `name=` (`evo-swarm`/`evo-agent`) and `read=` (`catalog`/`check`), plus `check`'s own `workers`/`model`/`lane-model` | yes — by hand: a real catalog, and a real `check` whose binary exits 1 while the route answers 200 with the document |
+
+`/api/cli` is the one the empty tab's cards need. It exists because a card is
+drawn from a **run** — `catalog --json`, or `check --json` — and a page has no
+process to run. Two closed sets and no path: `name` selects one of the server's
+own two binaries (never a path the caller supplies), `read` selects one of two
+reads, and the argv is **built by the server** from validated pieces. There is no
+subcommand, flag or position this route does not name itself, so it is not a
+general "run this for me". `check` exits 1 while printing its document, which is
+why it is read with `run_json_reporting`: a launch with problems is a 200
+carrying them, never a 502.
+
+The three browser-only reads exist because a page has no filesystem and no
+processes: `~/.evo/init.lisp` and a project's `.evo/` are on the **serving**
+machine, so the config editor and the binary rows ask the server rather than
+pretending to look. `/api/fs` lists directories and nothing else, deliberately —
+a picker that showed files would leak more than it needs, so a browser's
+attachment picker walks to the folder and asks for the name.
 
 Every proxied route is one route of the serve protocol. There is no catch-all
 that forwards whatever path a caller typed.
@@ -339,7 +361,7 @@ soon…`.
 `evo-web` prints one line when it is up:
 
 ```
-evo-web ready — http://127.0.0.1:8787  (dist dist/web, root ~/.evo/desktop)
+evo-web ready — http://127.0.0.1:9091  (dist dist/web, root ~/.evo/desktop)
 ```
 
 Then open that URL.
@@ -455,7 +477,7 @@ Verbatim from `evo-web --help`:
 ```
 --bind ADDR        address to listen on (default 127.0.0.1, env EVO_WEB_BIND).
                    Anything that is not loopback REQUIRES --auth-token.
---port N           port to listen on (default 8787, env EVO_WEB_PORT).
+--port N           port to listen on (default 9091, env EVO_WEB_PORT).
                    0 asks the OS for a free one; the chosen one is printed.
 --dist DIR         the frontend bundle to serve (default dist, env EVO_WEB_DIST)
 --root DIR         where tabs live (default ~/.evo/desktop, env EVO_WEB_ROOT)
@@ -646,17 +668,22 @@ needs a branch and no behaviour silently changes.
 
 | what | native | browser |
 |---|---|---|
-| asking for a folder on the empty tab | `rfd`'s async panel, opened by the card's button (`host::pick_folder`) | **a panel, not a dialog**: an icon, the label `Folder to run in`, a text field (`folder-input`) and an `Open session` button (`folder-go`), with the hint `An absolute path on the machine that served this page.` (`crates/workspace/src/empty_tab.rs`, gated on `target_family = "wasm"`; `host::ENTERS_FOLDER` is what selects it). A typed path is checked for being rooted here and the rest is the server's to refuse. `host::pick_folder` is still a `None` stub — the browser simply does not call it for this. |
+| asking for a folder on the empty tab | `rfd`'s async panel, opened by the card's button (`host::pick_folder`) | **a panel, not a dialog**: an icon, the label `Select folder…` (which is itself the picker trigger), a text field (`folder-input`) and an `Open session` button (`folder-go`), with the hint `An absolute path on the machine that served this page.` (`crates/workspace/src/empty_tab.rs`, gated on `target_family = "wasm"`). `Select folder…` calls `host::pick_folder`, which on wasm walks the serving machine through `GET /api/fs`; a typed path is checked for being rooted here and the rest is the server's to refuse. |
+| asking for an attachment | `cx.prompt_for_paths` — the system panel | **the page's own file dialog**: `host::pick_files` makes and clicks an `<input type="file">` and answers with **bytes** (`Vec<composer::ChosenFile>`), injected through `Composer::set_bytes_picker` and handled by `attach_files`. Images only, and deliberately: an image rides the turn *in the op itself* (`input.send`'s `images`, base64), so no server route is involved — but a file that is not an image has no shape a page can fill, because the only other shape is an absolute path the *session's* machine can open, and a page's file is on the reader's. `showOpenFilePicker` is not used (not in every browser) and a `File`'s non-standard `path` is never read (it would name the wrong machine). |
+| a binary read behind a card (`catalog`, `check`) | `store::cli::run_json` / `run_json_reporting` — a real child | `GET /api/cli` (`crates/workspace/src/host.rs` is split by target; the wasm arms are `async` because a page's fetch is). An unreachable server answers `not_hosted(bin)`, so a transport failure degrades to what the card showed before rather than to a blank one. |
+| reading a config file | `store::config_file::{read,save}` | `crates/settings/src/config_http.rs`: `GET`/`POST /api/config`, with the same shapes, so `ConfigEditor` does not branch. `base` is what makes a browser's save safe — a write whose `base` is not what the file holds now is a 409, not a silent overwrite. |
 | reading a file the UI names | `std::fs` | **stub**: `Err` from `read_to_string`, `None`/`false` from the `transcript` and `composer` readers — nothing is drawn, and a path is not linked (`host.rs` in `workspace`, `transcript`, `composer`). `canonicalize` is *not* a stub: it returns the path as written, which is what the desktop's own fallback does for a path that cannot be resolved. |
 | running an offline CLI (`catalog`, `sessions`, `check`) | a real child process | **stub**: `CliError::NotFound` — literally true, the binary is on the serving machine |
 | the Settings file dialog | `rfd`'s async panel | **stub**: `None` (`crates/settings/src/dialog.rs`) |
-| the binary probe behind a Settings row | `store::cli::version_within` — a child and two reader threads | **stub**: `Check::Missing`, and it never reaches `store::cli` (`crates/settings/src/probe.rs` is split by target). This one is not cosmetic: `std::thread::spawn` panics on wasm, so the ungated version took the whole Settings page down. |
-| the terminal pane | a real pty and `alacritty_terminal`'s grid | **stub**: the same `TerminalPane` type, built the same way, saying a terminal is not available here (`crates/terminal/src/pane_wasm.rs`). `alacritty_terminal` cannot even be built for wasm32 — it reaches `polling`, `home` and `filedescriptor`, none of which support the target — so the grid goes with the shell it was there to draw. |
+| the binary probe behind a Settings row | `store::cli::version_within` — a child and two reader threads | `GET /api/probe` (`crates/settings/src/probe.rs` is split by target) — the row asks the **server** whether it can run the binary, and the server answers with `store::cli::version_within` off the reactor. It must not reach `store::cli` itself: `std::thread::spawn` panics on wasm, so the ungated version took the whole Settings page down. |
+| closing a tab | the app's own unsaved-edits question | the same question, after a `window.confirm("Close <title>?")` — a page has no window chrome of its own to ask with (`crates/workspace/src/chrome.rs`) |
+| the terminal pane | a real pty and `alacritty_terminal`'s grid | **stub, and deliberately so**: the same `TerminalPane` type, built the same way, saying a terminal is not available here (`crates/terminal/src/pane_wasm.rs`). `alacritty_terminal` cannot even be built for wasm32 — it reaches `polling`, `home` and `filedescriptor`, none of which support the target — so the grid goes with the shell it was there to draw. **The terminal stays a local app feature.** A browser terminal is buildable (the server would own the pty and the `Term` and stream the grid to a page that only draws cells — the page cannot own the parser), but it is a feature, not a fix, and it is out of scope for this branch. The stub is the intended final state. |
 | the clock | `std::time::Instant` | `web_time::Instant` (`Performance.now()`) — `std::time::Instant::now` compiles to a `panic!` on wasm32, and every animated widget reads it (`crates/widgets/src/clock.rs`) |
 | the wall clock | `std::time::SystemTime::now()` | `js_sys::Date::now()` (`crates/store/src/time.rs`) — `SystemTime::now` panics on wasm32, and `paths::fill_random` falls back to it when `/dev/urandom` cannot be opened, which is every page |
 | whether a path is absolute | `Path::is_absolute` | `session::path::is_absolute`, which is `Path::has_root` (`crates/session/src/path.rs`) — `is_absolute` is **always false** on wasm32, so an ungated call silently refuses every path a person types |
 | a thread | `std::thread::spawn` | **must not be called**: it panics on wasm32, and `wasm_thread` does not rescue a plain `std::thread::spawn` — it only offers its own `Builder`. Every browser-reachable spawn is behind a seam (`workspace::bridge`, `settings::probe`, `tab.rs`). |
-| the HTTP transport | a blocking socket (`swarm_client::http`) | `fetch` and a `ReadableStream` (`swarm_client::fetch`) — a browser can do neither of the things the native half is made of: it cannot open a raw TCP connection, and it cannot block a thread on a read |
+| the HTTP transport | a blocking socket (`swarm_client::http`) | `reqwest` + `eventsource-stream` (`swarm_client::fetch`) — a browser can do neither of the things the native half is made of: it cannot open a raw TCP connection, and it cannot block a thread on a read. The SSE framing is the crate's, not hand-rolled: a hand-written `ReadableStream` reader was what made the badge say "reconnecting…" for ever. `reqwest` on wasm needs an **absolute** URL, so a same-origin prefix is resolved against the page's own origin first. |
+| an idle stream | a socket read with a timeout | the same patience, measured against the last **byte** rather than the last frame (`fetch.rs`'s `Tap`): the server's 15 s keepalives are SSE comments, which the framing drops, so only the layer under it can see them. Without this a dead socket parks the tab for ever. |
 | syntax colouring in code fences | tree-sitter grammars | **off** — the kit's wasm stub, same fence, uncoloured |
 | spawning a session | the app spawns `evo-swarm serve` itself and holds the pipe | **wired**: the page asks `evo-web` to open one (`POST /api/tabs`) and attaches — the server owns the process, and the browser owns neither a pipe nor a pid |
 | single instance, window bounds, menu bar | the app owns them | **not applicable** — the browser owns the tab, the page owns the URL |
@@ -665,20 +692,19 @@ needs a branch and no behaviour silently changes.
 
 Each of these was re-checked against the code, not carried forward.
 
-- **The file-reading seams still answer "no".** No local file read and no offline
-  CLI run from the page: a path a transcript names is not linked, and the
-  choosers have no catalog from the *page*. (They do have one from the server —
-  `GET /api/catalog` and `GET /api/sessions` exist — but nothing in the frontend
-  asks for them yet.) This is narrower than it used to be: the folder card and
-  the Settings page are both wired now, so it is the *reads*, not the page, that
-  are missing.
-- **No folder *browser*.** The empty tab takes a typed absolute path, and the
-  server has no folder-listing endpoint — the complete route table is the one in
-  [the API surface](#the-api-surface), and none of it lists a directory. So
-  `POST /api/tabs` requires an **absolute path that exists on the serving
-  machine** (`crates/web/src/tabs.rs`: `folder is required`, `must be an absolute
-  path`, `is not a directory on the serving machine`), and a page cannot offer a
-  picker that walks a filesystem it cannot see. A path has to be known.
+- **No local file read.** A path a transcript names is not linked, and a file's
+  *contents* cannot be read from the page. The config files are the exception and
+  the only one: `GET /api/config` reads them, because a page cannot open
+  `~/.evo/init.lisp` itself. `GET /api/fs` lists **directories only** — never a
+  file, never a file's bytes — so a page still cannot fetch an arbitrary path.
+- **A folder picker, but a coarse one.** The empty tab takes a typed absolute path
+  *and* offers `Select folder…`, which walks the serving machine through
+  `GET /api/fs`. That route returns directories and no `parent`, so the walk is a
+  sequence of `window.prompt` dialogs rather than an in-app panel; an attachment
+  is the same walk to the file's folder plus the file's own name, because
+  `/api/fs` will not list files. The real answer — a panel drawn over the card,
+  with the listing in a list — needs a `parent` field on `/api/fs`, and is a UI
+  change to `empty_tab.rs` rather than a protocol one.
 - **One shared token, and nothing finer.** No users, no sessions, no per-tab
   authorization: `require_token` compares the configured token and that is the
   whole of it. The token is one secret for the whole server.

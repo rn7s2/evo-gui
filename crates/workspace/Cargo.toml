@@ -31,7 +31,26 @@ rfd = "0.17"
 # tab while it is in flight. A host needs none of it — its launch is a spawn on a
 # thread.
 [target.'cfg(target_family = "wasm")'.dependencies]
+wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
+serde = { workspace = true }
+serde_json = { workspace = true }
+# The page's own globals and DOM: the picker asks the server for a directory
+# listing (`GET /api/fs`) and puts up the page's own prompt to choose from it.
+web-sys = { version = "0.3", features = [
+    "Response",
+    "Window",
+    # The attachment picker: the page's own file dialog is an `<input type=file>`,
+    # clicked, and what it hands back is a `FileList` of `File`s whose bytes arrive
+    # through a `FileReader` — the only way a page can read a file it was given.
+    "Document",
+    "Element",
+    "HtmlInputElement",
+    "File",
+    "FileList",
+    "FileReader",
+    "Blob",
+] }
 # The page's own clock, for the step ticker: `std::time` is unimplemented on
 # `wasm32-unknown-unknown` (`SystemTime::now()` panics there, it does not return an
 # error), and a browser's clock is `Date.now()` — which is `js_sys`. Native builds

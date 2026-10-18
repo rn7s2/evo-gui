@@ -1029,11 +1029,13 @@ fn holds_the_tab(topic: Option<&str>) -> bool {
 /// while a tab is behind, which is the only reason a reset can be retried without
 /// freezing the very tab it is trying to bring back.
 ///
-/// Awaited rather than handed to a thread, on both targets: the caller is the loop
-/// task, and a page has no thread to hand it to. The timer is the platform's own —
-/// a parked engine thread on a host ([`block_on`] unparks when the channel's waker
-/// fires), the page's timer in a browser ([`sleep_for`]) — so what this costs is
-/// that the loop is *idle* for `next`, not that it is blocked.
+/// **A host hands the timer to a thread of its own** (`evo-tab-reset`), and that
+/// is load-bearing rather than incidental: this is awaited from inside
+/// [`engine_loop`], so sleeping here would park the loop for the whole wait — up
+/// to `RESET_RETRY_LONGEST` (10 s) — and no op, frame or fetch would be taken
+/// while a tab was catching up. A page has no thread to hand it to, so there the
+/// wait is the page's own timer ([`sleep_for`]) and the loop is idle, not blocked;
+/// in a browser that is the only thing it can be.
 async fn ask_again(
     engine: &mut Engine,
     commands: &Sender<Inbound>,
@@ -1046,17 +1048,30 @@ async fn ask_again(
         });
     }
     #[cfg(not(target_family = "wasm"))]
-    thread::sleep(next);
+    {
+        let commands = commands.clone();
+        let _ = thread::Builder::new()
+            .name("evo-tab-reset".into())
+            .spawn(move || {
+                thread::sleep(next);
+                let _ = commands.send_blocking(Inbound::Retry {
+                    topic,
+                    waited: next,
+                });
+            });
+    }
     #[cfg(target_family = "wasm")]
-    sleep_for(next).await;
-    // A dropped send means the handle is gone, which the loop finds out for itself
-    // on its next receive: nothing to do about it here.
-    let _ = commands
-        .send(Inbound::Retry {
-            topic,
-            waited: next,
-        })
-        .await;
+    {
+        sleep_for(next).await;
+        // A dropped send means the handle is gone, which the loop finds out for
+        // itself on its next receive: nothing to do about it here.
+        let _ = commands
+            .send(Inbound::Retry {
+                topic,
+                waited: next,
+            })
+            .await;
+    }
 }
 
 /// One read, off the loop: a page of items, an item, or an image can be large, and

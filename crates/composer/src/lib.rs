@@ -58,10 +58,10 @@ use gpui_kit::component::{
 use gpui_kit::prelude::*;
 use gpui_kit::{
     anchored, deferred, div, img, point, px, radians, AbsoluteLength, Anchor, Animation,
-    AnimationExt as _, AnyElement, App, AsyncApp, Bounds, BoxShadow, ClickEvent, ClipboardEntry,
+    AnimationExt as _, AnyElement, App, Bounds, BoxShadow, ClickEvent, ClipboardEntry,
     ClipboardItem, Context, ElementId, Entity, EventEmitter, ExternalPaths, FocusHandle,
     FontWeight, Global, HighlightStyle, ImageSource, IntoElement, KeyBinding, Keystroke,
-    KeystrokeEvent, ObjectFit, PathPromptOptions, Pixels, Point, Render, RenderImage, ScrollHandle,
+    KeystrokeEvent, ObjectFit, Pixels, Point, Render, RenderImage, ScrollHandle,
     SharedString, StyledText, Subscription, Task, TestSupportExt as _, WeakEntity, Window,
 };
 use session::{ordered_segments, GoalInfo, Segment, Todo, TodoStatus, TopicState};
@@ -273,17 +273,44 @@ pub const BUTTON_ID: &str = "composer-action";
 /// The `+` beside it: what a test clicks to open the picker.
 pub const ATTACH_ID: &str = "composer-attach";
 
-/// The system's file picker, as the composer asks for one: the files the reader chose,
-/// `None` when they put the dialog away — or when the platform could not open one.
+/// One thing a picker chose, before it is an [`Attachment`]: the bytes of a file the
+/// page's own machine holds, under the name it had there.
 ///
-/// Injectable ([`Composer::set_picker`]) so a test never opens a real dialog, and so a
-/// capture can be of what the picker's own answer makes of the box.
+/// The browser's answer, and only the browser's: a page's file dialog hands back a
+/// `File` — its bytes, and no path — so this is the shape of what a browser can
+/// offer. The native side never builds one (its picker answers with paths), which is
+/// why nothing here is `cfg`'d: an unused type on a host is cheaper than a branch at
+/// every call site, and a `PathBuf`-only picker could not express this at all.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChosenFile {
+    /// The file's name, as the browser had it.
+    pub name: String,
+    /// Its media type, from the browser's own reading of the file.
+    pub media_type: String,
+    pub bytes: Vec<u8>,
+}
+
+/// A picker that answers with **paths** — the platform's own dialog, and what a test
+/// injects.
 pub type PathPicker =
     Arc<dyn Fn(&mut Window, &mut App) -> Task<Option<Vec<PathBuf>>> + Send + Sync>;
 
-/// The platform's own picker: files, any number of them, and no folders — an attachment
-/// is something evo can carry, and a folder is not.
+/// A picker that answers with **bytes**: a browser's file dialog.
+///
+/// A page cannot hand back a path — its filesystem is the reader's own machine, not
+/// the session's — so the answer is the file itself, and it travels the way a pasted
+/// screenshot already does: [`AttachmentKind::ImageBytes`], base64 in the op's
+/// `images`, with no path anywhere. That is what makes the `+` work in a browser
+/// without a route that serves a file's bytes: nothing asks the server for anything,
+/// because the bytes are the page's own.
+pub type BytesPicker =
+    Arc<dyn Fn(&mut Window, &mut App) -> Task<Option<Vec<ChosenFile>>> + Send + Sync>;
+
+/// The platform's own picker: files, any number of them, and no folders — an
+/// attachment is something evo can carry, and a folder is not.
+#[cfg(not(target_family = "wasm"))]
 fn system_picker(_window: &mut Window, cx: &mut App) -> Task<Option<Vec<PathBuf>>> {
+    use gpui_kit::{AsyncApp, PathPromptOptions};
     let dialog = cx.prompt_for_paths(PathPromptOptions {
         files: true,
         directories: false,
@@ -766,6 +793,14 @@ pub struct Composer {
     /// The file picker the `+` asks: the platform's own dialog, or one a test or the
     /// capture example put here.
     picker: PathPicker,
+    /// The browser's picker: a file dialog that answers with bytes rather than a path.
+    ///
+    /// `Some` only in a build whose platform has no filesystem to name — a page — and
+    /// it is the shell that fills it ([`Composer::set_bytes_picker`]), because reaching
+    /// the page's own file dialog needs the platform bindings this crate does not
+    /// carry. When it is set, the `+` uses it and never [`Self::picker`]: a browser's
+    /// answer is bytes, and a path from a page would name a file on nobody's machine.
+    bytes_picker: Option<BytesPicker>,
     /// The picker's own request, while the reader is choosing: held so that the answer
     /// still lands when the update that asked is over — a dropped task is a cancelled
     /// one.
@@ -927,7 +962,16 @@ impl Composer {
             effort_motion: Rc::new(Motion::new()),
             box_bounds: Rc::new(Cell::new(Bounds::default())),
             effort_focus: cx.focus_handle(),
+            // A host's `+` is the platform's own dialog. A browser has none, and no
+            // filesystem to name either, so its `+` is given a bytes picker by the
+            // shell (`TabContent::new` calls `set_bytes_picker` on wasm) — and until it
+            // is, the browser's path picker attaches nothing, which is the same answer a
+            // dialog that was put away gives.
+            #[cfg(not(target_family = "wasm"))]
             picker: Arc::new(system_picker),
+            #[cfg(target_family = "wasm")]
+            picker: Arc::new(|_window, _cx| Task::ready(None)),
+            bytes_picker: None,
             picking: None,
             swarm: true,
             _subscriptions: vec![subscription, interceptor],
@@ -1019,6 +1063,19 @@ impl Composer {
     /// tile, count, removal — is what those runs are about.
     pub fn set_picker(&mut self, picker: PathPicker, cx: &mut Context<Self>) {
         self.picker = picker;
+        cx.notify();
+    }
+
+    /// Have the `+` ask the platform's own **file dialog** for files, and attach what
+    /// it answers — the browser's seam.
+    ///
+    /// Set by the shell, which is the side of this that carries the platform bindings
+    /// (`wasm-bindgen`/`web-sys`); what it hands back is each file's bytes, because
+    /// that is what a page's dialog can give and what a session on another machine can
+    /// use. Once set, the `+` never consults the path picker.
+    #[cfg(target_family = "wasm")]
+    pub fn set_bytes_picker(&mut self, picker: BytesPicker, cx: &mut Context<Self>) {
+        self.bytes_picker = Some(picker);
         cx.notify();
     }
 
@@ -1279,6 +1336,21 @@ impl Composer {
     /// lands in a task of its own: the box does not block on a reader who is still
     /// choosing, and the composer holds that task so the answer is still delivered.
     fn pick_attachments(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // A browser's answer is bytes and a host's is paths, and which one this build
+        // has is the shell's to say. Both land on the same draft: `attach_files` takes
+        // what a page chose, `attach` what a dialog named.
+        #[cfg(target_family = "wasm")]
+        if let Some(picker) = self.bytes_picker.clone() {
+            let chosen = picker(window, cx);
+            self.picking = Some(cx.spawn_in(window, async move |this, cx| {
+                let Some(files) = chosen.await else {
+                    return;
+                };
+                this.update_in(cx, |composer, _window, cx| composer.attach_files(files, cx))
+                    .ok();
+            }));
+            return;
+        }
         let picker = self.picker.clone();
         let chosen = picker(window, cx);
         self.picking = Some(cx.spawn_in(window, async move |this, cx| {
@@ -1288,6 +1360,56 @@ impl Composer {
             this.update_in(cx, |composer, _window, cx| composer.attach(paths, cx))
                 .ok();
         }));
+    }
+
+    /// Attach what a browser's own file dialog chose: each file's bytes, under the
+    /// name it had on the page's machine.
+    ///
+    /// **Images, and only images.** An image is the one kind of attachment a browser
+    /// can deliver whole: it becomes [`AttachmentKind::ImageBytes`] and rides the turn
+    /// as base64 — the shape a pasted screenshot already takes — so the bytes travel
+    /// *with* the op and there is nothing for a server route to serve.
+    ///
+    /// A file that is not an image cannot be attached from a page, and the reason is
+    /// the protocol rather than this client: the only shape a file has is
+    /// [`AttachmentKind::File`] — an absolute path named in the message, which the
+    /// agent then reads on the **session's** machine. A page's file is on the
+    /// *reader's* machine; a path for it would name nothing the session can open, and
+    /// `input.send`'s `images` is the only field that carries bytes. So a non-image is
+    /// dropped here rather than attached as something that would not work, and the
+    /// dialog this build opens is told to offer images in the first place (see the
+    /// shell's `set_bytes_picker`) — the reader sees what they can actually add rather
+    /// than adding something that silently fails.
+    fn attach_files(&mut self, files: Vec<ChosenFile>, cx: &mut Context<Self>) {
+        for file in files {
+            let ChosenFile {
+                name,
+                media_type,
+                bytes,
+            } = file;
+            if bytes.is_empty() {
+                continue;
+            }
+            let is_image = media_type.starts_with("image/")
+                || std::path::Path::new(&name)
+                    .extension()
+                    .is_some_and(|ext| {
+                        IMAGE_EXTENSIONS
+                            .iter()
+                            .any(|image| ext.eq_ignore_ascii_case(image))
+                    });
+            if !is_image {
+                continue;
+            }
+            let kind = AttachmentKind::ImageBytes {
+                media_type,
+                bytes: Arc::new(bytes.clone()),
+            };
+            let id = self.push_attachment(name, kind);
+            self.make_thumbnails(vec![(id, Thumbnail::Bytes(bytes))], cx);
+            let _ = id;
+        }
+        cx.notify();
     }
 
     /// Attach the files at `paths`, in the order they were chosen.

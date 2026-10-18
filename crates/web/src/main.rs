@@ -25,6 +25,10 @@
 //! GET    /api/tabs/<id>/catalog     the running session's own registry
 //! GET    /api/catalog               the machine's registry (offline CLI read)
 //! GET    /api/sessions              the machine's session history (offline read)
+//! GET    /api/config                evo's own config files, for the browser's editor
+//! POST   /api/config                write one, through the same save the app uses
+//! GET    /api/fs                    the serving machine's directories, for a picker
+//! GET    /api/probe                 whether this machine can run evo-swarm/evo-agent
 //! ```
 //!
 //! # Security
@@ -53,6 +57,10 @@
 //!   a path that climbs out of the directory it was given.
 
 mod cli;
+mod config;
+mod fs;
+mod offline;
+mod probe;
 mod proxy;
 mod tabs;
 
@@ -113,7 +121,7 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn serve(config: cli::Config) -> anyhow::Result<()> {
-    let listener = tokio::net::TcpListener::bind(SocketAddr::new(config.bind, config.port)).await?;
+    let listener = bind(&config).await?;
     let local = listener.local_addr()?;
 
     let state = AppState {
@@ -170,6 +178,33 @@ async fn serve(config: cli::Config) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Bind the listener, and make a taken port say something a person can act on.
+///
+/// A bare `Address already in use (os error 48)` names neither the port nor what
+/// to do about it, and the default port is fixed on purpose — so a run that finds
+/// it taken explains itself instead of passing the OS's words along.
+///
+/// **Nothing is retried and nothing falls back to another port.** A predictable
+/// default is the whole point of having one, and a silent fallback would leave two
+/// runs of this server disagreeing about the URL the browser should open. `--port
+/// 0` is the deliberate way to ask for a free one, and the chosen URL is printed
+/// once the server is up.
+async fn bind(config: &cli::Config) -> anyhow::Result<tokio::net::TcpListener> {
+    let addr = SocketAddr::new(config.bind, config.port);
+    match tokio::net::TcpListener::bind(addr).await {
+        Ok(listener) => Ok(listener),
+        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => Err(anyhow::anyhow!(
+            "port {} on {} is already in use: something else on this machine holds it \
+             (another evo-web, or an unrelated service).\n\
+             Start on a free port with `--port 0` — the OS picks one and the chosen \
+             URL is printed — or pass `--port <N>` for one you know is free.",
+            config.port,
+            config.bind
+        )),
+        Err(error) => Err(anyhow::Error::new(error).context(format!("could not bind {addr}"))),
+    }
+}
+
 /// Wait for the signal that stops this server, and name it.
 ///
 /// **SIGTERM as well as SIGINT, and the first one wins.** A server that runs other
@@ -223,6 +258,19 @@ fn router(config: &cli::Config, state: &AppState) -> Router {
         .merge(proxy::routes())
         .route("/api/catalog", get(catalog))
         .route("/api/sessions", get(sessions))
+        // A browser cannot run a binary, so the two offline reads the empty tab's
+        // cards need — `<bin> catalog --json` and `evo-swarm check --json` — are run
+        // here, from a closed set of binaries and reads. See `offline.rs`.
+        .route("/api/cli", get(offline::read))
+        // The browser's two filesystem needs: evo's own config files (which a
+        // page cannot read or write) and a directory listing (which a native
+        // folder dialog would otherwise give it). Both are on `/api`, so both
+        // are behind the token check below.
+        .route("/api/config", get(config::read).post(config::save))
+        .route("/api/fs", get(fs::list))
+        // A browser cannot run a binary, so it asks the machine that has one — and
+        // gets the same answer the desktop app's own probe computes.
+        .route("/api/probe", get(probe::probe))
         // An op may carry a pasted picture; axum's default limit is smaller than
         // the protocol's own.
         .layer(DefaultBodyLimit::max(MAX_BODY))
@@ -441,7 +489,7 @@ async fn sessions(State(state): State<AppState>) -> Result<Response, ApiError> {
 /// A missing or unreadable binary is the common failure here (this is the one
 /// place the two binaries are run by path), and `store::cli` reports it as one
 /// line: which binary, and what it said.
-async fn offline<F>(read: F) -> Result<Response, ApiError>
+pub(crate) async fn offline<F>(read: F) -> Result<Response, ApiError>
 where
     F: FnOnce() -> Result<serde_json::Value, store::cli::CliError> + Send + 'static,
 {

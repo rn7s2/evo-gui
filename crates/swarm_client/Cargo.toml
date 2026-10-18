@@ -21,26 +21,27 @@ async-channel = "2"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
-# The browser transport: `fetch` for one request, and a `ReadableStream` read
-# chunk by chunk for the op stream. `EventSource` is deliberately not used — it
-# cannot carry an `Authorization` header, and the protocol is bearer-token.
+# The browser transport, and it is the browser's alone: native keeps the
+# hand-rolled client in `http.rs` (a socket, a thread, and the bearer token), which
+# `crates/web`'s proxy also drives. So `reqwest` is asked for with no default
+# features and no TLS — on wasm it is `fetch`, and the browser brings its own TLS.
+#
+# `eventsource-stream` is the SSE framing: it turns the reply body into a stream of
+# whole events. `futures-util` is the `StreamExt` that drives it. Hand-rolling the
+# framing is what this replaces — see the note at the top of `fetch.rs`.
 [target.'cfg(target_family = "wasm")'.dependencies]
-wasm-bindgen = "0.2"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
+eventsource-stream = "0.2"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+
+# `spawn_local` is the page's executor, and `Promise`/`setTimeout` is the only
+# clock a backoff has there.
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
-web-sys = { version = "0.3", features = [
-    "AbortController",
-    "AbortSignal",
-    "Headers",
-    "ReadableStream",
-    "ReadableStreamDefaultReader",
-    "ReadableStreamReadResult",
-    "Request",
-    "RequestCredentials",
-    "RequestInit",
-    "Response",
-    "Window",
-] }
+# `window.location.origin`: a browser's `fetch` refuses a relative URL, so a
+# same-origin path prefix is resolved against the page's own origin before it is
+# handed to `reqwest`.
+web-sys = { version = "0.3", features = ["Location", "Window"] }
 
 [dev-dependencies]
 # The real-binary test sends a body the size of a pasted screenshot: the base64 an

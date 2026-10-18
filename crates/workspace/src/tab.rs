@@ -600,6 +600,20 @@ impl TabContent {
         );
 
         let composer = cx.new(|cx| Composer::new(window, cx));
+        // A browser has no `rfd`, and no filesystem to name either, so the composer's
+        // `+` is given the page's own file dialog instead: the reader chooses images
+        // and each one arrives as **bytes**, which ride the turn the way a pasted
+        // screenshot already does. Injected here because the platform bindings
+        // (`web-sys`) live in this crate, not below it in `composer`.
+        #[cfg(target_family = "wasm")]
+        composer.update(cx, |composer, cx| {
+            composer.set_bytes_picker(
+                std::sync::Arc::new(|_window, cx| {
+                    cx.spawn(async move |_cx: &mut gpui_kit::AsyncApp| crate::host::pick_files().await)
+                }),
+                cx,
+            );
+        });
         let composer_subscription = cx.subscribe_in(
             &composer,
             window,

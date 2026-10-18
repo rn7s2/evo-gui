@@ -52,6 +52,7 @@ pub use catalog::{
 pub use config_file::{ConfigError, ConfigFile, ConfigScope, SaveError};
 pub use history::{HistoryEntry, HistorySource, Session, SessionsQuery};
 pub use launch::{LaunchSpec, Program};
+pub use cli::Verdict;
 pub use lispcheck::{CheckError, Checker};
 pub use model_cache::ModelCache;
 pub use paths::{Root, TabId};

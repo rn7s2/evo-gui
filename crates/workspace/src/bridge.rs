@@ -89,11 +89,9 @@ impl<T> BridgeSender<T> {
         // `SendError`, which is what a caller of an unbounded send can see: a
         // `Full` that cannot happen, and a `Closed` that is the answer.
         let tagged = Tagged::new(self.revision, payload);
-        self.sender
-            .try_send(tagged)
-            .map_err(|error| match error {
-                TrySendError::Full(tagged) | TrySendError::Closed(tagged) => SendError(tagged),
-            })
+        self.sender.try_send(tagged).map_err(|error| match error {
+            TrySendError::Full(tagged) | TrySendError::Closed(tagged) => SendError(tagged),
+        })
     }
 
     /// True once the UI side is gone, without sending anything.

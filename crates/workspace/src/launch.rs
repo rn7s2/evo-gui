@@ -201,12 +201,17 @@ pub fn agent_catalog_argv() -> Vec<String> {
 /// Ask `evo-swarm check --json` about one launch (§9): are the models resolvable,
 /// can a lane reach its API, is the key there.
 ///
-/// Blocking — it is a process — so the caller runs it off the thread that draws
-/// (the empty tab's own check does). Running it is `crate::host`'s: in a browser
-/// there is no process to run, and the answer is the one a binary that could not
-/// be started gives.
-pub fn check(bin: &Path, plan: &LaunchPlan) -> Result<CheckReport, CliError> {
-    let body = crate::host::run_json(bin, &check_spec(plan).check_argv())?;
+/// `async` on both targets, and the difference between them is one `await`: on a host
+/// it is a process, so the caller runs it off the thread that draws (the empty tab's
+/// own check does); in a browser it is the same read asked of the server that has the
+/// binary (`GET /api/cli`). Both are `crate::host`'s, so a caller does not branch on
+/// which machine ran it.
+pub async fn check(bin: &Path, plan: &LaunchPlan) -> Result<CheckReport, CliError> {
+    let argv = check_spec(plan).check_argv();
+    #[cfg(not(target_family = "wasm"))]
+    let body = crate::host::run_json(bin, &argv)?;
+    #[cfg(target_family = "wasm")]
+    let body = crate::host::run_json(bin, &argv).await?;
     Ok(CheckReport::from_json(&body))
 }
 
@@ -369,7 +374,10 @@ fn open_request(launch: &Launch) -> Value {
     if let Some(plan) = launch.plan() {
         map.insert("model".into(), model_json(&plan.model));
         map.insert("thinking".into(), json_opt(&plan.thinking));
-        map.insert("workers".into(), plan.workers.map_or(Value::Null, Value::from));
+        map.insert(
+            "workers".into(),
+            plan.workers.map_or(Value::Null, Value::from),
+        );
         // Only a swarm has lanes, which is the same rule the native launch applies
         // before it passes a lane flag at all.
         if plan.swarm {

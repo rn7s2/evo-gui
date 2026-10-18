@@ -80,7 +80,10 @@ pub fn from_server(
 /// asks with, so what comes back is already the resumable set: no filtering here,
 /// and none there.
 pub fn session_entries(body: &Value) -> Vec<session::HistoryEntry> {
-    let indexed: Vec<StoreEntry> = history::parse(body).iter().map(history::from_session).collect();
+    let indexed: Vec<StoreEntry> = history::parse(body)
+        .iter()
+        .map(history::from_session)
+        .collect();
     to_session(&indexed)
 }
 
@@ -150,7 +153,10 @@ mod tests {
         assert_eq!(entry.folder, "/Users/you/coding/foo");
         assert!(entry.swarm, "an `evo-swarm` session resumes as a swarm");
         assert_eq!(entry.when, Some(1_756_000_300));
-        assert!(!entry.open_at_quit, "a browser has no recents to know this from");
+        assert!(
+            !entry.open_at_quit,
+            "a browser has no recents to know this from"
+        );
     }
 
     /// The whole hand-off: both bodies and no error is a filled launcher, and the rows

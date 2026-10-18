@@ -604,6 +604,196 @@ pub fn args(items: &[&str]) -> Vec<String> {
     items.iter().map(|item| (*item).to_owned()).collect()
 }
 
+/// What a binary is, as `<path> --version` answers (§13).
+///
+/// The five things a Settings row has to tell apart, and nothing else. It lives
+/// here, beside [`version_within`], because the mapping from a run to one of these
+/// is the same question wherever it is asked: the desktop app asks it of a child
+/// process on this machine, and the `evo-web` server asks it of the machine it
+/// serves — and the two have to give one answer for one path.
+///
+/// A browser cannot run a binary, so it never calls [`verdict`]; it asks the server
+/// that can, and this type is the vocabulary the two ends share (see
+/// [`Verdict::token`] and [`Verdict::from_wire`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Verdict {
+    /// It introduced itself: the line it printed, kept whole.
+    Ready(String),
+    /// Nothing is at that path.
+    Missing,
+    /// Something is there and this machine cannot run it.
+    NotExecutable,
+    /// It ran and did not introduce itself as the binary that was asked for.
+    NotEvo,
+    /// It ran and never answered: its bound ran out and it was stopped.
+    TimedOut,
+}
+
+impl Verdict {
+    /// The token this verdict travels as — over the wire, and in a page.
+    pub fn token(&self) -> &'static str {
+        match self {
+            Verdict::Ready(_) => "ready",
+            Verdict::Missing => "missing",
+            Verdict::NotExecutable => "not-executable",
+            Verdict::NotEvo => "not-evo",
+            Verdict::TimedOut => "timed-out",
+        }
+    }
+
+    /// The line it introduced itself with, when it did.
+    pub fn line(&self) -> Option<&str> {
+        match self {
+            Verdict::Ready(line) => Some(line),
+            _ => None,
+        }
+    }
+
+    /// The verdict a wire token names, with the line it came with. `ready` is the
+    /// one that needs a line; a token that is not one of the five is not a verdict,
+    /// and neither is a `ready` with nothing to show.
+    pub fn from_wire(token: &str, line: Option<&str>) -> Option<Verdict> {
+        Some(match token {
+            "ready" => Verdict::Ready(line?.to_owned()),
+            "missing" => Verdict::Missing,
+            "not-executable" => Verdict::NotExecutable,
+            "not-evo" => Verdict::NotEvo,
+            "timed-out" => Verdict::TimedOut,
+            _ => return None,
+        })
+    }
+}
+
+/// Ask `<path> --version` within `limit` and say what it is.
+///
+/// The one mapping from a run to a [`Verdict`], so that the desktop app and the
+/// server answering for a browser agree about a path. `name` is the binary the
+/// caller expects — `evo-swarm` or `evo-agent` — and it is read in the *output*,
+/// never in the file name: `evo` is a symlink to `evo-swarm`, and a copy under any
+/// name is still the binary.
+///
+/// Native only: it runs a child. A browser has no machine to ask, so it asks the
+/// server that has one.
+#[cfg(not(target_family = "wasm"))]
+pub fn verdict(bin: &Path, name: &str, limit: Duration) -> Verdict {
+    let output = match version_within(bin, limit) {
+        Ok(output) => output,
+        Err(CliError::NotFound { source, .. }) => {
+            return match source.kind() {
+                io::ErrorKind::NotFound => Verdict::Missing,
+                // A file that is not marked executable, and a directory: the same
+                // answer, since neither is something this app can spawn.
+                io::ErrorKind::PermissionDenied => Verdict::NotExecutable,
+                _ => Verdict::NotEvo,
+            };
+        }
+        Err(CliError::TimedOut { .. }) => return Verdict::TimedOut,
+        // A run that never printed a document cannot fail as one, so the other two
+        // errors are not reachable from here — and "not an evo binary" is the answer
+        // this question already has for a program that answered nothing.
+        Err(_) => return Verdict::NotEvo,
+    };
+
+    // Either stream: a binary that introduces itself on stderr is still introducing
+    // itself.
+    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&output.stderr));
+    let Some(line) = text.lines().map(str::trim).find(|line| !line.is_empty()) else {
+        return Verdict::NotEvo;
+    };
+
+    // The name has to *lead*: `evo-agent` is not what `evo-swarm` prints, and a
+    // program that merely mentions an evo binary in passing is not one.
+    let Some(rest) = line.strip_prefix(name) else {
+        return Verdict::NotEvo;
+    };
+    if !output.status.success()
+        || !(rest.is_empty() || rest.starts_with(' ') || rest.starts_with('\t'))
+    {
+        return Verdict::NotEvo;
+    }
+    Verdict::Ready(line.to_owned())
+}
+
+#[cfg(test)]
+mod verdict_tests {
+    use super::*;
+
+    /// A runnable script of this test's own, with the mode a spawn needs.
+    #[cfg(not(target_family = "wasm"))]
+    fn script(name: &str, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path =
+            std::env::temp_dir().join(format!("store-verdict-{}-{name}.sh", std::process::id()));
+        std::fs::write(&path, body).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    /// The five tokens are a closed vocabulary: every verdict has one, each names
+    /// its own verdict back, and nothing else is a verdict.
+    #[test]
+    fn a_verdict_survives_the_wire_and_nothing_else_is_one() {
+        let all = [
+            Verdict::Ready("evo-swarm 0.1.0".to_owned()),
+            Verdict::Missing,
+            Verdict::NotExecutable,
+            Verdict::NotEvo,
+            Verdict::TimedOut,
+        ];
+        for verdict in &all {
+            let token = verdict.token();
+            let line = verdict.line();
+            assert_eq!(
+                Verdict::from_wire(token, line).as_ref(),
+                Some(verdict),
+                "{token} did not name its own verdict back"
+            );
+        }
+        assert_eq!(Verdict::Ready("x".into()).line(), Some("x"));
+        assert_eq!(Verdict::Missing.line(), None);
+
+        // A token this crate does not mint is not a verdict, and `ready` without
+        // the line it is made of is not one either — the row has nothing to show
+        // for it.
+        assert_eq!(Verdict::from_wire("checking", None), None);
+        assert_eq!(Verdict::from_wire("", None), None);
+        assert_eq!(Verdict::from_wire("ready", None), None);
+    }
+
+    /// The verdicts a path can get, against real files: the mapping this crate
+    /// shares with the server, exercised where it runs.
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn a_path_is_answered_by_what_it_is() {
+        let scratch = std::env::temp_dir().join(format!("store-cli-verdict-{}", std::process::id()));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let short = Duration::from_secs(2);
+
+        let runnable = script("swarm", "#!/bin/sh\necho 'evo-swarm 9.9.9'\n");
+        assert_eq!(
+            verdict(&runnable, "evo-swarm", short),
+            Verdict::Ready("evo-swarm 9.9.9".to_owned())
+        );
+        // The same file is not the other binary.
+        assert_eq!(verdict(&runnable, "evo-agent", short), Verdict::NotEvo);
+        // Nothing there, and something there that cannot be run.
+        assert_eq!(
+            verdict(&scratch.join("nothing"), "evo-swarm", short),
+            Verdict::Missing
+        );
+        let plain = scratch.join("plain");
+        std::fs::write(&plain, "#!/bin/sh\n").unwrap();
+        assert_eq!(verdict(&plain, "evo-swarm", short), Verdict::NotExecutable);
+        // Something runnable that is not evo.
+        assert_eq!(verdict(Path::new("/bin/echo"), "evo-swarm", short), Verdict::NotEvo);
+
+        std::fs::remove_file(&runnable).unwrap();
+        std::fs::remove_file(&plain).unwrap();
+        std::fs::remove_dir_all(&scratch).unwrap();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

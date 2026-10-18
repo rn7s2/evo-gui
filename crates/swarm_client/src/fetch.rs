@@ -1,75 +1,99 @@
-//! The browser transport: `fetch` for one request, a `ReadableStream` read chunk
-//! by chunk for the op stream (CONTRACT.md §5).
+//! The browser transport: `reqwest` for one request, `eventsource-stream` for the
+//! op stream (CONTRACT.md §5).
 //!
 //! This is the wasm half of the transport seam — the other is [`crate::http`],
-//! which opens a socket. A browser can do neither of the things the native half
-//! is made of: it cannot open a raw TCP connection, and it cannot block a thread
-//! on a read. So everything here is `async`, driven by the page's own event loop
-//! through `wasm-bindgen-futures`, and the client's methods are `async` with it.
+//! which opens a socket. What the two share is the protocol, the paths and the
+//! types; what differs is the platform underneath, so this file is the browser's
+//! whole transport and native never compiles it.
+//!
+//! # Why not a hand-rolled reader
+//!
+//! This module used to frame SSE itself: a `ReadableStreamDefaultReader`, a
+//! `Vec<u8>` buffer, a `take_line` that drained up to the next `\n`, and a loop
+//! feeding [`crate::sse::SseParser`] a line at a time. It compiled, and it was
+//! wrong: a live session showed `reconnecting…` for ever and sent turns that were
+//! answered but never appeared, while `curl` against the same URL read the frames
+//! and the native half of this crate read them too. Framing a streaming protocol
+//! by hand is a place to be wrong quietly — a mis-split frame is a turn that never
+//! arrives — so the framing is now done by crates that exist for it:
+//!
+//! * [`reqwest`] is the request: one `fetch` on this target, with the timeout,
+//!   the headers and the status already handled;
+//! * [`eventsource_stream`] is the framing: `bytes_stream().eventsource()` turns
+//!   the reply body into a `Stream<Item = Result<Event, _>>` that splits frames
+//!   on the blank line, joins a frame's several `data:` lines with `\n`, and drops
+//!   `:` comments — the same rules [`crate::sse`] implements, from a crate that is
+//!   tested against them.
+//!
+//! Nothing here is per-target: the request, the framing and the loop below are the
+//! same code on both. What *is* per-target is small and named where it appears: a
+//! same-origin prefix has to be resolved against the page's origin before
+//! `reqwest` sees it (the browser's `fetch` refuses a relative URL), and a browser
+//! needs a cancellation handle where a host has a socket it can shut down.
 //!
 //! # Where it points
 //!
 //! A browser cannot spawn `evo-swarm`, so it does not talk to serve directly. It
 //! talks to the axum server that served the bundle ([`Target::BasePath`] — a
 //! same-origin prefix like `/api/tabs/7f3a`), which holds the bearer token and
-//! adds `Authorization` to every request it forwards. That is
-//! [`Client::at_base`], and it is the shape the web frontend uses.
+//! adds `Authorization` to every request it forwards. That is [`Client::at_base`],
+//! and it is the shape the web frontend uses.
 //!
-//! A [`Target::Loopback`] is also accepted — an absolute `http://host:port/…`
-//! URL with the token in a header — for a page served by the very machine that
-//! runs serve. It needs that server to send CORS headers, which the real
-//! `serve` does not, so it is a capability and not the intended route.
+//! A [`Target::Loopback`] is also accepted — an absolute `http://host:port/…` URL
+//! with the token in a header — for a page served by the very machine that runs
+//! serve. It needs that server to send CORS headers, which the real `serve` does
+//! not, so it is a capability and not the intended route.
 //!
 //! # Why not `EventSource`
 //!
-//! `EventSource` is the browser's own SSE client and would have been less code.
-//! It cannot be used here, for two reasons that are both fatal:
+//! The browser's own SSE client would have been less code still. It cannot be used
+//! here, for two reasons that are both fatal:
 //!
-//! * it cannot set an `Authorization` header, and this protocol is bearer-token
-//!   on every route;
-//! * it hides the response status — a 401 and a closed stream look the same to
-//!   it — so a tab could not tell "wrong token" from "the server restarted".
+//! * it cannot set an `Authorization` header, and this protocol is bearer-token on
+//!   every route;
+//! * it hides the response status — a 401 and a closed stream look the same to it
+//!   — so a tab could not tell "wrong token" from "the server restarted".
 //!
-//! An authenticated `fetch` whose body is read incrementally has neither
-//! problem: the status is in hand before a byte of the body is read, and the
-//! request carries whatever headers the protocol needs.
+//! An authenticated request whose body is read as a stream has neither problem:
+//! the status is in hand before a frame is parsed, and the request carries whatever
+//! headers the protocol needs.
 
 use std::cell::{Cell, RefCell};
 use std::fmt;
 use std::rc::Rc;
 use std::time::Duration;
 
-use js_sys::{Reflect, Uint8Array};
+use eventsource_stream::Eventsource;
+use futures_util::StreamExt;
 use serde_json::Value;
-use wasm_bindgen::closure::Closure;
-use wasm_bindgen::{JsCast, JsValue};
-use wasm_bindgen_futures::JsFuture;
-use web_sys::{
-    AbortController, AbortSignal, Headers, ReadableStreamDefaultReader,
-    ReadableStreamReadResult, RequestCredentials, RequestInit, Response,
-};
 
 use crate::error::{Error, Result, StatusError};
 use crate::protocol::{Cursor, OpReply, OpRequest, Snapshot};
-use crate::sse::SseParser;
+use crate::sse::SseEvent;
 use crate::transport::{request_path, HttpResponse, Target, Token};
 
 /// How much patience a body of `bytes` bytes buys, on top of the base timeout.
 ///
-/// The same model as the native transport's, and for the same reason: serve
-/// reads a POST body a few kilobytes a second, so the reply to a turn carrying a
-/// pasted screenshot is tens of seconds behind its request, and a client that
-/// gives up there reports a refusal for a turn the session has already taken.
-/// See [`crate::http`] for the measurements this is drawn from.
+/// The same model as the native transport's, and for the same reason: serve reads
+/// a POST body a few kilobytes a second, so the reply to a turn carrying a pasted
+/// screenshot is tens of seconds behind its request, and a client that gives up
+/// there reports a refusal for a turn the session has already taken. See
+/// [`crate::http`] for the measurements this is drawn from.
 const BODY_RATE_FLOOR: u64 = 8 * 1024;
 
 /// The most extra patience one body may earn, whatever it carries.
 const BODY_PATIENCE_CAP: Duration = Duration::from_secs(240);
 
-/// One `fetch`, on the page's event loop.
+/// How often the reader looks at the connection's own clock while it waits for a
+/// frame. Short enough that a dead connection is noticed promptly, long enough that
+/// an idle tab is not polling a timer hard. See [`Tap`].
+const IDLE_TICK: Duration = Duration::from_secs(1);
+
+/// One request, on the platform's own client.
 #[derive(Clone, Debug)]
 pub struct FetchClient {
     target: Target,
+    client: reqwest::Client,
     timeout: Duration,
     stream_timeout: Duration,
 }
@@ -78,6 +102,10 @@ impl FetchClient {
     pub fn new(target: Target) -> FetchClient {
         FetchClient {
             target,
+            // No timeout on the client: every request carries its own, because a
+            // stream's is different from a POST's and a client-wide one would
+            // apply to both.
+            client: reqwest::Client::new(),
             timeout: Duration::from_secs(30),
             stream_timeout: Duration::from_secs(45),
         }
@@ -113,6 +141,12 @@ impl FetchClient {
         }
     }
 
+    /// The patience for an idle stream — what [`Client::open_stream`]'s reader
+    /// gives a silent connection before it calls it dead.
+    pub fn stream_timeout(&self) -> Duration {
+        self.stream_timeout
+    }
+
     pub fn target(&self) -> &Target {
         &self.target
     }
@@ -133,26 +167,29 @@ impl FetchClient {
     ) -> Result<HttpResponse> {
         let payload = body.map(serde_json::to_string).transpose()?;
         let timeout = self.patience_for_body(payload.as_ref().map_or(0, String::len));
-        let url = self.url(route);
-        let init = RequestInit::new();
-        init.set_method(method);
-        // Same-origin: a cookie the proxy set travels, and nothing is sent
-        // cross-origin by default. A loopback target is a different origin and
-        // the token in the header is what authenticates it.
-        init.set_credentials(RequestCredentials::SameOrigin);
-        if let Some(payload) = &payload {
-            init.set_body(&JsValue::from_str(payload));
+        let mut request = self
+            .client
+            .request(method.parse().map_err(|_| {
+                Error::Config(format!("{method:?} is not an HTTP method"))
+            })?, self.url(route))
+            .timeout(timeout)
+            .header("accept", "application/json");
+        if let Some(token) = self.token() {
+            request = request.header("authorization", format!("Bearer {}", token.as_str()));
         }
-        init.set_headers(&self.headers(payload.is_some(), false)?);
-        // A deadline, not a delay: the fetch is aborted if it outlives its
-        // patience, which is what the native transport's read timeout does.
-        let signal = AbortSignal::timeout_with_u32(timeout.as_millis().min(u32::MAX as u128) as u32);
-        init.set_signal(Some(&signal));
-
-        let response = fetch(&url, &init).await?;
-        let status = response.status();
-        let headers = read_headers(&response);
-        let body = read_body(&response).await?;
+        if let Some(payload) = &payload {
+            request = request
+                .header("content-type", "application/json")
+                .body(payload.clone());
+        }
+        let response = request.send().await.map_err(request_error)?;
+        let status = response.status().as_u16();
+        let headers = read_headers(response.headers());
+        let body = response
+            .bytes()
+            .await
+            .map_err(|e| Error::Protocol(format!("cannot read the body: {e}")))?
+            .to_vec();
         Ok(HttpResponse {
             status,
             headers,
@@ -172,329 +209,238 @@ impl FetchClient {
     /// before any stream header, so it arrives as an ordinary HTTP error here —
     /// which is the whole reason this is not an `EventSource`.
     ///
-    /// The connection is left with an `AbortController` armed: [`FetchSseConnection::close`]
-    /// aborts the fetch, which is what unblocks a `read` that is waiting on a
-    /// stream nobody is going to write to again.
+    /// The reply is *not* read here: an SSE stream does not end, so a caller that
+    /// awaited the body would wait for the tab to be over. What is read is the
+    /// status, which is what tells a refusal from a stream; the frames come from
+    /// [`FetchSseConnection::next_event`] as the server writes them.
     pub async fn open_sse(&self, route: &str) -> Result<FetchSseConnection> {
-        let url = self.url(route);
-        let controller = AbortController::new()
-            .map_err(|e| Error::Protocol(format!("no AbortController: {}", describe(&e))))?;
-        let init = RequestInit::new();
-        init.set_method("GET");
-        init.set_credentials(RequestCredentials::SameOrigin);
-        init.set_headers(&self.headers(false, true)?);
-        init.set_signal(Some(&controller.signal()));
-
-        let response = fetch(&url, &init).await?;
-        let status = response.status();
+        let mut request = self
+            .client
+            .get(self.url(route))
+            .header("accept", "text/event-stream")
+            // A proxy that buffers would defeat an SSE stream; this asks it not
+            // to. Harmless where there is no proxy.
+            .header("cache-control", "no-cache");
+        if let Some(token) = self.token() {
+            request = request.header("authorization", format!("Bearer {}", token.as_str()));
+        }
+        let response = request.send().await.map_err(request_error)?;
+        let status = response.status().as_u16();
         if !(200..300).contains(&status) {
-            let body = read_body(&response).await?;
+            let body = response.bytes().await.map_err(|e| {
+                Error::Protocol(format!("cannot read the refusal: {e}"))
+            })?;
             let text = String::from_utf8_lossy(&body).into_owned();
             let raw = serde_json::from_str(&text).unwrap_or(Value::String(text.clone()));
             return Err(Error::Status(StatusError::from_reply(status, raw, &text)));
         }
-        let stream = response
-            .body()
-            .ok_or_else(|| Error::Protocol("the stream has no body".into()))?;
-        let reader = stream
-            .get_reader()
-            .dyn_into::<ReadableStreamDefaultReader>()
-            .map_err(|_| Error::Protocol("the stream is not a byte reader".into()))?;
+        let last_activity = Rc::new(Cell::new(js_sys::Date::now()));
+        let tap = Tap {
+            inner: response.bytes_stream(),
+            last_activity: Rc::clone(&last_activity),
+        };
         Ok(FetchSseConnection {
-            reader,
-            controller,
-            buffer: Vec::new(),
-            ended: false,
-            stream_timeout: self.stream_timeout,
+            stream: Box::pin(tap.eventsource()),
+            done: false,
+            last_activity,
         })
     }
 
-    /// The absolute or same-origin URL one route is fetched at.
-    fn url(&self, route: &str) -> String {
+    /// The token this client holds, if it holds one: a base-path client holds none,
+    /// because the proxy that forwards it adds one.
+    pub fn token(&self) -> Option<&Token> {
         match &self.target {
-            // A relative URL: same origin as the page, whatever that is. The
-            // prefix is the proxy's, and the route is the protocol's.
-            Target::BasePath(_) => request_path(&self.target, route),
-            Target::Loopback { host, port, .. } => {
-                let host = if host.contains(':') && !host.starts_with('[') {
-                    format!("[{host}]")
-                } else {
-                    host.clone()
-                };
-                format!("http://{host}:{port}{route}")
-            }
+            Target::Loopback { token, .. } => Some(token),
+            Target::BasePath(_) => None,
         }
     }
 
-    /// The headers every request carries. `Accept: text/event-stream` for a
-    /// stream; `Content-Type` when there is a body; and `Authorization` only
-    /// when this client holds a token of its own — a base-path client holds
-    /// none, because the proxy that forwards it adds one.
-    fn headers(&self, has_body: bool, sse: bool) -> Result<JsValue> {
-        let headers = Headers::new()
-            .map_err(|e| Error::Protocol(format!("no Headers: {}", describe(&e))))?;
-        if let Target::Loopback { token, .. } = &self.target {
-            set_header(&headers, "authorization", &format!("Bearer {}", token.as_str()))?;
+    /// The absolute URL one route is requested at.
+    ///
+    /// A browser's `fetch` refuses a relative URL — `reqwest` builds the request
+    /// itself and answers `builder error` rather than resolving it — so a
+    /// same-origin prefix is resolved against the page's origin here, and what
+    /// reaches the transport is always absolute.
+    fn url(&self, route: &str) -> String {
+        let path = request_path(&self.target, route);
+        match &self.target {
+            // A loopback target is already absolute: host and port are in it.
+            Target::Loopback { .. } => path,
+            Target::BasePath(_) => format!("{}{}", origin(), path),
         }
-        if sse {
-            set_header(&headers, "accept", "text/event-stream")?;
-            // A proxy that buffers would defeat an SSE stream; this asks it not
-            // to. Harmless where there is no proxy.
-            set_header(&headers, "cache-control", "no-cache")?;
-        }
-        if has_body {
-            set_header(&headers, "content-type", "application/json")?;
-        }
-        Ok(headers.into())
     }
 }
 
-/// Set one header, as an error rather than a panic: a browser refuses some
-/// names outright, and a refusal here is a config error, not a crash.
-fn set_header(headers: &Headers, name: &str, value: &str) -> Result<()> {
-    headers
-        .set(name, value)
-        .map_err(|e| Error::Protocol(format!("cannot set {name}: {}", describe(&e))))
-}
-
-/// `window.fetch`, as a future.
-async fn fetch(url: &str, init: &RequestInit) -> Result<Response> {
-    let window = web_sys::window()
-        .ok_or_else(|| Error::Config("no window: this is not a browser context".into()))?;
-    let promise = window.fetch_with_str_and_init(url, init);
-    let value = JsFuture::from(promise).await.map_err(fetch_error)?;
-    value
-        .dyn_into::<Response>()
-        .map_err(|_| Error::Protocol("fetch answered something that is not a Response".into()))
-}
-
-/// A rejected fetch as an [`Error`].
+/// The page's own origin — `https://host:port` — for resolving a same-origin path.
 ///
-/// A network failure and an abort are the same shape here — a `TypeError`, with
-/// the reason on `signal.reason` — and both are transport failures: the
-/// connection (rather than the request) is what went wrong. That is the case a
-/// stream reconnects on, so it is [`Error::Closed`] and not a protocol error.
-fn fetch_error(value: JsValue) -> Error {
-    let text = describe(&value);
-    if value.is_instance_of::<js_sys::TypeError>() {
+/// This is the one thing the browser needs that a host does not, and it is the
+/// *only* reason a base-path client cannot be built without a page: a path has no
+/// origin of its own.
+fn origin() -> String {
+    web_sys::window()
+        .and_then(|window| window.location().origin().ok())
+        .unwrap_or_default()
+}
+
+/// A rejected request as an [`Error`].
+///
+/// A network failure and a timeout are the same shape to a caller — the connection
+/// (rather than the request) is what went wrong — and that is the case a stream
+/// reconnects on, so they are transport errors and not protocol ones.
+fn request_error(error: reqwest::Error) -> Error {
+    if error.is_timeout() {
+        return Error::Timeout(error.to_string());
+    }
+    if error.is_builder() {
+        // A URL `reqwest` would not build: a config mistake, and the message says
+        // which — `builder error` alone is not worth showing anyone.
+        return Error::Config(error.to_string());
+    }
+    // Everything else a request can fail with is the connection rather than the
+    // request: the case a stream reconnects on. `is_connect` is not asked — on wasm
+    // there is no connection to have failed, and the method does not exist there.
+    if error.is_request() || error.is_body() || error.is_decode() {
         return Error::Closed;
     }
-    Error::Protocol(format!("fetch failed: {text}"))
-}
-
-/// One JavaScript value as text, for an error message.
-fn describe(value: &JsValue) -> String {
-    value
-        .as_string()
-        .or_else(|| {
-            value
-                .dyn_ref::<js_sys::Error>()
-                .map(|e| String::from(e.message()))
-        })
-        .unwrap_or_else(|| format!("{value:?}"))
+    Error::Protocol(error.to_string())
 }
 
 /// A reply's headers, lower-cased, as the native transport's `HttpResponse` has
 /// them.
-fn read_headers(response: &Response) -> Vec<(String, String)> {
-    let headers = response.headers();
-    let mut out = Vec::new();
-    // `entries()` is an iterator of `[name, value]` pairs; a browser folds the
-    // name to lower case itself, so there is nothing to normalise.
-    if let Ok(iter) = Reflect::get(&headers, &JsValue::from_str("entries")) {
-        if let Ok(func) = iter.dyn_into::<js_sys::Function>() {
-            if let Ok(entries) = func.call0(&headers) {
-                if let Ok(iterator) = entries.dyn_into::<js_sys::Iterator>() {
-                    for entry in iterator {
-                        let Ok(entry) = entry else { break };
-                        let Ok(pair) = entry.dyn_into::<js_sys::Array>() else {
-                            continue;
-                        };
-                        let (Some(name), Some(value)) =
-                            (pair.get(0).as_string(), pair.get(1).as_string())
-                        else {
-                            continue;
-                        };
-                        out.push((name.to_ascii_lowercase(), value));
-                    }
-                }
-            }
-        }
-    }
-    out
+fn read_headers(headers: &reqwest::header::HeaderMap) -> Vec<(String, String)> {
+    headers
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.as_str().to_ascii_lowercase(),
+                value.to_str().unwrap_or_default().to_owned(),
+            )
+        })
+        .collect()
 }
 
-/// A reply's whole body.
-async fn read_body(response: &Response) -> Result<Vec<u8>> {
-    let promise = response
-        .array_buffer()
-        .map_err(|e| Error::Protocol(format!("cannot read the body: {}", describe(&e))))?;
-    let value = JsFuture::from(promise)
-        .await
-        .map_err(|e| Error::Protocol(format!("the body failed: {}", describe(&e))))?;
-    let buffer: js_sys::ArrayBuffer = value
-        .dyn_into()
-        .map_err(|_| Error::Protocol("the body is not an ArrayBuffer".into()))?;
-    Ok(Uint8Array::new(&buffer).to_vec())
-}
-
-/// A live SSE connection, read a chunk at a time.
+/// A byte stream that notes when it last produced anything.
 ///
-/// The body of an SSE reply arrives in whatever pieces the network and the proxy
-/// hand over, and a frame is not aligned to a chunk: one `read()` can end in the
-/// middle of a line, or carry three frames and half of a fourth. So the bytes go
-/// through a buffer and [`read_line`](Self::read_line) hands back one line at a
-/// time, holding the remainder — which is exactly what the native transport gets
-/// for free from a `BufReader`.
+/// The liveness of an SSE connection is *any* byte arriving, and the server proves
+/// it with a `: keepalive` comment every 15 s. But a comment is not an event, so
+/// [`eventsource_stream`] drops it — which means the frame stream below cannot see
+/// the very thing that says the connection is alive. Timing the *frames* therefore
+/// measures nothing useful: a healthy idle stream looks exactly like a dead one,
+/// and a reader that reconnects on frame-silence tears down good connections for
+/// ever (measured: two reconnects in a hundred seconds, which is the "reconnecting…"
+/// the reader sees).
+///
+/// So the tap sits *under* the framing, where the bytes still are: it records the
+/// last moment one arrived, keepalives included, and the reader's patience is
+/// measured against that instead of against the last frame.
+struct Tap<S> {
+    inner: S,
+    last_activity: Rc<Cell<f64>>,
+}
+
+impl<S, T> futures_util::Stream for Tap<S>
+where
+    S: futures_util::Stream<Item = T> + Unpin,
+{
+    type Item = T;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        let polled = std::pin::Pin::new(&mut self.inner).poll_next(cx);
+        if matches!(polled, std::task::Poll::Ready(Some(_))) {
+            self.last_activity.set(js_sys::Date::now());
+        }
+        polled
+    }
+}
+
+/// A live SSE connection, read one frame at a time.
+///
+/// The framing is [`eventsource_stream`]'s, not this crate's: what it hands back
+/// is already a whole event, with a frame's several `data:` lines joined and its
+/// `:` comments dropped. This type's job is the two things a stream of frames
+/// still needs — a way to ask for the next one, and a way to stop.
 pub struct FetchSseConnection {
-    reader: ReadableStreamDefaultReader,
-    controller: AbortController,
-    /// Bytes read and not yet handed out as a line.
-    buffer: Vec<u8>,
-    ended: bool,
-    /// The patience for an idle stream: serve keeps one alive with a
-    /// `: keepalive` comment every 15 s, so a silence past this is a dead
-    /// socket, and the stream reconnects. The native transport gets this from
-    /// its socket's read timeout; here it is a timer that aborts the fetch.
-    stream_timeout: Duration,
+    /// The frame stream. Boxed because the underlying reader is a `reqwest` body
+    /// of an unnamed type, and pinned because a stream is polled in place.
+    ///
+    /// Not `Send`: a browser's body is a `ReadableStream` on the one thread there
+    /// is, and `reqwest`'s wasm stream is `!Send` for exactly that reason. Nothing
+    /// here crosses a thread — the whole stream task is one `spawn_local` — so the
+    /// bound would only be a lie about a platform that has no second thread.
+    stream: std::pin::Pin<
+        Box<
+            dyn futures_util::Stream<
+                Item = std::result::Result<
+                    eventsource_stream::Event,
+                    eventsource_stream::EventStreamError<reqwest::Error>,
+                >,
+            >,
+        >,
+    >,
+    done: bool,
+    /// When a byte last arrived on this connection, keepalives included — the
+    /// clock the reader's idle patience is measured against. See [`Tap`].
+    last_activity: Rc<Cell<f64>>,
 }
 
 impl FetchSseConnection {
-    /// The next line, without its terminator; `Ok(None)` at end of stream.
-    pub async fn read_line(&mut self) -> Result<Option<String>> {
-        loop {
-            if let Some(line) = self.take_line() {
-                return Ok(Some(line));
-            }
-            if self.ended {
-                // The last line of a body that did not end in a newline.
-                if self.buffer.is_empty() {
-                    return Ok(None);
-                }
-                let line = std::mem::take(&mut self.buffer);
-                return Ok(Some(lossy(&line)));
-            }
-            self.read_chunk().await?;
-        }
-    }
-
-    /// One complete line out of the buffer, if there is one.
-    fn take_line(&mut self) -> Option<String> {
-        let at = self.buffer.iter().position(|byte| *byte == b'\n')?;
-        let mut line: Vec<u8> = self.buffer.drain(..=at).collect();
-        while line.last().is_some_and(|byte| *byte == b'\n' || *byte == b'\r') {
-            line.pop();
-        }
-        Some(lossy(&line))
-    }
-
-    /// Read one chunk into the buffer, and note the end of the stream.
+    /// The next frame, or `None` at the end of the stream.
     ///
-    /// The read is bounded: a chunk that never comes is a connection that is
-    /// gone, and the timer below aborts the fetch when the patience runs out —
-    /// which is what the native transport's socket read timeout does, and what
-    /// makes a stream reconnect rather than hang forever on a dead socket.
-    async fn read_chunk(&mut self) -> Result<()> {
-        let _deadline = self.arm_idle_timeout();
-        let promise = self.reader.read();
-        let value = JsFuture::from(promise)
-            .await
-            .map_err(|e| Error::Protocol(format!("the stream failed: {}", describe(&e))))?;
-        let result: ReadableStreamReadResult = value
-            .dyn_into()
-            .map_err(|_| Error::Protocol("a stream read gave no result".into()))?;
-        if result.get_done().unwrap_or(true) {
-            self.ended = true;
-            return Ok(());
+    /// This is the browser's [`crate::http::SseConnection::read_line`]: a caller
+    /// reads frames until the connection ends. A `stream.reset` and a `hello` are
+    /// frames like any other — the caller is what decides what they mean.
+    pub async fn next_event(&mut self) -> Option<Result<SseEvent>> {
+        if self.done {
+            return None;
         }
-        let value = result.get_value();
-        let chunk: Uint8Array = value
-            .dyn_into()
-            .map_err(|_| Error::Protocol("a stream chunk is not bytes".into()))?;
-        self.buffer.extend_from_slice(&chunk.to_vec());
-        Ok(())
-    }
-
-    /// Arm the idle deadline for one read: if no chunk arrives within the
-    /// stream's patience, abort the fetch — which ends the stream, and is
-    /// reported as a transport failure for the reader to reconnect from.
-    fn arm_idle_timeout(&self) -> Option<IdleTimeout> {
-        let window = web_sys::window()?;
-        let fired = Rc::new(Cell::new(false));
-        let controller = self.controller.clone();
-        let expired = Rc::clone(&fired);
-        let closure = Closure::once(move || {
-            if !expired.get() {
-                controller.abort();
+        match self.stream.next().await {
+            Some(Ok(event)) => Some(Ok(SseEvent::from_wire(&event.event, &event.id, &event.data))),
+            Some(Err(error)) => {
+                self.done = true;
+                Some(Err(Error::Protocol(format!("the stream broke: {error}"))))
             }
-        });
-        let millis = self.stream_timeout.as_millis().min(i32::MAX as u128) as i32;
-        let handle = window
-            .set_timeout_with_callback_and_timeout_and_arguments_0(
-                closure.as_ref().unchecked_ref(),
-                millis,
-            )
-            .ok()?;
-        Some(IdleTimeout {
-            handle,
-            fired,
-            _closure: closure,
-        })
+            None => {
+                self.done = true;
+                None
+            }
+        }
     }
 
-    /// Unblock a reader on another task: abort the fetch, which ends the stream.
-    /// Idempotent, and safe to call from anywhere the handle is.
-    pub fn close(&self) {
-        self.controller.abort();
+    /// Unblock a reader: end the stream, so a `next_event` in flight comes back
+    /// `None` instead of waiting out the server's next keepalive.
+    ///
+    /// The browser has no socket to shut down, so this closes the stream from this
+    /// side — which is what a `Drop` on the reader would do anyway, and is
+    /// idempotent.
+    pub fn close(&mut self) {
+        self.done = true;
     }
 
-    /// The controller whose `signal` is this stream's fetch — a handle that can
-    /// be aborted from elsewhere.
-    pub fn controller(&self) -> &AbortController {
-        &self.controller
+    /// Whether this connection has gone quiet for longer than `patience`.
+    ///
+    /// Measured against the last *byte*, not the last frame: a stream that is idle
+    /// but alive is saying so with a `: keepalive` every 15 s, and only the tap
+    /// under the framing can see those. See [`Tap`].
+    pub fn is_idle(&self, patience: Duration) -> bool {
+        let idle_ms = js_sys::Date::now() - self.last_activity.get();
+        idle_ms > patience.as_millis() as f64
     }
 }
 
 impl fmt::Debug for FetchSseConnection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("FetchSseConnection")
-            .field("ended", &self.ended)
-            .field("buffered", &self.buffer.len())
+            .field("done", &self.done)
             .finish_non_exhaustive()
     }
 }
 
-/// One read's idle deadline: a timer that aborts the fetch if the read it was
-/// armed for has not come back. Dropped when the read does come back, which
-/// cancels the timer.
-struct IdleTimeout {
-    handle: i32,
-    fired: Rc<Cell<bool>>,
-    /// Held so the JS callback outlives the timer, and released with it.
-    _closure: Closure<dyn FnMut()>,
-}
-
-impl Drop for IdleTimeout {
-    fn drop(&mut self) {
-        // Before the timer is cleared, so a callback already queued behind this
-        // drop does not abort a fetch that just answered.
-        self.fired.set(true);
-        if let Some(window) = web_sys::window() {
-            window.clear_timeout_with_handle(self.handle);
-        }
-    }
-}
-
-/// Bytes as text, lossily — a frame is UTF-8 JSON, and a chunk boundary can fall
-/// inside a multi-byte character, which is why the buffer holds bytes and not a
-/// `String`.
-fn lossy(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes).into_owned()
-}
-
 /// A client bound to one server, at one address, with one token — the wasm
-/// counterpart of [`crate::client::Client`], and the type a wasm consumer names
-/// as `swarm_client::Client`.
+/// counterpart of [`crate::client::Client`], and the type a wasm consumer names as
+/// `swarm_client::Client`.
 ///
 /// Everything is `async`: a browser has no thread to block.
 #[derive(Clone, Debug)]
@@ -503,9 +449,9 @@ pub struct Client {
 }
 
 impl Client {
-    /// A client for a same-origin path prefix with no token — the browser's
-    /// shape. Every request goes to `<prefix>/snapshot`, `<prefix>/stream`, …
-    /// and the server behind that prefix adds the bearer token itself.
+    /// A client for a same-origin path prefix with no token — the browser's shape.
+    /// Every request goes to `<prefix>/snapshot`, `<prefix>/stream`, … and the
+    /// server behind that prefix adds the bearer token itself.
     pub fn at_base(prefix: &str) -> Result<Client> {
         Ok(Client {
             fetch: FetchClient::at_base(prefix)?,
@@ -539,14 +485,20 @@ impl Client {
         }
     }
 
-    /// The transport underneath, for a caller that needs a route the typed
-    /// methods do not cover.
+    /// The transport underneath, for a caller that needs a route the typed methods
+    /// do not cover.
     pub fn fetch(&self) -> &FetchClient {
         &self.fetch
     }
 
     pub fn target(&self) -> &Target {
         self.fetch.target()
+    }
+
+    /// The patience for an idle stream — the `with_stream_timeout` this client was
+    /// built with, and what its reader calls a silent connection dead after.
+    pub fn stream_timeout(&self) -> Duration {
+        self.fetch.stream_timeout()
     }
 
     /// `GET /snapshot?topics=…&items=N` — the whole view, atomically.
@@ -561,8 +513,8 @@ impl Client {
 
     /// Open the op stream (§5.3) from `since`, or from now when it is `None`.
     ///
-    /// The caller reads the lines; [`WasmEventStream`] is the usual one, and it
-    /// is the one that knows how to reconnect.
+    /// The caller reads the frames; [`WasmEventStream`] is the usual one, and it is
+    /// the one that knows how to reconnect.
     pub async fn open_stream(
         &self,
         topics: &[String],
@@ -577,9 +529,9 @@ impl Client {
 
     /// `POST /ops` (§5.5) — one transparent retry on a connection failure.
     ///
-    /// The retry is safe because `rid` is idempotent: the server remembers the
-    /// last 256 replies by rid, so a request that was answered into a connection
-    /// that died is answered again rather than acted on twice.
+    /// The retry is safe because `rid` is idempotent: the server remembers the last
+    /// 256 replies by rid, so a request that was answered into a connection that
+    /// died is answered again rather than acted on twice.
     pub async fn op(&self, op: &str, args: Value) -> Result<OpReply> {
         let rid = crate::transport::new_rid();
         self.op_with_rid(&rid, op, args).await
@@ -760,8 +712,8 @@ pub enum StreamMsg {
 /// The native [`crate::stream::EventStream`] reads on a thread of its own; a
 /// browser has no thread, so this is a task on the event loop, and `recv` is
 /// `async` rather than blocking. What it does is the same: one connection at a
-/// time, resuming from the last cursor it saw, parking when the server asks for
-/// a full re-read.
+/// time, resuming from the last cursor it saw, parking when the server asks for a
+/// full re-read.
 ///
 /// Cheap to clone, and every handle is the same stream — which is the native
 /// guarantee, and the reason the state is behind an `Rc`: it is the **last**
@@ -775,40 +727,30 @@ enum Order {
     Stop,
 }
 
-/// The stream itself: one per `start`, shared by every handle to it. When the
-/// last handle goes, the reader stops.
+/// The stream itself: one per `start`, shared by every handle to it. When the last
+/// handle goes, the reader stops.
 pub struct StreamHandle {
     messages: async_channel::Receiver<StreamMsg>,
     orders: async_channel::Sender<Order>,
     /// The cursor last seen, shared so a consumer can read it without asking the
     /// task.
     cursor: Rc<RefCell<Option<Cursor>>>,
-    /// The connection in flight, so `stop` can abort it: a read waiting on a
-    /// stream nobody will write to again would otherwise wait out its idle
-    /// timeout. This is the native handle's socket shutdown, on a platform that
-    /// has no socket.
-    abort: Rc<RefCell<Option<AbortController>>>,
+    /// Whether the reader has been told to stop. The stream task checks it between
+    /// frames, which is how `stop` ends a read that would otherwise wait for the
+    /// server's next keepalive.
     stopped: Rc<Cell<bool>>,
 }
 
 impl StreamHandle {
-    /// Stop reading: the flag ends a backoff, the order ends a parked stream, and
-    /// aborting the fetch ends a read that is in flight.
+    /// Stop reading: the flag ends a backoff and a read in flight, and the order
+    /// ends a parked stream.
     fn stop_stream(&self) {
         self.stopped.set(true);
         let _ = self.orders.try_send(Order::Stop);
-        // The borrow ends here, before the call: `if let Some(c) = self.abort.borrow().as_ref()`
-        // holds the `Ref` for the whole body, so `abort()` would run while `abort`
-        // was still borrowed — and a re-entrant `abort()` panics with
-        // `already borrowed`. Cloning the controller first is what scopes it.
-        let controller = self.abort.borrow().clone();
-        if let Some(controller) = controller {
-            controller.abort();
-        }
     }
 
-    /// The next message, awaited; `None` once the stream has stopped and its
-    /// last message has been read.
+    /// The next message, awaited; `None` once the stream has stopped and its last
+    /// message has been read.
     pub async fn recv(&self) -> Option<StreamMsg> {
         self.messages.recv().await.ok()
     }
@@ -837,23 +779,21 @@ impl Drop for StreamHandle {
 }
 
 impl WasmEventStream {
-    /// Start reading. The task ends when the stream does — on `stop`, or when
-    /// the last handle is dropped.
+    /// Start reading. The task ends when the stream does — on `stop`, or when the
+    /// last handle is dropped.
     pub fn start(client: Client, config: StreamConfig) -> WasmEventStream {
         let (messages_tx, messages) = async_channel::bounded(1024);
         let (orders, orders_rx) = async_channel::bounded(8);
         let cursor = Rc::new(RefCell::new(config.cursor.clone()));
-        let abort = Rc::new(RefCell::new(None));
         let stopped = Rc::new(Cell::new(false));
         let stream = WasmEventStream(Rc::new(StreamHandle {
             messages,
             orders,
             cursor: Rc::clone(&cursor),
-            abort: Rc::clone(&abort),
             stopped: Rc::clone(&stopped),
         }));
         wasm_bindgen_futures::spawn_local(run(
-            client, config, messages_tx, orders_rx, cursor, abort, stopped,
+            client, config, messages_tx, orders_rx, cursor, stopped,
         ));
         stream
     }
@@ -886,7 +826,6 @@ async fn run(
     messages: async_channel::Sender<StreamMsg>,
     orders: async_channel::Receiver<Order>,
     cursor: Rc<RefCell<Option<Cursor>>>,
-    abort: Rc<RefCell<Option<AbortController>>>,
     stopped: Rc<Cell<bool>>,
 ) {
     let mut attempt: u32 = 0;
@@ -895,17 +834,7 @@ async fn run(
             break;
         }
         let since = cursor.borrow().clone();
-        match read(
-            &client,
-            &config.topics,
-            since,
-            &messages,
-            &cursor,
-            &abort,
-            &stopped,
-        )
-        .await
-        {
+        match read(&client, &config.topics, since, &messages, &cursor, &stopped).await {
             // A re-read: park until the consumer says where to resume.
             Ok(Ended::Reset(reason)) => {
                 if messages.send(StreamMsg::Reset { reason }).await.is_err() {
@@ -958,23 +887,46 @@ async fn read(
     since: Option<Cursor>,
     messages: &async_channel::Sender<StreamMsg>,
     cursor: &Rc<RefCell<Option<Cursor>>>,
-    abort: &Rc<RefCell<Option<AbortController>>>,
     stopped: &Rc<Cell<bool>>,
 ) -> Result<Ended> {
     let mut connection = client.open_stream(topics, since.as_ref()).await?;
-    // The handle `stop` aborts from anywhere; cleared when this connection ends.
-    *abort.borrow_mut() = Some(connection.controller().clone());
-    let mut parser = SseParser::new();
     let ended = loop {
         if stopped.get() || messages.is_closed() {
             break Ended::Disconnected;
         }
-        let line = match connection.read_line().await {
-            Ok(Some(line)) => line,
-            Ok(None) | Err(_) => break Ended::Disconnected,
-        };
-        let Some(event) = parser.feed(&line) else {
-            continue;
+        // The next frame, or a tick. The tick is what lets an idle-but-alive stream
+        // be told apart from a dead one: frames can be minutes apart on a quiet
+        // tab, while the server keeps saying it is there every 15 s — but those
+        // keepalives are comments, which the framing drops. Only the tap under it
+        // sees them, so the patience is measured against the last byte rather than
+        // against the last frame (see `Tap`).
+        //
+        // The clock is cloned out before the `select`, because the borrow of the
+        // connection that `next_event` takes lives as long as the future does.
+        let activity = Rc::clone(&connection.last_activity);
+        let next = futures_util::future::select(
+            Box::pin(connection.next_event()),
+            Box::pin(sleep(IDLE_TICK, stopped)),
+        );
+        let event = match next.await {
+            // A frame arrived first: `eventsource-stream` has already joined its
+            // `data:` lines and dropped the `:` keepalives, so this is the same
+            // shape the native reader's parser produces.
+            futures_util::future::Either::Left((event, _)) => match event {
+                Some(Ok(event)) => event,
+                // Closed, or broke: either way this connection is over.
+                Some(Err(_)) | None => break Ended::Disconnected,
+            },
+            // Nothing arrived in a tick. Not a dead stream by itself — the server's
+            // own keepalives are 15 s apart — so the connection's clock decides,
+            // and only a silence past the patience ends it.
+            futures_util::future::Either::Right(_) => {
+                let idle = js_sys::Date::now() - activity.get();
+                if stopped.get() || idle > client.stream_timeout().as_millis() as f64 {
+                    break Ended::Disconnected;
+                }
+                continue;
+            }
         };
         let frame = crate::protocol::StreamFrame::parse(
             event.kind.as_deref(),
@@ -1003,7 +955,6 @@ async fn read(
         }
     };
     connection.close();
-    *abort.borrow_mut() = None;
     Ok(ended)
 }
 
@@ -1028,26 +979,17 @@ async fn sleep(total: Duration, stopped: &Rc<Cell<bool>>) -> bool {
         }
         let step = left.min(SLICE);
         let promise = js_sys::Promise::new(&mut |resolve, _reject| {
-            let window = web_sys::window();
-            if let Some(window) = window {
+            if let Some(window) = web_sys::window() {
+                // `resolve` is already a `js_sys::Function`: `setTimeout` takes the
+                // callback itself, so there is nothing to cast.
                 let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
-                    resolve.unchecked_ref(),
+                    &resolve,
                     step as i32,
                 );
             }
         });
-        let _ = JsFuture::from(promise).await;
+        let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
         left -= step;
     }
     !stopped.get()
-}
-
-/// A token this client holds, or `None` when it holds none.
-impl FetchClient {
-    pub fn token(&self) -> Option<&Token> {
-        match &self.target {
-            Target::Loopback { token, .. } => Some(token),
-            Target::BasePath(_) => None,
-        }
-    }
 }

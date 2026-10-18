@@ -334,6 +334,14 @@ pub struct WorkspaceView {
     /// The catalog and the session list the app pushed, waiting for the tabs that
     /// show them (§9.4, §9.5).
     launcher: LauncherData,
+    /// The tab a browser's close confirmation is about, while it is up.
+    ///
+    /// A page's `confirm` is answered asynchronously — it is a dialog, and the
+    /// answer arrives whenever the person gives it — so the close has to be
+    /// remembered between the question and the answer. `None` on a host, which has
+    /// no such question.
+    #[cfg(target_family = "wasm")]
+    pending_close: Option<TabId>,
     /// Tabs whose run ended while another tab was being shown: the strip keeps a
     /// dot on them until they are looked at (§7.1).
     finished: BTreeSet<TabId>,
@@ -428,6 +436,8 @@ impl WorkspaceView {
             config,
             quit_hook: None,
             launcher: LauncherData::default(),
+            #[cfg(target_family = "wasm")]
+            pending_close: None,
             finished: BTreeSet::new(),
             hovered: None,
             close_hovered: None,
@@ -1147,6 +1157,39 @@ impl WorkspaceView {
             // Already on its way out: a second × has nothing more to do.
             return;
         }
+        // A browser asks first, always. There is no ⌘W in a page — the shortcut
+        // lives in the desktop shell's menus (`crates/app/src/menus.rs`) — so the
+        // strip's ✕ is the only way to close a tab, and a click that lands on it by
+        // accident would otherwise take a running session with it. The page's own
+        // `confirm` is the dialog a browser has; a host keeps its behaviour exactly
+        // as it was, because there a close is a deliberate shortcut or menu item and
+        // the prompt below is already the one that matters (an editor with unsaved
+        // changes).
+        #[cfg(target_family = "wasm")]
+        {
+            // A second ✕ while the question is up would put up a second question
+            // about the same tab. The first answer settles it either way.
+            if self.pending_close.is_some() {
+                return;
+            }
+            let name = tab.read(cx).title(cx);
+            let this = cx.entity().downgrade();
+            cx.spawn_in(window, async move |_this, cx| {
+                let yes = crate::host::confirm(&format!("Close {name}?")).await;
+                let _ = this.update_in(cx, |view, window, cx| {
+                    if yes {
+                        view.confirm_close(id, window, cx);
+                    } else {
+                        view.pending_close = None;
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+            self.pending_close = Some(id);
+            cx.notify();
+            return;
+        }
         // A save that is in flight is not something to walk away from. The write is
         // on the background executor with a copy of the text, and dropping the editor
         // under it — or answering a discard that could not undo it — is how a file
@@ -1161,6 +1204,48 @@ impl WorkspaceView {
             }
             return;
         }
+        self.finish_close(id, window, cx);
+    }
+
+    /// The browser's confirmation was answered with a yes: the close goes on where
+    /// it left off.
+    #[cfg(target_family = "wasm")]
+    fn confirm_close(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pending_close != Some(id) {
+            // The question was about another tab, or about one that has since gone.
+            return;
+        }
+        self.pending_close = None;
+        self.finish_close_later(id, window, cx);
+    }
+
+    /// Run [`Self::finish_close`] for a tab that is still on the strip.
+    ///
+    /// `finish_close` takes a window, and the answer to a `confirm` arrives in a
+    /// context without one; the window is this view's own, which is where the tab
+    /// is drawn.
+    #[cfg(target_family = "wasm")]
+    fn finish_close_later(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>) {
+        self.finish_close(id, window, cx);
+    }
+
+    /// The close itself, once any question has been answered.
+    ///
+    /// Split from [`Self::close_tab`] because a browser asks first and answers
+    /// later: the confirmation is the page's own dialog, and what it guards is this.
+    fn finish_close(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(target_family = "wasm")]
+        {
+            self.pending_close = None;
+        }
+        let Some(tab) = self
+            .tabs
+            .iter()
+            .find(|tab| tab.read(cx).id() == id)
+            .cloned()
+        else {
+            return;
+        };
         // An editor with changes that are not on disk is asked about first: the tab
         // puts the Discard / Keep Editing question up and stays where it is until one
         // of them is answered (§7.1, §13).

@@ -12,12 +12,29 @@
 //! The process is [`store::cli`]'s bounded run (§9.1), not a bare `Command::output()`: a
 //! binary that never exits is a row that never resolves, and the bound — and the quit —
 //! stop it like every other read the app starts.
+//!
+//! # In a browser
+//!
+//! A page cannot run a binary — `std::thread::spawn` panics on `wasm32-unknown-unknown`,
+//! so [`store::cli`]'s two reader threads are not reachable from here at all. But the
+//! binaries are not the *page's* to run: they belong to the machine that served it, and
+//! that machine is already the authority for this page's filesystem
+//! ([`crate::config_http`]). So the wasm arm asks it — `GET /api/probe` — and the server
+//! answers with the same [`store::cli::Verdict`] the desktop app computes locally, from
+//! the same function. That is what keeps the two from disagreeing about a path.
+//!
+//! A page that cannot reach the server answers [`Check::Missing`], the honest "we could
+//! not establish that it runs" — never a panic, and never a row that hangs.
 
-use std::io::ErrorKind;
+// The native arm's imports. `Duration` is native-only: the bound is the native
+// arm's to name, and a browser chooses no bound, because the server that runs the
+// binary applies `store::cli::VERSION_TIMEOUT` itself. The `CliError`/`ErrorKind`
+// mapping is `store::cli::verdict`'s now, so neither is named here.
 use std::path::Path;
+#[cfg(not(target_family = "wasm"))]
 use std::time::Duration;
 
-use store::cli::{self, CliError};
+use store::cli;
 
 /// The words for a probe that has been asked and has not answered yet.
 pub const CHECKING: &str = "checking…";
@@ -79,19 +96,56 @@ pub fn probe(path: &Path, name: &str) -> Check {
     probe_within(path, name, cli::VERSION_TIMEOUT)
 }
 
-/// [`probe`] where there is no process to run: a browser.
+/// [`probe`] where there is no process to run: a browser asks the server that has
+/// one.
 ///
-/// The row asks whether *this machine* can run the binary at that path, and a page
-/// has no machine to ask — the binaries belong to the server that served it. The
-/// answer is the one a path nothing can run gets, and it must not be reached
-/// through `store::cli`: that spawns a child and two reader threads, and
-/// `std::thread::spawn` **panics** on `wasm32-unknown-unknown` (`std`'s
-/// `sys::thread::unsupported::Thread::new` returns `UNSUPPORTED_PLATFORM`), which
-/// would take the Settings page down with it.
+/// The row asks whether the machine behind this page can run the binary at that
+/// path, and the page cannot answer that itself — `std::thread::spawn` **panics** on
+/// `wasm32-unknown-unknown` (`std`'s `sys::thread::unsupported::Thread::new`
+/// returns `UNSUPPORTED_PLATFORM`), so `store::cli` is not reachable from here at
+/// all. `GET /api/probe` is, and the server answers it with
+/// [`store::cli::verdict`] — the same function the desktop app calls — so the row
+/// says the same thing in a browser as it does in the app.
+///
+/// Asynchronous, because on this target the work is a request and not a process:
+/// there is no thread to block, and blocking the one this page has would freeze it.
+/// The panel's call site is the `#[cfg]` pair that matches (see `panel.rs`).
+///
+/// A server that cannot be reached, or that answers something this crate does not
+/// recognise, is [`Check::Missing`]: the honest "we could not establish that it
+/// runs". Never a panic, and never a row that stays at `checking…`.
 #[cfg(target_family = "wasm")]
-pub fn probe(path: &Path, name: &str) -> Check {
-    let _ = (path, name);
-    Check::Missing
+pub async fn probe(path: &Path, name: &str) -> Check {
+    let Some(answer) = crate::config_http::probe(name, path).await else {
+        return Check::Missing;
+    };
+    let token = answer
+        .get("check")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let line = answer.get("line").and_then(serde_json::Value::as_str);
+    // A token this crate does not mint is not an answer — and neither is `ready`
+    // with nothing to show, which is why the line travels with it.
+    match cli::Verdict::from_wire(token, line) {
+        Some(verdict) => check_of(verdict),
+        None => Check::Missing,
+    }
+}
+
+/// What the server said a binary is, in this row's words.
+///
+/// The mapping from a [`store::cli::Verdict`] to a [`Check`] — the same five-way
+/// vocabulary, so a host that ran the binary and a server answering for a browser
+/// cannot drift. `Check::Checking` is deliberately absent: it is the panel's own
+/// "in flight" state, and no server ever answers it.
+fn check_of(verdict: cli::Verdict) -> Check {
+    match verdict {
+        cli::Verdict::Ready(line) => Check::Ready(line),
+        cli::Verdict::Missing => Check::Missing,
+        cli::Verdict::NotExecutable => Check::NotExecutable,
+        cli::Verdict::NotEvo => Check::NotEvo,
+        cli::Verdict::TimedOut => Check::TimedOut,
+    }
 }
 
 /// [`probe`], giving the binary `limit` before it is stopped.
@@ -100,44 +154,13 @@ pub fn probe(path: &Path, name: &str) -> Check {
 /// not reach it. Gating it here is what keeps `store::cli` — and therefore its two
 /// reader threads — out of the browser build entirely, rather than merely out of
 /// the browser's call path.
+///
+/// The reading is [`store::cli::verdict`]'s, which is also what the server answers
+/// `GET /api/probe` with: one implementation of "run it and decide what it is", so
+/// a path cannot be one thing to this app and another to a page it served.
 #[cfg(not(target_family = "wasm"))]
 fn probe_within(path: &Path, name: &str, limit: Duration) -> Check {
-    let output = match cli::version_within(path, limit) {
-        Ok(output) => output,
-        Err(CliError::NotFound { source, .. }) => {
-            return match source.kind() {
-                ErrorKind::NotFound => Check::Missing,
-                // A file that is not marked executable, and a directory: the same answer,
-                // since neither is something this app can spawn.
-                ErrorKind::PermissionDenied => Check::NotExecutable,
-                _ => Check::NotEvo,
-            };
-        }
-        Err(CliError::TimedOut { .. }) => return Check::TimedOut,
-        // A run that never printed a document cannot fail as one, so the other two
-        // errors are not reachable from here — and "not an evo binary" is the answer
-        // this row already has for a program that answered nothing.
-        Err(_) => return Check::NotEvo,
-    };
-
-    // Either stream: a binary that introduces itself on stderr is still introducing itself.
-    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-    text.push_str(&String::from_utf8_lossy(&output.stderr));
-    let Some(line) = text.lines().map(str::trim).find(|line| !line.is_empty()) else {
-        return Check::NotEvo;
-    };
-
-    // The name has to *lead*: `evo-agent` is not what `evo-swarm` prints, and a program that
-    // merely mentions an evo binary in passing is not one.
-    let Some(rest) = line.strip_prefix(name) else {
-        return Check::NotEvo;
-    };
-    if !output.status.success()
-        || !(rest.is_empty() || rest.starts_with(' ') || rest.starts_with('\t'))
-    {
-        return Check::NotEvo;
-    }
-    Check::Ready(line.to_owned())
+    check_of(cli::verdict(path, name, limit))
 }
 
 #[cfg(test)]
