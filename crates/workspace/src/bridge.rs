@@ -24,7 +24,7 @@
 
 use std::thread::{self, JoinHandle};
 
-use async_channel::{Receiver, RecvError, SendError, Sender};
+use async_channel::{Receiver, RecvError, SendError, Sender, TrySendError};
 use gpui_kit::{Context, Task};
 
 /// Counter that identifies one generation of work on a target.
@@ -81,8 +81,19 @@ impl<T> BridgeSender<T> {
     /// Returns `Err` when the UI side is gone — the receiver was dropped or its
     /// task ended — which is the worker's signal to stop.
     pub fn send(&self, payload: T) -> Result<(), SendError<Tagged<T>>> {
+        // The channel is unbounded ([`Bridge::spawn`]), so a send never waits for
+        // room and never parks the worker: `try_send` *is* the send. It is also
+        // the only one that exists on every target — `async_channel`'s
+        // `send_blocking` is compiled out for wasm — so the two spellings would
+        // have been the same call anyway. Its error is narrowed back to
+        // `SendError`, which is what a caller of an unbounded send can see: a
+        // `Full` that cannot happen, and a `Closed` that is the answer.
+        let tagged = Tagged::new(self.revision, payload);
         self.sender
-            .send_blocking(Tagged::new(self.revision, payload))
+            .try_send(tagged)
+            .map_err(|error| match error {
+                TrySendError::Full(tagged) | TrySendError::Closed(tagged) => SendError(tagged),
+            })
     }
 
     /// True once the UI side is gone, without sending anything.

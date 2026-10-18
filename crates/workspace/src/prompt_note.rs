@@ -78,7 +78,10 @@ pub fn write(root: &Root) -> io::Result<PathBuf> {
     })?;
     root.ensure()?;
     paths::create_dir_private(dir)?;
-    if std::fs::read_to_string(&path).is_ok_and(|held| held == NOTE) {
+    // Reading the file back is `crate::host`'s: in a browser there is no
+    // filesystem to read, and a read that fails is the write below — which is the
+    // same path a first run takes, not a false "already right".
+    if crate::host::read_to_string(&path).is_ok_and(|held| held == NOTE) {
         return Ok(path);
     }
     paths::write_atomic(&path, NOTE.as_bytes(), paths::FILE_MODE)?;

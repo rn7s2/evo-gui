@@ -21,12 +21,20 @@ use std::path::{Path, PathBuf};
 use async_channel::Receiver;
 use session::LaunchPlan;
 use store::catalog::{CheckReport, ModelRef};
-use store::cli::{self, CliError};
+use store::cli::CliError;
 use store::launch::{LaunchSpec, Program};
 use store::paths::Root;
-use tab_engine::{EngineHandle, Update};
+use tab_engine::{EngineHandle, TabEngine, Update};
 
 use crate::prompt_note::PromptNote;
+
+// The browser's launch talks to the `evo-web` server through `swarm_client`'s own
+// client — the same one a tab's session uses — so there is no second HTTP client
+// and no token held by the page.
+#[cfg(target_family = "wasm")]
+use serde_json::Value;
+#[cfg(target_family = "wasm")]
+use swarm_client::Client;
 
 /// What every tab this window opens needs in order to start a swarm: the two
 /// binaries, the app's own data root, and the environment a hermetic run needs.
@@ -194,9 +202,11 @@ pub fn agent_catalog_argv() -> Vec<String> {
 /// can a lane reach its API, is the key there.
 ///
 /// Blocking — it is a process — so the caller runs it off the thread that draws
-/// (the empty tab's own check does).
+/// (the empty tab's own check does). Running it is `crate::host`'s: in a browser
+/// there is no process to run, and the answer is the one a binary that could not
+/// be started gives.
 pub fn check(bin: &Path, plan: &LaunchPlan) -> Result<CheckReport, CliError> {
-    let body = cli::run_json(bin, &check_spec(plan).check_argv())?;
+    let body = crate::host::run_json(bin, &check_spec(plan).check_argv())?;
     Ok(CheckReport::from_json(&body))
 }
 
@@ -216,6 +226,7 @@ pub struct Started {
 ///
 /// The tab directory is made first: the ready file, the log and the argv all name
 /// paths inside it, so it has to exist before the spawn does.
+#[cfg(not(target_family = "wasm"))]
 pub fn start(env: &LaunchEnv, launch: &Launch) -> std::io::Result<Started> {
     let store_id = store::paths::TabId::new();
     let tab_dir = env.root.ensure_tab_dir(&store_id)?;
@@ -264,6 +275,137 @@ pub fn start(env: &LaunchEnv, launch: &Launch) -> std::io::Result<Started> {
         tab_dir,
         store_id,
     })
+}
+
+/// Open one tab's session through the `evo-web` server, and hand back the engine
+/// that commands it (§1, §3).
+///
+/// This is [`start`] for a browser, and it is the same shape: a tab directory, a
+/// connection, an engine, and a [`Started`] the window attaches to. What differs
+/// is who owns the process. A page cannot spawn `evo-swarm`, so the server that
+/// served it does — and the page asks it to, with `POST /api/tabs`, then talks to
+/// the tab over that server's same-origin prefix (`/api/tabs/<id>`). The
+/// credential stays on the server; the page never holds one.
+///
+/// `async` because the request is a `fetch`: the caller is the UI, which runs this
+/// as a task and draws while it is in flight (the tab shows `Booting`). The request
+/// is made by `swarm_client`'s own browser client — [`Client::at_base`] and its
+/// `post` — so no second HTTP client exists here.
+///
+/// The body is `crates/web`'s `OpenRequest`, built from the same [`Launch`] the
+/// native launch uses, so both targets send one description of a tab.
+#[cfg(target_family = "wasm")]
+pub async fn start(env: &LaunchEnv, launch: &Launch) -> std::io::Result<Started> {
+    // The engine talks to `<prefix>/snapshot`, `<prefix>/stream`, … — see the
+    // `evo-web` router. It is a same-origin path, so this client carries no token.
+    //
+    // The prefix is `/api` and the route below is `/tabs`, which is the router's
+    // exact path: a prefix of `/api/tabs` with route `/` would ask for `/api/tabs/`
+    // and miss it.
+    let client = Client::at_base("/api").map_err(unsupported)?;
+    // `post` is not one of the typed methods (they are the protocol's own routes),
+    // so this is the transport underneath — the same client, not a second one.
+    let response = client
+        .fetch()
+        .post("/tabs", &open_request(launch))
+        .await
+        .map_err(unsupported)?;
+    if !response.is_success() {
+        // The server's own words: a folder that is not a directory on the serving
+        // machine, or a child that never came ready with its log tail attached.
+        let reason = response.error();
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("the evo-web server refused this tab: {reason}"),
+        ));
+    }
+    let body: Value = serde_json::from_slice(&response.body)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let Some(id) = body.get("id").and_then(Value::as_str) else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "the evo-web server opened a tab without naming it",
+        ));
+    };
+    // The id is the server's, so it is parsed rather than trusted: it names a path
+    // segment in the prefix below, and `TabId::parse` is what keeps that one
+    // segment.
+    let store_id = store::paths::TabId::parse(id).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("the evo-web server named a tab {id:?}, which is not a tab id"),
+        )
+    })?;
+
+    // The tab's directory is the server's — it made the child's ready file and log
+    // there, on the machine the work happens on. This is the *same* path because
+    // the page is served from that machine (that is the whole premise of the
+    // prefix), and the window shows the log, so it has to name it.
+    let tab_dir = env.root.tab_dir(&store_id);
+
+    let client = Client::at_base(&format!("/api/tabs/{id}")).map_err(unsupported)?;
+    let (engine, updates) = TabEngine::connect(client, launch.folder().clone());
+    Ok(Started {
+        engine,
+        updates,
+        tab_dir,
+        store_id,
+    })
+}
+
+/// A [`Launch`] as `crates/web`'s `OpenRequest` — the same fields, named the way
+/// the server's own `serde` reads them.
+///
+/// A resume carries no plan on this side (the empty tab's choices are the `New`
+/// arm's), so it sends the folder, the program, and the journal to resume — which
+/// is everything a resumed tab is.
+#[cfg(target_family = "wasm")]
+fn open_request(launch: &Launch) -> Value {
+    let mut body = serde_json::json!({
+        "folder": launch.folder(),
+        "program": if launch.swarm() { "swarm" } else { "agent" },
+    });
+    let map = body.as_object_mut().expect("an object was just built");
+    if let Some(plan) = launch.plan() {
+        map.insert("model".into(), model_json(&plan.model));
+        map.insert("thinking".into(), json_opt(&plan.thinking));
+        map.insert("workers".into(), plan.workers.map_or(Value::Null, Value::from));
+        // Only a swarm has lanes, which is the same rule the native launch applies
+        // before it passes a lane flag at all.
+        if plan.swarm {
+            map.insert("lane_model".into(), model_json(&plan.lanes_model));
+            map.insert("lane_thinking".into(), json_opt(&plan.lane_thinking));
+        }
+    }
+    if let Some(session) = launch.session() {
+        map.insert(
+            "resume".into(),
+            Value::from(session.to_string_lossy().into_owned()),
+        );
+    }
+    body
+}
+
+/// `ID@PROVIDER`, the shape `--model` and `--lane-model` take (§1), as the server
+/// hands it to the child's argv.
+#[cfg(target_family = "wasm")]
+fn model_json(model: &Option<(String, String)>) -> Value {
+    model
+        .as_ref()
+        .map(|(id, provider)| Value::from(format!("{id}@{provider}")))
+        .unwrap_or(Value::Null)
+}
+
+#[cfg(target_family = "wasm")]
+fn json_opt(text: &Option<String>) -> Value {
+    text.clone().map_or(Value::Null, Value::from)
+}
+
+/// A failed request as the `io::Error` this signature answers with: the caller
+/// shows its words, which is all it needs of the distinction.
+#[cfg(target_family = "wasm")]
+fn unsupported(error: swarm_client::Error) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::Other, error.to_string())
 }
 
 #[cfg(test)]
