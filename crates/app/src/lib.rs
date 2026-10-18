@@ -30,7 +30,6 @@ mod quit;
 mod settings;
 mod settings_guard;
 mod startup;
-mod theme;
 
 pub use about::{start as start_version_probe, Version, Versions};
 pub use bounds::{window_bounds, window_options, Tracker};
@@ -50,10 +49,30 @@ pub use settings_guard::{
     asking as asking_about_settings, DISCARD_ID, KEEP_EDITING_ID, SAVING_HELD_LOG,
 };
 pub use startup::{refresh_catalog, start as start_background_loads};
-pub use theme::{follow_appearance, mode_for};
+// The design's palette is `theme`'s crate, shared with the browser frontend: it
+// is not this shell's, and a browser that drew the kit's defaults instead is what
+// having it here caused. What *is* this shell's is the choice and the log, which
+// come from the `Shell` — so the palette's own functions are re-exported as they
+// are, and the one that needs the shell has a wrapper below.
+pub use theme::{apply, install, mode_for, ThemeLog};
+
+/// [`theme::follow_appearance`] for this shell: the choice and the log are read
+/// from the [`Shell`], where this app keeps them (§7.1).
+///
+/// A wrapper rather than a call site that reads the globals itself, because the
+/// reading is the shell's business and the palette's crate deliberately knows
+/// nothing about a `Shell`. The returned subscription has to be kept for as long
+/// as the window lives — [`run`] keeps it on the shell.
+pub fn follow_appearance(cx: &mut App, window: &mut Window) -> Subscription {
+    let (choice, log) = {
+        let shell = cx.global::<Shell>();
+        (shell.theme, shell.log.clone())
+    };
+    theme::follow_appearance(cx, window, choice, log)
+}
 
 use gpui_kit::prelude::*;
-use gpui_kit::{App, Entity, Global, QuitMode, Subscription, WeakEntity};
+use gpui_kit::{App, Entity, Global, QuitMode, Subscription, WeakEntity, Window};
 
 use store::app_state::{AppState, Binaries, Recent, Theme};
 use store::cli::{self, PROMPT_NOTE_FLAG};
@@ -326,7 +345,7 @@ pub fn run() {
             }
             // Light or dark, and following the system from here on (§7.1).
             let appearance = window
-                .update(cx, |_root, window, cx| theme::follow_appearance(cx, window))
+                .update(cx, |_root, window, cx| follow_appearance(cx, window))
                 .ok();
             cx.update_global::<Shell, _>(|shell, _| {
                 if let Some(appearance) = appearance {

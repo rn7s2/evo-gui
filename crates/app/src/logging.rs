@@ -149,6 +149,21 @@ impl AppLog {
     }
 }
 
+/// The app log is where the design's palette reports itself: the one `info` line
+/// naming the mode a window got is how a launch's light/dark is checked from
+/// outside the UI, and it is written here rather than in the `theme` crate because
+/// this is where the desktop's lines go. The browser has no such file and uses
+/// [`theme::LogCrate`] instead.
+impl theme::ThemeLog for AppLog {
+    fn info(&self, message: &str) {
+        AppLog::info(self, message);
+    }
+
+    fn error(&self, message: &str) {
+        AppLog::error(self, message);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

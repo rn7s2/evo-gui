@@ -1,0 +1,27 @@
+[package]
+name = "theme"
+version.workspace = true
+edition.workspace = true
+
+# The design's palette, as a crate of its own.
+#
+# It lives here rather than in `crates/app` because it is not the desktop shell's:
+# the browser frontend draws the *same* window from the same UI crates, and a
+# theme installed by only one shell is a window that looks different in the other.
+# The desktop app (`crates/app`) and the browser (`crates/webapp`) both call this
+# crate's `install` and `apply`; neither owns the colours.
+[dependencies]
+gpui-kit = { workspace = true }
+store = { path = "../store" }
+serde_json = { workspace = true }
+
+# The browser shell has no `AppLog` — that is a file the desktop app keeps — so
+# the error and info paths go through `log` on the targets that have no logger
+# installed, and through `log` too on the ones that do. See the module docs.
+log = "0.4"
+
+[dev-dependencies]
+# `TestAppContext` and `gpui_kit::test`, for the tests that install the palettes
+# and read what the kit did with them. The desktop app carried this dev-dependency
+# for the same tests while they lived there.
+gpui-kit = { workspace = true, features = ["test-support"] }
