@@ -5,14 +5,14 @@
 //! client sends bytes and hands back what came; the `session` crate decides what
 //! they mean.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use serde_json::Value;
 
 use crate::error::{Error, Result};
 use crate::http::{HttpClient, HttpResponse, SseConnection, Token};
 use crate::protocol::{Cursor, OpReply, OpRequest, Snapshot};
+use crate::transport::{new_rid, Target};
 
 /// A client bound to one server, at one address, with one token.
 #[derive(Clone, Debug)]
@@ -33,6 +33,21 @@ impl Client {
         Ok(Client {
             http: HttpClient::new(host, port, Token::new(token))?,
         })
+    }
+
+    /// A client for a same-origin path prefix with no token — the browser's
+    /// shape, and the one thing a wasm consumer can construct.
+    ///
+    /// The native transport cannot speak it: it opens a socket to a loopback
+    /// port, and a path prefix has no host and no port. A native build that asks
+    /// for one is told so rather than handed a client that cannot work.
+    pub fn at_base(prefix: &str) -> Result<Client> {
+        let target = Target::base_path(prefix)?;
+        Err(Error::Config(format!(
+            "{} is a proxied base path: a native client opens a socket to a loopback \
+             server, and only a wasm build can speak a path prefix",
+            target.base_path_prefix().unwrap_or_default()
+        )))
     }
 
     /// The same server, with a different patience — a shutdown request gets a
@@ -206,21 +221,6 @@ fn encode_value(text: &str) -> String {
     out
 }
 
-/// A request id, unique to this process and this instant: the server dedupes
-/// retries by rid, so it only has to be *unique*, not a real uuid.
-///
-/// Public because a caller that wants to recognise its own reply mints the rid
-/// itself and uses [`Client::op_with_rid`].
-pub fn new_rid() -> String {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    format!("{:x}-{nanos:x}-{n:x}", std::process::id())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,14 +229,6 @@ mod tests {
     fn a_remote_host_is_refused() {
         assert!(Client::at("10.0.0.1", 9, "t").is_err());
         assert!(Client::loopback(9, "t").is_ok());
-    }
-
-    #[test]
-    fn rids_are_unique() {
-        let first = new_rid();
-        let second = new_rid();
-        assert_ne!(first, second);
-        assert!(!first.contains(' '));
     }
 
     #[test]
