@@ -7,5 +7,15 @@ edition.workspace = true
 gpui-kit = { workspace = true }
 store = { path = "../store" }
 
+# The clock the animated widgets read (`clock`). `std::time::Instant::now` is a
+# `panic!` on wasm32-unknown-unknown — the standard library's backend for that
+# target is a stub — and the slider's first frame reads it, so a browser build
+# without this aborts the moment it draws. `web-time` is `Performance.now()` on
+# the web and a plain re-export of `std::time` everywhere else, so it is only a
+# dependency of the web build and a desktop build still links no clock but the
+# standard one.
+[target.'cfg(target_family = "wasm")'.dependencies]
+web-time = "1"
+
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }

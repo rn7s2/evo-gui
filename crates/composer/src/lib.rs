@@ -42,7 +42,6 @@
 
 use std::cell::Cell;
 use std::collections::HashMap;
-use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -72,6 +71,7 @@ use widgets::{paint, Chip, EffortSlider};
 
 pub mod attachments;
 mod complete;
+mod host;
 
 pub use attachments::{Attachment, AttachmentKind, Outgoing};
 use complete::Popup;
@@ -566,7 +566,7 @@ impl Thumbnail {
     fn picture(self) -> Option<Arc<RenderImage>> {
         let bytes = match self {
             Thumbnail::Bytes(bytes) => bytes,
-            Thumbnail::File(path) => std::fs::read(path).ok()?,
+            Thumbnail::File(path) => host::read_file(&path)?,
         };
         prepare_thumbnail(&bytes)
     }
@@ -589,11 +589,8 @@ fn has_image_extension(path: &Path) -> bool {
 /// reading: the picker's answer is a path, and a path that is not there is something the
 /// reader finds out about when the message is sent.
 fn looks_like_an_image(path: &Path) -> bool {
-    let Ok(mut file) = std::fs::File::open(path) else {
-        return false;
-    };
     let mut head = [0u8; 12];
-    let Ok(read) = file.read(&mut head) else {
+    let Some(read) = host::read_head(path, &mut head) else {
         return false;
     };
     image_magic(&head[..read])

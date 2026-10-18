@@ -28,6 +28,7 @@
 //! is `relative(…)` rather than `calc(var(--p) + 3px)`.
 
 pub mod chip;
+pub mod clock;
 pub mod dot;
 pub mod effort;
 pub mod glyph;
@@ -36,6 +37,7 @@ pub mod text;
 pub mod tooltip;
 
 pub use chip::Chip;
+pub use clock::Instant;
 pub use dot::BreathingDot;
 pub use effort::EffortSlider;
 pub use paint::{color, faded, mix, wash, Rgb};

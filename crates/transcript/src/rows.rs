@@ -817,7 +817,7 @@ pub(crate) fn sent(text: &str) -> Option<Sent<'_>> {
 /// `- `, the path, and nothing else on the line.
 fn block_path(line: &str) -> Option<&str> {
     let path = line.trim_end().strip_prefix("- ")?.trim_end();
-    Path::new(path).is_absolute().then_some(path)
+    session::path::is_absolute(Path::new(path)).then_some(path)
 }
 
 /// The name of the file a path names, and the path itself when it has no name of its

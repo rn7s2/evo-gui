@@ -126,9 +126,7 @@ impl LocalImages {
                 generation: 0,
             }),
             folder: Mutex::new(None),
-            home: std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .unwrap_or_default(),
+            home: crate::host::home_dir(),
             width: AtomicU32::new(0),
             max_entries,
             max_bytes,
@@ -401,7 +399,7 @@ pub(crate) fn resolve(url: &str, folder: Option<&Path>, home: &Path) -> Option<P
     if let Some(rest) = strip_scheme(url, "file://") {
         let rest = rest.strip_prefix("localhost").unwrap_or(rest);
         let path = PathBuf::from(decode_percent(rest));
-        return path.is_absolute().then_some(path);
+        return session::path::is_absolute(&path).then_some(path);
     }
     if has_scheme(url) {
         return None;
@@ -410,7 +408,7 @@ pub(crate) fn resolve(url: &str, folder: Option<&Path>, home: &Path) -> Option<P
         return (!home.as_os_str().is_empty()).then(|| home.join(rest));
     }
     let path = Path::new(url);
-    if path.is_absolute() {
+    if session::path::is_absolute(&path) {
         return Some(path.to_path_buf());
     }
     folder.map(|folder| folder.join(path))

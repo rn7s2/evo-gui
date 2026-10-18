@@ -26,7 +26,9 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use widgets::clock::Instant;
 
 /// How long one look at the file system stands before it is taken again.
 ///
@@ -66,7 +68,8 @@ pub(crate) fn target(href: &str) -> Option<Target> {
         return Some(Target::Web(href.to_string()));
     }
     let path = PathBuf::from(href);
-    (path.is_absolute() && path.parent().is_some() && path.exists()).then_some(Target::Path(path))
+    (session::path::is_absolute(&path) && path.parent().is_some() && crate::host::exists(&path))
+        .then_some(Target::Path(path))
 }
 
 /// The file system a transcript looks at: the folder a relative path is measured from,
@@ -97,9 +100,7 @@ impl Default for Paths {
 impl Paths {
     pub(crate) fn new() -> Self {
         Paths {
-            home: std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .unwrap_or_default(),
+            home: crate::host::home_dir(),
             folder: Mutex::new(None),
             seen: Mutex::new(HashMap::new()),
         }
@@ -201,13 +202,13 @@ impl Paths {
             self.home.clone()
         } else {
             let path = Path::new(token);
-            if path.is_absolute() {
+            if session::path::is_absolute(path) {
                 path.to_path_buf()
             } else {
                 self.folder()?.join(path)
             }
         };
-        path.exists().then_some(path)
+        crate::host::exists(&path).then_some(path)
     }
 }
 

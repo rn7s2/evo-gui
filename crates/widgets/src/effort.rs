@@ -28,7 +28,7 @@
 
 use std::cell::Cell;
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -39,6 +39,7 @@ use gpui_kit::{
 };
 use store::design::Palette;
 
+use crate::clock::Instant;
 use crate::paint::{color, wash, Rgb};
 
 /// A re-render a caller lends the slider.
