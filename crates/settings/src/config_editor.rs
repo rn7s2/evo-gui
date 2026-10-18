@@ -40,7 +40,13 @@ use gpui_kit::{
     KeyDownEvent, Render, Rgba, SharedString, Subscription, TestSupportExt as _, WeakEntity,
     Window,
 };
-use store::config_file::{self, ConfigError};
+// `store::config_file` is the host's own reader and writer: it is a filesystem,
+// and a browser has none. The browser's half is `crate::config_http`, reached at
+// the two call sites below, which answer the same shapes — so `ConfigError` is
+// named by both and the module itself only by the host.
+#[cfg(not(target_family = "wasm"))]
+use store::config_file;
+use store::config_file::ConfigError;
 use store::design;
 use store::{ConfigFile, ConfigScope};
 
@@ -233,7 +239,7 @@ impl ConfigEditor {
                 search_input,
                 replace_input,
                 search_replace_mode: false,
-                path: config_file::path(&scope, file),
+                path: store::config_file::path(&scope, file),
                 base: None,
                 baseline: String::new(),
                 read_error: None,
@@ -369,6 +375,10 @@ impl ConfigEditor {
         let text = self.buffers[ix].editor.read(cx).value().to_string();
         let base = self.buffers[ix].base.clone();
         let path = self.buffers[ix].path.clone();
+        // A browser's save names the scope to the server; a host's does not need
+        // it, because the path it writes is already the scope's.
+        #[cfg(target_family = "wasm")]
+        let scope = self.scope.clone();
         self.buffers[ix].op += 1;
         let op = self.buffers[ix].op;
         self.buffers[ix].status = Status::Saving;
@@ -379,6 +389,7 @@ impl ConfigEditor {
             // The write takes its own copy: `text` is moved on into the result,
             // where it becomes the new baseline.
             let writing = text.clone();
+            #[cfg(not(target_family = "wasm"))]
             let outcome = cx
                 .background_executor()
                 .spawn(async move {
@@ -386,6 +397,13 @@ impl ConfigEditor {
                         .map_err(|error| error.to_string())
                 })
                 .await;
+            #[cfg(target_family = "wasm")]
+            let outcome = {
+                let _ = &path;
+                crate::config_http::save(&scope, file, &writing, base.as_deref())
+                    .await
+                    .map_err(|error| error.to_string())
+            };
             let _ = this.update(cx, |page, cx| page.apply_save(file, op, text, outcome, cx));
         })
         .detach();
@@ -418,11 +436,27 @@ impl ConfigEditor {
         cx.notify();
 
         let path = self.buffers[ix].path.clone();
+        // The one place the target shows: a host reads the file itself, a browser
+        // has no filesystem and asks the server that served the page for it
+        // (`config_http`). Both answers are the same shape — `Some(text)` when the
+        // file is there, `None` when it is not — so nothing below branches.
+        #[cfg(target_family = "wasm")]
+        let scope = self.scope.clone();
         cx.spawn_in(window, async move |this, cx| {
+            // The one place the target shows. A host reads the file itself, off the
+            // frame; a browser has no filesystem, so it asks the server that served
+            // this page (`config_http`). Both answer `Some(text)` when the file is
+            // there and `None` when it is not, so nothing below branches.
+            #[cfg(not(target_family = "wasm"))]
             let outcome = cx
                 .background_executor()
                 .spawn(async move { config_file::read(&path) })
                 .await;
+            #[cfg(target_family = "wasm")]
+            let outcome = {
+                let _ = &path;
+                crate::config_http::read(&scope, file).await
+            };
             let _ = this.update_in(cx, |page, window, cx| {
                 page.apply_read(file, op, revision, outcome, window, cx)
             });
@@ -1048,7 +1082,7 @@ mod tests {
         }
 
         fn file(&self, file: ConfigFile) -> PathBuf {
-            config_file::path(&self.scope(), file)
+            store::config_file::path(&self.scope(), file)
         }
 
         fn write(&self, file: ConfigFile, text: &str) {

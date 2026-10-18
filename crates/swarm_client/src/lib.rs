@@ -108,7 +108,6 @@ pub use stream::{Backoff, EventStream, StreamConfig, StreamMsg};
 
 #[cfg(target_family = "wasm")]
 pub use fetch::{FetchClient, FetchSseConnection, StreamHandle, WasmEventStream};
-
 /// The installed swarm binary, unless `EVO_SWARM_BIN` says otherwise.
 ///
 /// Native only: a browser has no binary to name, and no way to run one.

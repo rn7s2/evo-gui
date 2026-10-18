@@ -37,6 +37,11 @@
 
 mod appearance;
 mod config_editor;
+// How a browser reaches evo's own config files: the server that served the page
+// holds them, so the page asks it. Native builds call `store::config_file`
+// directly, which is why this module is only compiled for wasm.
+#[cfg(target_family = "wasm")]
+pub mod config_http;
 mod dialog;
 mod panel;
 mod probe;

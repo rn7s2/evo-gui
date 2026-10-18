@@ -48,7 +48,7 @@ USAGE:
 OPTIONS:
   --bind ADDR        address to listen on (default 127.0.0.1, env EVO_WEB_BIND).
                      Anything that is not loopback REQUIRES --auth-token.
-  --port N           port to listen on (default 8787, env EVO_WEB_PORT).
+  --port N           port to listen on (default 9091, env EVO_WEB_PORT).
                      0 asks the OS for a free one; the chosen one is printed.
   --dist DIR         the frontend bundle to serve (default dist, env EVO_WEB_DIST)
   --root DIR         where tabs live (default ~/.evo/desktop, env EVO_WEB_ROOT)
@@ -108,7 +108,7 @@ where
             .trim()
             .parse::<u16>()
             .map_err(|_| format!("--port {text:?} is not a port number"))?,
-        None => 8787,
+        None => 9091,
     };
     let dist = dist
         .or_else(|| getenv("EVO_WEB_DIST"))
@@ -200,7 +200,7 @@ mod tests {
     fn the_defaults_are_loopback_and_a_port() {
         let cfg = config(&[]);
         assert_eq!(cfg.bind, IpAddr::V4(Ipv4Addr::LOCALHOST));
-        assert_eq!(cfg.port, 8787);
+        assert_eq!(cfg.port, 9091);
         assert_eq!(cfg.dist, PathBuf::from("dist"));
         assert!(cfg.token.is_none());
         assert_eq!(cfg.agent_bin, PathBuf::from(store::cli::INSTALLED_AGENT));

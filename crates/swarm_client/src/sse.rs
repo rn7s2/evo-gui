@@ -16,6 +16,28 @@ pub struct SseEvent {
     pub data: String,
 }
 
+impl SseEvent {
+    /// One event as a wire reader hands it over: the `event:` name, the `id:`, and
+    /// the payload.
+    ///
+    /// A frame's several `data:` lines are already joined with `\n` by whoever read
+    /// them (this is what SSE means by one event), and an absent field is `None`
+    /// rather than an empty string — the protocol's own distinction, and the one
+    /// [`StreamFrame::parse`](crate::protocol::StreamFrame::parse) reads.
+    ///
+    /// [`crate::sse::SseParser`] is the native reader's half of the same thing: it
+    /// walks a line at a time off a socket. The browser's reader is
+    /// `eventsource-stream`, which has already done the framing by the time a frame
+    /// arrives, so the two meet here.
+    pub fn from_wire(kind: &str, id: &str, data: &str) -> SseEvent {
+        SseEvent {
+            id: (!id.is_empty()).then(|| id.to_owned()),
+            kind: (!kind.is_empty()).then(|| kind.to_owned()),
+            data: data.to_owned(),
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct SseParser {
     id: Option<String>,

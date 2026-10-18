@@ -540,10 +540,18 @@ impl SettingsPanel {
             // A process, but not on the thread that draws: the app's own executor runs it,
             // and the row keeps saying `checking…` until this task comes back with it.
             let asked = path.clone();
+            // The same two lines, and the same answer: on a host the work is a child
+            // process, so it goes to the background executor's thread pool; in a browser
+            // it is a request to the server that holds the binaries, which is I/O on this
+            // page's own event loop — there is no pool to hand it to, and `probe` is
+            // already the future that is awaited here.
+            #[cfg(not(target_family = "wasm"))]
             let answer = cx
                 .background_executor()
                 .spawn(async move { probe(&asked, &name) })
                 .await;
+            #[cfg(target_family = "wasm")]
+            let answer = probe(&asked, &name).await;
             let _ = this.update(cx, |panel, cx| {
                 panel.settle(binary, &path, answer, revision, cx)
             });
@@ -584,7 +592,8 @@ impl SettingsPanel {
                     // know whether there is one, and a target without it answers
                     // the same way a cancelled dialog does.
                     let start = current.parent().filter(|folder| folder.is_dir());
-                    let Some(path) = crate::dialog::pick_file(title, start.map(PathBuf::from)).await
+                    let Some(path) =
+                        crate::dialog::pick_file(title, start.map(PathBuf::from)).await
                     else {
                         return;
                     };

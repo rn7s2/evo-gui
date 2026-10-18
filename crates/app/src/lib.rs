@@ -63,12 +63,14 @@ pub use theme::{apply, install, mode_for, ThemeLog};
 /// reading is the shell's business and the palette's crate deliberately knows
 /// nothing about a `Shell`. The returned subscription has to be kept for as long
 /// as the window lives — [`run`] keeps it on the shell.
+///
+/// The choice is handed over as a **closure that reads the global**, not as a
+/// value: Settings writes `shell.theme` after this has been called (§7.1), and a
+/// value captured here would leave the window following the system's appearance
+/// after the reader had chosen Light or Dark.
 pub fn follow_appearance(cx: &mut App, window: &mut Window) -> Subscription {
-    let (choice, log) = {
-        let shell = cx.global::<Shell>();
-        (shell.theme, shell.log.clone())
-    };
-    theme::follow_appearance(cx, window, choice, log)
+    let log = cx.global::<Shell>().log.clone();
+    theme::follow_appearance(cx, window, |cx: &App| cx.global::<Shell>().theme, log)
 }
 
 use gpui_kit::prelude::*;

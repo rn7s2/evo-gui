@@ -171,18 +171,28 @@ pub fn mode_for(choice: StoredTheme, appearance: WindowAppearance) -> ThemeMode 
 /// live: it has to be kept for as long as the window lives (the desktop app keeps
 /// it on its `Shell`, the browser on nothing at all, since its appearance cannot
 /// change under it without the page being reloaded).
+///
+/// The choice is read through `choice` **on every appearance change**, not captured
+/// once: the app writes it when Settings saves (§7.1), so a window that took the
+/// system's appearance at launch and was then given Light or Dark by hand must
+/// stop following the system. Reading the value here is what keeps that true, and
+/// it is why this takes a closure rather than a `StoredTheme` — a captured value
+/// goes stale the moment the setting changes, and the window then flips to the
+/// system's mode over the one the reader chose.
 pub fn follow_appearance(
     cx: &mut App,
     window: &mut Window,
-    choice: StoredTheme,
+    choice: impl Fn(&App) -> StoredTheme + 'static,
     log: impl ThemeLog + 'static,
 ) -> Subscription {
-    apply(cx, window, choice, &log);
+    apply(cx, window, choice(cx), &log);
     window.observe_window_appearance(move |window, cx| {
         // Only an appearance the system decided is worth reacting to: with Light
-        // or Dark chosen, the system's opinion is not the app's.
-        if choice == StoredTheme::System {
-            apply(cx, window, choice, &log);
+        // or Dark chosen, the system's opinion is not the app's. Asked again here,
+        // because the answer may have changed since the window was made.
+        let chosen = choice(cx);
+        if chosen == StoredTheme::System {
+            apply(cx, window, chosen, &log);
         }
     })
 }

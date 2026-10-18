@@ -49,7 +49,7 @@ sessions on the machine it runs on, so a browser tab is a tab.
 
 ```sh
 scripts/web.sh                             # → dist/web/
-cargo run -p evo-web -- --dist dist/web    # then open http://127.0.0.1:8787
+cargo run -p evo-web -- --dist dist/web    # then open http://127.0.0.1:9091
 ```
 
 The wasm build needs the **nightly** toolchain: install it with

@@ -6,6 +6,10 @@ edition.workspace = true
 [dependencies]
 gpui-kit = { workspace = true }
 store = { path = "../store" }
+# The config routes' bodies, and the `{ error }` a refusal carries: JSON in, JSON
+# out. Already in the tree through `store`, and used by `config_http` on wasm.
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 # The system file dialog behind `dialog.rs`, and a desktop's alone: `rfd`'s web
 # backend cannot pick a folder (its `pick_folder` does not exist for `wasm32`) and
@@ -15,6 +19,22 @@ store = { path = "../store" }
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 rfd = "0.17"
 
-[dev-dependencies]
+# A browser's way to evo's own config files: the page has no filesystem, so the
+# `evo-web` server that served it reads and writes them over HTTP and the page
+# asks it. `web-sys`/`js-sys` are the DOM and the globals `fetch` needs, and
+# `wasm-bindgen` is the bridge the answers arrive through. Native builds call
+# `store::config_file` directly and never compile any of this. See `config_http.rs`.
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["Request", "RequestInit", "Response", "Headers", "Window"] }
+
+# Native only, both of them: `gpui-kit`'s `test-support` is the test harness the
+# panel's own tests drive a window with, and `image` is what `settings_demo` crops
+# its captures with. Neither has a browser build — `test-support` reaches
+# `wait-timeout`, which does not compile for `wasm32` at all — and a wasm example
+# must not be dragged down by a dev-dependency it never uses.
+[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }
 image = "0.25"
