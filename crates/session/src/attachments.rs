@@ -114,7 +114,7 @@ fn absolute(path: &Path) -> PathBuf {
     if let Ok(resolved) = std::fs::canonicalize(path) {
         return resolved;
     }
-    if path.is_absolute() {
+    if crate::path::is_absolute(path) {
         return path.to_path_buf();
     }
     std::env::current_dir()

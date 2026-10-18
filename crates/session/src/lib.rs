@@ -36,6 +36,7 @@ mod format;
 mod item;
 mod launcher;
 mod op;
+pub mod path;
 mod state;
 mod swarm;
 mod tab;
