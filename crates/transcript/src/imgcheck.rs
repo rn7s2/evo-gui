@@ -63,12 +63,12 @@ pub fn decode_image(bytes: &[u8]) -> Option<Arc<RenderImage>> {
 ///
 /// This is the whole of the work, so it belongs off the UI thread: the caller reads
 /// this on a background task and hands the frame back.
+///
+/// The read is the platform's ([`crate::host`]): on a desktop it is the file, and in
+/// a browser there is no file at a path, so this is `None` — a picture there arrives
+/// as the bytes a row fetched, not as a path.
 pub(crate) fn read_local_image(path: &Path) -> Option<Arc<RenderImage>> {
-    let metadata = std::fs::metadata(path).ok()?;
-    if !metadata.is_file() || metadata.len() > MAX_LOCAL_IMAGE_BYTES {
-        return None;
-    }
-    let bytes = std::fs::read(path).ok()?;
+    let bytes = crate::host::read_file(path, MAX_LOCAL_IMAGE_BYTES)?;
     let decoded = decode_bounded(&bytes, MAX_LOCAL_IMAGE_DIMENSION, MAX_LOCAL_IMAGE_ALLOC)?;
     Some(render(reduced(decoded, MAX_LOCAL_PICTURE_DIMENSION)))
 }

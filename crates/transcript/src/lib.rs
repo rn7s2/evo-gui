@@ -36,6 +36,7 @@
 
 mod images;
 mod imgcheck;
+mod host;
 mod link;
 mod linkify;
 mod markdown;

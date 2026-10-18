@@ -20,7 +20,9 @@
 //! held to the design without rendering anything: [`Pin::on_scroll`] takes the
 //! distance from the bottom and says what the view should do.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use widgets::clock::Instant;
 
 /// Within this distance of the bottom counts as being at the latest.
 pub const SLACK: f32 = 24.;
