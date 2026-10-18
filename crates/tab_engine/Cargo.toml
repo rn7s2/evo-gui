@@ -9,7 +9,20 @@ session = { path = "../session" }
 serde_json = { workspace = true }
 async-channel = "2"
 
+# The page's own executor and clock, and nothing more: `spawn_local` drives the
+# engine loop where a host drives it on a thread, `JsFuture`/`Promise` is the
+# timer a retry waits on (`setTimeout`), and `web_sys::window()` is where that
+# timer lives. A host needs none of it — its loop parks a thread instead — so
+# none of it is compiled there.
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["Window"] }
+
 [dev-dependencies]
 # The fake serve this crate's tests drive a real tab against; a plain dependent
-# of tab_engine never compiles it.
+# of tab_engine never compiles it. Native only: the harness spawns a process, so
+# it is not built for wasm, and neither is the test that drives it.
+[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
 swarm_client = { path = "../swarm_client", features = ["test-harness"] }

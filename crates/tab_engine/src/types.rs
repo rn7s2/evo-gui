@@ -94,6 +94,11 @@ pub enum Update {
     /// The server process died on its own; the engine has stopped.
     ServerGone,
     /// The engine has stopped, and how the server went.
+    ///
+    /// Native only, with the process whose end it reports: a browser's server is
+    /// not this page's child, so there is no exit status to carry. What a page
+    /// still learns is that the session stopped, which is [`Update::ServerGone`].
+    #[cfg(not(target_family = "wasm"))]
     Exited {
         outcome: swarm_client::ShutdownOutcome,
     },
