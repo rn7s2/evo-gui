@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Evo</title>
+<style>
+  /* gpui's web platform creates its own canvas, styles it 100% x 100% and
+     appends it to <body> — so the *body* is the mount, and it has to be the
+     viewport's full size or the canvas gets the HTML default 300x150. This page
+     therefore contributes no canvas of its own: one would be a second, unused
+     surface, and it is what made a first version of this page report a canvas
+     that had never been drawn into. */
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: #1c1c1e;
+  }
+  body > canvas {
+    /* Belt and braces with the inline styles the platform sets. */
+    position: fixed;
+    inset: 0;
+    display: block;
+  }
+  /* Until the module is instantiated: a word, so a slow first load is not a
+     blank page that looks broken. Removed by the boot script below. */
+  #evo-boot {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font: 14px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    color: #8e8e93;
+    background: #1c1c1e;
+    z-index: 1;
+  }
+</style>
+</head>
+<body>
+<div id="evo-boot">Evo…</div>
+
+<script type="module">
+  // The bundle `scripts/web.sh` builds beside this file: wasm-bindgen's glue and
+  // the module it instantiates.
+  import init, { start } from "./evo_webapp.js";
+
+  try {
+    await init();
+    document.getElementById("evo-boot")?.remove();
+    start();
+  } catch (error) {
+    // A failure here is before any window exists, so it has nowhere to be drawn
+    // but here — and a module that will not instantiate is exactly the case
+    // where a silent blank page wastes the most time.
+    const boot = document.getElementById("evo-boot");
+    if (boot) {
+      boot.textContent = `Evo could not start: ${error}`;
+      boot.style.color = "#ff453a";
+    }
+    console.error("evo-webapp: start failed", error);
+  }
+</script>
+</body>
+</html>
