@@ -26,7 +26,7 @@
 //! through [`store::design`] itself where the design names a number. The design's
 //! `color-mix` is [`widgets::wash`].
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use gpui_kit::base::Button;
@@ -176,6 +176,9 @@ const PROBLEM_ID: &str = "check-problem";
 
 /// The folder card, and the two role cards' own ids.
 const FOLDER_ID: &str = "select-folder";
+/// The browser's folder field, its commit button, and the card's own heading there.
+const FOLDER_INPUT_ID: &str = "folder-input";
+const FOLDER_GO_ID: &str = "folder-go";
 const COORDINATOR_CARD_ID: &str = "config-group-coordinator";
 const WORKERS_CARD_ID: &str = "config-group-workers";
 
@@ -248,7 +251,15 @@ const MODEL_LABEL: &str = "Model";
 const EFFORT_LABEL: &str = "Effort";
 const COUNT_LABEL: &str = "Count";
 const USE_SWARM_LABEL: &str = "Use swarm";
+#[cfg_attr(target_family = "wasm", allow(dead_code))]
 const FOLDER_LABEL: &str = "Select folder…";
+/// What the browser's folder card says instead of a click's invitation: it is asking for
+/// a path, and the path is the serving machine's.
+const FOLDER_TYPE_LABEL: &str = "Folder to run in";
+const FOLDER_INPUT_LABEL: &str = "Folder path on the serving machine";
+const FOLDER_GO_LABEL: &str = "Open session";
+/// The field's own height, and the card's: the design's input row.
+const FOLDER_FIELD_H: f32 = 28.;
 const HISTORY_TITLE: &str = "History";
 
 gpui_kit::actions!(
@@ -369,6 +380,17 @@ fn row_aria_label(row: &session::HistoryRow) -> SharedString {
 /// page's own name for it.
 fn medium<T: Styled>(element: T) -> T {
     element.font_weight(widgets::text::MEDIUM)
+}
+
+/// Whether a path is absolute — the one question a browser's folder field asks before it
+/// sends a path to the server.
+///
+/// [`session::path::is_absolute`] is the one definition of that question in this
+/// workspace, and this crate asks it rather than spelling `has_root` again: the
+/// folder field and the transcript's links must answer it the same way. See that
+/// module for why `Path::is_absolute` cannot be used on `wasm32-unknown-unknown`.
+fn has_root(path: &Path) -> bool {
+    session::path::is_absolute(path)
 }
 
 /// `box-shadow: 0 0 0 <spread>px <colour>` — the ring the design draws on a focused field.
@@ -698,6 +720,18 @@ struct EmptyTabState {
     /// The folder card's own focus handle, so keyboard traversal and its focus ring have
     /// somewhere to land.
     folder_focus: FocusHandle,
+    /// The folder a person **types**, in a build with no file dialog to open: a browser
+    /// ([`crate::host::ENTERS_FOLDER`]). `None` on the desktop, where the card is a click
+    /// and there is nothing to type into.
+    ///
+    /// A path typed here names a folder on the machine that served the page — the machine
+    /// `POST /api/tabs` opens the tab on — so this field *is* the browser's way into a
+    /// session, and the empty tab has no other.
+    folder_input: Option<Entity<InputState>>,
+    /// Why the folder a person typed was not launched in — a relative path, which this
+    /// page can see is wrong before a round trip would say so. `None` when nothing has
+    /// been refused.
+    folder_error: Option<String>,
     /// The two sliders' focus handles: a click on a rail focuses it, which is what makes
     /// the arrows work.
     effort_focus: [FocusHandle; 2],
@@ -725,7 +759,18 @@ impl EmptyTabState {
             state
         });
 
-        let subscriptions = vec![
+        // A browser types the folder; the desktop clicks for it. The field exists only
+        // where it is the only way in, so the desktop's page is byte-for-byte what it
+        // was (see `crate::host::ENTERS_FOLDER`).
+        let folder_input = crate::host::ENTERS_FOLDER.then(|| {
+            cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder(crate::host::FOLDER_PLACEHOLDER)
+                    .clean_on_escape()
+            })
+        });
+
+        let mut subscriptions = vec![
             cx.subscribe_in(
                 &coordinator,
                 window,
@@ -744,6 +789,19 @@ impl EmptyTabState {
                 this.on_type(event, window, cx)
             }),
         ];
+        // Enter commits the folder the way the card's own button does. The field is
+        // only built where it exists, so the desktop registers nothing here.
+        if let Some(field) = &folder_input {
+            subscriptions.push(cx.subscribe_in(
+                field,
+                window,
+                |this, field, event: &InputEvent, window, cx| {
+                    if matches!(event, InputEvent::PressEnter { .. }) {
+                        this.enter_folder(field, window, cx);
+                    }
+                },
+            ));
+        }
 
         EmptyTabState {
             launcher,
@@ -771,6 +829,8 @@ impl EmptyTabState {
             history_error: None,
             history_scroll: UniformListScrollHandle::new(),
             folder_focus: cx.focus_handle(),
+            folder_input,
+            folder_error: None,
             effort_focus: [cx.focus_handle(), cx.focus_handle()],
             effort_motion: [
                 Rc::new(widgets::effort::Motion::new()),
@@ -957,7 +1017,10 @@ impl EmptyTabState {
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
             let answer = cx
                 .background_executor()
-                .spawn(async move { cli::run_json(&bin, &argv) })
+                // The run is `crate::host`'s: in a browser there is no process,
+                // and the answer is the one a binary that could not be started
+                // gives — rendered as the same line under the cards.
+                .spawn(async move { crate::host::run_json(&bin, &argv) })
                 .await;
             let _ = this.update(cx, move |state, cx| {
                 state.settle_single_agent(answer, revision, cx)
@@ -1062,8 +1125,8 @@ impl EmptyTabState {
                 .spawn(async move {
                     // `check` exits 1 when it found problems and prints them anyway (§2),
                     // so the document is read on that exit too: those problems are exactly
-                    // what these lines are.
-                    match cli::run_json_reporting(&bin, &argv) {
+                    // what these lines are. The run is `crate::host`'s (see `probe_single_agent`).
+                    match crate::host::run_json_reporting(&bin, &argv) {
                         Ok(body) => CheckReport::from_json(&body),
                         Err(error) => CheckReport {
                             problems: vec![check_failed(&error)],
@@ -1175,6 +1238,11 @@ impl EmptyTabState {
     /// The dialog is `rfd`'s async one: the UI thread neither blocks on it nor waits for
     /// it, its answer arrives on the GPUI foreground executor, and cancelling it leaves the
     /// tab empty.
+    ///
+    /// The desktop's alone, and that is a property of the card: a browser's folder card is
+    /// a text field ([`crate::host::ENTERS_FOLDER`]), so nothing there ever opens a dialog
+    /// and there is no `crate::host::pick_folder` for it to open.
+    #[cfg(not(target_family = "wasm"))]
     fn pick_folder(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let answer = match self.picker.clone() {
             FolderPicker::Fixed(answer) => answer,
@@ -1182,15 +1250,17 @@ impl EmptyTabState {
                 let starting_folder = self.home.clone().map(PathBuf::from);
                 let tab = self.tab.clone();
                 cx.spawn(async move |_this: WeakEntity<Self>, cx| {
-                    let mut dialog = rfd::AsyncFileDialog::new()
-                        .set_title("Choose the folder this session runs in");
-                    if let Some(folder) = starting_folder {
-                        dialog = dialog.set_directory(folder);
-                    }
-                    let Some(picked) = dialog.pick_folder().await else {
+                    // The system dialog is `crate::host`'s: this file does not
+                    // know whether the build has one, and a target without it
+                    // answers the way a cancelled dialog does.
+                    let Some(folder) = crate::host::pick_folder(
+                        "Choose the folder this session runs in".to_owned(),
+                        starting_folder,
+                    )
+                    .await
+                    else {
                         return;
                     };
-                    let folder = picked.path().to_path_buf();
                     let _ = tab.update(cx, |tab, cx| tab.request_launch(folder, cx));
                 })
                 .detach();
@@ -1687,41 +1757,197 @@ impl EmptyTabState {
 
     /// The folder card (§7.2): the one thing on the page that is not a control's value —
     /// pick the folder the swarm runs in.
+    ///
+    /// Two shapes, and which one is a property of the build rather than of the page
+    /// ([`crate::host::ENTERS_FOLDER`]):
+    ///
+    /// * **The desktop** clicks for it: the card *is* a button, and pressing it opens
+    ///   `rfd`'s folder dialog. Unchanged.
+    /// * **A browser** types it: the card is a panel holding a text field and a button.
+    ///   A page has no dialog to open, and — the part that decides it — the folder a
+    ///   browser session runs in is not a folder *here*: it is on the machine that served
+    ///   the page, which is the machine `POST /api/tabs` opens the tab on. A path typed
+    ///   into the field is that machine's, and the field's own hint says so.
+    ///
+    /// The browser's card is deliberately **not** a button. A button takes the keyboard
+    /// on mouse-down, so a field inside one can never be typed into: the click that would
+    /// focus the field is spent on the button around it. That is not a theory — the first
+    /// version of this did exactly that, and the field silently took nothing.
     fn folder_card(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let face = theme.secondary;
         let hover_face = theme.muted;
         let border = theme.border;
         let accent = theme.primary;
+        // The focus ring is the desktop card's: the browser's card is a panel and never
+        // takes the keyboard itself (its field does).
+        #[cfg(not(target_family = "wasm"))]
         let ring = theme.ring;
-        Button::new(FOLDER_ID)
-            .track_focus(&self.folder_focus)
-            .accessibility_label(FOLDER_LABEL)
-            .bg(face)
-            .text_color(theme.foreground)
-            .w(FOLDER_COLUMN)
-            .flex_none()
-            .p(FOLDER_PAD)
-            .rounded(theme.radius_lg)
-            .border_1()
-            .border_color(border)
-            // `.folder-card-large:hover{border-color:var(--primary);background:var(--muted)}`
-            .hover(move |style| style.border_color(accent).bg(hover_face))
-            .focus_visible(move |style| style.border_color(ring))
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .gap(FOLDER_GAP)
-            .on_click(cx.listener(|this, _, window, cx| this.pick_folder(window, cx)))
-            .child(
-                div().mb(FOLDER_ICON_GAP).child(
-                    Icon::new(IconName::Folder)
-                        .with_size(FOLDER_ICON)
-                        .text_color(theme.foreground),
-                ),
+
+        // The card's box, in both shapes: the design's `.folder-card-large`. The two
+        // shapes are different elements — a button that clicks, or a panel that holds a
+        // field — so this is a macro rather than a function: it is the *styles* that are
+        // shared, and both a `Button` and a `Div` take them.
+        macro_rules! shape {
+            ($card:expr) => {
+                $card
+                    .bg(face)
+                    .text_color(theme.foreground)
+                    .w(FOLDER_COLUMN)
+                    .flex_none()
+                    .p(FOLDER_PAD)
+                    .rounded(theme.radius_lg)
+                    .border_1()
+                    .border_color(border)
+                    // `.folder-card-large:hover{border-color:var(--primary);background:var(--muted)}`
+                    .hover(move |style| style.border_color(accent).bg(hover_face))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap(FOLDER_GAP)
+            };
+        }
+
+        let icon = || {
+            div().mb(FOLDER_ICON_GAP).child(
+                Icon::new(IconName::Folder)
+                    .with_size(FOLDER_ICON)
+                    .text_color(theme.foreground),
             )
-            .child(medium(div().text_size(CARD_TITLE).line_height(BODY_LINE)).child(FOLDER_LABEL))
+        };
+
+        // The desktop: the card is the button, and the click is the dialog.
+        #[cfg(not(target_family = "wasm"))]
+        {
+            return shape!(Button::new(FOLDER_ID))
+                .track_focus(&self.folder_focus)
+                .accessibility_label(FOLDER_LABEL)
+                .focus_visible(move |style| style.border_color(ring))
+                .on_click(cx.listener(|this, _, window, cx| this.pick_folder(window, cx)))
+                .child(icon())
+                .child(
+                    medium(div().text_size(CARD_TITLE).line_height(BODY_LINE)).child(FOLDER_LABEL),
+                )
+                .into_any_element();
+        }
+
+        // The browser: a panel, a field, and the button that opens the session.
+        #[cfg(target_family = "wasm")]
+        {
+            let field = self
+                .folder_input
+                .clone()
+                .expect("a browser's folder card always has its field");
+            shape!(div().id(FOLDER_ID))
+                .child(icon())
+                .child(
+                    div()
+                        .w_full()
+                        .text_size(px(design::FONT_BASE - 3.))
+                        .line_height(BODY_LINE)
+                        .text_color(theme.muted_foreground)
+                        .child(FOLDER_TYPE_LABEL),
+                )
+                .child(
+                    div()
+                        .w_full()
+                        .rounded(px(design::RADIUS))
+                        .border_1()
+                        .border_color(border)
+                        // The card's own surface behind the field: CSS paints a box-shadow
+                        // *outside* the border and gpui paints one under the element, so
+                        // without a surface of its own the focus ring's fill covered the
+                        // whole box.
+                        .bg(theme.background)
+                        .focus(move |style| style.border_color(accent))
+                        .child(
+                            Input::new(&field)
+                                .id(FOLDER_INPUT_ID)
+                                .aria_label(FOLDER_INPUT_LABEL)
+                                .appearance(false)
+                                .bordered(false)
+                                .focus_bordered(false)
+                                .text_size(SMALL)
+                                .h(px(FOLDER_FIELD_H))
+                                .px(px(6.)),
+                        ),
+                )
+                .child(
+                    Button::new(FOLDER_GO_ID)
+                        .w_full()
+                        .h(px(FOLDER_FIELD_H))
+                        .flex_none()
+                        .rounded(px(design::RADIUS))
+                        .bg(accent)
+                        .text_color(theme.primary_foreground)
+                        .text_size(SMALL)
+                        .child(FOLDER_GO_LABEL)
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.enter_folder(&field, window, cx)
+                        })),
+                )
+                .child(
+                    div()
+                        .w_full()
+                        .text_size(px(design::FONT_BASE - 4.))
+                        .line_height(px(design::FONT_BASE + 2.))
+                        .text_color(theme.muted_foreground)
+                        .child(crate::host::FOLDER_HINT),
+                )
+                .when_some(self.folder_error.clone(), |card, error| {
+                    card.child(
+                        div()
+                            .w_full()
+                            .text_size(px(design::FONT_BASE - 4.))
+                            .line_height(px(design::FONT_BASE + 2.))
+                            .text_color(theme.danger)
+                            .child(error),
+                    )
+                })
+                .into_any_element()
+        }
+    }
+
+    /// Launch in the folder a person typed ([`Self::folder_card`]'s browser shape).
+    ///
+    /// Nothing is guessed at: an empty field is not a launch, and a path that is not
+    /// absolute is refused here rather than sent to a server that would refuse it with
+    /// the same words (`crates/web`'s `OpenRequest::validate` — a relative path would
+    /// silently mean "wherever that server was started"). What the server knows and this
+    /// page cannot — whether the folder exists on *its* machine — is left to it, and its
+    /// refusal comes back as the tab's own failure line.
+    fn enter_folder(
+        &mut self,
+        field: &Entity<InputState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let typed = field.read(cx).value().trim().to_owned();
+        if typed.is_empty() {
+            return;
+        }
+        let folder = PathBuf::from(&typed);
+        if !has_root(&folder) {
+            // A relative path is refused here rather than sent: the server would refuse
+            // it with the same words (`crates/web`'s `OpenRequest::validate` — a relative
+            // path would silently mean "wherever that server was started"), and a round
+            // trip to be told what the page can see for itself is a worse answer. What
+            // the server knows and this page cannot — whether the folder exists on *its*
+            // machine — is left to it, and its refusal comes back as the tab's own
+            // failure line.
+            self.folder_error = Some(format!("{typed} is not an absolute path"));
+            cx.notify();
+            return;
+        }
+        self.folder_error = None;
+        // The plan is read here, with the state in hand: asking the tab for it would read
+        // this entity again while it is being updated.
+        let plan = self.launcher.plan();
+        let _ = self
+            .tab
+            .update(cx, |tab, cx| tab.emit_launch(folder, plan, cx));
+        let _ = window;
     }
 
     /// What `evo-swarm check --json` found wrong with this launch (§9), and what the
@@ -2496,6 +2722,13 @@ impl TabContent {
 
     /// [`TabContent::emit_launch`] with the plan read from the controls, for a caller that
     /// is not inside this tab's own update.
+    ///
+    /// The folder dialog's helper: it answers on the foreground executor, where the plan
+    /// cannot be read from the state in hand. A browser's folder card is a text field and
+    /// reads the plan where it stands ([`EmptyTabState::enter_folder`]), so this has no
+    /// caller there — and a browser is not a place to keep a function for a dialog that
+    /// does not exist.
+    #[cfg(not(target_family = "wasm"))]
     pub(crate) fn request_launch(&mut self, folder: PathBuf, cx: &mut Context<Self>) {
         let plan = self.launch_plan(cx);
         self.emit_launch(folder, plan, cx);

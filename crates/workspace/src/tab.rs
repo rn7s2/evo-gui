@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use gpui_kit::component::input::InputState;
 use gpui_kit::component::list::{ListEvent, ListState};
@@ -1276,6 +1276,7 @@ impl TabContent {
     /// The tab directory and the folder's `swarm.lisp` block are written first, so
     /// a launch that cannot write them fails the tab instead of starting a swarm
     /// that would run the wrong lanes model (§9.6).
+    #[cfg(not(target_family = "wasm"))]
     pub fn launch(&mut self, launch: Launch, window: &mut Window, cx: &mut Context<Self>) {
         let folder = launch.folder().clone();
         match crate::launch::start(&self.config, &launch) {
@@ -1305,6 +1306,61 @@ impl TabContent {
                 cx.notify();
             }
         }
+    }
+
+    /// Start this tab's swarm (§3), in a build whose launch is a request.
+    ///
+    /// The same two outcomes as the native one, reached asynchronously: a browser
+    /// opens a tab by asking the `evo-web` server to (`POST /api/tabs`), which is a
+    /// `fetch` and cannot be waited on from here. So the tab goes to `Booting`
+    /// first — the same state a native launch shows while its child comes ready —
+    /// and the answer arrives as a task that either attaches the engine or fails
+    /// the tab with the server's own words.
+    ///
+    /// Nothing is drawn between the two that is not true: a tab that is booting is
+    /// booting whether the process is being spawned here or there.
+    #[cfg(target_family = "wasm")]
+    pub fn launch(&mut self, launch: Launch, window: &mut Window, cx: &mut Context<Self>) {
+        let folder = launch.folder().clone();
+        self.last_launch = Some(launch.clone());
+        self.gone = None;
+        // A new session writes a new session; the server names it when it does.
+        self.session = None;
+        self.set_state(TabState::Booting { folder }, cx);
+
+        let config = self.config.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let started = crate::launch::start(&config, &launch).await;
+            // The tab may have been closed while the request was in flight, in
+            // which case there is nothing to tell and no engine to attach — the
+            // handle is dropped, which stops the tab the server just opened.
+            let _ = this.update_in(cx, |tab, window, cx| match started {
+                Ok(started) => {
+                    tab.attach(started, window, cx);
+                    cx.notify();
+                }
+                Err(error) => {
+                    tab.set_state(
+                        TabState::Failed {
+                            folder: tab
+                                .last_launch
+                                .as_ref()
+                                .map(|launch| launch.folder().clone())
+                                .unwrap_or_default(),
+                            message: Some(format!("could not open this tab: {error}")),
+                            log_tail: String::new(),
+                            was_up: false,
+                            // The request failed before a tab existed, and there
+                            // is no log on this machine to shorten.
+                            tab_dir: None,
+                        },
+                        cx,
+                    );
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     /// Try again after a failure (§9.7).
@@ -1646,6 +1702,11 @@ impl TabContent {
             }
             Update::OpReply { rid, op, reply } => self.on_op_reply(&rid, &op, *reply, window, cx),
             Update::ServerGone => self.server_gone(window, cx),
+            // Native only, with the process whose end it reports: the variant is
+            // gated in `tab_engine`, because a browser's server is not this
+            // page's process and the stream ending is the whole story there
+            // (`Update::ServerGone`, which is not gated).
+            #[cfg(not(target_family = "wasm"))]
             Update::Exited { outcome } => {
                 // The engine stopped. A tab being closed never sees this; one that
                 // is still on screen says so and keeps what it has.
@@ -2393,30 +2454,47 @@ impl TabContent {
         let Some(agent) = AgentKey::from_topic(topic) else {
             return;
         };
-        let (bridge, _worker) = crate::bridge::Bridge::spawn(
-            crate::bridge::Revision::new(0),
-            move |updates: crate::bridge::BridgeSender<Option<Arc<gpui_kit::RenderImage>>>| {
-                let image = transcript::decode_image(&bytes);
-                let _ = updates.send(image);
-            },
-        );
-        let id = id.to_string();
-        bridge
-            .drive_into(
-                cx,
-                |_tab: &TabContent| crate::bridge::Revision::new(0),
-                move |tab, image: Option<Arc<gpui_kit::RenderImage>>, cx| {
-                    let Some(view) = tab.transcripts.get(&agent).cloned() else {
-                        return;
-                    };
-                    let id = id.clone();
-                    view.update(cx, |view, cx| match image {
-                        Some(image) => view.set_image(&id, n, image, cx),
-                        None => view.set_image_failed(&id, n, cx),
-                    });
+        // Decoding is off the UI thread on a host, where `Bridge` is a real thread.
+        // A browser has none — `std::thread::spawn` panics on
+        // `wasm32-unknown-unknown` — and the decode there runs on the task that
+        // already has the bytes, which is where a page must do it anyway.
+        #[cfg(not(target_family = "wasm"))]
+        {
+            let (bridge, _worker) = crate::bridge::Bridge::spawn(
+                crate::bridge::Revision::new(0),
+                move |updates: crate::bridge::BridgeSender<Option<Arc<gpui_kit::RenderImage>>>| {
+                    let image = transcript::decode_image(&bytes);
+                    let _ = updates.send(image);
                 },
-            )
-            .detach();
+            );
+            let id = id.to_string();
+            bridge
+                .drive_into(
+                    cx,
+                    |_tab: &TabContent| crate::bridge::Revision::new(0),
+                    move |tab, image: Option<Arc<gpui_kit::RenderImage>>, cx| {
+                        let Some(view) = tab.transcripts.get(&agent).cloned() else {
+                            return;
+                        };
+                        let id = id.clone();
+                        view.update(cx, |view, cx| match image {
+                            Some(image) => view.set_image(&id, n, image, cx),
+                            None => view.set_image_failed(&id, n, cx),
+                        });
+                    },
+                )
+                .detach();
+        }
+        #[cfg(target_family = "wasm")]
+        {
+            let image = transcript::decode_image(&bytes);
+            if let Some(view) = self.transcripts.get(&agent).cloned() {
+                view.update(cx, |view, cx| match image {
+                    Some(image) => view.set_image(id, n, image, cx),
+                    None => view.set_image_failed(id, n, cx),
+                });
+            }
+        }
     }
 
     /// The whole of one item, as `GET /items/<id>` answered: the row that asked for it
@@ -2627,6 +2705,13 @@ impl TabContent {
 
     /// The swarm's server exited on its own (§3, §9.7): the tab shows why, from
     /// the log the server was writing to.
+    ///
+    /// The log is read where it is written. On the desktop that is this machine's
+    /// filesystem, through the `swarm_client` reader. In a browser the log belongs
+    /// to the server that served the page — there is no local file to tail — so
+    /// the tab says the server is gone and has no tail to show, which is the same
+    /// shape the desktop shows for a log that is not there.
+    #[cfg(not(target_family = "wasm"))]
     fn server_gone(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.answer_pending_completions(cx);
         let Some(log) = self
@@ -2651,6 +2736,21 @@ impl TabContent {
             )
             .detach();
         let _ = window;
+    }
+
+    /// [`server_gone`](Self::server_gone) where there is no local log to tail: a
+    /// browser.
+    ///
+    /// The server that owns the tab is on the machine the page was served from,
+    /// and its `swarm.log` is a file there — not one this page can read. So the
+    /// tab says what it knows — the session stopped — and shows no tail, which is
+    /// the same thing the desktop shows for a log that is not there. The tail, if
+    /// a browser is to have one, is a read the `evo-web` server has to expose.
+    #[cfg(target_family = "wasm")]
+    fn server_gone(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.answer_pending_completions(cx);
+        self.gone = Some("session: the server exited".into());
+        cx.notify();
     }
 
     /// Record the session this tab started, once it is really on disk, so the
@@ -2688,38 +2788,57 @@ impl TabContent {
         let mut recent = store::app_state::Recent::new(session.clone(), folder, lanes);
         recent.models = models;
         let root = self.config.root.clone();
-        let (bridge, _worker) = crate::bridge::Bridge::<bool>::spawn(
-            crate::bridge::Revision::new(0),
-            move |updates: crate::bridge::BridgeSender<bool>| {
-                if !session.is_file() {
-                    // Nothing has been journalled yet, so there is nothing to
-                    // resume: the `/state` that names the session is not enough.
-                    let _ = updates.send(false);
-                    return;
-                }
-                let mut state = store::app_state::AppState::load(&root);
-                state.touch_recent(recent);
-                let _ = state.save(&root);
-                let _ = updates.send(true);
-            },
-        );
-        bridge
-            .drive_into(
-                cx,
-                |_tab: &TabContent| crate::bridge::Revision::new(0),
-                |tab, recorded: bool, _cx| {
-                    if let Some(live) = tab.live.as_mut() {
-                        live.recording = false;
-                        // Only a real record stops the next `/state` from asking
-                        // again.
-                        live.recorded |= recorded;
+
+        // A browser has no `app.json` to write, and no thread to write it on.
+        //
+        // Both halves matter. `app.json` is this *client's* own file — the recents
+        // a person sees in their own window — and a page has none: its history
+        // comes from the server's `GET /api/sessions`, which the browser shell
+        // reads. And the write is `Bridge`'s, which is a `std::thread::spawn`, and
+        // `std::thread::spawn` **panics** on `wasm32-unknown-unknown` (std's
+        // `sys::thread::unsupported::Thread::new` returns `UNSUPPORTED_PLATFORM`).
+        // That panic unwound out of `apply(Update::Ready)` — before
+        // `set_state(TabState::Running)` — so a browser that opened a session
+        // stayed on the empty tab with the session really running behind it.
+        #[cfg(not(target_family = "wasm"))]
+        {
+            let (bridge, _worker) = crate::bridge::Bridge::<bool>::spawn(
+                crate::bridge::Revision::new(0),
+                move |updates: crate::bridge::BridgeSender<bool>| {
+                    if !session.is_file() {
+                        // Nothing has been journalled yet, so there is nothing to
+                        // resume: the `/state` that names the session is not enough.
+                        let _ = updates.send(false);
+                        return;
                     }
+                    let mut state = store::app_state::AppState::load(&root);
+                    state.touch_recent(recent);
+                    let _ = state.save(&root);
+                    let _ = updates.send(true);
                 },
-            )
-            .detach();
+            );
+            bridge
+                .drive_into(
+                    cx,
+                    |_tab: &TabContent| crate::bridge::Revision::new(0),
+                    |tab, recorded: bool, _cx| {
+                        if let Some(live) = tab.live.as_mut() {
+                            live.recording = false;
+                            // Only a real record stops the next `/state` from asking
+                            // again.
+                            live.recorded |= recorded;
+                        }
+                    },
+                )
+                .detach();
+        }
     }
 
     /// Show a boot-style failure for a swarm that went away after it was up.
+    ///
+    /// Native only, with the log tail it renders: a browser has no `swarm.log` to
+    /// read (see [`Self::server_gone`]).
+    #[cfg(not(target_family = "wasm"))]
     fn fail_with_log(&mut self, log_tail: String, cx: &mut Context<Self>) {
         if let Some(folder) = self.folder().map(Path::to_path_buf) {
             let tab_dir = self.live.as_ref().map(|live| live.tab_dir.clone());
@@ -2810,25 +2929,30 @@ impl Render for TabContent {
 /// One spelling per file: a session path as the index writes it and as `/state`
 /// names it can differ by a trailing slash or a symlinked prefix
 /// (`/var` → `/private/var`).
+///
+/// Resolving a path is `crate::host`'s: on the desktop it is the filesystem's own
+/// answer, and in a browser — which has no filesystem, and holds paths that are
+/// the *serving* machine's — it is the path as written, trimmed.
 fn same_file_key(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| {
+    crate::host::canonicalize(path).unwrap_or_else(|_| {
         let text = path.to_string_lossy();
         PathBuf::from(text.trim_end_matches('/'))
     })
 }
 
 /// Epoch milliseconds, for the step clock.
+///
+/// The reading is `crate::host`'s: `std::time` is unimplemented on
+/// `wasm32-unknown-unknown` and `SystemTime::now()` panics there, so a browser
+/// reads the page's own clock instead (see [`crate::host::now_millis`]).
 fn now_millis() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|since| since.as_millis() as u64)
-        .unwrap_or_default()
+    crate::host::now_millis()
 }
 
 /// Whether two spellings name the same folder: as written, or once both resolve.
 fn same_folder(a: &Path, b: &Path) -> bool {
     a == b
-        || match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        || match (crate::host::canonicalize(a), crate::host::canonicalize(b)) {
             (Ok(a), Ok(b)) => a == b,
             _ => false,
         }

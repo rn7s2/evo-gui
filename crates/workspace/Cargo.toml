@@ -8,7 +8,6 @@ gpui-kit = { workspace = true }
 anyhow = { workspace = true }
 serde_json = { workspace = true }
 async-channel = "2"
-rfd = "0.17"
 session = { path = "../session" }
 settings = { path = "../settings" }
 store = { path = "../store" }
@@ -19,6 +18,25 @@ transcript = { path = "../transcript" }
 agent_list = { path = "../agent_list" }
 composer = { path = "../composer" }
 terminal = { path = "../terminal" }
+
+# The folder picker behind `host.rs`, and a desktop's alone: a browser has no
+# system dialog, and `rfd`'s web backend cannot pick a folder at all (`pick_folder`
+# does not exist for `wasm32`). Gating the dependency keeps a browser from
+# compiling the native backends. See `host.rs`.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+rfd = "0.17"
+
+# The page's own executor, for the browser launch: opening a tab is a `fetch`
+# (`POST /api/tabs`), so `TabContent::launch` runs as a task and draws a `Booting`
+# tab while it is in flight. A host needs none of it — its launch is a spawn on a
+# thread.
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-bindgen-futures = "0.4"
+# The page's own clock, for the step ticker: `std::time` is unimplemented on
+# `wasm32-unknown-unknown` (`SystemTime::now()` panics there, it does not return an
+# error), and a browser's clock is `Date.now()` — which is `js_sys`. Native builds
+# read the system clock instead and never compile this. See `host::now_millis`.
+js-sys = "0.3"
 
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }
