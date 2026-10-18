@@ -1,0 +1,49 @@
+[package]
+name = "evo-webapp"
+version.workspace = true
+edition.workspace = true
+
+# The browser frontend: the *same* gpui UI codebase the desktop app draws, built
+# for wasm32-unknown-unknown and mounted into a page by `wasm-bindgen`. It is a
+# cdylib — the artifact is a `.wasm` module, not a program — and its `main` is
+# the `#[wasm_bindgen] start` in `src/lib.rs`.
+[lib]
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[dependencies]
+gpui-kit = { workspace = true }
+workspace = { path = "../workspace" }
+store = { path = "../store" }
+# The design's palette: the same crate the desktop app installs, so both shells
+# draw the same window rather than the browser getting gpui-kit's defaults.
+theme = { path = "../theme" }
+session = { path = "../session" }
+settings = { path = "../settings" }
+transcript = { path = "../transcript" }
+serde_json = { workspace = true }
+async-channel = "2"
+# The browser client for the server that served this page: the empty tab's
+# catalog and history come over `fetch` through it, the same client a tab's
+# session uses — so the frontend has exactly one HTTP client, not two.
+swarm_client = { path = "../swarm_client" }
+
+# `wasm-bindgen` is the bridge the page calls through; `web-sys`/`js-sys` are the
+# DOM and the globals the entry point reads (the mount element, `location`, and
+# the console). Nothing here is compiled for the desktop build.
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+    "console",
+    "Document",
+    "Element",
+    "HtmlElement",
+    "Location",
+    "Window",
+] }
+console_error_panic_hook = "0.1"
+# The web platform's own logging writes through `log`, and the shell reports a
+# window that could not open the same way.
+log = "0.4"
