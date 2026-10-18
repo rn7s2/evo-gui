@@ -557,6 +557,7 @@ fn signal_group(pid: u32, signal: Signal) {
 }
 
 /// Take a process group down: `SIGTERM`, one grace, then `SIGKILL`.
+#[cfg(unix)]
 fn stop_group(pid: u32) {
     signal_group(pid, Signal::Term);
     let deadline = Instant::now() + TERM_GRACE;

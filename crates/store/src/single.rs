@@ -11,6 +11,13 @@
 //!   and returns so its `main` can exit 0 while the running instance raises its
 //!   window.
 //!
+//! Both halves are Unix: `flock` and the activation socket have no counterpart
+//! off it. Where there is none — the wasm build, where the app is one page and
+//! there is no second instance to coordinate — [`SingleInstance::acquire`]
+//! answers [`SingleInstance::Primary`] with nothing to hold and nothing to
+//! watch: the API is the same, the coordination is simply not there to do. See
+//! the `#[cfg(not(unix))]` half of [`Primary`].
+//!
 //! ```no_run
 //! use store::single::SingleInstance;
 //! use store::paths::Root;
@@ -20,24 +27,41 @@
 //! }
 //! ```
 
-use std::fs::{File, OpenOptions};
-use std::io::{self, BufRead, BufReader, Read, Write};
-use std::os::unix::fs::OpenOptionsExt;
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver};
-use std::sync::Arc;
-use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::sync::mpsc::Receiver;
+use std::time::Duration;
 
-use crate::paths::{self, Root};
+use crate::paths::Root;
+
+#[cfg(unix)]
+use std::fs::{File, OpenOptions};
+#[cfg(unix)]
+use std::io::{BufRead, BufReader, Read, Write};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+#[cfg(unix)]
+use std::os::unix::net::{UnixListener, UnixStream};
+#[cfg(unix)]
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(unix)]
+use std::sync::mpsc;
+#[cfg(unix)]
+use std::sync::Arc;
+#[cfg(unix)]
+use std::thread::JoinHandle;
+#[cfg(unix)]
+use std::time::Instant;
+
+#[cfg(unix)]
+use crate::paths;
 
 /// The verb a secondary sends to the primary.
 pub const ACTIVATE: &str = "activate";
 
 /// How long a secondary keeps trying to reach the primary's socket. The primary
 /// creates it moments after taking the lock, so this only covers that gap.
+#[cfg(unix)]
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// How long the accept loop waits between non-blocking `accept` calls.
@@ -47,9 +71,11 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 /// removed directory, a test that cleans up first) and `accept` on a dead path
 /// would then never return. One syscall every 25 ms is the price of a `Drop`
 /// that always terminates.
+#[cfg(unix)]
 const ACCEPT_POLL: Duration = Duration::from_millis(25);
 
 /// How long the primary waits for a knocked connection to say something.
+#[cfg(unix)]
 const READ_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Outcome of [`SingleInstance::acquire`].
@@ -80,6 +106,7 @@ pub struct Activation {
     pub raw: String,
 }
 
+#[cfg(unix)]
 impl Activation {
     fn parse(line: &str) -> Activation {
         let raw = line.trim().to_string();
@@ -95,6 +122,11 @@ impl SingleInstance {
     ///
     /// Creates the root if it does not exist. A lock file left behind by a dead
     /// process is taken over: the lock itself died with that process.
+    ///
+    /// Off Unix there is no lock to take and no other instance to knock on: the
+    /// root is still created (the app keeps its files in the same place), and
+    /// the answer is always a [`Primary`] with nothing behind it.
+    #[cfg(unix)]
     pub fn acquire(root: &Root) -> io::Result<SingleInstance> {
         root.ensure()?;
         let file = open_lock_file(&root.lock())?;
@@ -107,12 +139,22 @@ impl SingleInstance {
         }
     }
 
+    /// [`SingleInstance::acquire`] where there is nothing to acquire: the root is
+    /// created and the caller is the primary, because it is the only instance
+    /// there can be.
+    #[cfg(not(unix))]
+    pub fn acquire(root: &Root) -> io::Result<SingleInstance> {
+        root.ensure()?;
+        Ok(SingleInstance::Primary(Primary::uncontended(root)))
+    }
+
     /// Convenience over [`SingleInstance::acquire`] with `~/.evo/desktop/`.
     pub fn acquire_default() -> io::Result<SingleInstance> {
         SingleInstance::acquire(&Root::default())
     }
 }
 
+#[cfg(unix)]
 fn open_lock_file(path: &Path) -> io::Result<File> {
     if let Some(parent) = path.parent() {
         paths::create_dir_private(parent)?;
@@ -126,6 +168,7 @@ fn open_lock_file(path: &Path) -> io::Result<File> {
 }
 
 /// Knocked but not let in: announce ourselves to whoever holds the lock.
+#[cfg(unix)]
 fn notify_blocked(root: &Root) -> Secondary {
     let sock = root.activate_sock();
     let deadline = Instant::now() + CONNECT_TIMEOUT;
@@ -146,6 +189,13 @@ fn notify_blocked(root: &Root) -> Secondary {
 }
 
 /// The running instance: holds the lock and listens for knocks.
+///
+/// On Unix that is a file lock and a bound unix socket. Off it there is neither,
+/// so the primary holds the paths it would have used — [`Primary::lock_path`]
+/// and [`Primary::socket_path`] still answer, because the UI shows them — and an
+/// empty knock channel, so the poll in the event loop ([`Primary::try_activation`],
+/// [`Primary::recv_activation`]) finds nothing, forever, which is the truth here.
+#[cfg(unix)]
 pub struct Primary {
     /// Holding this open is what holds the lock. Never read: it is an RAII
     /// handle, and dropping it releases the lock.
@@ -163,6 +213,17 @@ pub struct Primary {
     accept: Option<JoinHandle<()>>,
 }
 
+#[cfg(not(unix))]
+pub struct Primary {
+    lock_path: PathBuf,
+    sock_path: PathBuf,
+    /// Nothing ever sends on this: the sender is dropped as soon as it is made,
+    /// so a poll answers `None` (empty or disconnected, which are the same thing
+    /// to the caller) rather than waiting for a knock that cannot come.
+    rx: Receiver<Activation>,
+}
+
+#[cfg(unix)]
 impl Primary {
     fn claim(root: &Root, lock: File) -> io::Result<Primary> {
         // The pid is inside for a human reading the file; the lock, not the
@@ -233,6 +294,55 @@ impl Primary {
     }
 }
 
+#[cfg(not(unix))]
+impl Primary {
+    fn uncontended(root: &Root) -> Primary {
+        // The sender goes out of scope here, so the receiver is disconnected and
+        // every poll below is an immediate `None` — never a wait.
+        let (tx, rx) = std::sync::mpsc::channel::<Activation>();
+        drop(tx);
+        Primary {
+            lock_path: root.lock(),
+            sock_path: root.activate_sock(),
+            rx,
+        }
+    }
+
+    /// This process's pid. Nothing records it here, but the UI and the logs show
+    /// it, so it answers as everywhere else.
+    pub fn pid(&self) -> u32 {
+        std::process::id()
+    }
+
+    /// Path of the lock file, which this build neither creates nor holds.
+    pub fn lock_path(&self) -> &Path {
+        &self.lock_path
+    }
+
+    /// Path of the activation socket, which this build never binds.
+    pub fn socket_path(&self) -> &Path {
+        &self.sock_path
+    }
+
+    /// The channel a secondary's knock would arrive on. Nothing sends on it.
+    pub fn activation_rx(&self) -> &Receiver<Activation> {
+        &self.rx
+    }
+
+    /// A knock, if one is waiting — there is no other instance to knock, so this
+    /// is `None`.
+    pub fn try_activation(&self) -> Option<Activation> {
+        self.rx.try_recv().ok()
+    }
+
+    /// Wait up to `timeout` for a knock — which never comes, so this is `None`
+    /// immediately rather than after `timeout`.
+    pub fn recv_activation(&self, _timeout: Duration) -> Option<Activation> {
+        self.rx.recv_timeout(Duration::ZERO).ok()
+    }
+}
+
+#[cfg(unix)]
 impl Drop for Primary {
     fn drop(&mut self) {
         // The accept loop polls, so this flag alone stops it; the connection is
@@ -258,6 +368,7 @@ impl std::fmt::Debug for Primary {
 
 /// Bind the activation socket, clearing a file left by a process that died
 /// without unlinking it (a stale socket, or anything else sitting there).
+#[cfg(unix)]
 fn bind_activation_socket(path: &Path) -> io::Result<UnixListener> {
     if let Some(parent) = path.parent() {
         paths::create_dir_private(parent)?;
@@ -278,6 +389,7 @@ fn bind_activation_socket(path: &Path) -> io::Result<UnixListener> {
     }
 }
 
+#[cfg(unix)]
 fn accept_loop(listener: UnixListener, tx: mpsc::Sender<Activation>, running: Arc<AtomicBool>) {
     while running.load(Ordering::SeqCst) {
         match listener.accept() {
@@ -301,6 +413,7 @@ fn accept_loop(listener: UnixListener, tx: mpsc::Sender<Activation>, running: Ar
 
 /// One short line in, one ack out. A peer that connects and says nothing is
 /// dropped after the read timeout, so the loop always comes back.
+#[cfg(unix)]
 fn handle_connection(stream: UnixStream, tx: &mpsc::Sender<Activation>) {
     // An accepted socket may inherit the listener's non-blocking flag; put it
     // back, so a read means "wait for the line", not "try once".
@@ -320,7 +433,7 @@ fn handle_connection(stream: UnixStream, tx: &mpsc::Sender<Activation>) {
     let _ = out.flush();
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::fs;

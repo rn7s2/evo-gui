@@ -14,6 +14,14 @@ anyhow = { workspace = true }
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
 
+# `Date.now()` is the clock a page has. `std::time` is unimplemented on
+# `wasm32-unknown-unknown` — `SystemTime::now()` panics rather than returning an
+# error — and this crate reads the clock in `time::now_epoch`, which the launch
+# path reaches when it mints a tab id (`paths::fill_random`'s fallback, taken
+# whenever `/dev/urandom` cannot be opened, which is every browser).
+[target.'cfg(target_family = "wasm")'.dependencies]
+js-sys = "0.3"
+
 [[bin]]
 name = "store-lock-probe"
 path = "src/bin/lock_probe.rs"
