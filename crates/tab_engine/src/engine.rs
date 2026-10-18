@@ -694,8 +694,8 @@ async fn run_connected(
         session: session_ref_of(&snapshot).unwrap_or(swarm_client::SessionRef {
             // A snapshot with no `session` topic is a server that answered
             // something unexpected; the tab then records no session, which is
-            // what an empty id and path mean here.
-            id: String::new(),
+            // what an absent id and an empty path mean here.
+            id: None,
             path: String::new(),
         }),
     });
@@ -711,10 +711,14 @@ async fn run_connected(
 /// The topic carries it (`crates/session/src/state.rs`: `session.id` and
 /// `session.path`), which is what a tab needs to record the session it is on
 /// (§2, §9.5) — the one thing `ReadyFile.session` is read for.
+///
+/// `id` is optional for the same reason it is on the ready file: a session that
+/// was *resumed* adopts a journal rather than minting one, so it can name no id of
+/// its own. The **path** is what identifies the journal, and it is required.
 fn session_ref_of(snapshot: &swarm_client::Snapshot) -> Option<swarm_client::SessionRef> {
     let session = snapshot.topic("session")?.get("state")?.get("session")?;
     Some(swarm_client::SessionRef {
-        id: session.get("id")?.as_str()?.to_owned(),
+        id: session.get("id").and_then(|id| id.as_str()).map(str::to_owned),
         path: session.get("path")?.as_str()?.to_owned(),
     })
 }

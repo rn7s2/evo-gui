@@ -147,7 +147,7 @@ this is the same list.
 | `GET /` | the frontend (`dist/`, `index.html` fallback) | yes — the browser leg |
 | `GET /api/health` | this server: version, tabs, bind | yes — by hand |
 | `GET /api/tabs` | every tab, oldest first | yes — the proxy leg |
-| `POST /api/tabs` | open one (folder, program, model/effort/…, `resume`) | yes — the proxy leg; and by hand with a real `resume`, which opened a tab carrying the exact journal path back and refused a path that is not a file with a 400 |
+| `POST /api/tabs` | open one (folder, program, model/effort/…, `resume`) | yes — the proxy leg; and by hand with a real `resume`, which opened a tab carrying the exact journal path back and refused a path that is not a file with a 400. **A `resume` naming a session a live tab already holds answers 200 with *that tab's* id and pid and starts no process** — it attaches rather than forking the journal (see below) |
 | `GET /api/tabs/<id>` | one tab's state | yes — by hand |
 | `DELETE /api/tabs/<id>` | stop it, and forget it | yes — the proxy leg |
 | `GET /api/tabs/<id>/snapshot` | the tab's whole view, atomically | yes — the proxy leg |
@@ -686,12 +686,30 @@ needs a branch and no behaviour silently changes.
 | an idle stream | a socket read with a timeout | the same patience, measured against the last **byte** rather than the last frame (`fetch.rs`'s `Tap`): the server's 15 s keepalives are SSE comments, which the framing drops, so only the layer under it can see them. Without this a dead socket parks the tab for ever. |
 | syntax colouring in code fences | tree-sitter grammars | **off** — the kit's wasm stub, same fence, uncoloured |
 | spawning a session | the app spawns `evo-swarm serve` itself and holds the pipe | **wired**: the page asks `evo-web` to open one (`POST /api/tabs`) and attaches — the server owns the process, and the browser owns neither a pipe nor a pid |
+| reopening a running session | the app *selects* the tab that already holds it (`chrome.rs`'s `TabContentEvent::Resume`) | **attach, and that is deliberately not the desktop's answer.** The desktop can select a tab because it owns a tab strip; a server cannot enumerate, select or close anybody's browser tabs, so "switch to the other tab" is not a move available here. A refusal would strand a reader with a running session they cannot reach. `POST /api/tabs` naming a session a **live** tab holds therefore answers **200 with that tab's id and pid** and starts no process — idempotent, one writer — and the page joins it. A tab's stream is a broadcast, not a private pipe, so a second reader costs nothing: two windows can share one live session. A dead holder never blocks; a different journal still opens its own tab. |
+| a journal whose header has no `:id` | n/a (the app resumes whatever `evo` writes) | `SessionRef.id` is `Option<String>` — see below. |
 | single instance, window bounds, menu bar | the app owns them | **not applicable** — the browser owns the tab, the page owns the URL |
 
 ### Not implemented on the web side
 
 Each of these was re-checked against the code, not carried forward.
 
+- **No separate "running sessions" section.** The empty tab lists the session
+  *index* (`GET /api/sessions`), and a session that is **currently running is in
+  that list** — so the row a reader clicks to get back to their work is the one
+  that already exists. That is why there is no second list fed by `GET /api/tabs`:
+  the attach rule above is what makes the existing row the right affordance. What
+  is missing is a *distinction* — a running session's row does not say so — which
+  would be a UI addition, not a correctness one.
+- **A ready file whose `session.id` is absent used to hang the boot.** Worth
+  recording because it cost hours and the symptom pointed elsewhere. `evo-agent`
+  reports `{"id": <the journal's own :id>, "path": "…"}`; a journal whose header
+  has no `:id` is reported as `"id": null`. `SessionRef.id` was a non-optional
+  `String`, so the whole ready file failed to deserialise, `read_ready` returned
+  `None`, and the boot polled a **perfectly valid file** to its 90 s timeout and
+  then said "no ready file" — with the child alive and listening throughout. It is
+  `Option<String>` now. Measured: without that, resuming such a journal hangs;
+  with it, `running` immediately.
 - **No local file read.** A path a transcript names is not linked, and a file's
   *contents* cannot be read from the page. The config files are the exception and
   the only one: `GET /api/config` reads them, because a page cannot open

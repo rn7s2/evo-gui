@@ -104,14 +104,6 @@ impl OpenRequest {
                 self.folder.display()
             )));
         }
-        if let Some(path) = &self.resume {
-            if !path.is_file() {
-                return Err(ApiError::bad_request(format!(
-                    "resume {} is not a file on the serving machine",
-                    path.display()
-                )));
-            }
-        }
         if self.workers == Some(0) {
             return Err(ApiError::bad_request("workers must be at least 1"));
         }
@@ -201,11 +193,21 @@ struct Live {
     /// Shared so a stop can be moved onto another thread; the `Server` itself is
     /// not `Sync` (it owns a `Child`), so the lock is what makes it usable from
     /// the async side at all.
-    server: Arc<Mutex<Server>>,
+    ///
+    /// `Option` so that a test can build a `Live` with no process behind it: the
+    /// shutdown path is the only thing that touches this, and a tab with no server
+    /// has nothing to stop.
+    server: Arc<Mutex<Option<Server>>>,
     pid: u32,
     port: u16,
     epoch: String,
     url: String,
+    /// The journal this swarm reported it is writing, from the ready file's
+    /// `session.path`. This is the authority for "what does this tab have open":
+    /// the process's own statement about itself, rather than an inference from
+    /// the request that started it — so it covers a tab that was started without
+    /// `resume` and named its journal on its own. See [`Tab::holds_session`].
+    session_path: PathBuf,
 }
 
 /// Why a tab never came up, in the words the API hands the browser.
@@ -253,6 +255,50 @@ pub struct Tab {
 impl Tab {
     fn state(&self) -> MutexGuard<'_, State> {
         lock(&self.state)
+    }
+
+    /// Whether this tab has `session` open — the desktop's rule, on this side of
+    /// the wire (§7.1: *two swarms on one journal would fork it*).
+    ///
+    /// Two sources, and the same two the desktop's `TabContent::holds_session`
+    /// compares, because each covers a window the other misses:
+    ///
+    /// * **what the swarm reported** — `Live::session_path`, read from the child's
+    ///   ready file once it was listening. This is the authority: the process
+    ///   says which journal it is writing. It is the *only* thing that can cover a
+    ///   tab started **without** `resume`, which creates its journal itself under
+    ///   a key derived from its folder and so has no path in its request at all.
+    /// * **what it was launched to resume** — `request.resume`, which covers the
+    ///   window between the spawn and the ready file, when the child is already
+    ///   running with that journal open but has not said so yet.
+    ///
+    /// A tab that is not running holds nothing: a stopped or failed tab must not
+    /// block a resume, and its state is the thing that says so — not a list kept
+    /// beside it, which could drift.
+    pub fn holds_session(&self, session: &Path) -> bool {
+        let wanted = same_file_key(session);
+        let state = self.state();
+        // Which sources can possibly be true, given what this tab is doing.
+        //
+        // Only a tab that has a process can hold a journal open, so a failed or
+        // stopped tab holds nothing — its state is the authority, and that is what
+        // keeps a dead tab from blocking the resume that would recover from it.
+        let (reported, launched) = match &*state {
+            // The child has opened a journal and said which: this is the authority,
+            // and it is the only thing that covers a tab started without `resume`.
+            State::Running(live) => (
+                Some(live.session_path.clone()),
+                self.request.resume.clone(),
+            ),
+            // Still booting: the child may already be running with the journal it
+            // was told to resume, so the request is all we have.
+            State::Starting => (None, self.request.resume.clone()),
+            State::Failed(_) | State::Stopped => (None, None),
+        };
+        [reported, launched]
+            .into_iter()
+            .flatten()
+            .any(|held| same_file_key(&held) == wanted)
     }
 
     /// The client of a running tab, or why there is none.
@@ -345,6 +391,18 @@ impl Tabs {
         self.map().get(id.as_str()).cloned()
     }
 
+    /// The running tab that has `session` open, if one does.
+    ///
+    /// Asked of every tab's own state ([`Tab::holds_session`]) rather than of a
+    /// side list, so a tab that has stopped or failed stops holding its journal at
+    /// the same moment it stops being able to write to it.
+    pub fn holder_of(&self, session: &Path) -> Option<String> {
+        self.list()
+            .into_iter()
+            .find(|tab| tab.holds_session(session))
+            .map(|tab| tab.id.clone())
+    }
+
     /// Every tab, oldest first.
     pub fn list(&self) -> Vec<Arc<Tab>> {
         let mut tabs: Vec<Arc<Tab>> = self.map().values().cloned().collect();
@@ -366,6 +424,51 @@ impl Tabs {
     /// carries the same thing.
     pub async fn open(&self, request: OpenRequest) -> Result<Arc<Tab>, ApiError> {
         request.validate()?;
+        // One journal, one writer (§7.1) — but the answer here is **attach, not
+        // refuse**.
+        //
+        // A second `serve` on a session a live tab is already writing would fork
+        // it: both append to the same `.sexp`, each one's view shows only its own
+        // turns, and the file the user later resumes is malformed. So no second
+        // process is started. What comes back instead is the tab that already has
+        // it — because that is the only answer that leaves the reader able to
+        // continue their work.
+        //
+        // The desktop app answers this by *selecting* the holding tab
+        // (`chrome.rs`, `TabContentEvent::Resume`), which works because a desktop
+        // has one window with a tab strip: the app can point at tab 3 and the
+        // reader clicks it. A browser has no tab strip — this server cannot
+        // enumerate, select or close anybody's browser tabs — so "switch to the
+        // other tab" is not a move available here, and a refusal would strand a
+        // reader with a running session they cannot reach. A tab's stream is a
+        // broadcast, not a private pipe, so a second reader can simply join the
+        // one that exists.
+        //
+        // So the id returned is the holder's, and the caller attaches to it. That
+        // makes this idempotent: asking twice for the same session yields the same
+        // tab and never a second writer.
+        //
+        // This is asked **before** the file-exists check below, and that order is
+        // load-bearing: a live tab's journal is created by the child on its first
+        // write, so a session that is running but has written nothing yet has no
+        // file on disk. Checking the file first would reject the very request this
+        // rule exists to answer — the reader's own running session.
+        if let Some(path) = &request.resume {
+            if let Some(holder) = self.holder_of(path) {
+                return self
+                    .get(&holder)
+                    .ok_or_else(|| ApiError::not_found(format!("no tab {holder}")));
+            }
+        }
+        // Nothing holds it, so the path has to be a real journal to resume.
+        if let Some(path) = &request.resume {
+            if !path.is_file() {
+                return Err(ApiError::bad_request(format!(
+                    "resume {} is not a file on the serving machine",
+                    path.display()
+                )));
+            }
+        }
         let id = self.mint_id()?;
         let tab_dir = self
             .root
@@ -412,8 +515,13 @@ impl Tabs {
                     port: server.port(),
                     epoch: server.epoch().to_owned(),
                     url: server.ready().url.clone(),
+                    // The journal the child says it is writing (§1). For a resumed
+                    // tab this is the path that was asked for; for a fresh one it is
+                    // the journal the child created itself, which is the case a
+                    // `resume`-only guard could not see.
+                    session_path: PathBuf::from(&server.ready().session.path),
                     client: server.client().clone(),
-                    server: Arc::new(Mutex::new(server)),
+                    server: Arc::new(Mutex::new(Some(server))),
                 });
                 *tab.state() = State::Running(live);
                 Ok(tab)
@@ -451,8 +559,17 @@ impl Tabs {
             Some(live) => {
                 let server = live.server.clone();
                 let shutdown = tokio::task::spawn_blocking(move || {
-                    let mut server = lock(&server);
-                    server.shutdown()
+                    let mut held = lock(&server);
+                    match held.as_mut() {
+                        Some(server) => server.shutdown(),
+                        // A tab with no process behind it — only a test builds
+                        // one — has nothing to ladder down.
+                        None => Ok(Shutdown {
+                            outcome: swarm_client::ShutdownOutcome::AlreadyGone,
+                            exit_code: None,
+                            waited: std::time::Duration::ZERO,
+                        }),
+                    }
                 })
                 .await
                 .map_err(|e| ApiError::internal(format!("the stop task failed: {e}")))?;
@@ -486,9 +603,11 @@ impl Tabs {
                 _ => None,
             };
             if let Some(live) = live {
-                let mut server = lock(&live.server);
-                if server.shutdown().is_ok() {
-                    stopped += 1;
+                let mut held = lock(&live.server);
+                if let Some(server) = held.as_mut() {
+                    if server.shutdown().is_ok() {
+                        stopped += 1;
+                    }
                 }
             }
             *tab.state() = State::Stopped;
@@ -507,6 +626,21 @@ impl Tabs {
         }
         Err(ApiError::internal("cannot mint an unused tab id"))
     }
+}
+
+/// The key two spellings of one journal are compared by.
+///
+/// A path that resolves is compared resolved, so `/tmp/x/../x/j.sexp` and
+/// `/tmp/x/j.sexp` are one file — the desktop's `same_file_key` does the same
+/// thing for the same reason. A path that does **not** resolve (a journal that is
+/// not there yet, which is the normal case for a resume target that has not been
+/// written) falls back to its own text with any trailing slash removed, so two
+/// equal strings still match.
+fn same_file_key(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| {
+        let text = path.to_string_lossy();
+        PathBuf::from(text.trim_end_matches('/'))
+    })
 }
 
 /// A mutex a poisoned lock cannot make useless: a panic elsewhere must not take
@@ -671,6 +805,130 @@ mod tests {
         open.program = ProgramChoice::Swarm;
         open.workers = Some(4);
         assert!(open.validate().is_ok());
+    }
+
+
+    // -----------------------------------------------------------------------
+    // One journal, one writer (§7.1)
+    //
+    // The guard is a decision about a tab's own state, so most of it is testable
+    // without a process: a tab whose state says it holds a journal holds it, and a
+    // tab whose state says it does not, does not. The live-process half is
+    // `tests/resume_guard.rs`, which drives a real `evo-agent`.
+    // -----------------------------------------------------------------------
+
+    /// A tab in a given state, with a given request, for the predicate's own test.
+    fn tab_holding(request: OpenRequest, state: State) -> Tab {
+        Tab {
+            id: "t1".to_owned(),
+            folder: request.folder.clone(),
+            program: request.program,
+            request,
+            created: 0,
+            state: Mutex::new(state),
+        }
+    }
+
+    /// The `resume` field is what covers the window between the spawn and the
+    /// ready file: the child is already running with that journal open and has not
+    /// reported it yet.
+    #[test]
+    fn a_starting_tab_holds_the_journal_it_was_told_to_resume() {
+        let journal = Path::new("/tmp/rxp/journal.sexp");
+        let mut open = request("/tmp/rxp");
+        open.resume = Some(journal.to_path_buf());
+        let tab = tab_holding(open, State::Starting);
+        assert!(tab.holds_session(journal));
+        assert!(!tab.holds_session(Path::new("/tmp/rxp/other.sexp")));
+    }
+
+    /// A tab that never came up, and one that was stopped, hold nothing: their
+    /// state is the authority, so a resume is not blocked by a dead tab.
+    #[test]
+    fn a_tab_that_is_not_running_holds_nothing() {
+        let journal = Path::new("/tmp/rxp/journal.sexp");
+        let mut open = request("/tmp/rxp");
+        open.resume = Some(journal.to_path_buf());
+        for state in [
+            State::Failed(BootError {
+                reason: "the server exited during startup".to_owned(),
+                log_tail: String::new(),
+                log_path: PathBuf::from("/tmp/rxp/swarm.log"),
+            }),
+            State::Stopped,
+        ] {
+            let tab = tab_holding(open.clone(), state);
+            assert!(
+                !tab.holds_session(journal),
+                "a tab that is not running must not block a resume"
+            );
+        }
+    }
+
+    /// A tab started **without** `resume` names no journal in its request, so the
+    /// only thing that can say what it has open is the swarm's own report — which
+    /// is `Live::session_path`, from the ready file. This is the case a
+    /// `resume`-only guard would miss, and it is why the predicate has two sources.
+    #[test]
+    fn a_fresh_tab_holds_the_journal_its_swarm_reported() {
+        // The journal the child created for itself, under the folder's own key.
+        let created = Path::new("/tmp/rxp/.evo/sessions/-private-tmp-rxp/20261018T141415Z_9d6.sexp");
+        let open = request("/tmp/rxp");
+        assert!(open.resume.is_none(), "a fresh tab names no journal");
+
+        // Its request alone says nothing about the journal...
+        let booting = tab_holding(open.clone(), State::Starting);
+        assert!(!booting.holds_session(created));
+
+        // ...but once the swarm has reported it, the tab holds it.
+        let running = tab_holding(open, running_with(created));
+        assert!(running.holds_session(created));
+        assert!(!running.holds_session(Path::new("/tmp/rxp/other.sexp")));
+    }
+
+    /// A tab in the `Running` state, whose swarm reported `session`.
+    ///
+    /// The predicate reads `session_path` and nothing else, so the rest of the
+    /// `Live` is never touched — which is what lets this test be a plain unit test
+    /// rather than one that spawns. The real-process half is
+    /// `tests/resume_guard.rs`.
+    fn running_with(session: &Path) -> State {
+        State::Running(Arc::new(Live {
+            client: Client::loopback(1, "t").expect("a client with no server behind it"),
+            // Never locked by the predicate: it is here because `Live` owns it.
+            server: Arc::new(Mutex::new(None)),
+            pid: 1,
+            port: 1,
+            epoch: "e".to_owned(),
+            url: "http://127.0.0.1:1/".to_owned(),
+            session_path: session.to_path_buf(),
+        }))
+    }
+
+    /// Two spellings of one journal are one journal: the comparison resolves what
+    /// it can, and falls back to the text for a path that is not there (which is
+    /// the normal case for a resume target).
+    #[test]
+    fn two_spellings_of_one_journal_are_one_journal() {
+        let dir = std::env::temp_dir().join(format!("evo-web-key-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let journal = dir.join("j.sexp");
+        std::fs::write(&journal, "()").unwrap();
+
+        // Through a `..`, which resolves to the same file. `sub` has to exist:
+        // `canonicalize` walks the real path, so a `..` under a directory that is
+        // not there resolves to nothing at all.
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        let round_about = dir.join("sub").join("..").join("j.sexp");
+        assert_eq!(same_file_key(&journal), same_file_key(&round_about));
+
+        // A path that is not there falls back to its own text, trailing slash off.
+        let missing = dir.join("nope.sexp");
+        assert_eq!(same_file_key(&missing), missing);
+        let trailing = PathBuf::from(format!("{}/", missing.display()));
+        assert_eq!(same_file_key(&trailing), missing);
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

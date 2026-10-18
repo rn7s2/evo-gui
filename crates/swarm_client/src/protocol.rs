@@ -86,7 +86,20 @@ pub struct ReadyFile {
 /// The session a server is serving, as the ready file records it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionRef {
-    pub id: String,
+    /// The journal's own id, when the child can name one.
+    ///
+    /// **Optional, and that is not cosmetic.** A process started to *resume* a
+    /// journal reports `"id": null` here — it adopts a journal rather than minting
+    /// one — while a process that creates its own reports the id it generated. A
+    /// non-optional `String` cannot deserialise `null`, so the whole ready file
+    /// failed to parse, `read_ready` returned `None`, and the caller polled a
+    /// perfectly good file until its timeout and then reported "no ready file".
+    /// Every resumed tab hung for the full 90 s and came up `failed`. Nothing reads
+    /// this id — the journal's **path** is what callers use — so it is an
+    /// annotation, and an absent one is a fact about the child rather than an
+    /// error.
+    #[serde(default)]
+    pub id: Option<String>,
     pub path: String,
 }
 

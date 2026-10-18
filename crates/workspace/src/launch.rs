@@ -299,8 +299,30 @@ pub fn start(env: &LaunchEnv, launch: &Launch) -> std::io::Result<Started> {
 ///
 /// The body is `crates/web`'s `OpenRequest`, built from the same [`Launch`] the
 /// native launch uses, so both targets send one description of a tab.
+///
+/// # Create and attach are two steps
+///
+/// This is [`create`] then [`attach`], and the split matters for one case the
+/// server's own rule creates: a `POST /api/tabs` that names a session a live tab
+/// already holds comes back with **that tab's id** and starts no process (see
+/// `crates/web`'s `Tabs::open`), so the id a caller gets is not always one it
+/// just brought into being. Both halves are therefore useful on their own —
+/// [`attach`] is how a page joins a tab it did not create, which is what lets a
+/// reader reach a session that is already running.
 #[cfg(target_family = "wasm")]
 pub async fn start(env: &LaunchEnv, launch: &Launch) -> std::io::Result<Started> {
+    let store_id = create(launch).await?;
+    attach(env, store_id, launch.folder().clone())
+}
+
+/// Ask the `evo-web` server to open a tab for `launch`, and return the id it named
+/// — which is the tab's own if it already had the session, and a new one otherwise.
+///
+/// The id is parsed rather than trusted, because it names a path segment in every
+/// request [`attach`] makes: [`store::paths::TabId::parse`] is what keeps it one
+/// segment, so a server that named something else cannot address another endpoint.
+#[cfg(target_family = "wasm")]
+pub async fn create(launch: &Launch) -> std::io::Result<store::paths::TabId> {
     // The engine talks to `<prefix>/snapshot`, `<prefix>/stream`, … — see the
     // `evo-web` router. It is a same-origin path, so this client carries no token.
     //
@@ -335,21 +357,34 @@ pub async fn start(env: &LaunchEnv, launch: &Launch) -> std::io::Result<Started>
     // The id is the server's, so it is parsed rather than trusted: it names a path
     // segment in the prefix below, and `TabId::parse` is what keeps that one
     // segment.
-    let store_id = store::paths::TabId::parse(id).ok_or_else(|| {
+    store::paths::TabId::parse(id).ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("the evo-web server named a tab {id:?}, which is not a tab id"),
         )
-    })?;
+    })
+}
 
+/// Connect to a tab the server already has, by its id — the second half of
+/// [`start`], and the whole of "join a session that is already running".
+///
+/// `folder` is what the engine reports the tab as working in: the caller's own,
+/// because the tab was opened from it. Nothing here creates anything, so an id
+/// that came from anywhere — the server's reply to a `POST`, or a tab the server
+/// listed as already open — is all this needs.
+#[cfg(target_family = "wasm")]
+pub fn attach(
+    env: &LaunchEnv,
+    store_id: store::paths::TabId,
+    folder: PathBuf,
+) -> std::io::Result<Started> {
     // The tab's directory is the server's — it made the child's ready file and log
     // there, on the machine the work happens on. This is the *same* path because
     // the page is served from that machine (that is the whole premise of the
     // prefix), and the window shows the log, so it has to name it.
     let tab_dir = env.root.tab_dir(&store_id);
-
-    let client = Client::at_base(&format!("/api/tabs/{id}")).map_err(unsupported)?;
-    let (engine, updates) = TabEngine::connect(client, launch.folder().clone());
+    let client = Client::at_base(&format!("/api/tabs/{store_id}")).map_err(unsupported)?;
+    let (engine, updates) = TabEngine::connect(client, folder);
     Ok(Started {
         engine,
         updates,

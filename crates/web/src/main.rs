@@ -438,8 +438,20 @@ async fn open_tab(
     State(state): State<AppState>,
     Json(body): Json<OpenRequest>,
 ) -> Result<Response, ApiError> {
+    // Which tab this ends up being, so the status can say which of the two things
+    // happened. A request naming a session a live tab already holds comes back as
+    // *that* tab rather than a new one (see `Tabs::open`), and a caller may want to
+    // say "joined the session that was already running" rather than "started one".
+    let wanted = body.resume.clone();
+    let joined = wanted.as_ref().and_then(|path| state.tabs.holder_of(path));
     let tab = state.tabs.open(body).await?;
-    Ok((StatusCode::CREATED, Json(tab.view())).into_response())
+    let status = if joined.as_deref() == Some(tab.id.as_str()) {
+        // 200, not 201: nothing was created — this is the tab that already had it.
+        StatusCode::OK
+    } else {
+        StatusCode::CREATED
+    };
+    Ok((status, Json(tab.view())).into_response())
 }
 
 /// `GET /api/tabs/<id>` — one tab's state.
