@@ -5,10 +5,19 @@ edition.workspace = true
 
 [dependencies]
 gpui-kit = { workspace = true }
+
+# The terminal's two halves, and the machinery that runs them, are the desktop's:
+# a browser has no pseudo-terminal, no child process to put on one, and no thread
+# to drain it with. `alacritty_terminal` cannot even be *built* for wasm32 — it
+# reaches `polling`, `home` and `filedescriptor`, none of which support the target
+# — so the grid goes with the pty rather than being kept without a shell to feed
+# it. What the wasm build keeps is the pane's own surface (`pane_wasm.rs`): the
+# view the workspace puts in its terminal column, saying where a terminal is
+# really available.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
 alacritty_terminal = { workspace = true }
 portable-pty = { workspace = true }
 anyhow = { workspace = true }
-store = { path = "../store" }
 # The reader thread's wakeups reach the UI through a channel, the way every other
 # off-thread I/O path in this app reports back (`workspace::bridge`): the thread
 # sends, a GPUI task awaits, and the pane is updated on the UI thread.

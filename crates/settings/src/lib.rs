@@ -37,6 +37,7 @@
 
 mod appearance;
 mod config_editor;
+mod dialog;
 mod panel;
 mod probe;
 

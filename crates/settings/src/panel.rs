@@ -580,15 +580,14 @@ impl SettingsPanel {
                 let handle = window.window_handle();
                 let title = format!("Where is the {} binary?", binary.name());
                 cx.spawn(async move |this: WeakEntity<Self>, cx| {
-                    let mut dialog = rfd::AsyncFileDialog::new().set_title(title);
-                    // Open where the binary is, so a sibling is one click away.
-                    if let Some(folder) = current.parent().filter(|folder| folder.is_dir()) {
-                        dialog = dialog.set_directory(folder);
-                    }
-                    let Some(picked) = dialog.pick_file().await else {
+                    // The system dialog is `crate::dialog`'s: this file does not
+                    // know whether there is one, and a target without it answers
+                    // the same way a cancelled dialog does.
+                    let start = current.parent().filter(|folder| folder.is_dir());
+                    let Some(path) = crate::dialog::pick_file(title, start.map(PathBuf::from)).await
+                    else {
                         return;
                     };
-                    let path = picked.path().to_path_buf();
                     let _ = cx.update_window(handle, |_, window, cx| {
                         let _ = this
                             .update(cx, |panel, cx| panel.take_picked(binary, path, window, cx));

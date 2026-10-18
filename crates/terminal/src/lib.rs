@@ -50,11 +50,27 @@
 //! the terminal starts with the `PATH` a terminal window on this machine would
 //! have.
 
+// The keyboard's byte translation, the palette mapping and the scrollback all
+// speak `alacritty_terminal`'s types (`TermMode`, `Color`, `Term`), so they are
+// the desktop's along with the grid they translate into and out of.
+#[cfg(not(target_family = "wasm"))]
 mod keys;
+#[cfg(not(target_family = "wasm"))]
 mod palette;
-mod pane;
-mod pty;
+#[cfg(not(target_family = "wasm"))]
 mod scroll;
+
+// The pane and everything under it are the desktop's: a pty, a shell on it, and
+// `alacritty_terminal`'s grid parsing the escape stream (see `Cargo.toml`). The
+// wasm build has the same *view* — `pane_wasm.rs` — so the workspace's terminal
+// column compiles against one name on both targets.
+#[cfg(not(target_family = "wasm"))]
+mod pane;
+#[cfg(not(target_family = "wasm"))]
+mod pty;
+#[cfg(target_family = "wasm")]
+#[path = "pane_wasm.rs"]
+mod pane;
 
 use gpui_kit::base::input::{Copy, Paste, SelectAll};
 use gpui_kit::{App, Global, KeyBinding, SharedString};
