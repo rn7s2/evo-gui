@@ -1,9 +1,14 @@
-//! A blocking HTTP/1.1 client for serve's protocol: loopback only, a bearer
-//! token on every request (CONTRACT.md §5).
+//! The native transport: a blocking HTTP/1.1 client for serve's protocol,
+//! loopback only, a bearer token on every request (CONTRACT.md §5).
 //!
 //! It is hand-rolled on `std::net::TcpStream` on purpose: serve's HTTP is small
 //! and speaks nothing else, and an SSE stream is read line by line on a
 //! dedicated thread anyway (§5.3), so a runtime is dead weight.
+//!
+//! This is one of the two implementations behind the transport seam — the other
+//! is [`crate::fetch`], for a browser, which cannot open a socket at all. The
+//! types both of them speak ([`Token`], [`HttpResponse`], [`Target`]) are in
+//! [`crate::transport`]; what is here is the part that needs a socket.
 
 use std::fmt;
 use std::io::{BufRead, BufReader, Write};
@@ -13,45 +18,7 @@ use std::time::Duration;
 use serde_json::Value;
 
 use crate::error::{Error, Result, StatusError};
-
-/// A bearer token. Its `Debug` never prints the secret (§2.4: never log it).
-#[derive(Clone, PartialEq, Eq)]
-pub struct Token(String);
-
-impl Token {
-    pub fn new(text: impl Into<String>) -> Token {
-        Token(text.into())
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Debug for Token {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("Token(<redacted>)")
-    }
-}
-
-impl fmt::Display for Token {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("<redacted>")
-    }
-}
-
-/// Whether a host names this machine. Everything else is refused: there is no
-/// TLS and serve's trust boundary is the loopback interface.
-pub fn is_loopback(host: &str) -> bool {
-    if host.eq_ignore_ascii_case("localhost") {
-        return true;
-    }
-    let bare = host.trim_start_matches('[').trim_end_matches(']');
-    match bare.parse::<IpAddr>() {
-        Ok(ip) => ip.is_loopback(),
-        Err(_) => false,
-    }
-}
+pub use crate::transport::{is_loopback, HttpResponse, Token};
 
 /// How much patience a body of `bytes` bytes buys, on top of the base timeout — a
 /// request is not the only thing on this machine's clock, and the server's own
@@ -258,44 +225,6 @@ impl HttpClient {
             return Err(Error::Status(StatusError::from_reply(status, raw, &text)));
         }
         Ok(SseConnection { reader, socket })
-    }
-}
-
-/// One reply, whole.
-#[derive(Clone, Debug)]
-pub struct HttpResponse {
-    pub status: u16,
-    /// Header names lower-cased.
-    pub headers: Vec<(String, String)>,
-    pub body: Vec<u8>,
-}
-
-impl HttpResponse {
-    pub fn header(&self, name: &str) -> Option<&str> {
-        let want = name.to_ascii_lowercase();
-        self.headers
-            .iter()
-            .find(|(n, _)| *n == want)
-            .map(|(_, v)| v.as_str())
-    }
-
-    pub fn is_success(&self) -> bool {
-        (200..300).contains(&self.status)
-    }
-
-    pub fn text(&self) -> String {
-        String::from_utf8_lossy(&self.body).into_owned()
-    }
-
-    pub fn json(&self) -> Result<Value> {
-        serde_json::from_slice(&self.body).map_err(Error::from)
-    }
-
-    /// This reply as a typed error, for a status the client did not expect.
-    pub fn error(&self) -> StatusError {
-        let text = self.text();
-        let raw = serde_json::from_str(&text).unwrap_or(Value::String(text.clone()));
-        StatusError::from_reply(self.status, raw, &text)
     }
 }
 

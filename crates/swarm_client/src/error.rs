@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use serde_json::Value;
 
 use crate::redact::{redact, redact_json};
+#[cfg(not(target_family = "wasm"))]
 use crate::server::ShutdownOutcome;
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -26,7 +27,9 @@ pub enum Error {
     Timeout(String),
     /// A server that never became ready, with the tail of its log.
     Boot(Box<BootFailure>),
-    /// A boot a caller aborted, and how the process was stopped.
+    /// A boot a caller aborted, and how the process was stopped. Native only:
+    /// there is no boot to abort without a process to spawn.
+    #[cfg(not(target_family = "wasm"))]
     Cancelled(ShutdownOutcome),
     /// The thing we were talking to went away.
     Closed,
@@ -44,7 +47,8 @@ impl Error {
     }
 
     /// Whether a caller's own [`BootCancel`](crate::server::BootCancel) stopped
-    /// this boot, and how the process went.
+    /// this boot, and how the process went. Native only, with the variant.
+    #[cfg(not(target_family = "wasm"))]
     pub fn cancelled(&self) -> Option<ShutdownOutcome> {
         match self {
             Error::Cancelled(outcome) => Some(*outcome),
@@ -83,6 +87,7 @@ impl fmt::Display for Error {
             Error::Status(s) => write!(f, "{s}"),
             Error::Timeout(m) => write!(f, "timeout: {m}"),
             Error::Boot(b) => write!(f, "boot failed: {}", b.reason),
+            #[cfg(not(target_family = "wasm"))]
             Error::Cancelled(outcome) => write!(f, "boot cancelled ({outcome:?})"),
             Error::Closed => write!(f, "connection closed"),
             Error::Config(m) => write!(f, "config: {m}"),
@@ -248,6 +253,7 @@ mod tests {
         assert_eq!(gone.status(), 503);
     }
 
+    #[cfg(not(target_family = "wasm"))]
     #[test]
     fn a_cancelled_boot_says_how_it_went() {
         let error = Error::Cancelled(ShutdownOutcome::Terminated);
