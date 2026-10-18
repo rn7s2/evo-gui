@@ -1,4 +1,11 @@
-//! The design's palette, installed as this app's theme, and light-or-dark.
+//! The design's palette, installed as the app's theme, and light-or-dark.
+//!
+//! One palette for two shells. The desktop app (`crates/app`) and the browser
+//! frontend (`crates/webapp`) draw the *same* gpui window from the same UI crates,
+//! so the theme cannot belong to either of them: while it lived in `crates/app` it
+//! was installed by the desktop alone, and the browser rendered gpui-kit's
+//! defaults — white where the design's paper is `#EFE9DF`. Both shells call
+//! [`install`] and [`apply`] now, and neither owns the colours.
 //!
 //! The colours are the design's own (`store::design`, from `doc.tsx`'s `L` and
 //! `DARK`): a warm "Dimmed Light 2026" ramp — the editor's deepest surface, the
@@ -19,14 +26,24 @@
 //! own light and dark syntax palettes — or dark mode draws its blocks with the light
 //! ramp's ink.
 //!
-//! The app follows the system's appearance — the macOS setting, which is also the
-//! one the Dock and every other app follow — unless `app.json`'s `theme` says
-//! otherwise, and it follows it *live*: switching the system appearance switches
-//! the window with it. macOS reports the change on the window, which is where the
-//! app listens.
+//! Each shell decides which mode its window gets, and the decision is the same
+//! shape on both: [`mode_for`] is pure, and `System` is the only choice that looks
+//! at the window at all.
+//!
+//! * The desktop follows the system's appearance — the macOS setting, which is
+//!   also the one the Dock and every other app follow — unless `app.json`'s
+//!   `theme` says otherwise, and it follows it *live*: switching the system
+//!   appearance switches the window with it. macOS reports the change on the
+//!   window, which is where [`follow_appearance`] listens.
+//! * The browser has no `app.json` and no live appearance to follow, so it asks
+//!   for `System` once and gets the page's own `prefers-color-scheme`: gpui's web
+//!   platform answers `Window::appearance()` from exactly that media query.
+//!
+//! Neither shell's own types reach this crate: the choice and the log are
+//! parameters ([`ThemeLog`]), which is what lets one palette serve both.
 //!
 //! `gpui_component`'s themes come in two, [`ThemeMode::Light`] and
-//! [`ThemeMode::Dark`]; `System` is this app's own third answer, worked out from
+//! [`ThemeMode::Dark`]; `System` is this crate's own third answer, worked out from
 //! the window's appearance.
 
 use gpui_kit::component::highlighter::{HighlightTheme, HighlightThemeStyle};
@@ -37,7 +54,42 @@ use gpui_kit::{App, Subscription, Window, WindowAppearance};
 use store::app_state::Theme as StoredTheme;
 use store::design::{self, Palette, Rgb};
 
-use crate::Shell;
+/// Where the theme's own two lines go: one `info` naming the mode a window got
+/// (and why), and one `error` when the design's palettes could not be read.
+///
+/// A parameter rather than a global, because the two shells that draw this window
+/// log in different places and neither owns the palette. The desktop app writes
+/// through its own `AppLog` — a file under the app's root — and the browser has
+/// no file at all: its lines go to the page's console through the `log` crate.
+/// Each implements this trait, so this crate depends on neither.
+pub trait ThemeLog {
+    fn info(&self, message: &str);
+    fn error(&self, message: &str);
+}
+
+/// The logger for a caller that has nowhere to put a line — the theme crate's own
+/// tests, and any host that would rather the palette be silent.
+impl ThemeLog for () {
+    fn info(&self, _message: &str) {}
+    fn error(&self, _message: &str) {}
+}
+
+/// [`ThemeLog`] through the `log` crate, for a shell with no log file of its own:
+/// the browser, where these lines reach the page's console.
+///
+/// `log` is a no-op unless a logger is installed, so a host that wants them calls
+/// its platform's `init_logging` first (the web shell does).
+pub struct LogCrate;
+
+impl ThemeLog for LogCrate {
+    fn info(&self, message: &str) {
+        log::info!("{message}");
+    }
+
+    fn error(&self, message: &str) {
+        log::error!("{message}");
+    }
+}
 
 /// The names the two palettes are registered under, and the theme file's own.
 const LIGHT_THEME: &str = "Evo Light (Dimmed 2026)";
@@ -114,15 +166,23 @@ pub fn mode_for(choice: StoredTheme, appearance: WindowAppearance) -> ThemeMode 
 
 /// Apply the choice now, and keep following the system while it is `System`.
 ///
-/// The returned subscription is what makes the following live: it has to be kept
-/// for as long as the window lives (the app keeps it on the [`Shell`]).
-pub fn follow_appearance(cx: &mut App, window: &mut Window) -> Subscription {
-    apply(cx, window);
-    window.observe_window_appearance(|window, cx| {
+/// `choice` and `log` are the caller's — this crate reads no global but the kit's
+/// theme (see [`ThemeLog`]). The returned subscription is what makes the following
+/// live: it has to be kept for as long as the window lives (the desktop app keeps
+/// it on its `Shell`, the browser on nothing at all, since its appearance cannot
+/// change under it without the page being reloaded).
+pub fn follow_appearance(
+    cx: &mut App,
+    window: &mut Window,
+    choice: StoredTheme,
+    log: impl ThemeLog + 'static,
+) -> Subscription {
+    apply(cx, window, choice, &log);
+    window.observe_window_appearance(move |window, cx| {
         // Only an appearance the system decided is worth reacting to: with Light
         // or Dark chosen, the system's opinion is not the app's.
-        if cx.global::<Shell>().theme == StoredTheme::System {
-            apply(cx, window);
+        if choice == StoredTheme::System {
+            apply(cx, window, choice, &log);
         }
     })
 }
@@ -140,7 +200,7 @@ pub fn follow_appearance(cx: &mut App, window: &mut Window) -> Subscription {
 /// kit's default is whatever the system prefers, which is `Scrolling` on a platform that
 /// auto-hides its scrollbars and `Hover` on one that does not: the same app would answer
 /// differently per machine, and the design asks for one behaviour everywhere.
-pub fn install(cx: &mut App) {
+pub fn install(cx: &mut App, log: &impl ThemeLog) {
     let Some(installed) = cx.try_global::<ComponentTheme>() else {
         // Nothing to install into: `gpui_kit::init` has not run.
         return;
@@ -158,10 +218,7 @@ pub fn install(cx: &mut App) {
     if let Err(error) = registry.load_themes_from_str(&body) {
         // The kit's own defaults are a usable theme; a malformed file of ours is
         // a bug to fix, not a reason to refuse to draw.
-        let log = cx.global::<Shell>().log.clone();
-        log.error(format!(
-            "theme: the design's palettes did not load: {error}"
-        ));
+        log.error(&format!("theme: the design's palettes did not load: {error}"));
         return;
     }
     let themes = registry.themes();
@@ -179,15 +236,16 @@ pub fn install(cx: &mut App) {
 
 /// Put the current answer on the window, and say in the log which one it is —
 /// this line is how a launch's light/dark is checked from outside the UI.
-fn apply(cx: &mut App, window: &mut Window) {
-    install(cx);
-    let (choice, log) = {
-        let shell = cx.global::<Shell>();
-        (shell.theme, shell.log.clone())
-    };
+///
+/// Public because the desktop app's Settings panel applies a newly chosen theme
+/// through it, and because a shell that installs the palettes without following
+/// the system still has to pick a mode. `choice` is what `app.json` said (or what
+/// a shell with no `app.json` decided); `log` is the caller's.
+pub fn apply(cx: &mut App, window: &mut Window, choice: StoredTheme, log: &impl ThemeLog) {
+    install(cx, log);
     let mode = mode_for(choice, window.appearance());
     ComponentTheme::change(mode, Some(window), cx);
-    log.info(format!(
+    log.info(&format!(
         "theme: {} ({})",
         if mode.is_dark() { "dark" } else { "light" },
         match choice {
@@ -542,7 +600,7 @@ mod tests {
     fn the_kits_input_surface_is_not_the_designs_input(cx: &mut gpui_kit::TestAppContext) {
         cx.update(gpui_kit::init);
         cx.update(|cx| {
-            install(cx);
+            install(cx, &());
             ComponentTheme::change(ThemeMode::Light, None, cx);
         });
         cx.update(|cx| {
@@ -575,7 +633,7 @@ mod tests {
     ) {
         cx.update(gpui_kit::init);
         cx.update(|cx| {
-            install(cx);
+            install(cx, &());
             ComponentTheme::change(ThemeMode::Light, None, cx);
         });
         cx.update(|cx| {
@@ -654,7 +712,7 @@ mod tests {
     fn the_code_inks_follow_the_mode(cx: &mut gpui_kit::TestAppContext) {
         cx.update(gpui_kit::init);
         cx.update(|cx| {
-            install(cx);
+            install(cx, &());
             ComponentTheme::change(ThemeMode::Light, None, cx);
         });
         cx.update(|cx| {
@@ -730,7 +788,7 @@ mod tests {
     fn the_scrollbars_come_out_for_a_scroll_not_for_a_hover(cx: &mut gpui_kit::TestAppContext) {
         cx.update(gpui_kit::init);
         cx.update(|cx| {
-            install(cx);
+            install(cx, &());
             assert_eq!(
                 cx.global::<ComponentTheme>().scrollbar_mode,
                 ScrollbarMode::Scrolling,
@@ -738,7 +796,7 @@ mod tests {
             );
             // And installing again — every window open and appearance change does — is a
             // no-op, not a second write that refreshes every window.
-            install(cx);
+            install(cx, &());
             assert_eq!(
                 cx.global::<ComponentTheme>().scrollbar_mode,
                 ScrollbarMode::Scrolling

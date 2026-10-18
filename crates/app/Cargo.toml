@@ -12,10 +12,26 @@ name = "evo-desktop"
 path = "src/main.rs"
 
 [dependencies]
-gpui-kit = { workspace = true }
+# The syntax highlighter's grammars belong to the application, so they are turned
+# on here rather than in the workspace: this is the native binary, and a browser
+# cannot run them (see the note in the workspace `Cargo.toml`). The desktop app
+# and the web frontend therefore share one gpui UI codebase and differ only in
+# which of them is compiled in.
+gpui-kit = { workspace = true, features = [
+    "tree-sitter",
+    "tree-sitter-bash",
+    "tree-sitter-javascript",
+    "tree-sitter-python",
+    "tree-sitter-rust",
+    "tree-sitter-toml",
+    "tree-sitter-typescript",
+] }
 anyhow = { workspace = true }
 workspace = { path = "../workspace" }
 store = { path = "../store" }
+# The design's palette, as a crate shared with the browser frontend: this shell
+# installs it, and so does `crates/webapp`, so the two draw the same window.
+theme = { path = "../theme" }
 session = { path = "../session" }
 tab_engine = { path = "../tab_engine" }
 settings = { path = "../settings" }
