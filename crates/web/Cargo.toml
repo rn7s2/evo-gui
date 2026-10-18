@@ -1,0 +1,41 @@
+[package]
+name = "evo-web"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "evo-web"
+path = "src/main.rs"
+
+[dependencies]
+# The HTTP server. Default features are what this uses: http1, json, query,
+# tokio (for `axum::serve`), form, matched-path.
+axum = "0.8"
+# `rt-multi-thread` runs the server, `sync` carries SSE lines off the blocking
+# reader thread, `signal` is the shutdown path, `time` bounds the stop ladder.
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "net",
+    "signal",
+    "sync",
+    "time",
+] }
+# `ServeDir`/`ServeFile` for the frontend bundle, and its own path-traversal
+# guard. No `trace` feature: this server's log line is its own middleware, so
+# there is nothing to wire a subscriber into.
+# `set-header` carries the two cross-origin-isolation headers the page needs
+# (see `router`); `fs` serves the bundle.
+tower-http = { version = "0.6", features = ["fs", "set-header"] }
+# The `Stream` trait, for the SSE body that must not be buffered. Already in the
+# tree through hyper; the trait is all this crate needs from it.
+futures-core = "0.3"
+# `tower::service_fn` for the static bundle's SPA fallback: `ServeDir`'s fallback
+# is a `Service`, and this is the smallest way to write one. Already in the tree
+# through axum.
+tower = "0.5"
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+store = { path = "../store" }
+swarm_client = { path = "../swarm_client" }
