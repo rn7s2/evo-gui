@@ -42,10 +42,28 @@ scripts/bundle.sh           # → "dist/Evo Desktop.app"
 No API key handy? `scripts/stub_home.sh` runs the app against a scripted model in a throwaway
 `HOME`, touching nothing in your real `~/.evo`.
 
+## In a browser
+
+The same UI also runs as a web app: `evo-web` serves the frontend and drives the evo
+sessions on the machine it runs on, so a browser tab is a tab.
+
+```sh
+scripts/web.sh                             # → dist/web/
+cargo run -p evo-web -- --dist dist/web    # then open http://127.0.0.1:8787
+```
+
+The wasm build needs the **nightly** toolchain: install it with
+`rustup toolchain install nightly` and add the target
+(`rustup target add wasm32-unknown-unknown --toolchain nightly`). `scripts/web.sh`
+installs the matching `wasm-bindgen` for you, but not the toolchain — without it
+you get `error: toolchain 'nightly' is not installed`. See [`docs/web.md`](docs/web.md).
+
 ## More
 
 - [`docs/usage.md`](docs/usage.md) — driving it: tabs and shortcuts, the transcript,
   history, Settings, failures.
+- [`docs/web.md`](docs/web.md) — the two delivery paths, the browser build, and what
+  is still missing there.
 - [`docs/architecture.md`](docs/architecture.md) — which crate owns what.
 - [`docs/screens.md`](docs/screens.md) — the screenshot gallery and how to capture it.
 - Third-party notices for the bundled fonts and math typesetting: [`assets/licenses/`](assets/licenses/).
