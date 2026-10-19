@@ -152,13 +152,10 @@ fn row(view: &WorkspaceView, window: &Window, cx: &mut Context<WorkspaceView>) -
                 window.start_window_move();
             }
         }))
-        .on_double_click(|_, window, _| {
-            if cfg!(target_os = "macos") {
-                window.titlebar_double_click();
-            } else {
-                window.zoom_window();
-            }
-        })
+        // No double-click handler here: the [`TitleBar`] around this row already
+        // has one, and a click bubbles to both. Every platform's zoom is a
+        // *toggle*, so the pair would fill the screen and put it straight back —
+        // which is exactly what a double click on the strip used to do.
         .test_support()
         .child(scroller(view, cx))
         .child(add(cx))
