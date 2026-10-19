@@ -130,11 +130,7 @@ fn name_of(name: Option<&str>) -> Result<&'static str, ApiError> {
 /// An absolute path is required when one is given. A relative one would be resolved
 /// against this process's working directory, which is not a thing a caller should
 /// be able to steer.
-fn path_of(
-    path: Option<&str>,
-    name: &str,
-    state: &AppState,
-) -> Result<PathBuf, ApiError> {
+fn path_of(path: Option<&str>, name: &str, state: &AppState) -> Result<PathBuf, ApiError> {
     let Some(given) = path.map(str::trim).filter(|path| !path.is_empty()) else {
         return Ok(match name {
             "evo-agent" => state.agent_bin.clone(),
@@ -153,13 +149,7 @@ fn path_of(
 /// The `check` tokens this route can send — the contract, in one place, so a test
 /// can assert the set rather than spell it out twice.
 #[cfg(test)]
-const TOKENS: [&str; 5] = [
-    "ready",
-    "missing",
-    "not-executable",
-    "not-evo",
-    "timed-out",
-];
+const TOKENS: [&str; 5] = ["ready", "missing", "not-executable", "not-evo", "timed-out"];
 
 #[cfg(test)]
 mod tests {

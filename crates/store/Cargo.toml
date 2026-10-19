@@ -6,7 +6,6 @@ edition.workspace = true
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
-anyhow = { workspace = true }
 
 # `O_NOFOLLOW`/`O_NONBLOCK`/`ELOOP` for opening a config file without following
 # a symlink (see `config_file::open_regular`). Unix only: the constants do not

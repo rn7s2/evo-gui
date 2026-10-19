@@ -224,11 +224,11 @@ async fn request(
     path: &str,
     body: Option<&serde_json::Value>,
 ) -> Result<serde_json::Value, String> {
-    let mut options = web_sys::RequestInit::new();
-    options.method(method);
+    let options = web_sys::RequestInit::new();
+    options.set_method(method);
     if let Some(body) = body {
         let text = serde_json::to_string(body).map_err(|e| e.to_string())?;
-        options.body(Some(&JsValue::from_str(&text)));
+        options.set_body(&JsValue::from_str(&text));
     }
     let request = web_sys::Request::new_with_str_and_init(path, &options)
         .map_err(|_| format!("cannot ask the server for {path}"))?;

@@ -161,10 +161,7 @@ async fn serve(config: cli::Config) -> anyhow::Result<()> {
         let state = state.clone();
         async move {
             let signal = stop_signal().await;
-            println!(
-                "evo-web: {signal}; {} tab(s) to stop",
-                state.tabs.len()
-            );
+            println!("evo-web: {signal}; {} tab(s) to stop", state.tabs.len());
             let tabs = state.tabs.clone();
             // The ladder is blocking (it waits on processes), so it runs off the
             // runtime — and the runtime is not torn down until this returns.

@@ -207,9 +207,7 @@ impl Stream for SseStream {
         let this = self.get_mut();
         match this.lines.poll_recv(cx) {
             Poll::Ready(Some(Ok(line))) => Poll::Ready(Some(Ok(Bytes::from(format!("{line}\n"))))),
-            Poll::Ready(Some(Err(reason))) => {
-                Poll::Ready(Some(Err(std::io::Error::other(reason))))
-            }
+            Poll::Ready(Some(Err(reason))) => Poll::Ready(Some(Err(std::io::Error::other(reason)))),
             Poll::Ready(None) => Poll::Ready(None),
             Poll::Pending => Poll::Pending,
         }

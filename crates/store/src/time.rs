@@ -3,6 +3,10 @@
 //! Every timestamp this crate writes is RFC 3339 in UTC with a `Z` suffix, so
 //! logs and state files never depend on the machine's local timezone.
 
+// `SystemTime` is unimplemented on `wasm32-unknown-unknown` (it panics rather than
+// returning an error), so the browser's clock comes from `js_sys::Date` below and
+// these two are the native path's alone.
+#[cfg(not(target_family = "wasm"))]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const SECS_PER_DAY: u64 = 86_400;

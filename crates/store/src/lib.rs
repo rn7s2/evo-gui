@@ -49,10 +49,10 @@ pub use app_state::{AppState, Binaries, Recent, Theme, WindowBounds, SCHEMA_VERS
 pub use catalog::{
     Catalog, CheckReport, LaneModel, Model, ModelCheck, ModelRef, Problem, ProblemTarget,
 };
+pub use cli::Verdict;
 pub use config_file::{ConfigError, ConfigFile, ConfigScope, SaveError};
 pub use history::{HistoryEntry, HistorySource, Session, SessionsQuery};
 pub use launch::{LaunchSpec, Program};
-pub use cli::Verdict;
 pub use lispcheck::{CheckError, Checker};
 pub use model_cache::ModelCache;
 pub use paths::{Root, TabId};

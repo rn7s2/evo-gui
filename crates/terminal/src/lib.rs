@@ -66,11 +66,11 @@ mod scroll;
 // column compiles against one name on both targets.
 #[cfg(not(target_family = "wasm"))]
 mod pane;
-#[cfg(not(target_family = "wasm"))]
-mod pty;
 #[cfg(target_family = "wasm")]
 #[path = "pane_wasm.rs"]
 mod pane;
+#[cfg(not(target_family = "wasm"))]
+mod pty;
 
 use gpui_kit::base::input::{Copy, Paste, SelectAll};
 use gpui_kit::{App, Global, KeyBinding, SharedString};

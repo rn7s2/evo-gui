@@ -230,7 +230,7 @@ fn transcript_search_is_literal_case_insensitive_and_uses_byte_ranges() {
     );
     assert_eq!(
         crate::search_ranges("Needle + needle + NEEDLE", "needle", true),
-        [9..15]
+        vec![9..15]
     );
     assert!(crate::search_ranges("needle", "", false).is_empty());
 }
@@ -502,7 +502,7 @@ fn transcript_search_follows_streamed_document_revisions(cx: &mut TestAppContext
     });
     assert_eq!(
         matches,
-        [7..13],
+        vec![7..13],
         "the active query is reapplied when a streamed parse lands; rendered={rendered:?}, stamp={stamp_text:?}, query={stamp_query:?}"
     );
 }
@@ -518,7 +518,7 @@ fn clearing_transcript_search_removes_matches_but_keeps_documents(cx: &mut TestA
     view.update(cx, |view, cx| view.set_search("needle", false, cx));
     assert_eq!(
         cx.read(|cx| view.read(cx).search_matches(&id, None, cx).unwrap().0),
-        [0..6]
+        vec![0..6]
     );
     view.update(cx, |view, cx| view.set_search("", false, cx));
     assert!(cx

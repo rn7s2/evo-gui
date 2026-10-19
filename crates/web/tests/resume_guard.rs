@@ -53,7 +53,10 @@ fn real_bin() -> Option<PathBuf> {
             if path.is_file() {
                 return Some(path);
             }
-            eprintln!("resume_guard: {name}={} is not a file — skipping", path.display());
+            eprintln!(
+                "resume_guard: {name}={} is not a file — skipping",
+                path.display()
+            );
             return None;
         }
     }
@@ -210,11 +213,7 @@ impl Web {
             self.wait_until_running(&id, &text);
         }
         let reply = self.get_tab(&id);
-        (
-            status,
-            id,
-            reply["pid"].as_u64().map_or(pid, |p| p as u32),
-        )
+        (status, id, reply["pid"].as_u64().map_or(pid, |p| p as u32))
     }
 
     /// Wait for a tab to report `running`, or fail saying what it reported.
@@ -256,7 +255,10 @@ impl Web {
                     }
                 }
             }
-            assert!(Instant::now() < deadline, "tab {id} reported no session path");
+            assert!(
+                Instant::now() < deadline,
+                "tab {id} reported no session path"
+            );
             std::thread::sleep(Duration::from_millis(25));
         }
     }
@@ -448,8 +450,6 @@ fn a_resume_of_a_live_session_attaches_to_it() {
 }
 
 impl Web {
-
-
     /// `GET /api/tabs` as `(status, how many, raw)`.
     fn get_tabs(&self) -> (u16, usize, String) {
         let reply = self.client.get("/api/tabs").expect("GET /api/tabs");

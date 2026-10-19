@@ -1197,14 +1197,21 @@ impl WorkspaceView {
         // that is writing comes to the front while it does: its own status line says
         // `Saving…`, which is the feedback — a press that looked like nothing
         // happened would be worse than the wait.
-        if tab.read(cx).is_settings_saving(cx) {
-            tab.update(cx, |tab, cx| tab.reveal_dirty_settings(window, cx));
-            if let Some(index) = self.tabs.iter().position(|other| other.read(cx).id() == id) {
-                self.select_tab(index, window, cx);
+        //
+        // Native only: the browser's block above answers the question first and
+        // returns, so it never reaches here — the close goes on from `confirm_close`
+        // instead, where this check has already been made.
+        #[cfg(not(target_family = "wasm"))]
+        {
+            if tab.read(cx).is_settings_saving(cx) {
+                tab.update(cx, |tab, cx| tab.reveal_dirty_settings(window, cx));
+                if let Some(index) = self.tabs.iter().position(|other| other.read(cx).id() == id) {
+                    self.select_tab(index, window, cx);
+                }
+                return;
             }
-            return;
+            self.finish_close(id, window, cx);
         }
-        self.finish_close(id, window, cx);
     }
 
     /// The browser's confirmation was answered with a yes: the close goes on where

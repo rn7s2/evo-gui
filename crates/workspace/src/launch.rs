@@ -273,7 +273,7 @@ pub fn start(env: &LaunchEnv, launch: &Launch) -> std::io::Result<Started> {
         config = config.with_env_removed(key.clone());
     }
 
-    let (engine, updates) = tab_engine::TabEngine::start(config);
+    let (engine, updates) = TabEngine::start(config);
     Ok(Started {
         engine,
         updates,

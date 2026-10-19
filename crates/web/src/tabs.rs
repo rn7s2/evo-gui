@@ -286,10 +286,7 @@ impl Tab {
         let (reported, launched) = match &*state {
             // The child has opened a journal and said which: this is the authority,
             // and it is the only thing that covers a tab started without `resume`.
-            State::Running(live) => (
-                Some(live.session_path.clone()),
-                self.request.resume.clone(),
-            ),
+            State::Running(live) => (Some(live.session_path.clone()), self.request.resume.clone()),
             // Still booting: the child may already be running with the journal it
             // was told to resume, so the request is all we have.
             State::Starting => (None, self.request.resume.clone()),
@@ -807,7 +804,6 @@ mod tests {
         assert!(open.validate().is_ok());
     }
 
-
     // -----------------------------------------------------------------------
     // One journal, one writer (§7.1)
     //
@@ -872,7 +868,8 @@ mod tests {
     #[test]
     fn a_fresh_tab_holds_the_journal_its_swarm_reported() {
         // The journal the child created for itself, under the folder's own key.
-        let created = Path::new("/tmp/rxp/.evo/sessions/-private-tmp-rxp/20261018T141415Z_9d6.sexp");
+        let created =
+            Path::new("/tmp/rxp/.evo/sessions/-private-tmp-rxp/20261018T141415Z_9d6.sexp");
         let open = request("/tmp/rxp");
         assert!(open.resume.is_none(), "a fresh tab names no journal");
 

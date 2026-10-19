@@ -605,11 +605,9 @@ fn run(
         session: ready.session.clone(),
     });
 
-    let Some((mut live, snapshot)) = block_on(Live::connect(
-        server.client(),
-        &engine.topics,
-        &commands,
-    )) else {
+    let Some((mut live, snapshot)) =
+        block_on(Live::connect(server.client(), &engine.topics, &commands))
+    else {
         engine.send(Update::BootFailed {
             reason: "the server answered the ready file but not a snapshot".into(),
             log_tail: server.log_tail(40),
@@ -715,10 +713,17 @@ async fn run_connected(
 /// `id` is optional for the same reason it is on the ready file: a session that
 /// was *resumed* adopts a journal rather than minting one, so it can name no id of
 /// its own. The **path** is what identifies the journal, and it is required.
+///
+/// Read on the browser's path (`run_connected`), which reconstructs the ready file
+/// from the snapshot; a host reads the child's own file instead.
+#[cfg_attr(not(target_family = "wasm"), allow(dead_code))]
 fn session_ref_of(snapshot: &swarm_client::Snapshot) -> Option<swarm_client::SessionRef> {
     let session = snapshot.topic("session")?.get("state")?.get("session")?;
     Some(swarm_client::SessionRef {
-        id: session.get("id").and_then(|id| id.as_str()).map(str::to_owned),
+        id: session
+            .get("id")
+            .and_then(|id| id.as_str())
+            .map(str::to_owned),
         path: session.get("path")?.as_str()?.to_owned(),
     })
 }
@@ -1449,8 +1454,7 @@ impl Engine {
             Some(topic) => vec![topic.clone()],
             None => self.topics.clone(),
         };
-        let snapshot =
-            awaited!(client.snapshot(&topics, Some(session::PAGE_ITEMS))).ok()?;
+        let snapshot = awaited!(client.snapshot(&topics, Some(session::PAGE_ITEMS))).ok()?;
         if let Some(wanted) = &topic {
             snapshot.topic(wanted)?;
         }

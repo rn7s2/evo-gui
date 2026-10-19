@@ -169,9 +169,12 @@ impl FetchClient {
         let timeout = self.patience_for_body(payload.as_ref().map_or(0, String::len));
         let mut request = self
             .client
-            .request(method.parse().map_err(|_| {
-                Error::Config(format!("{method:?} is not an HTTP method"))
-            })?, self.url(route))
+            .request(
+                method
+                    .parse()
+                    .map_err(|_| Error::Config(format!("{method:?} is not an HTTP method")))?,
+                self.url(route),
+            )
             .timeout(timeout)
             .header("accept", "application/json");
         if let Some(token) = self.token() {
@@ -227,9 +230,10 @@ impl FetchClient {
         let response = request.send().await.map_err(request_error)?;
         let status = response.status().as_u16();
         if !(200..300).contains(&status) {
-            let body = response.bytes().await.map_err(|e| {
-                Error::Protocol(format!("cannot read the refusal: {e}"))
-            })?;
+            let body = response
+                .bytes()
+                .await
+                .map_err(|e| Error::Protocol(format!("cannot read the refusal: {e}")))?;
             let text = String::from_utf8_lossy(&body).into_owned();
             let raw = serde_json::from_str(&text).unwrap_or(Value::String(text.clone()));
             return Err(Error::Status(StatusError::from_reply(status, raw, &text)));
@@ -397,7 +401,11 @@ impl FetchSseConnection {
             return None;
         }
         match self.stream.next().await {
-            Some(Ok(event)) => Some(Ok(SseEvent::from_wire(&event.event, &event.id, &event.data))),
+            Some(Ok(event)) => Some(Ok(SseEvent::from_wire(
+                &event.event,
+                &event.id,
+                &event.data,
+            ))),
             Some(Err(error)) => {
                 self.done = true;
                 Some(Err(Error::Protocol(format!("the stream broke: {error}"))))
@@ -698,12 +706,16 @@ impl StreamConfig {
 /// in a build that has no `stream` module.
 #[derive(Clone, Debug, PartialEq)]
 pub enum StreamMsg {
-    Connected { cursor: Cursor },
+    Connected {
+        cursor: Cursor,
+    },
     Frame(crate::protocol::StreamFrame),
     Reset {
         reason: crate::protocol::StreamResetReason,
     },
-    Reconnecting { retry_in: Duration },
+    Reconnecting {
+        retry_in: Duration,
+    },
     Stopped,
 }
 
@@ -793,7 +805,12 @@ impl WasmEventStream {
             stopped: Rc::clone(&stopped),
         }));
         wasm_bindgen_futures::spawn_local(run(
-            client, config, messages_tx, orders_rx, cursor, stopped,
+            client,
+            config,
+            messages_tx,
+            orders_rx,
+            cursor,
+            stopped,
         ));
         stream
     }
@@ -982,10 +999,8 @@ async fn sleep(total: Duration, stopped: &Rc<Cell<bool>>) -> bool {
             if let Some(window) = web_sys::window() {
                 // `resolve` is already a `js_sys::Function`: `setTimeout` takes the
                 // callback itself, so there is nothing to cast.
-                let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
-                    &resolve,
-                    step as i32,
-                );
+                let _ = window
+                    .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, step as i32);
             }
         });
         let _ = wasm_bindgen_futures::JsFuture::from(promise).await;

@@ -766,7 +766,8 @@ mod verdict_tests {
     #[cfg(not(target_family = "wasm"))]
     #[test]
     fn a_path_is_answered_by_what_it_is() {
-        let scratch = std::env::temp_dir().join(format!("store-cli-verdict-{}", std::process::id()));
+        let scratch =
+            std::env::temp_dir().join(format!("store-cli-verdict-{}", std::process::id()));
         std::fs::create_dir_all(&scratch).unwrap();
         let short = Duration::from_secs(2);
 
@@ -786,7 +787,10 @@ mod verdict_tests {
         std::fs::write(&plain, "#!/bin/sh\n").unwrap();
         assert_eq!(verdict(&plain, "evo-swarm", short), Verdict::NotExecutable);
         // Something runnable that is not evo.
-        assert_eq!(verdict(Path::new("/bin/echo"), "evo-swarm", short), Verdict::NotEvo);
+        assert_eq!(
+            verdict(Path::new("/bin/echo"), "evo-swarm", short),
+            Verdict::NotEvo
+        );
 
         std::fs::remove_file(&runnable).unwrap();
         std::fs::remove_file(&plain).unwrap();

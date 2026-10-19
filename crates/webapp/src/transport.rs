@@ -92,8 +92,10 @@ mod tests {
         // parent step. Both are encoded, so the id stays one segment.
         assert_eq!(encode_segment("a/b"), "a%2Fb");
         assert_eq!(encode_segment(".."), "..");
-        assert_eq!(Endpoint::proxied("../../etc").base_path(),
-                   Some("/api/tabs/..%2F..%2Fetc"));
+        assert_eq!(
+            Endpoint::proxied("../../etc").base_path(),
+            Some("/api/tabs/..%2F..%2Fetc")
+        );
     }
 
     #[test]

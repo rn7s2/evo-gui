@@ -142,9 +142,7 @@ pub async fn save(
             tokio::task::spawn_blocking(move || store::paths::create_dir_private(&made))
                 .await
                 .map_err(|e| ApiError::internal(format!("the save task failed: {e}")))?
-                .map_err(|e| {
-                    ApiError::internal(format!("cannot make {}: {e}", dir.display()))
-                })?;
+                .map_err(|e| ApiError::internal(format!("cannot make {}: {e}", dir.display())))?;
         }
     }
 
@@ -269,7 +267,10 @@ mod tests {
     #[test]
     fn a_project_scope_needs_a_folder_and_the_default_is_global() {
         assert_eq!(scope_of(None, None).unwrap(), ConfigScope::Global);
-        assert_eq!(scope_of(Some("global"), Some("/x")).unwrap(), ConfigScope::Global);
+        assert_eq!(
+            scope_of(Some("global"), Some("/x")).unwrap(),
+            ConfigScope::Global
+        );
         assert_eq!(
             scope_of(Some("project"), Some("/work/proj")).unwrap(),
             ConfigScope::Project(std::path::PathBuf::from("/work/proj"))
@@ -314,6 +315,10 @@ mod tests {
             "unbalanced".to_owned(),
         )));
         assert_eq!(refused.status, 400);
-        assert!(refused.message.contains("unbalanced"), "{}", refused.message);
+        assert!(
+            refused.message.contains("unbalanced"),
+            "{}",
+            refused.message
+        );
     }
 }

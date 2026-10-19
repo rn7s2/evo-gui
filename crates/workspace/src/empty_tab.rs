@@ -177,8 +177,13 @@ const PROBLEM_ID: &str = "check-problem";
 /// The folder card, and the two role cards' own ids.
 const FOLDER_ID: &str = "select-folder";
 /// The browser's folder field, its commit button, and the card's own heading there.
+/// Drawn by the browser's folder card alone ([`EmptyTabState::folder_card`]), so a
+/// host build carries them unused.
+#[cfg_attr(not(target_family = "wasm"), allow(dead_code))]
 const FOLDER_INPUT_ID: &str = "folder-input";
+#[cfg_attr(not(target_family = "wasm"), allow(dead_code))]
 const FOLDER_GO_ID: &str = "folder-go";
+#[cfg_attr(not(target_family = "wasm"), allow(dead_code))]
 const FOLDER_BROWSE_ID: &str = "folder-browse";
 const COORDINATOR_CARD_ID: &str = "config-group-coordinator";
 const WORKERS_CARD_ID: &str = "config-group-workers";
@@ -259,10 +264,17 @@ const FOLDER_LABEL: &str = "Select folder…";
 /// opens the browser's folder picker ([`EmptyTabState::browse_folder`]), which walks
 /// the serving machine's directories. The field under it is the fallback for a path
 /// that is easier to type than to walk to.
+///
+/// The three labels and the field's height below are the browser's card alone, so a
+/// host build carries them unused.
+#[cfg_attr(not(target_family = "wasm"), allow(dead_code))]
 const FOLDER_TYPE_LABEL: &str = "Select folder…";
+#[cfg_attr(not(target_family = "wasm"), allow(dead_code))]
 const FOLDER_INPUT_LABEL: &str = "Folder path on the serving machine";
+#[cfg_attr(not(target_family = "wasm"), allow(dead_code))]
 const FOLDER_GO_LABEL: &str = "Open session";
 /// The field's own height, and the card's: the design's input row.
+#[cfg_attr(not(target_family = "wasm"), allow(dead_code))]
 const FOLDER_FIELD_H: f32 = 28.;
 const HISTORY_TITLE: &str = "History";
 
@@ -731,6 +743,7 @@ struct EmptyTabState {
     /// A path typed here names a folder on the machine that served the page — the machine
     /// `POST /api/tabs` opens the tab on — so this field *is* the browser's way into a
     /// session, and the empty tab has no other.
+    #[cfg_attr(not(target_family = "wasm"), allow(dead_code))]
     folder_input: Option<Entity<InputState>>,
     /// Why the folder a person typed was not launched in — a relative path, which this
     /// page can see is wrong before a round trip would say so. `None` when nothing has
@@ -1853,9 +1866,12 @@ impl EmptyTabState {
         };
 
         // The desktop: the card is the button, and the click is the dialog.
+        //
+        // The value of this block *is* the function's, on a host: the browser's block
+        // below is compiled away there, which is why this one carries no `return`.
         #[cfg(not(target_family = "wasm"))]
         {
-            return shape!(Button::new(FOLDER_ID))
+            shape!(Button::new(FOLDER_ID))
                 .track_focus(&self.folder_focus)
                 .accessibility_label(FOLDER_LABEL)
                 .focus_visible(move |style| style.border_color(ring))
@@ -1864,7 +1880,7 @@ impl EmptyTabState {
                 .child(
                     medium(div().text_size(CARD_TITLE).line_height(BODY_LINE)).child(FOLDER_LABEL),
                 )
-                .into_any_element();
+                .into_any_element()
         }
 
         // The browser: a panel, a field, and the button that opens the session.

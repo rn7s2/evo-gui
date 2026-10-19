@@ -609,7 +609,9 @@ impl TabContent {
         composer.update(cx, |composer, cx| {
             composer.set_bytes_picker(
                 std::sync::Arc::new(|_window, cx| {
-                    cx.spawn(async move |_cx: &mut gpui_kit::AsyncApp| crate::host::pick_files().await)
+                    cx.spawn(async move |_cx: &mut gpui_kit::AsyncApp| {
+                        crate::host::pick_files().await
+                    })
                 }),
                 cx,
             );
@@ -2776,6 +2778,13 @@ impl TabContent {
     /// it is re-checked on every `/state` until it is there — a `stat` in front of
     /// a write that both happen on a thread of their own, like every other piece
     /// of file I/O the UI asks for.
+    ///
+    /// A browser does the bookkeeping and writes nothing: `app.json` is this
+    /// client's own file and a page has none (its history comes from the server's
+    /// `GET /api/sessions`), and the write is a `std::thread::spawn`, which panics
+    /// on `wasm32-unknown-unknown`. So `cx` is the native path's alone, and the
+    /// browser's call is a no-op past the guard below.
+    #[cfg_attr(target_family = "wasm", allow(unused_variables))]
     fn record_recent(&mut self, cx: &mut Context<Self>) {
         let Some(session) = self.session.clone() else {
             return;
@@ -2801,7 +2810,6 @@ impl TabContent {
 
         let mut recent = store::app_state::Recent::new(session.clone(), folder, lanes);
         recent.models = models;
-        let root = self.config.root.clone();
 
         // A browser has no `app.json` to write, and no thread to write it on.
         //
@@ -2816,6 +2824,7 @@ impl TabContent {
         // stayed on the empty tab with the session really running behind it.
         #[cfg(not(target_family = "wasm"))]
         {
+            let root = self.config.root.clone();
             let (bridge, _worker) = crate::bridge::Bridge::<bool>::spawn(
                 crate::bridge::Revision::new(0),
                 move |updates: crate::bridge::BridgeSender<bool>| {

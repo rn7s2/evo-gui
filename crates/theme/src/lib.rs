@@ -228,7 +228,9 @@ pub fn install(cx: &mut App, log: &impl ThemeLog) {
     if let Err(error) = registry.load_themes_from_str(&body) {
         // The kit's own defaults are a usable theme; a malformed file of ours is
         // a bug to fix, not a reason to refuse to draw.
-        log.error(&format!("theme: the design's palettes did not load: {error}"));
+        log.error(&format!(
+            "theme: the design's palettes did not load: {error}"
+        ));
         return;
     }
     let themes = registry.themes();

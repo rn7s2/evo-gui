@@ -280,9 +280,12 @@ mod tests {
             Target::base_path("api/tabs/1/").unwrap().base_path_prefix(),
             Some("/api/tabs/1")
         );
-        assert_eq!(Target::base_path("  /api/tabs/1  ")
-            .unwrap()
-            .base_path_prefix(), Some("/api/tabs/1"));
+        assert_eq!(
+            Target::base_path("  /api/tabs/1  ")
+                .unwrap()
+                .base_path_prefix(),
+            Some("/api/tabs/1")
+        );
     }
 
     #[test]

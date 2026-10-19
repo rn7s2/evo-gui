@@ -182,10 +182,7 @@ impl Plan {
             argv.push("--workers".to_owned());
             argv.push(workers.to_string());
         }
-        for (flag, value) in [
-            ("--model", &self.model),
-            ("--lane-model", &self.lane_model),
-        ] {
+        for (flag, value) in [("--model", &self.model), ("--lane-model", &self.lane_model)] {
             if let Some(value) = value {
                 argv.push(flag.to_owned());
                 argv.push(value.clone());
@@ -214,7 +211,10 @@ fn name_of(name: Option<&str>) -> Result<&'static str, ApiError> {
         .into_iter()
         .find(|known| *known == wanted)
         .ok_or_else(|| {
-            ApiError::bad_request(format!("name {wanted:?} is not one of {}", NAMES.join(", ")))
+            ApiError::bad_request(format!(
+                "name {wanted:?} is not one of {}",
+                NAMES.join(", ")
+            ))
         })
 }
 
@@ -420,7 +420,11 @@ mod tests {
             ]))
             .unwrap_err();
             assert_eq!(err.status, 400, "{key}");
-            assert!(err.message.contains("not a flag of `catalog`"), "{}", err.message);
+            assert!(
+                err.message.contains("not a flag of `catalog`"),
+                "{}",
+                err.message
+            );
         }
     }
 
@@ -453,7 +457,10 @@ mod tests {
     fn a_flag_value_is_checked_like_a_launch_flag() {
         assert_eq!(flag(None, "model").unwrap(), None);
         assert_eq!(flag(Some("   "), "model").unwrap(), None);
-        assert_eq!(flag(Some(" m@acme "), "model").unwrap(), Some("m@acme".to_owned()));
+        assert_eq!(
+            flag(Some(" m@acme "), "model").unwrap(),
+            Some("m@acme".to_owned())
+        );
 
         let err = flag(Some("m\u{0}del"), "model").unwrap_err();
         assert_eq!(err.status, 400);
