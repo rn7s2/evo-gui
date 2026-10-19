@@ -201,7 +201,7 @@ fn cjk_fallback_font() -> gpui_kit::Font {
         // platform's choice changed.
         family: ".SystemUIFont".into(),
         fallbacks: Some(gpui_kit::FontFallbacks::from_fonts(vec![
-            CJK_FAMILY.to_owned(),
+            CJK_FAMILY.to_owned()
         ])),
         ..Default::default()
     }

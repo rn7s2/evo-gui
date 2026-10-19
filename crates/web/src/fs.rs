@@ -175,7 +175,8 @@ mod tests {
 
     impl Scratch {
         fn new(name: &str) -> Scratch {
-            let dir = std::env::temp_dir().join(format!("evo-web-fs-{}-{name}", std::process::id()));
+            let dir =
+                std::env::temp_dir().join(format!("evo-web-fs-{}-{name}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(dir.join("alpha")).unwrap();
             std::fs::create_dir_all(dir.join("beta")).unwrap();

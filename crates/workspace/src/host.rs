@@ -124,9 +124,9 @@ pub async fn pick_files() -> Option<Vec<composer::ChosenFile>> {
 /// resolve is kept in a `Rc<RefCell<…>>` and called from the listener.
 #[cfg(target_family = "wasm")]
 async fn file_input() -> Option<web_sys::HtmlInputElement> {
-    use wasm_bindgen::closure::Closure;
     use std::cell::RefCell;
     use std::rc::Rc;
+    use wasm_bindgen::closure::Closure;
 
     let document = web_sys::window()?.document()?;
     let input = document
@@ -177,7 +177,6 @@ async fn read_bytes(file: &web_sys::File) -> Option<Vec<u8>> {
     let promise = js_sys::Promise::new(&mut |resolve, _reject| {
         *settle.borrow_mut() = Some(resolve);
     });
-    let reader_for_event = reader.clone();
     let settle_for_event = settle.clone();
     let listener = Closure::<dyn FnMut()>::new(move || {
         if let Some(resolve) = settle_for_event.borrow().as_ref() {
@@ -257,8 +256,11 @@ async fn ask(title: String, start: Option<PathBuf>) -> Option<PathBuf> {
 /// What the person answered at one step of the walk.
 ///
 /// Pure, and compiled on both targets: the walk is the same decision whether the
-/// question was put up by a page's `prompt` or by a test.
+/// question was put up by a page's `prompt` or by a test. On a host only the tests
+/// reach it — the browser is where the walk actually runs — so a native build is
+/// told that is deliberate.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(not(target_family = "wasm"), allow(dead_code))]
 enum Choice {
     /// Stop here: this directory is the answer.
     Here,
@@ -271,6 +273,9 @@ enum Choice {
 ///
 /// The numbers are the walk's own: `0` is "this folder", and the rest index the
 /// listing in the order it is shown.
+///
+/// A host reaches this only from its tests; the browser is where it runs.
+#[cfg_attr(not(target_family = "wasm"), allow(dead_code))]
 fn question(title: &str, here: &Path, listing: &Listing) -> String {
     let mut lines = vec![format!("{title}\n\nIn {}", here.display()), String::new()];
     lines.push("  0  — this folder".to_owned());
@@ -284,6 +289,9 @@ fn question(title: &str, here: &Path, listing: &Listing) -> String {
 
 /// What the answer means. A cancelled or unparseable answer is `None` — a dialog
 /// that was put away, or one whose text was not a number this listing has.
+///
+/// A host reaches this only from its tests; the browser is where it runs.
+#[cfg_attr(not(target_family = "wasm"), allow(dead_code))]
 fn parse(answer: &str, listing: &Listing) -> Option<Choice> {
     let answer = answer.trim();
     if answer.is_empty() {
@@ -307,22 +315,30 @@ fn choose(title: &str, here: &Path, listing: &Listing) -> Option<Choice> {
 }
 
 /// One entry of a directory listing: its name, and the whole path it names.
+///
+/// The browser's `GET /api/fs` reply; a host builds it only in its tests.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(target_family = "wasm", derive(serde::Deserialize))]
+#[cfg_attr(not(target_family = "wasm"), allow(dead_code))]
 pub struct Entry {
     name: String,
     path: PathBuf,
 }
 
 /// `GET /api/fs?path=` — what is in one directory of the serving machine.
+///
+/// The browser's `GET /api/fs` reply; a host builds it only in its tests.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(target_family = "wasm", derive(serde::Deserialize))]
+#[cfg_attr(not(target_family = "wasm"), allow(dead_code))]
 pub struct Listing {
     path: PathBuf,
     #[cfg_attr(target_family = "wasm", serde(default))]
     dirs: Vec<Entry>,
 }
 
+/// The browser's `GET /api/fs` reply; a host builds it only in its tests.
+#[cfg_attr(not(target_family = "wasm"), allow(dead_code))]
 impl Listing {
     /// One child of this listing, by name.
     fn join(&self, name: &str) -> PathBuf {
@@ -391,6 +407,7 @@ async fn get_json(path: &str) -> Result<serde_json::Value, String> {
 ///
 /// Both targets, with [`cli_route`]: it is the one that uses this to build a query,
 /// and a host compiles it only so that function can be tested.
+#[cfg_attr(not(target_family = "wasm"), allow(dead_code))]
 fn encode(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for byte in text.bytes() {
@@ -444,6 +461,9 @@ pub const ENTERS_FOLDER: bool = cfg!(target_family = "wasm");
 /// A person who types `/Users/me/coding/foo` into a page is naming a folder on the
 /// serving machine, and one that is not there is refused by that machine rather
 /// than by this one — which is worth saying before they try, not after.
+///
+/// Drawn by the browser's folder card (`empty_tab.rs`).
+#[cfg_attr(not(target_family = "wasm"), allow(dead_code))]
 pub const FOLDER_HINT: &str = "An absolute path on the machine that served this page.";
 
 /// The placeholder a browser's folder field shows: a path, so what is expected of
@@ -573,10 +593,7 @@ pub async fn run_json_reporting(
 /// answered comes back as the same `serde_json::Value` the desktop's own run would
 /// have produced.
 #[cfg(target_family = "wasm")]
-async fn cli_read(
-    bin: &std::path::Path,
-    args: &[String],
-) -> Result<serde_json::Value, CliError> {
+async fn cli_read(bin: &std::path::Path, args: &[String]) -> Result<serde_json::Value, CliError> {
     let Some(route) = cli_route(bin, args) else {
         // Not a read this route can express: the binary is not one of the two the
         // server runs, or the argv is not one of the two reads it knows.
@@ -607,6 +624,7 @@ async fn cli_read(
 /// test it. That is the point — the translation between an argv and this route is
 /// the whole contract between the two halves of this seam, and a browser is a bad
 /// place to discover it is wrong.
+#[cfg_attr(not(target_family = "wasm"), allow(dead_code))]
 fn cli_route(bin: &std::path::Path, args: &[String]) -> Option<String> {
     let name = match bin.file_name()?.to_str()? {
         "evo-swarm" => "evo-swarm",
@@ -740,8 +758,14 @@ mod tests {
             ("", vec!["catalog", "--json"]),
             ("/usr/local/bin/evo-swarm", vec!["serve"]),
             ("/usr/local/bin/evo-swarm", vec!["sessions", "--json"]),
-            ("/usr/local/bin/evo-swarm", vec!["check", "--json", "--port", "0"]),
-            ("/usr/local/bin/evo-swarm", vec!["check", "--json", "--workers"]),
+            (
+                "/usr/local/bin/evo-swarm",
+                vec!["check", "--json", "--port", "0"],
+            ),
+            (
+                "/usr/local/bin/evo-swarm",
+                vec!["check", "--json", "--workers"],
+            ),
             ("/usr/local/bin/evo-swarm", vec![]),
         ] {
             let argv: Vec<String> = argv.into_iter().map(str::to_owned).collect();

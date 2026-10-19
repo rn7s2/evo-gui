@@ -61,8 +61,8 @@ use gpui_kit::{
     AnimationExt as _, AnyElement, App, Bounds, BoxShadow, ClickEvent, ClipboardEntry,
     ClipboardItem, Context, ElementId, Entity, EventEmitter, ExternalPaths, FocusHandle,
     FontWeight, Global, HighlightStyle, ImageSource, IntoElement, KeyBinding, Keystroke,
-    KeystrokeEvent, ObjectFit, Pixels, Point, Render, RenderImage, ScrollHandle,
-    SharedString, StyledText, Subscription, Task, TestSupportExt as _, WeakEntity, Window,
+    KeystrokeEvent, ObjectFit, Pixels, Point, Render, RenderImage, ScrollHandle, SharedString,
+    StyledText, Subscription, Task, TestSupportExt as _, WeakEntity, Window,
 };
 use session::{ordered_segments, GoalInfo, Segment, Todo, TodoStatus, TopicState};
 use store::design::{self, Palette, INSET, MEASURE, RADIUS};
@@ -800,6 +800,10 @@ pub struct Composer {
     /// the page's own file dialog needs the platform bindings this crate does not
     /// carry. When it is set, the `+` uses it and never [`Self::picker`]: a browser's
     /// answer is bytes, and a path from a page would name a file on nobody's machine.
+    ///
+    /// Filled and read on the browser's path alone (`set_bytes_picker`,
+    /// `pick_attachments`), so a host build carries it unread.
+    #[cfg_attr(not(target_family = "wasm"), allow(dead_code))]
     bytes_picker: Option<BytesPicker>,
     /// The picker's own request, while the reader is choosing: held so that the answer
     /// still lands when the update that asked is over — a dropped task is a cancelled
@@ -1380,6 +1384,9 @@ impl Composer {
     /// dialog this build opens is told to offer images in the first place (see the
     /// shell's `set_bytes_picker`) — the reader sees what they can actually add rather
     /// than adding something that silently fails.
+    ///
+    /// The browser's answer, where a file's bytes are the only shape a page has.
+    #[cfg_attr(not(target_family = "wasm"), allow(dead_code))]
     fn attach_files(&mut self, files: Vec<ChosenFile>, cx: &mut Context<Self>) {
         for file in files {
             let ChosenFile {
@@ -1391,13 +1398,11 @@ impl Composer {
                 continue;
             }
             let is_image = media_type.starts_with("image/")
-                || std::path::Path::new(&name)
-                    .extension()
-                    .is_some_and(|ext| {
-                        IMAGE_EXTENSIONS
-                            .iter()
-                            .any(|image| ext.eq_ignore_ascii_case(image))
-                    });
+                || std::path::Path::new(&name).extension().is_some_and(|ext| {
+                    IMAGE_EXTENSIONS
+                        .iter()
+                        .any(|image| ext.eq_ignore_ascii_case(image))
+                });
             if !is_image {
                 continue;
             }

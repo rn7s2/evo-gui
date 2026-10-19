@@ -408,7 +408,7 @@ pub(crate) fn resolve(url: &str, folder: Option<&Path>, home: &Path) -> Option<P
         return (!home.as_os_str().is_empty()).then(|| home.join(rest));
     }
     let path = Path::new(url);
-    if session::path::is_absolute(&path) {
+    if session::path::is_absolute(path) {
         return Some(path.to_path_buf());
     }
     folder.map(|folder| folder.join(path))
